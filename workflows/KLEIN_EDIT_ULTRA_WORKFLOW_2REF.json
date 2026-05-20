@@ -1,0 +1,534 @@
+{
+  "73": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "75": {
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-Q8_0.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "76": {
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "77": {
+    "inputs": {
+      "clip_name": "qwen_3_8b_fp8mixed_abliterated.safetensors",
+      "type": "flux2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "78": {
+    "inputs": {
+      "switch": true,
+      "on_false": [
+        "75",
+        0
+      ],
+      "on_true": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch"
+    }
+  },
+  "214": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "219": {
+    "inputs": {
+      "noise_seed": 534456299610996
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "230": {
+    "inputs": {
+      "image": "Flux2-Klein_00164_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "231": {
+    "inputs": {
+      "image": "Flux2-Klein_00164_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Reference 2 Image"
+    }
+  },
+  "232": {
+    "inputs": {
+      "filename_prefix": "Flux2-Klein",
+      "images": [
+        "516:497",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "233": {
+    "inputs": {
+      "text": "a zoomed out veiw of this image\n\n",
+      "clip": [
+        "307",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "302": {
+    "inputs": {
+      "value": 1536
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Width"
+    }
+  },
+  "303": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Height"
+    }
+  },
+  "307": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "lora_1": {
+        "on": false,
+        "lora": "anime2real-semi.safetensors",
+        "strength": 1
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "78",
+        0
+      ],
+      "clip": [
+        "77",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "412": {
+    "inputs": {
+      "rgthree_comparer": {
+        "images": [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_aizpp_00001_.png&type=temp&subfolder=&rand=0.7679333091230144"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_aizpp_00002_.png&type=temp&subfolder=&rand=0.8695283048883202"
+          }
+        ]
+      },
+      "image_a": [
+        "460",
+        0
+      ],
+      "image_b": [
+        "516:497",
+        0
+      ]
+    },
+    "class_type": "Image Comparer (rgthree)",
+    "_meta": {
+      "title": "Image Comparer (rgthree)"
+    }
+  },
+  "460": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "230",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "ImageScaleToTotalPixels"
+    }
+  },
+  "447:446": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "231",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "ImageScaleToTotalPixels"
+    }
+  },
+  "447:436": {
+    "inputs": {
+      "pixels": [
+        "447:446",
+        0
+      ],
+      "vae": [
+        "73",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "515:503": {
+    "inputs": {
+      "steps": 4,
+      "width": [
+        "302",
+        0
+      ],
+      "height": [
+        "303",
+        0
+      ]
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2Scheduler"
+    }
+  },
+  "515:505": {
+    "inputs": {
+      "width": [
+        "302",
+        0
+      ],
+      "height": [
+        "303",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "515:510": {
+    "inputs": {
+      "switch": true,
+      "on_false": [
+        "516:512",
+        0
+      ],
+      "on_true": [
+        "515:503",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch"
+    }
+  },
+  "515:511": {
+    "inputs": {
+      "switch": true,
+      "on_false": [
+        "516:513",
+        0
+      ],
+      "on_true": [
+        "515:505",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch"
+    }
+  },
+  "516:493": {
+    "inputs": {
+      "conditioning": [
+        "516:495",
+        0
+      ],
+      "latent": [
+        "447:436",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "516:494": {
+    "inputs": {
+      "conditioning": [
+        "233",
+        0
+      ],
+      "latent": [
+        "516:504",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "516:495": {
+    "inputs": {
+      "conditioning": [
+        "516:500",
+        0
+      ],
+      "latent": [
+        "516:504",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "516:496": {
+    "inputs": {
+      "anything": [
+        "516:498",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  },
+  "516:497": {
+    "inputs": {
+      "anything": [
+        "516:496",
+        0
+      ]
+    },
+    "class_type": "easy clearCacheAll",
+    "_meta": {
+      "title": "Clear Cache All"
+    }
+  },
+  "516:498": {
+    "inputs": {
+      "samples": [
+        "516:501",
+        0
+      ],
+      "vae": [
+        "73",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "516:499": {
+    "inputs": {
+      "conditioning": [
+        "516:494",
+        0
+      ],
+      "latent": [
+        "447:436",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "516:500": {
+    "inputs": {
+      "conditioning": [
+        "233",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "516:501": {
+    "inputs": {
+      "noise": [
+        "219",
+        0
+      ],
+      "guider": [
+        "516:502",
+        0
+      ],
+      "sampler": [
+        "214",
+        0
+      ],
+      "sigmas": [
+        "515:510",
+        0
+      ],
+      "latent_image": [
+        "515:511",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "516:502": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "307",
+        0
+      ],
+      "positive": [
+        "516:499",
+        0
+      ],
+      "negative": [
+        "516:493",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "516:504": {
+    "inputs": {
+      "pixels": [
+        "460",
+        0
+      ],
+      "vae": [
+        "73",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "516:506": {
+    "inputs": {
+      "image": [
+        "460",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "516:513": {
+    "inputs": {
+      "width": [
+        "516:506",
+        0
+      ],
+      "height": [
+        "516:506",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "516:512": {
+    "inputs": {
+      "steps": 4,
+      "width": [
+        "516:506",
+        0
+      ],
+      "height": [
+        "516:506",
+        1
+      ]
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2Scheduler"
+    }
+  }
+}

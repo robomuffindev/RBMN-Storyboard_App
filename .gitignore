@@ -1,0 +1,86 @@
+# ============================================================
+# Robomuffin Idea Factory — .gitignore
+# ============================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ---------- Virtual environments ----------
+venv/
+.venv/
+env/
+ENV/
+
+# ---------- Environment variables (contains API keys!) ----------
+.env
+!.env.example
+
+# ---------- Database ----------
+*.db
+*.db-wal
+*.db-shm
+
+# ---------- IDE / Editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- OS files ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# ---------- Frontend ----------
+frontend/dist/
+frontend/node_modules/
+frontend/vite.config.ts.timestamp-*
+
+# ---------- Logs ----------
+logs/
+*.log
+
+# ---------- Temporary / backup files ----------
+*.tmp
+*.temp
+*.bak
+
+# ---------- Project data (generated at runtime, machine-specific) ----------
+audio_clips/
+cache/
+generated/
+stems/
+
+# ---------- Sample videos (too large for GitHub, hosted externally) ----------
+Videos/
+
+# ---------- Dev artifacts (not needed for public repo) ----------
+Devscreenshots/
+transition_comparison.png
+V2V_NESTEDTENSOR_FIX.md
+vrgamedevgirl84/
+
+# ---------- Blueprint / original spec docs ----------
+Blueprint/
+Original Ideas.txt
+RBMF - Storyboard Blueprint.md
+RBMF - Storyboard Blueprint.pdf
+CLAUDE.md
+
+# ---------- Alembic (unused — migrations are inline in database.py) ----------
+alembic.ini
+alembic/
+
+# ---------- Cowork / Claude session files ----------
+.auto-memory/
+.claude/

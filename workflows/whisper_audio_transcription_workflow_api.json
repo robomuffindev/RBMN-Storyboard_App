@@ -1,0 +1,88 @@
+{
+  "99": {
+    "inputs": {
+      "audio": "sample.mp3"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "LOAD AUDIO"
+    }
+  },
+  "47": {
+    "inputs": {
+      "audio": ["99", 0],
+      "model_size": "large",
+      "language": "auto",
+      "initial_text": ""
+    },
+    "class_type": "Apply Whisper",
+    "_meta": {
+      "title": "Apply Whisper"
+    }
+  },
+  "92": {
+    "inputs": {
+      "source": ["47", 0]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Preview Text"
+    }
+  },
+  "93": {
+    "inputs": {
+      "source": ["47", 1]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Preview Segments Alignment"
+    }
+  },
+  "98": {
+    "inputs": {
+      "source": ["47", 2]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Preview Words Alignment"
+    }
+  },
+  "94": {
+    "inputs": {
+      "alignment": ["47", 1],
+      "filename_prefix": "segments"
+    },
+    "class_type": "Save SRT",
+    "_meta": {
+      "title": "Save SRT (Segments)"
+    }
+  },
+  "95": {
+    "inputs": {
+      "alignment": ["47", 2],
+      "filename_prefix": "words"
+    },
+    "class_type": "Save SRT",
+    "_meta": {
+      "title": "Save SRT (Words)"
+    }
+  },
+  "96": {
+    "inputs": {
+      "source": ["94", 0]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Segments SRT Path"
+    }
+  },
+  "97": {
+    "inputs": {
+      "source": ["95", 0]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Words SRT Path"
+    }
+  }
+}

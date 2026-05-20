@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-md transition-colors;
+  }
+
+  .btn-danger {
+    @apply px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors;
+  }
+
+  .btn-ghost {
+    @apply px-4 py-2 bg-transparent hover:bg-gray-800 text-gray-100 rounded-md transition-colors;
+  }
+
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-lg p-4;
+  }
+
+  .input-field {
+    @apply w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-md text-gray-100 focus:outline-none focus:border-blue-500;
+  }
+
+  .section-marker {
+    @apply absolute h-full cursor-pointer opacity-70 hover:opacity-100 transition-opacity;
+  }
+}
+
+/* Wavesurfer custom styling */
+.ws-container {
+  @apply w-full bg-gray-900 rounded-lg border border-gray-800;
+}
+
+.ws-spectrogram-container {
+  @apply bg-gray-950;
+}
+
+/* Timeline editor styling */
+.react-timeline-editor {
+  @apply bg-gray-900;
+}
+
+.timeline-row {
+  @apply border-b border-gray-800;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #5b6573;
+}

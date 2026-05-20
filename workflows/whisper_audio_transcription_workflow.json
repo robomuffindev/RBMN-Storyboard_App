@@ -1,0 +1,455 @@
+{
+  "id": "13ec9b05-13e3-4ce0-a274-dfe796b6c75d",
+  "revision": 0,
+  "last_node_id": 100,
+  "last_link_id": 220,
+  "nodes": [
+    {
+      "id": 99,
+      "type": "LoadAudio",
+      "pos": [
+        -1160,
+        -100
+      ],
+      "size": [
+        315,
+        124
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "slot_index": 0,
+          "links": [
+            213
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "sample.mp3",
+        null,
+        null
+      ]
+    },
+    {
+      "id": 47,
+      "type": "Apply Whisper",
+      "pos": [
+        -780,
+        -100
+      ],
+      "size": [
+        315,
+        146
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 213
+        }
+      ],
+      "outputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [
+            206
+          ]
+        },
+        {
+          "name": "segments_alignment",
+          "type": "whisper_alignment",
+          "slot_index": 1,
+          "links": [
+            207,
+            210
+          ]
+        },
+        {
+          "name": "words_alignment",
+          "type": "whisper_alignment",
+          "slot_index": 2,
+          "links": [
+            211,
+            212
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-Whisper",
+        "ver": "c67c040559c013833dedb0737df14182dc5043cc",
+        "Node name for S&R": "Apply Whisper",
+        "aux_id": "yuvraj108c/ComfyUI-Whisper"
+      },
+      "widgets_values": [
+        "large",
+        "auto",
+        ""
+      ]
+    },
+    {
+      "id": 92,
+      "type": "PreviewAny",
+      "pos": [
+        -380,
+        -320
+      ],
+      "size": [
+        240,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 206
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Text",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 93,
+      "type": "PreviewAny",
+      "pos": [
+        -380,
+        -160
+      ],
+      "size": [
+        240,
+        200
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 207
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Segments Alignment",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 98,
+      "type": "PreviewAny",
+      "pos": [
+        -380,
+        80
+      ],
+      "size": [
+        240,
+        200
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 212
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Words Alignment",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 94,
+      "type": "Save SRT",
+      "pos": [
+        -90,
+        -160
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "alignment",
+          "type": "whisper_alignment",
+          "link": 210
+        }
+      ],
+      "outputs": [
+        {
+          "name": "srt_path",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [
+            208
+          ]
+        }
+      ],
+      "title": "Save SRT (Segments)",
+      "properties": {
+        "cnr_id": "ComfyUI-Whisper",
+        "ver": "c67c040559c013833dedb0737df14182dc5043cc",
+        "Node name for S&R": "Save SRT"
+      },
+      "widgets_values": [
+        "segments"
+      ]
+    },
+    {
+      "id": 95,
+      "type": "Save SRT",
+      "pos": [
+        -90,
+        80
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "alignment",
+          "type": "whisper_alignment",
+          "link": 211
+        }
+      ],
+      "outputs": [
+        {
+          "name": "srt_path",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [
+            209
+          ]
+        }
+      ],
+      "title": "Save SRT (Words)",
+      "properties": {
+        "cnr_id": "ComfyUI-Whisper",
+        "ver": "c67c040559c013833dedb0737df14182dc5043cc",
+        "Node name for S&R": "Save SRT"
+      },
+      "widgets_values": [
+        "words"
+      ]
+    },
+    {
+      "id": 96,
+      "type": "PreviewAny",
+      "pos": [
+        230,
+        -160
+      ],
+      "size": [
+        240,
+        100
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 208
+        }
+      ],
+      "outputs": [],
+      "title": "Segments SRT Path",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 97,
+      "type": "PreviewAny",
+      "pos": [
+        230,
+        80
+      ],
+      "size": [
+        240,
+        100
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 209
+        }
+      ],
+      "outputs": [],
+      "title": "Words SRT Path",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.7.0",
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    }
+  ],
+  "links": [
+    [
+      206,
+      47,
+      0,
+      92,
+      0,
+      "*"
+    ],
+    [
+      207,
+      47,
+      1,
+      93,
+      0,
+      "*"
+    ],
+    [
+      208,
+      94,
+      0,
+      96,
+      0,
+      "STRING"
+    ],
+    [
+      209,
+      95,
+      0,
+      97,
+      0,
+      "STRING"
+    ],
+    [
+      210,
+      47,
+      1,
+      94,
+      0,
+      "whisper_alignment"
+    ],
+    [
+      211,
+      47,
+      2,
+      95,
+      0,
+      "whisper_alignment"
+    ],
+    [
+      212,
+      47,
+      2,
+      98,
+      0,
+      "whisper_alignment"
+    ],
+    [
+      213,
+      99,
+      0,
+      47,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Whisper Audio Transcription",
+      "bounding": [
+        -1180,
+        -400,
+        1680,
+        720
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [
+        1300,
+        500
+      ]
+    },
+    "frontendVersion": "1.35.9",
+    "workflowRendererVersion": "LG",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
