@@ -64,6 +64,9 @@ stems/
 # ---------- Sample videos (too large for GitHub, hosted externally) ----------
 Videos/
 
+# ---------- Local ComfyUI workflow files (reference only, not part of app) ----------
+LTX-2.3-Workflows/
+
 # ---------- Dev artifacts (not needed for public repo) ----------
 Devscreenshots/
 transition_comparison.png
@@ -79,8 +82,4 @@ CLAUDE.md
 
 # ---------- Alembic (unused — migrations are inline in database.py) ----------
 alembic.ini
-alembic/
-
-# ---------- Cowork / Claude session files ----------
-.auto-memory/
-.claude/
+alembi
