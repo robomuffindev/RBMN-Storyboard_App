@@ -792,10 +792,64 @@ async def get_lyrics(
         )
 
 
+def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
+    """Group words into sentences/phrases based on punctuation and pauses.
+
+    A sentence break occurs when:
+    - The word ends with sentence-ending punctuation (.!?…)
+    - There's a gap > 1.5s to the next word (verse/phrase break)
+    - The word ends with clause-ending punctuation AND gap > 0.4s
+
+    Returns a list of word-groups, each group being a sentence/phrase
+    that must be kept together — scene boundaries may ONLY be placed
+    between these groups, never inside them.
+    """
+    import re
+    if not words:
+        return []
+
+    sentences: list[list[dict]] = []
+    current: list[dict] = []
+
+    for i, w in enumerate(words):
+        current.append(w)
+        word_text = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+
+        is_last = (i == len(words) - 1)
+        if is_last:
+            sentences.append(current)
+            break
+
+        # Check for sentence-ending punctuation
+        has_sentence_end = bool(re.search(r'[.!?…]$', word_text))
+
+        # Check for clause-ending punctuation (comma, semicolon, colon, dash)
+        has_clause_end = bool(re.search(r'[,;:\-–—]$', word_text))
+
+        # Check for pause after this word
+        next_start = words[i + 1].get("start", 0)
+        this_end = w.get("end", 0)
+        gap = next_start - this_end
+
+        # Break on sentence-ending punctuation, long pauses, or clause + medium pause
+        if has_sentence_end or gap > 1.5 or (has_clause_end and gap > 0.4):
+            sentences.append(current)
+            current = []
+
+    if current:
+        sentences.append(current)
+
+    return sentences
+
+
 def _build_phrase_gaps(
     words: list[dict],
 ) -> list[dict]:
-    """Build a scored list of gaps between words, ranked by phrase-boundary quality.
+    """Build a scored list of gaps ONLY at sentence/phrase boundaries.
+
+    CRITICAL: This function only returns gaps that fall BETWEEN sentences,
+    never inside them. This guarantees that scene boundaries cannot split
+    a lyrical phrase. A scene always starts and ends with a complete phrase.
 
     Each gap gets a score based on:
     - Gap duration (longer pause = better boundary point)
@@ -810,21 +864,35 @@ def _build_phrase_gaps(
         return []
 
     import re
+    import math
+
+    # Group words into sentences — gaps are ONLY allowed between sentences
+    sentences = _group_words_into_sentences(words)
+    if len(sentences) < 2:
+        return []
 
     gaps: list[dict] = []
-    for i in range(len(words) - 1):
-        end_i = words[i].get("end", 0)
-        start_next = words[i + 1].get("start", 0)
-        gap_size = start_next - end_i
 
-        if gap_size < 0.05:
-            # Negligible gap — words run together, never break here
+    for s_idx in range(len(sentences) - 1):
+        last_word = sentences[s_idx][-1]
+        first_word_next = sentences[s_idx + 1][0]
+
+        # Find the index of last_word in the original words list
+        last_word_idx = None
+        for i, w in enumerate(words):
+            if w is last_word:
+                last_word_idx = i
+                break
+        if last_word_idx is None:
             continue
 
-        word_text = (words[i].get("word", "") or words[i].get("value", "") or words[i].get("text", "")).strip()
+        end_i = last_word.get("end", 0)
+        start_next = first_word_next.get("start", 0)
+        gap_size = max(start_next - end_i, 0.01)
+
+        word_text = (last_word.get("word", "") or last_word.get("value", "") or last_word.get("text", "")).strip()
 
         # Base score from gap duration (logarithmic — 0.3s=1, 1s=3, 2s=5, 5s=8)
-        import math
         score = max(0, math.log(max(gap_size, 0.01) / 0.1) * 2.0)
 
         # Sentence-ending punctuation bonus (period, !, ?, ellipsis)
@@ -843,15 +911,11 @@ def _build_phrase_gaps(
         elif gap_size > 0.5:
             score += 1.5  # Noticeable pause
 
-        # Penalty for very short gaps — don't break mid-phrase
-        if gap_size < 0.2:
-            score -= 5.0
-
         gap_center = (end_i + start_next) / 2.0
 
         gaps.append({
             "time": gap_center,
-            "after_word_idx": i,
+            "after_word_idx": last_word_idx,
             "gap_size": gap_size,
             "score": score,
             "word_before": word_text,
@@ -868,25 +932,24 @@ def _snap_boundaries_to_word_gaps(
     search_window: float = 3.0,
     fps: int = 24,
 ) -> list[float]:
-    """Adjust scene boundaries so they fall at natural phrase/sentence breaks.
+    """Adjust scene boundaries so they fall ONLY at sentence/phrase breaks.
 
-    This is the PRIMARY mechanism for keeping lyrics phrases, sentences, and
-    verses intact within scenes. The algorithm:
+    HARD CONSTRAINT: Boundaries may ONLY be placed between complete
+    sentences/phrases — never mid-sentence. A scene always starts and
+    ends with a complete lyrical phrase. The algorithm:
 
-    1. Build a scored list of all inter-word gaps, ranked by phrase-boundary
-       quality (sentence-ending punctuation, gap duration, verse breaks).
-    2. For each interior boundary, find the BEST-SCORED gap within a search
-       window. "Best" means: sentence endings > clause endings > long pauses
-       > short pauses. This ensures boundaries land at natural language breaks,
-       not in the middle of a sentence.
-    3. As a safety net, verify no word is straddled by a boundary. If one is,
-       push the boundary before that word.
+    1. Group all words into sentences/phrases (by punctuation and pauses).
+    2. Build a scored list of gaps ONLY at sentence boundaries — gaps
+       inside a sentence are never candidates.
+    3. For each interior boundary, find the BEST-SCORED sentence gap
+       within a search window. If none found, expand the window until
+       one is found (we never fall back to mid-sentence placement).
     4. Apply 0.3s lead time: boundaries are placed 0.3s before the next
        word starts, giving the viewer a moment to register the new visual
        before vocals resume (standard music video editing convention).
 
-    This ensures scenes contain complete phrases — the last word of a
-    sentence never bleeds into the next scene.
+    This ensures scenes contain complete phrases — "Black hat on a
+    wooden chair" will NEVER be split across two scenes.
     """
     if not words or len(boundaries) < 3:
         return boundaries
@@ -957,20 +1020,54 @@ def _snap_boundaries_to_word_gaps(
             )
             continue
 
-        # Fallback: no scored gap found in window. Check if a word is straddled.
-        for w in words:
-            w_start = w.get("start", 0)
-            w_end = w.get("end", 0)
-            if w_start < boundary < w_end:
-                # Move boundary before this word
-                new_boundary = max(prev_boundary + 0.5, w_start - 0.3)
-                adjusted[b_idx] = round(new_boundary, 2)
-                word_text = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
-                logger.info(
-                    f"Boundary {b_idx}: {boundary:.2f}s → {adjusted[b_idx]:.2f}s "
-                    f"(moved before straddled word '{word_text}')"
-                )
+        # Fallback: no sentence gap found in initial window.
+        # Expand window progressively until we find a sentence boundary.
+        # NEVER fall back to mid-sentence placement.
+        expanded_gap = None
+        for expand in [6.0, 10.0, 20.0, 999.0]:
+            for gap in scored_gaps:
+                gap_time = gap["time"]
+                gap_idx = gap["after_word_idx"]
+                if abs(gap_time - boundary) > expand:
+                    continue
+                if gap_time <= prev_boundary + 2.0 or gap_time >= next_boundary - 2.0:
+                    continue
+                if gap_idx in used_gap_indices:
+                    continue
+                expanded_gap = gap
                 break
+            if expanded_gap:
+                break
+
+        if expanded_gap is not None:
+            used_gap_indices.add(expanded_gap["after_word_idx"])
+            next_word_start = words[expanded_gap["after_word_idx"] + 1].get("start", 0) if expanded_gap["after_word_idx"] + 1 < len(words) else expanded_gap["time"]
+            if expanded_gap["gap_size"] > 0.6:
+                new_boundary = next_word_start - 0.3
+            else:
+                new_boundary = expanded_gap["time"]
+            new_boundary = max(prev_boundary + 1.0, new_boundary)
+            adjusted[b_idx] = round(new_boundary, 2)
+            logger.info(
+                f"Boundary {b_idx}: {boundary:.2f}s → {adjusted[b_idx]:.2f}s "
+                f"(expanded search, score={expanded_gap['score']:.1f}, "
+                f"after '{expanded_gap['word_before']}')"
+            )
+        else:
+            # Absolute last resort: no sentence gaps exist at all (instrumental section?)
+            # Keep original boundary but ensure it doesn't straddle a word
+            for w in words:
+                w_start = w.get("start", 0)
+                w_end = w.get("end", 0)
+                if w_start < boundary < w_end:
+                    new_boundary = max(prev_boundary + 0.5, w_start - 0.3)
+                    adjusted[b_idx] = round(new_boundary, 2)
+                    word_text = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+                    logger.info(
+                        f"Boundary {b_idx}: {boundary:.2f}s → {adjusted[b_idx]:.2f}s "
+                        f"(no sentence gaps — moved before straddled word '{word_text}')"
+                    )
+                    break
 
     # Snap all boundaries to frame boundaries for exact integer frame counts
     adjusted = [_snap_to_frame(t, fps) for t in adjusted]
@@ -1695,26 +1792,52 @@ async def suggest_timeline(
     # Re-enforce max duration after contiguity fixes.
     # The gap-closing and duration-clamping above can create scenes that
     # exceed max_dur (e.g. the last scene gets stretched to total_duration).
-    # Split any oversized scenes into roughly equal sub-scenes.
+    # Split any oversized scenes at sentence boundaries within the scene.
     final_scenes: list[dict[str, Any]] = []
     for sd in validated_scenes:
         dur = sd["end_time"] - sd["start_time"]
         if dur > max_dur:
-            # Split into N sub-scenes, each <= max_dur
             import math
             n_splits = math.ceil(dur / max_dur)
-            sub_dur = dur / n_splits
-            for j in range(n_splits):
-                sub_start = _snap_to_frame(sd["start_time"] + j * sub_dur, project_fps)
-                sub_end = _snap_to_frame(sd["start_time"] + (j + 1) * sub_dur, project_fps)
-                if j == n_splits - 1:
-                    sub_end = sd["end_time"]  # avoid rounding drift
-                sub_name = sd["name"] if n_splits == 1 else f"{sd['name']} (Part {j + 1})"
-                final_scenes.append({
-                    "name": sub_name,
-                    "start_time": sub_start,
-                    "end_time": sub_end,
-                })
+
+            # Find sentence gaps within this scene's time range
+            scene_gaps = []
+            if word_timestamps:
+                all_gaps = _build_phrase_gaps(word_timestamps)
+                for gap in all_gaps:
+                    if sd["start_time"] < gap["time"] < sd["end_time"]:
+                        scene_gaps.append(gap)
+                # Sort by time for ordered splitting
+                scene_gaps.sort(key=lambda g: g["time"])
+
+            if scene_gaps and len(scene_gaps) >= n_splits - 1:
+                # Pick the best N-1 sentence gaps as split points
+                # Sort by score, take top N-1, then re-sort by time
+                best_gaps = sorted(scene_gaps, key=lambda g: g["score"], reverse=True)[:n_splits - 1]
+                split_times = sorted([g["time"] for g in best_gaps])
+
+                boundaries_list = [sd["start_time"]] + split_times + [sd["end_time"]]
+                for j in range(len(boundaries_list) - 1):
+                    sub_name = sd["name"] if n_splits == 1 else f"{sd['name']} (Part {j + 1})"
+                    final_scenes.append({
+                        "name": sub_name,
+                        "start_time": _snap_to_frame(boundaries_list[j], project_fps),
+                        "end_time": _snap_to_frame(boundaries_list[j + 1], project_fps),
+                    })
+            else:
+                # Not enough sentence gaps — fall back to even splits
+                sub_dur = dur / n_splits
+                for j in range(n_splits):
+                    sub_start = _snap_to_frame(sd["start_time"] + j * sub_dur, project_fps)
+                    sub_end = _snap_to_frame(sd["start_time"] + (j + 1) * sub_dur, project_fps)
+                    if j == n_splits - 1:
+                        sub_end = sd["end_time"]
+                    sub_name = sd["name"] if n_splits == 1 else f"{sd['name']} (Part {j + 1})"
+                    final_scenes.append({
+                        "name": sub_name,
+                        "start_time": sub_start,
+                        "end_time": sub_end,
+                    })
             logger.info(
                 f"Split oversized scene '{sd['name']}' ({dur:.1f}s) into {n_splits} sub-scenes"
             )

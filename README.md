@@ -8,9 +8,13 @@ A local desktop application for creating AI-powered music videos and narration v
 
 These videos were generated entirely by the app using ComfyUI + LTX 2.3 video generation:
 
-[![Sample Output 1](https://img.youtube.com/vi/ysumK--oPEI/maxresdefault.jpg)](https://youtu.be/ysumK--oPEI)
+<a href="https://www.youtube.com/watch?v=ysumK--oPEI">
+  <img src="https://img.youtube.com/vi/ysumK--oPEI/maxresdefault.jpg" alt="Sample Output 1" width="600"/>
+</a>
 
-[![Sample Output 2](https://img.youtube.com/vi/hmp0o6oHwH8/maxresdefault.jpg)](https://youtu.be/hmp0o6oHwH8)
+<a href="https://www.youtube.com/watch?v=hmp0o6oHwH8">
+  <img src="https://img.youtube.com/vi/hmp0o6oHwH8/maxresdefault.jpg" alt="Sample Output 2" width="600"/>
+</a>
 
 ## Features
 

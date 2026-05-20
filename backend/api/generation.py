@@ -1117,50 +1117,97 @@ async def _build_video_enhance_context(
     return " | ".join(parts)
 
 
+def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
+    """Group words into sentences/phrases based on punctuation and pauses.
+
+    A sentence break occurs when:
+    - The word ends with sentence-ending punctuation (.!?…)
+    - There's a gap > 1.5s to the next word (verse/phrase break)
+
+    Returns a list of word-groups, each group being a sentence/phrase
+    that should be kept together and assigned to one scene.
+    """
+    import re
+    if not words:
+        return []
+
+    sentences: list[list[dict]] = []
+    current: list[dict] = []
+
+    for i, w in enumerate(words):
+        current.append(w)
+        word_text = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+
+        is_last = (i == len(words) - 1)
+        if is_last:
+            sentences.append(current)
+            break
+
+        # Check for sentence-ending punctuation
+        has_sentence_end = bool(re.search(r'[.!?…]$', word_text))
+
+        # Check for significant pause after this word
+        next_start = words[i + 1].get("start", 0)
+        this_end = w.get("end", 0)
+        gap = next_start - this_end
+
+        if has_sentence_end or gap > 1.5:
+            sentences.append(current)
+            current = []
+
+    if current:
+        sentences.append(current)
+
+    return sentences
+
+
 def _get_scene_lyrics(scene: Scene, words: list[dict]) -> str:
     """Extract lyrics text for a scene's time range from word timestamps.
 
-    Uses midpoint assignment with phrase-aware boundary cleanup:
-    1. Assigns each word to the scene containing its midpoint
-    2. Groups consecutive words into phrases (split at gaps > 1.5s)
-    3. If a phrase straddles the scene boundary and only 1-2 words
-       are in this scene while the bulk is in the adjacent scene,
-       drops those orphan words so the adjacent scene gets them
+    Uses sentence-aware assignment to prevent splitting sentences across scenes:
 
-    This prevents individual boundary words from bleeding while
-    keeping the bulk of lyrics correctly assigned per-scene.
+    1. Groups all words into sentences/phrases (split at punctuation or pauses)
+    2. For each sentence, determines which scene contains the MAJORITY of the
+       sentence's duration — the entire sentence is assigned to that scene
+    3. A sentence is included if the scene containing its majority overlaps
+       with this scene's time range
+
+    This ensures that if "Black hat on a wooden chair" is a sentence where
+    "Black" barely starts before the scene boundary, the ENTIRE sentence
+    stays in the scene where most of its words are spoken — never splitting
+    the first word into the intro.
     """
     if not words:
         return ""
 
-    # Step 1: Midpoint assignment — each word to the scene containing its center
-    scene_words = []
-    for w in words:
-        w_start = w.get("start", 0)
-        w_end = w.get("end", 0)
-        midpoint = (w_start + w_end) / 2.0
-        if midpoint >= scene.start_time and midpoint < scene.end_time:
-            scene_words.append(w)
+    sentences = _group_words_into_sentences(words)
+    if not sentences:
+        return ""
+
+    scene_words: list[dict] = []
+
+    for sentence in sentences:
+        if not sentence:
+            continue
+
+        # Calculate the sentence's time span
+        sent_start = sentence[0].get("start", 0)
+        sent_end = sentence[-1].get("end", 0)
+
+        # Calculate how much of the sentence overlaps with this scene
+        overlap_start = max(sent_start, scene.start_time)
+        overlap_end = min(sent_end, scene.end_time)
+        overlap = max(0, overlap_end - overlap_start)
+
+        sent_duration = max(sent_end - sent_start, 0.01)
+
+        # The sentence belongs to this scene if MORE THAN HALF of its
+        # duration falls within the scene boundaries
+        if overlap >= sent_duration * 0.5:
+            scene_words.extend(sentence)
 
     if not scene_words:
         return ""
-
-    # Step 2: Remove orphaned words at boundaries
-    # For scenes with 3+ words: remove leading/trailing orphans
-    # separated from the main body by a gap > 1.5s
-    if len(scene_words) > 2:
-        for split_idx in range(1, min(3, len(scene_words))):
-            gap = scene_words[split_idx].get("start", 0) - scene_words[split_idx - 1].get("end", 0)
-            if gap > 1.5:
-                scene_words = scene_words[split_idx:]
-                break
-
-    if len(scene_words) > 2:
-        for split_idx in range(len(scene_words) - 1, max(len(scene_words) - 3, 0), -1):
-            gap = scene_words[split_idx].get("start", 0) - scene_words[split_idx - 1].get("end", 0)
-            if gap > 1.5:
-                scene_words = scene_words[:split_idx]
-                break
 
     return " ".join(w["word"] for w in scene_words).strip()
 
