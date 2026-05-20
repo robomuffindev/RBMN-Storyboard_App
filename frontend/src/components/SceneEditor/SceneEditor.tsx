@@ -1519,13 +1519,13 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         .join('. ');
       parts.push(`Characters: ${charBlock}`);
     }
-    // Scene lyrics
+    // Scene lyrics — PRIMARY creative driver
     if (sceneLyrics && !sceneLyrics.startsWith('(No lyrics')) {
-      parts.push(`Lyrics during this scene: "${sceneLyrics}"`);
+      parts.push(`SCENE LYRICS (PRIMARY CREATIVE SOURCE — specific objects, people, actions, and settings mentioned here MUST appear visually in the image. The lyrics tell you WHAT to show): "${sceneLyrics}"`);
     }
-    // Story flow (when enabled)
+    // Story flow — scene composition and framing
     if (useStoryFlow && sceneFlowIdea) {
-      parts.push(`Story flow for this scene: ${sceneFlowIdea}`);
+      parts.push(`SCENE STORYBOARD (describes HOW to compose and frame the scene — use this alongside the lyrics to create a visually unique scene that depicts the lyrical content): ${sceneFlowIdea}`);
     }
     return parts.filter(Boolean).join(' | ');
   };

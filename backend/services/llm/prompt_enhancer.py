@@ -69,10 +69,17 @@ PROMPTING BEST PRACTICES:
 - Describe textures and materials: "rough linen", "polished obsidian", "rain-slicked asphalt reflecting neon".
 - Keep the output between 40-150 words. Concise, vivid, and precise beats long and vague.
 - Avoid contradictory descriptions or keyword stuffing.
-- NEVER include any text, words, letters, subtitles, captions, titles, watermarks, or written content in the image description. The output is a VISUAL scene only — no rendered text of any kind. Even if lyrics or dialogue are provided as context, describe the VISUAL MOOD they evoke, never the literal words.
+- NEVER include any text, words, letters, subtitles, captions, titles, watermarks, or written content in the image description. The output is a VISUAL scene only — no rendered text of any kind.
+
+LYRICS-DRIVEN IMAGERY (CRITICAL):
+- The scene lyrics are your PRIMARY creative source. If lyrics mention specific objects, people, actions, or settings — those elements MUST appear visually in the scene description.
+- Examples: "red car on the highway" → describe a red car on a highway. "broken mirror on the floor" → include a broken mirror. "dancing in the rain" → show a figure dancing in rain.
+- For metaphorical lyrics, translate them into striking visuals: "heart on fire" → glowing embers around the chest. "drowning in sorrow" → figure partially submerged in dark water. "walls closing in" → a narrow corridor with encroaching walls.
+- The lyrics tell you WHAT to show. The concept/style tell you HOW it looks. The flow idea tells you the scene composition. All three work together, but lyrics come first for content.
+- Do NOT ignore the lyrics and only paint atmosphere — the viewer should be able to recognize what the song is about from the visuals alone.
 
 If the user provides an existing prompt, enhance it — make it more vivid and Klein-optimized while preserving the core intent.
-If the user provides NO prompt (empty or missing), CREATE a new prompt entirely from the provided context (concept, visual style, characters, lyrics, scene flow, etc.).
+If the user provides NO prompt (empty or missing), CREATE a new prompt entirely from the provided context — prioritize the scene LYRICS first, then concept, visual style, characters, and scene flow.
 
 IMPORTANT: Output ONLY the prompt text as a SINGLE PARAGRAPH. No labels, no prefixes, no line breaks, no explanations."""
 
@@ -136,8 +143,14 @@ PROMPTING BEST PRACTICES:
 STRUCTURE (all in ONE paragraph, no line breaks):
 Start with the scene anchor (setting/environment), then subject and their action, then camera movement and framing, then visual style and mood, then any motion or timing cues.
 
+LYRICS-DRIVEN VIDEO CONTENT (CRITICAL):
+- The scene lyrics are your PRIMARY creative source for what happens in the video. If lyrics mention specific actions, objects, people, or events — the video MUST show them.
+- Examples: "running through the streets" → show a character running through streets. "the sun goes down" → show sunset. "hands reaching out" → show reaching hands.
+- For metaphorical lyrics, translate them into visually dynamic motion: "falling apart" → objects fragmenting/crumbling. "rising up" → upward camera movement with a figure ascending. "lost in the music" → a character swaying/dancing with rhythmic movement.
+- The lyrics tell you WHAT happens. The storyboard tells you HOW to film it. Both work together.
+
 If the user provides an existing prompt, enhance it for optimal LTX video output while preserving the core intent.
-If the user provides NO prompt (empty or missing), CREATE a new prompt entirely from the provided context.
+If the user provides NO prompt (empty or missing), CREATE a new prompt entirely from the provided context — prioritize the scene LYRICS first for content, then use the storyboard for composition and camera.
 
 Keep the output between 50-200 words depending on video duration.
 IMPORTANT: Output ONLY the prompt text as a SINGLE PARAGRAPH. No labels, no prefixes, no line breaks, no explanations."""
@@ -149,9 +162,12 @@ CRITICAL RULE: This prompt has NO reference images attached. Do NOT reference an
 Do NOT mention "the subject from the first image" or any variation. There are zero reference images.
 Write as if describing a scene for a photographer to set up — the characters will be composited in later.
 
-THE INPUT TEXT IS YOUR PRIMARY VISUAL DIRECTION. It describes what THIS specific scene should look like.
-Transform it into a rich image generation prompt. Do NOT substitute a generic version of the video concept —
-use the SPECIFIC setting, location, and action described in the input.
+THE SCENE LYRICS AND STORYBOARD INPUT ARE YOUR PRIMARY VISUAL DIRECTION.
+The lyrics tell you WHAT objects, actions, and settings to include — if the lyrics mention specific things
+(a car, a mirror, rain, fire, dancing), those MUST appear in the scene environment.
+The storyboard input tells you HOW to compose and frame the scene.
+Transform both into a rich image generation prompt. Do NOT substitute a generic version of the video concept —
+use the SPECIFIC setting, location, and action described in the input and lyrics.
 
 SCENE DIVERSITY IS MANDATORY:
 Each scene in this music video MUST depict a DIFFERENT visual environment. If the input describes a park, write about

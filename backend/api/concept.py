@@ -235,7 +235,15 @@ async def base_on_lyrics(
     system_prompt = (
         "You are a creative director for AI-generated music videos and narration videos. "
         "Given song lyrics, generate the requested fields for a video production concept. "
-        "Your output should be evocative, specific, and practical — aimed at guiding AI image/video generation. "
+        "Your output should be evocative, specific, and practical — aimed at guiding AI image/video generation.\n\n"
+        "LYRICS-DRIVEN CONCEPT GENERATION:\n"
+        "- The concept should reflect the NARRATIVE ARC of the lyrics in chronological order. "
+        "Identify key visual elements (objects, characters, settings, actions) as they appear in the lyrics "
+        "and incorporate them into the concept so the video tells the same story the lyrics tell.\n"
+        "- Call out specific concrete imagery from the lyrics (e.g., 'a red car', 'the ocean at night', "
+        "'dancing in a crowded room') — these will be used as visual anchors across scenes.\n"
+        "- The style should support the lyrical content — match the visual aesthetic to the emotional "
+        "journey of the song.\n\n"
         "Note: This app supports character reference images (up to 5 characters) that can be used across scenes "
         "to maintain visual consistency. When writing the concept, feel free to reference characters and their roles "
         "in the narrative — the user can define and generate character images separately.\n\n"
@@ -527,7 +535,10 @@ async def generate_video_flow(
     session: AsyncSession = Depends(get_session),
 ) -> VideoFlowResponse:
     """Use an LLM to generate a cohesive scene-by-scene storyboard flow
-    based on the project concept, style, characters, and existing scenes."""
+    based on the project concept, style, characters, lyrics, and existing scenes."""
+    from backend.database.models import Lyrics as LyricsModel
+    from backend.api.generation import _get_scene_lyrics
+
     project = await _get_project(project_id, session)
 
     # Gather concept info
@@ -541,6 +552,18 @@ async def generate_video_flow(
     result = await session.execute(stmt)
     scenes = result.scalars().all()
 
+    # Gather lyrics (word-level timestamps for per-scene filtering)
+    lyrics_stmt = select(LyricsModel).where(LyricsModel.project_id == project_id)
+    lyrics_result = await session.execute(lyrics_stmt)
+    lyrics_record = lyrics_result.scalars().first()
+    lyrics_words = lyrics_record.words if lyrics_record else []
+    # Also get the full lyrics text for overall context
+    full_lyrics = ""
+    if lyrics_record:
+        full_lyrics = (getattr(lyrics_record, "initial_text", "") or "").strip()
+        if not full_lyrics:
+            full_lyrics = (lyrics_record.full_text or "").strip()
+
     if not scenes:
         raise HTTPException(status_code=400, detail="No scenes found. Create scenes first.")
 
@@ -551,18 +574,37 @@ async def generate_video_flow(
     if not char_block:
         char_block = "\n  (No characters defined)"
 
-    scene_list = "\n".join(
-        f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
-        for i, sc in enumerate(scenes)
-    )
+    # Build scene list with per-scene lyrics
+    scene_lines = []
+    for i, sc in enumerate(scenes):
+        scene_lyrics = _get_scene_lyrics(sc, lyrics_words) if lyrics_words else ""
+        line = f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
+        if scene_lyrics:
+            line += f"\n    LYRICS: \"{scene_lyrics}\""
+        else:
+            line += "\n    LYRICS: (instrumental / no vocals)"
+        scene_lines.append(line)
+    scene_list = "\n".join(scene_lines)
 
     system_prompt = (
         "You are a creative director for AI-generated music videos and narration videos. "
-        "Given a video concept, visual style, characters, and a list of scenes with timings, "
+        "Given a video concept, visual style, characters, LYRICS for each scene, and a list of scenes with timings, "
         "generate a cohesive storyboard idea for each scene. Each idea should describe what happens "
         "visually in that scene — the SPECIFIC LOCATION, camera movement, action, mood, and composition — "
         "so that an AI image/video generator can produce compelling, visually DISTINCT frames. "
         "Keep each idea under 100 words.\n\n"
+        "CRITICAL — LYRICS ARE YOUR PRIMARY CREATIVE DRIVER:\n"
+        "The lyrics for each scene are the #1 source of creative direction. Your storyboard ideas MUST:\n"
+        "1. VISUALLY DEPICT specific objects, people, actions, and settings mentioned in the lyrics. "
+        "If the lyrics say 'red car', 'broken mirror', 'dancing in the rain', 'walking through fire' — "
+        "those elements MUST appear in your scene description. Do NOT abstract them into vague mood.\n"
+        "2. FOLLOW THE NARRATIVE ORDER of the lyrics. Events described first in the song happen first "
+        "in the video. The visual story should track the lyrical story beat by beat.\n"
+        "3. For instrumental/no-vocal scenes: use the overall concept and surrounding lyrical context "
+        "to create transitional or atmospheric visuals that bridge the narrative.\n"
+        "4. Translate metaphors into compelling visuals — 'heart on fire' could be a character with "
+        "glowing embers around their chest, 'drowning in sorrow' could be a character submerged in "
+        "dark water. Make abstract lyrics VISUALLY CONCRETE.\n\n"
         "CRITICAL — VISUAL DIVERSITY ACROSS SCENES:\n"
         "Each scene MUST take place in a DIFFERENT physical location or setting. Do NOT set every scene "
         "in the same place with different camera angles — that produces identical-looking images. Instead:\n"
@@ -581,12 +623,19 @@ async def generate_video_flow(
         "No markdown, no labels, no explanation — just the JSON array."
     )
 
+    # Include full lyrics for overall narrative arc context
+    lyrics_block = ""
+    if full_lyrics:
+        lyrics_block = f"\nFull Song Lyrics (for overall narrative arc):\n{full_lyrics}\n"
+
     user_prompt = (
         f"Video Concept: {concept_text or '(not set)'}\n"
         f"Visual Style: {style_text or '(not set)'}\n"
-        f"Characters: {char_block}\n\n"
-        f"Scenes:\n{scene_list}\n\n"
-        "Generate a storyboard idea for each scene. Return a JSON array of strings."
+        f"Characters: {char_block}\n"
+        f"{lyrics_block}\n"
+        f"Scenes (with per-scene lyrics):\n{scene_list}\n\n"
+        "Generate a storyboard idea for each scene. The lyrics for each scene are your PRIMARY source "
+        "of visual direction — depict what they describe. Return a JSON array of strings."
     )
 
     # Get LLM settings

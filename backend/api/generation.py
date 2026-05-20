@@ -782,29 +782,56 @@ async def _ensure_video_flow(
     style_text = s.get("style_text", "")
     characters = s.get("characters", [])
 
+    # Fetch lyrics for per-scene context
+    from backend.database.models import Lyrics as LyricsModel
+    lyrics_stmt = select(LyricsModel).where(LyricsModel.project_id == project.id)
+    lyrics_result = await session.execute(lyrics_stmt)
+    lyrics_record = lyrics_result.scalars().first()
+    lyrics_words = lyrics_record.words if lyrics_record else []
+    full_lyrics = ""
+    if lyrics_record:
+        full_lyrics = (getattr(lyrics_record, "initial_text", "") or "").strip()
+        if not full_lyrics:
+            full_lyrics = (lyrics_record.full_text or "").strip()
+
     char_block = ""
     for i, c in enumerate(characters, 1):
         char_block += f"\n  Character {i}: {c.get('name', 'Unnamed')} — {c.get('description', 'No description')}"
     if not char_block:
         char_block = "\n  (No characters defined)"
 
-    scene_list = "\n".join(
-        f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
-        for i, sc in enumerate(scenes)
-    )
+    # Build scene list with per-scene lyrics
+    scene_lines = []
+    for i, sc in enumerate(scenes):
+        scene_lyrics = _get_scene_lyrics(sc, lyrics_words) if lyrics_words else ""
+        line = f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
+        if scene_lyrics:
+            line += f"\n    LYRICS: \"{scene_lyrics}\""
+        else:
+            line += "\n    LYRICS: (instrumental / no vocals)"
+        scene_lines.append(line)
+    scene_list = "\n".join(scene_lines)
 
     system_prompt = (
         "You are a creative director for AI-generated music videos and narration videos. "
-        "Given a video concept, visual style, characters, and a list of scenes with timings, "
+        "Given a video concept, visual style, characters, LYRICS for each scene, and a list of scenes with timings, "
         "generate a cohesive storyboard idea for each scene. Each idea should describe what happens "
         "visually in that scene — camera movement, action, mood, composition — so that an AI image/video "
         "generator can produce compelling frames that tell a SEQUENTIAL STORY.\n\n"
+        "CRITICAL — LYRICS ARE YOUR PRIMARY CREATIVE DRIVER:\n"
+        "The lyrics for each scene are the #1 source of creative direction. Your storyboard ideas MUST:\n"
+        "1. VISUALLY DEPICT specific objects, people, actions, and settings mentioned in the lyrics. "
+        "If the lyrics say 'red car', 'broken mirror', 'dancing in the rain', 'walking through fire' — "
+        "those elements MUST appear in your scene description. Do NOT abstract them into vague mood.\n"
+        "2. FOLLOW THE NARRATIVE ORDER of the lyrics. Events described first in the song happen first "
+        "in the video. The visual story should track the lyrical story beat by beat.\n"
+        "3. For instrumental/no-vocal scenes: use the overall concept and surrounding lyrical context "
+        "to create transitional or atmospheric visuals that bridge the narrative.\n"
+        "4. Translate metaphors into compelling visuals — 'heart on fire' could be a character with "
+        "glowing embers around their chest, 'drowning in sorrow' could be a character submerged in "
+        "dark water. Make abstract lyrics VISUALLY CONCRETE.\n\n"
         "CRITICAL: Each scene MUST be visually DISTINCT from the others. Vary the composition, "
-        "camera angle, subject position, action, and environment across scenes. A music video tells "
-        "a story through changing visuals — avoid repetitive poses or static compositions.\n\n"
-        "Think about visual storytelling: establish a setting, introduce characters, build energy, "
-        "shift locations, change perspectives. Each scene should advance the narrative or emotional "
-        "arc of the video.\n\n"
+        "camera angle, subject position, action, and environment across scenes.\n\n"
         "Note: This app supports character reference images (up to 5 characters) that maintain visual "
         "consistency across scenes. When characters are defined, reference them by name "
         "in your scene descriptions — their appearance stays consistent automatically.\n\n"
@@ -813,14 +840,18 @@ async def _ensure_video_flow(
         "No markdown, no labels, no explanation — just the JSON array."
     )
 
+    lyrics_block = ""
+    if full_lyrics:
+        lyrics_block = f"\nFull Song Lyrics (for overall narrative arc):\n{full_lyrics}\n"
+
     user_prompt = (
         f"Video Concept: {concept_text or '(not set)'}\n"
         f"Visual Style: {style_text or '(not set)'}\n"
-        f"Characters: {char_block}\n\n"
-        f"Scenes:\n{scene_list}\n\n"
-        "Generate a storyboard idea for each scene. Each scene should depict DIFFERENT content, "
-        "compositions, and actions — tell a visual story that progresses scene-by-scene. "
-        "Return a JSON array of strings."
+        f"Characters: {char_block}\n"
+        f"{lyrics_block}\n"
+        f"Scenes (with per-scene lyrics):\n{scene_list}\n\n"
+        "Generate a storyboard idea for each scene. The lyrics for each scene are your PRIMARY source "
+        "of visual direction — depict what they describe. Return a JSON array of strings."
     )
 
     from backend.api.concept import _call_llm, _try_repair_truncated_json_array
@@ -933,19 +964,21 @@ async def _build_auto_enhance_context(
         for c in chars_without_images:
             parts.append(f'Character "{c.get("name", "Unnamed")}": {c.get("description", "no description")}')
 
-    # Scene lyrics (filter words by scene timing)
+    # Scene lyrics — PRIMARY creative driver
     if lyrics_text:
-        parts.append(f'Lyrics during this scene: "{lyrics_text}"')
+        parts.append(
+            f'SCENE LYRICS (PRIMARY CREATIVE SOURCE — specific objects, people, actions, and settings '
+            f'mentioned here MUST appear visually in the image. The lyrics tell you WHAT to show): '
+            f'"{lyrics_text}"'
+        )
 
-    # Story flow — THIS IS THE PRIMARY DIFFERENTIATOR between scenes.
-    # The flow idea describes what uniquely happens in THIS scene vs all others.
+    # Story flow — provides scene composition, camera, and visual diversity
     flow_idea = scene.parameters.get("flow_idea", "")
     if flow_idea:
         parts.append(
-            f"SCENE-SPECIFIC STORYBOARD (THIS IS THE MOST IMPORTANT INSTRUCTION — this is what makes "
-            f"this scene UNIQUE and different from every other scene in the video. The image MUST depict "
-            f"the action, composition, and subject placement described here, NOT a generic interpretation "
-            f"of the concept): {flow_idea}"
+            f"SCENE STORYBOARD (describes HOW to compose and frame the scene — camera angle, "
+            f"composition, location, and mood. Use this alongside the lyrics above to create a "
+            f"visually unique scene that depicts the lyrical content): {flow_idea}"
         )
 
     # Camera action (if set)
@@ -1048,15 +1081,21 @@ async def _build_video_enhance_context(
         )
         parts.append(f"Characters: {char_block}")
 
+    # Scene lyrics — PRIMARY creative driver for video content
     if lyrics_text:
-        parts.append(f'Lyrics during this scene: "{lyrics_text}"')
+        parts.append(
+            f'SCENE LYRICS (PRIMARY CREATIVE SOURCE — specific actions, movements, and events '
+            f'mentioned here should drive the video motion and content. The lyrics tell you WHAT '
+            f'happens in this scene): "{lyrics_text}"'
+        )
 
-    # Story flow — primary differentiator for unique scene content
+    # Story flow — provides scene composition and camera direction
     flow_idea = scene.parameters.get("flow_idea", "")
     if flow_idea:
         parts.append(
-            f"SCENE-SPECIFIC STORYBOARD (MOST IMPORTANT — this defines the unique action and "
-            f"visual content for THIS scene. The video MUST depict what is described here): {flow_idea}"
+            f"SCENE STORYBOARD (describes HOW to compose and film the scene — camera movement, "
+            f"framing, location, and mood. Use this alongside the lyrics above to create "
+            f"compelling video motion that depicts the lyrical content): {flow_idea}"
         )
 
     # Visual continuity from previous scene (skip if ignore_prev_scene_ref is set)
