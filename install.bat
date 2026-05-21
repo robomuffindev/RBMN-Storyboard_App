@@ -190,6 +190,16 @@ echo [5/6] Installing frontend dependencies...
 
 pushd frontend
 
+:: Delete lockfile if it contains Linux-specific platform binaries
+:: (happens when lockfile was generated on Linux/WSL)
+if exist "package-lock.json" (
+    findstr /C:"rollup-linux" package-lock.json >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo         Removing Linux-generated lockfile...
+        del package-lock.json
+    )
+)
+
 echo         Running npm install...
 call npm install
 if %errorlevel% neq 0 (
@@ -197,7 +207,7 @@ if %errorlevel% neq 0 (
 )
 
 echo         Building frontend for production...
-call npx vite build
+call npx --yes vite build
 if %errorlevel% neq 0 (
     echo [WARN]  Frontend build failed. App can still run in dev mode.
     echo         To retry: cd frontend ^& npm run build
