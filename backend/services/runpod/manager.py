@@ -12,7 +12,13 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:  # Python 3.10
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)

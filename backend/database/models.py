@@ -1,7 +1,14 @@
 """SQLModel database models for RBMN Storyboard App."""
 import json
 from datetime import datetime
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:  # Python 3.10
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        """Backport of StrEnum for Python <3.11."""
+        pass
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
