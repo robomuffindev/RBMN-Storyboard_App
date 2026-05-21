@@ -1,7 +1,9 @@
 """Application settings endpoints for RBMN Storyboard App."""
 import asyncio
 import logging
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
@@ -72,6 +74,8 @@ class SettingsResponse(BaseModel):
     runpod_api_key: Optional[str] = None  # Masked
     runpod_idle_timeout: int = 30
     runpod_pods: Optional[list[RunPodPodEntry]] = None
+    # Project directory
+    project_dir: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -111,6 +115,20 @@ class SettingsUpdate(BaseModel):
     runpod_api_key: Optional[str] = None
     runpod_idle_timeout: Optional[int] = None
     runpod_pods: Optional[list[RunPodPodEntry]] = None
+
+
+class ChangeProjectDirRequest(BaseModel):
+    """Request model for changing the project directory."""
+    new_path: str
+    move_data: bool = False
+
+
+class ChangeProjectDirResponse(BaseModel):
+    """Response model for project directory change."""
+    success: bool
+    message: str
+    old_path: str
+    new_path: str
 
 
 class TestComfyUIRequest(BaseModel):
@@ -254,6 +272,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         runpod_api_key=_mask_api_key(settings.runpod_api_key),
         runpod_idle_timeout=settings.runpod_idle_timeout or 30,
         runpod_pods=[RunPodPodEntry(**p) for p in (settings.runpod_pods or [])],
+        project_dir=settings.project_dir or str(env_settings.project_dir),
     )
 
 
@@ -1191,3 +1210,139 @@ async def stop_runpod_pod(
         "state": status.state.value,
         "error": status.error_message,
     }
+
+
+# ── Project Directory ───────────────────────────────────────────────
+
+@router.post(
+    "/browse-directory",
+    summary="Open native folder picker dialog",
+)
+async def browse_directory():
+    """Open a native folder picker dialog and return the selected path.
+
+    Uses tkinter for cross-platform native file dialog support.
+    Falls back gracefully if tkinter is not available (headless server).
+    """
+    import asyncio
+
+    def _pick_folder() -> str | None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            folder = filedialog.askdirectory(
+                title="Select Project Directory",
+                mustexist=False,
+            )
+            root.destroy()
+            return folder if folder else None
+        except Exception as e:
+            logger.warning(f"Folder picker not available: {e}")
+            return None
+
+    loop = asyncio.get_event_loop()
+    selected = await loop.run_in_executor(None, _pick_folder)
+
+    if selected is None:
+        return {"success": False, "path": None, "message": "No folder selected or dialog unavailable"}
+
+    return {"success": True, "path": selected, "message": "Folder selected"}
+
+
+@router.post(
+    "/change-project-dir",
+    response_model=ChangeProjectDirResponse,
+    summary="Change the project data directory",
+)
+async def change_project_dir(
+    req: ChangeProjectDirRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Change the project data directory with optional data migration.
+
+    Args:
+        req: Contains new_path and move_data flag.
+        session: Database session.
+
+    Returns:
+        Result of the directory change operation.
+    """
+    import asyncio
+
+    settings = await _get_or_create_settings(session)
+    old_path_str = settings.project_dir or str(env_settings.project_dir)
+    old_path = Path(old_path_str).expanduser().resolve()
+    new_path = Path(req.new_path).expanduser().resolve()
+
+    # Validate the new path
+    if not req.new_path.strip():
+        raise HTTPException(status_code=400, detail="Path cannot be empty")
+
+    if old_path == new_path:
+        raise HTTPException(status_code=400, detail="New path is the same as the current path")
+
+    # Check if new path is inside old path (would cause recursive issues)
+    try:
+        new_path.relative_to(old_path)
+        raise HTTPException(
+            status_code=400,
+            detail="New path cannot be inside the current project directory"
+        )
+    except ValueError:
+        pass  # Not relative — this is fine
+
+    def _do_directory_change() -> str:
+        """Perform directory operations in a thread (blocking I/O)."""
+        # Create the new directory if it doesn't exist
+        new_path.mkdir(parents=True, exist_ok=True)
+
+        if req.move_data and old_path.exists():
+            # Move all contents from old directory to new directory
+            moved_count = 0
+            errors = []
+            for item in old_path.iterdir():
+                dest = new_path / item.name
+                try:
+                    if dest.exists():
+                        # Skip if destination already exists
+                        logger.warning(f"Skipping {item.name} — already exists in destination")
+                        continue
+                    shutil.move(str(item), str(dest))
+                    moved_count += 1
+                except Exception as e:
+                    errors.append(f"{item.name}: {e}")
+                    logger.error(f"Failed to move {item}: {e}")
+
+            if errors:
+                return f"Moved {moved_count} items with {len(errors)} errors: {'; '.join(errors[:3])}"
+            return f"Moved {moved_count} items to new directory"
+        else:
+            return "Directory set (no data moved)"
+
+    try:
+        loop = asyncio.get_event_loop()
+        result_msg = await loop.run_in_executor(None, _do_directory_change)
+    except Exception as e:
+        logger.error(f"Failed to change project directory: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to change directory: {e}")
+
+    # Save the new path to database settings
+    settings.project_dir = str(new_path)
+    session.add(settings)
+    await session.commit()
+
+    # Update the runtime config so it takes effect immediately
+    env_settings.project_dir = new_path
+
+    logger.info(f"Project directory changed: {old_path} → {new_path} ({result_msg})")
+
+    return ChangeProjectDirResponse(
+        success=True,
+        message=result_msg,
+        old_path=str(old_path),
+        new_path=str(new_path),
+    )

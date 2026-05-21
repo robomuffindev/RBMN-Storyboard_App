@@ -338,6 +338,8 @@ class AppSettings(SQLModel, table=True):
     export_lfff_trim_enabled: bool = Field(default=True)  # trim first frame of scenes using prev scene's last frame
     # Content safety: append SFW tags to all prompts to restrict nudity/explicit content
     restrict_explicit_content: bool = Field(default=False)
+    # Project directory path (overrides env PROJECT_DIR when set via Settings UI)
+    project_dir: Optional[str] = Field(default=None)
 
 
 class WorkflowFieldType(StrEnum):

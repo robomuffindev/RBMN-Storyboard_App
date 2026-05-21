@@ -19,8 +19,10 @@ import {
   startRunPodPod,
   stopRunPodPod,
   purgeJobs,
+  browseDirectory,
+  changeProjectDir,
 } from '@/api/client';
-import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle } from 'lucide-react';
 import type { AppSettings, SystemPromptOverrideEntry, RunPodPodConfig, RunPodPodStatus } from '@/types/index';
 
 export default function SettingsPage() {
@@ -76,6 +78,11 @@ export default function SettingsPage() {
   const [runpodTestResult, setRunpodTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [runpodTesting, setRunpodTesting] = useState(false);
   const [runpodRefreshing, setRunpodRefreshing] = useState(false);
+  // Project directory state
+  const [projectDirInput, setProjectDirInput] = useState('');
+  const [projectDirChanged, setProjectDirChanged] = useState(false);
+  const [showMoveDialog, setShowMoveDialog] = useState(false);
+  const [projectDirStatus, setProjectDirStatus] = useState<{ type: 'success' | 'error' | 'loading'; message: string } | null>(null);
 
   const { data: savedSettings } = useQuery({
     queryKey: ['settings'],
@@ -118,6 +125,9 @@ export default function SettingsPage() {
         runpod_idle_timeout: savedSettings.runpod_idle_timeout || 30,
         runpod_pods: savedSettings.runpod_pods || [],
       });
+      // Initialize project directory input
+      setProjectDirInput(savedSettings.project_dir || '');
+      setProjectDirChanged(false);
       // If saved value doesn't match a preset, mark it as custom
       const imgType = savedSettings.image_model_type || 'flux2_klein_dev_9b';
       if (!IMAGE_MODEL_PRESETS.includes(imgType)) {
@@ -495,6 +505,85 @@ export default function SettingsPage() {
 
       {/* Content */}
       <div className="max-w-3xl mx-auto p-8 space-y-8">
+        {/* Project Directory */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-2">Project Directory</h2>
+          <p className="text-sm text-gray-400 mb-4">
+            Set the folder where all project data (database, assets, cache, generated files) is stored.
+            Changing this requires a restart to take full effect.
+          </p>
+
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={projectDirInput}
+              onChange={(e) => {
+                setProjectDirInput(e.target.value);
+                setProjectDirChanged(e.target.value !== (settings.project_dir || ''));
+                setProjectDirStatus(null);
+              }}
+              placeholder="e.g. C:\Users\You\RBMN-Projects"
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm font-mono"
+            />
+            <button
+              onClick={async () => {
+                try {
+                  const res = await browseDirectory();
+                  if (res.data.success && res.data.path) {
+                    setProjectDirInput(res.data.path);
+                    setProjectDirChanged(res.data.path !== (settings.project_dir || ''));
+                    setProjectDirStatus(null);
+                  }
+                } catch (e) {
+                  console.error('Browse directory failed:', e);
+                  setProjectDirStatus({ type: 'error', message: 'Failed to open folder picker' });
+                }
+              }}
+              className="flex items-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors"
+              title="Browse for folder"
+            >
+              <FolderOpen size={16} />
+              Browse
+            </button>
+          </div>
+
+          {/* Current path display */}
+          {settings.project_dir && (
+            <p className="text-xs text-gray-500 mb-3">
+              Current: <span className="font-mono text-gray-400">{settings.project_dir}</span>
+            </p>
+          )}
+
+          {/* Apply button — only enabled when path has changed */}
+          {projectDirChanged && projectDirInput.trim() && (
+            <button
+              onClick={() => setShowMoveDialog(true)}
+              disabled={projectDirStatus?.type === 'loading'}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors disabled:opacity-50"
+            >
+              {projectDirStatus?.type === 'loading' ? (
+                <Loader size={16} className="animate-spin" />
+              ) : (
+                <FolderInput size={16} />
+              )}
+              Apply New Directory
+            </button>
+          )}
+
+          {/* Status message */}
+          {projectDirStatus && projectDirStatus.type !== 'loading' && (
+            <div
+              className={`mt-3 px-3 py-2 rounded text-sm ${
+                projectDirStatus.type === 'success'
+                  ? 'bg-green-900/40 border border-green-700 text-green-300'
+                  : 'bg-red-900/40 border border-red-700 text-red-300'
+              }`}
+            >
+              {projectDirStatus.message}
+            </div>
+          )}
+        </section>
+
         {/* ComfyUI Servers */}
         <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
           <h2 className="text-xl font-semibold mb-4">ComfyUI Servers</h2>
@@ -1700,6 +1789,103 @@ export default function SettingsPage() {
           </button>
         </div>
       </div>
+
+      {/* Move Project Directory Dialog */}
+      {showMoveDialog && createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+          }}
+          onClick={() => setShowMoveDialog(false)}
+        >
+          <div
+            style={{
+              backgroundColor: '#1f2937',
+              borderRadius: '0.5rem',
+              border: '1px solid #374151',
+              padding: '1.5rem',
+              maxWidth: '500px',
+              width: '90%',
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-gray-100 mb-2">
+              Change Project Directory
+            </h2>
+            <p className="text-sm text-gray-400 mb-2">
+              New location:
+            </p>
+            <p className="text-sm font-mono text-blue-300 bg-gray-800 px-3 py-2 rounded mb-4 break-all">
+              {projectDirInput}
+            </p>
+            <p className="text-sm text-gray-300 mb-6">
+              Would you like to move your existing project data to the new folder?
+            </p>
+
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={async () => {
+                  setShowMoveDialog(false);
+                  setProjectDirStatus({ type: 'loading', message: 'Moving data...' });
+                  try {
+                    const res = await changeProjectDir(projectDirInput, true);
+                    setProjectDirStatus({ type: 'success', message: `${res.data.message}. Restart the app to use the new directory.` });
+                    setSettings((prev) => ({ ...prev, project_dir: res.data.new_path }));
+                    setProjectDirInput(res.data.new_path);
+                    setProjectDirChanged(false);
+                  } catch (e: any) {
+                    const detail = e?.response?.data?.detail || 'Failed to change directory';
+                    setProjectDirStatus({ type: 'error', message: detail });
+                  }
+                }}
+                className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors text-left"
+              >
+                Yes, move existing data to new folder
+                <span className="block text-xs text-blue-300 mt-0.5">Copies all projects, assets, and database</span>
+              </button>
+
+              <button
+                onClick={async () => {
+                  setShowMoveDialog(false);
+                  setProjectDirStatus({ type: 'loading', message: 'Setting new directory...' });
+                  try {
+                    const res = await changeProjectDir(projectDirInput, false);
+                    setProjectDirStatus({ type: 'success', message: `${res.data.message}. Restart the app to use the new directory.` });
+                    setSettings((prev) => ({ ...prev, project_dir: res.data.new_path }));
+                    setProjectDirInput(res.data.new_path);
+                    setProjectDirChanged(false);
+                  } catch (e: any) {
+                    const detail = e?.response?.data?.detail || 'Failed to change directory';
+                    setProjectDirStatus({ type: 'error', message: detail });
+                  }
+                }}
+                className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors text-left"
+              >
+                No, just set the new path (start fresh)
+                <span className="block text-xs text-gray-400 mt-0.5">Creates an empty directory at the new location</span>
+              </button>
+
+              <button
+                onClick={() => setShowMoveDialog(false)}
+                className="w-full px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
 
       {/* Prompt Guidance Modal */}
       {promptGuidanceModal && createPortal(

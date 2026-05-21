@@ -313,6 +313,16 @@ export const getBuiltinPrompt = (modelName: string, promptType: 'image' | 'video
     { params: { model_name: modelName, prompt_type: promptType } }
   );
 
+// ===== Project Directory =====
+export const browseDirectory = () =>
+  api.post<{ success: boolean; path: string | null; message: string }>('/settings/browse-directory');
+
+export const changeProjectDir = (newPath: string, moveData: boolean) =>
+  api.post<{ success: boolean; message: string; old_path: string; new_path: string }>(
+    '/settings/change-project-dir',
+    { new_path: newPath, move_data: moveData }
+  );
+
 // ===== Workflows =====
 export const getWorkflowConfigs = () =>
   api.get<WorkflowConfig[]>('/workflows');

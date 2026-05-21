@@ -190,6 +190,8 @@ export interface AppSettings {
   runpod_api_key?: string;
   runpod_idle_timeout?: number;
   runpod_pods?: RunPodPodConfig[];
+  // Project directory
+  project_dir?: string;
 }
 
 export interface RunPodPodConfig {

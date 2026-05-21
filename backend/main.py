@@ -80,6 +80,12 @@ async def lifespan(app: FastAPI):
         result = await session.execute(settings_stmt)
         app_settings = result.scalars().first()
 
+        # Apply project_dir from DB settings if set (overrides env default)
+        if app_settings and app_settings.project_dir:
+            from pathlib import Path as _Path
+            settings.project_dir = _Path(app_settings.project_dir).expanduser()
+            logger.info(f"Project directory from DB settings: {settings.project_dir}")
+
         if app_settings and app_settings.comfyui_urls:
             server_caps = app_settings.comfyui_server_caps or {}
             for url in app_settings.comfyui_urls:
