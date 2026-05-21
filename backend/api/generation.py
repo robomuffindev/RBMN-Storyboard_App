@@ -803,7 +803,7 @@ async def _ensure_video_flow(
     # Build scene list with per-scene lyrics
     scene_lines = []
     for i, sc in enumerate(scenes):
-        scene_lyrics = _get_scene_lyrics(sc, lyrics_words) if lyrics_words else ""
+        scene_lyrics = _get_scene_lyrics(sc, lyrics_words, lyrics_text=full_lyrics) if lyrics_words else ""
         line = f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
         if scene_lyrics:
             line += f"\n    LYRICS: \"{scene_lyrics}\""
@@ -1117,20 +1117,34 @@ async def _build_video_enhance_context(
     return " | ".join(parts)
 
 
-def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
-    """Group words into sentences/phrases based on punctuation and pauses.
+def _group_words_into_sentences(
+    words: list[dict],
+    lyrics_text: str = "",
+) -> list[list[dict]]:
+    """Group words into sentences/phrases — one per lyrics line.
 
-    A sentence break occurs when:
-    - The word ends with sentence-ending punctuation (.!?…)
-    - There's a gap > 1.5s to the next word (verse/phrase break)
+    STRATEGY: If user-provided lyrics text with line breaks is available,
+    use those lines as the authoritative phrase boundaries. Each line in
+    the lyrics = one indivisible phrase. Whisper word timestamps are matched
+    to lyrics lines by counting words per line.
 
-    Returns a list of word-groups, each group being a sentence/phrase
-    that should be kept together and assigned to one scene.
+    FALLBACK: If no lyrics text is available, detect phrases via punctuation
+    and pauses (for instrumental sections or missing lyrics).
+
+    Returns a list of word-groups, each group being a phrase that must be
+    kept together and assigned to one scene.
     """
     import re
     if not words:
         return []
 
+    # ── PRIMARY: Use lyrics lines if available ──────────────────────────
+    if lyrics_text and lyrics_text.strip():
+        lines = [l.strip() for l in lyrics_text.strip().splitlines() if l.strip()]
+        if lines:
+            return _match_words_to_lyrics_lines(words, lines)
+
+    # ── FALLBACK: Punctuation and pause detection ───────────────────────
     sentences: list[list[dict]] = []
     current: list[dict] = []
 
@@ -1146,12 +1160,15 @@ def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
         # Check for sentence-ending punctuation
         has_sentence_end = bool(re.search(r'[.!?…]$', word_text))
 
+        # Check for clause-ending punctuation
+        has_clause_end = bool(re.search(r'[,;:\-–—]$', word_text))
+
         # Check for significant pause after this word
         next_start = words[i + 1].get("start", 0)
         this_end = w.get("end", 0)
         gap = next_start - this_end
 
-        if has_sentence_end or gap > 1.5:
+        if has_sentence_end or gap > 1.5 or (has_clause_end and gap > 0.4):
             sentences.append(current)
             current = []
 
@@ -1161,7 +1178,74 @@ def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
     return sentences
 
 
-def _get_scene_lyrics(scene: Scene, words: list[dict]) -> str:
+def _match_words_to_lyrics_lines(
+    words: list[dict],
+    lines: list[str],
+) -> list[list[dict]]:
+    """Match Whisper word timestamps to user-provided lyrics lines.
+
+    Each lyrics line defines an indivisible phrase. We walk through the
+    Whisper words and assign them to lines by matching word counts per line.
+    """
+    import re
+
+    def clean_word(w: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', w).lower()
+
+    whisper_cleaned = []
+    for w in words:
+        raw = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+        whisper_cleaned.append(clean_word(raw))
+
+    groups: list[list[dict]] = []
+    word_idx = 0
+
+    for line_idx, line in enumerate(lines):
+        line_words_clean = [clean_word(w) for w in line.split()]
+        expected_count = len(line_words_clean)
+
+        if word_idx >= len(words):
+            break
+
+        first_word = line_words_clean[0] if line_words_clean else ""
+        best_start = word_idx
+        if first_word:
+            search_end = min(word_idx + 5, len(words))
+            for s in range(word_idx, search_end):
+                if whisper_cleaned[s] == first_word:
+                    best_start = s
+                    break
+
+        group_end = best_start + expected_count
+
+        if line_idx + 1 < len(lines):
+            next_line_words = [clean_word(w) for w in lines[line_idx + 1].split()]
+            next_first = next_line_words[0] if next_line_words else ""
+            if next_first:
+                for s in range(max(best_start + 1, group_end - 2), min(group_end + 5, len(words))):
+                    if whisper_cleaned[s] == next_first:
+                        group_end = s
+                        break
+
+        group_end = min(group_end, len(words))
+
+        if best_start < group_end:
+            groups.append(words[best_start:group_end])
+            word_idx = group_end
+        else:
+            word_idx = best_start
+
+    if word_idx < len(words):
+        if groups:
+            groups[-1].extend(words[word_idx:])
+        else:
+            groups.append(words[word_idx:])
+
+    groups = [g for g in groups if g]
+    return groups
+
+
+def _get_scene_lyrics(scene: Scene, words: list[dict], lyrics_text: str = "") -> str:
     """Extract lyrics text for a scene's time range from word timestamps.
 
     Uses sentence-aware assignment to prevent splitting sentences across scenes:
@@ -1180,7 +1264,7 @@ def _get_scene_lyrics(scene: Scene, words: list[dict]) -> str:
     if not words:
         return ""
 
-    sentences = _group_words_into_sentences(words)
+    sentences = _group_words_into_sentences(words, lyrics_text=lyrics_text)
     if not sentences:
         return ""
 
@@ -1279,6 +1363,11 @@ async def auto_generate(
         lyrics_result = await session.execute(lyrics_stmt)
         lyrics_record = lyrics_result.scalars().first()
         lyrics_words: list[dict] = lyrics_record.words if lyrics_record else []
+        user_lyrics_text = ""
+        if lyrics_record:
+            user_lyrics_text = (getattr(lyrics_record, "initial_text", "") or "").strip()
+            if not user_lyrics_text:
+                user_lyrics_text = (lyrics_record.full_text or "").strip()
 
         is_enhanced = req.mode in ("enhanced_all", "enhanced_missing")
         only_missing = req.mode in ("empty_only", "enhanced_missing")
@@ -1327,7 +1416,7 @@ async def auto_generate(
 
         prev_scene: Scene | None = None
         for scene in scenes:
-            scene_lyrics = _get_scene_lyrics(scene, lyrics_words)
+            scene_lyrics = _get_scene_lyrics(scene, lyrics_words, lyrics_text=user_lyrics_text)
             uses_ff_lf = _scene_uses_ff_lf(scene)
             has_ff = _scene_has_first_frame(scene)
             has_lf = _scene_has_last_frame(scene)
@@ -1816,6 +1905,7 @@ async def _run_windowed_batch(
     vocals_only_audio: bool = False,
     skip_audio_mux: bool = False,
     two_pass: bool = False,
+    user_lyrics_text: str = "",
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
 
@@ -1853,7 +1943,7 @@ async def _run_windowed_batch(
             if not scene:
                 continue
 
-            scene_lyrics = _get_scene_lyrics(scene, lyrics_words)
+            scene_lyrics = _get_scene_lyrics(scene, lyrics_words, lyrics_text=user_lyrics_text)
             has_ff = _scene_has_first_frame(scene)
             has_video = bool(scene.parameters.get("chosen_video_path"))
 
@@ -2255,6 +2345,7 @@ async def _run_sequential_auto_gen(
             lyrics_result = await session.execute(lyrics_stmt)
             lyrics_record = lyrics_result.scalars().first()
             lyrics_words: list[dict] = lyrics_record.words if lyrics_record else []
+            user_lyrics_text: str = (getattr(lyrics_record, "initial_text", "") or "").strip() if lyrics_record else ""
 
             scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
             scenes_result = await session.execute(scenes_stmt)
@@ -2321,6 +2412,7 @@ async def _run_sequential_auto_gen(
                 vocals_only_audio=vocals_only_audio,
                 skip_audio_mux=skip_audio_mux,
                 two_pass=two_pass,
+                user_lyrics_text=user_lyrics_text,
             )
             return
 
@@ -2343,7 +2435,7 @@ async def _run_sequential_auto_gen(
                 if not scene:
                     continue
 
-                scene_lyrics = _get_scene_lyrics(scene, lyrics_words)
+                scene_lyrics = _get_scene_lyrics(scene, lyrics_words, lyrics_text=user_lyrics_text)
                 has_ff = _scene_has_first_frame(scene)
                 has_video = bool(scene.parameters.get("chosen_video_path"))
 

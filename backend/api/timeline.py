@@ -792,22 +792,35 @@ async def get_lyrics(
         )
 
 
-def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
-    """Group words into sentences/phrases based on punctuation and pauses.
+def _group_words_into_sentences(
+    words: list[dict],
+    lyrics_text: str = "",
+) -> list[list[dict]]:
+    """Group words into sentences/phrases — one per lyrics line.
 
-    A sentence break occurs when:
-    - The word ends with sentence-ending punctuation (.!?…)
-    - There's a gap > 1.5s to the next word (verse/phrase break)
-    - The word ends with clause-ending punctuation AND gap > 0.4s
+    STRATEGY: If user-provided lyrics text with line breaks is available,
+    use those lines as the authoritative phrase boundaries. Each line in
+    the lyrics = one indivisible phrase. Whisper word timestamps are matched
+    to lyrics lines by counting words per line.
 
-    Returns a list of word-groups, each group being a sentence/phrase
-    that must be kept together — scene boundaries may ONLY be placed
-    between these groups, never inside them.
+    FALLBACK: If no lyrics text is available, detect phrases via punctuation
+    and pauses.
+
+    Returns a list of word-groups, each group being a phrase that must be
+    kept together — scene boundaries may ONLY be placed between these
+    groups, never inside them.
     """
     import re
     if not words:
         return []
 
+    # ── PRIMARY: Use lyrics lines if available ──────────────────────────
+    if lyrics_text and lyrics_text.strip():
+        lines = [l.strip() for l in lyrics_text.strip().splitlines() if l.strip()]
+        if lines:
+            return _match_words_to_lyrics_lines(words, lines)
+
+    # ── FALLBACK: Punctuation and pause detection ───────────────────────
     sentences: list[list[dict]] = []
     current: list[dict] = []
 
@@ -842,14 +855,123 @@ def _group_words_into_sentences(words: list[dict]) -> list[list[dict]]:
     return sentences
 
 
+def _match_words_to_lyrics_lines(
+    words: list[dict],
+    lines: list[str],
+) -> list[list[dict]]:
+    """Match Whisper word timestamps to user-provided lyrics lines.
+
+    Each lyrics line defines an indivisible phrase. We walk through the
+    Whisper words and assign them to lines by matching word counts per line.
+
+    This handles common mismatches:
+    - Whisper may contract words ("there's" vs "there" + "'s")
+    - Whisper may split/join words slightly differently
+    - Extra or missing words get absorbed into the nearest group
+
+    The algorithm uses fuzzy sequential matching: for each lyrics line,
+    find the best word-count match by comparing cleaned word text.
+    """
+    import re
+
+    def clean_word(w: str) -> str:
+        """Normalize a word for comparison."""
+        return re.sub(r'[^a-zA-Z0-9]', '', w).lower()
+
+    # Count words per lyrics line
+    line_word_counts = []
+    for line in lines:
+        line_words = line.split()
+        line_word_counts.append(len(line_words))
+
+    # Build a flat list of cleaned Whisper words for matching
+    whisper_cleaned = []
+    for w in words:
+        raw = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+        whisper_cleaned.append(clean_word(raw))
+
+    # Sequential assignment: walk through words, assigning chunks to lines
+    groups: list[list[dict]] = []
+    word_idx = 0
+
+    for line_idx, line in enumerate(lines):
+        line_words_clean = [clean_word(w) for w in line.split()]
+        expected_count = len(line_words_clean)
+
+        if word_idx >= len(words):
+            break
+
+        # Try to find the start of this line in the Whisper words
+        # Look for the first word of the line near our current position
+        first_word = line_words_clean[0] if line_words_clean else ""
+
+        # Check if we need to skip or if current position matches
+        best_start = word_idx
+        if first_word:
+            # Look within a small window for the first word match
+            search_end = min(word_idx + 5, len(words))
+            for s in range(word_idx, search_end):
+                if whisper_cleaned[s] == first_word:
+                    best_start = s
+                    break
+
+        # Assign `expected_count` words from best_start
+        # But cap at the start of the NEXT line's first word to avoid stealing
+        group_end = best_start + expected_count
+
+        # If this is not the last line, try to find where the next line starts
+        # and cap our group there
+        if line_idx + 1 < len(lines):
+            next_line_words = [clean_word(w) for w in lines[line_idx + 1].split()]
+            next_first = next_line_words[0] if next_line_words else ""
+            if next_first:
+                # Look for next line's first word starting from our expected end
+                for s in range(max(best_start + 1, group_end - 2), min(group_end + 5, len(words))):
+                    if whisper_cleaned[s] == next_first:
+                        group_end = s  # Cap here
+                        break
+
+        group_end = min(group_end, len(words))
+
+        if best_start < group_end:
+            groups.append(words[best_start:group_end])
+            word_idx = group_end
+        else:
+            # Edge case: no words match this line, skip it
+            word_idx = best_start
+
+    # Any remaining words go into the last group
+    if word_idx < len(words):
+        if groups:
+            groups[-1].extend(words[word_idx:])
+        else:
+            groups.append(words[word_idx:])
+
+    # Filter out empty groups
+    groups = [g for g in groups if g]
+
+    logger.info(
+        f"Matched {len(words)} Whisper words to {len(lines)} lyrics lines → "
+        f"{len(groups)} phrase groups"
+    )
+
+    return groups
+
+
 def _build_phrase_gaps(
     words: list[dict],
+    lyrics_text: str = "",
 ) -> list[dict]:
-    """Build a scored list of gaps ONLY at sentence/phrase boundaries.
+    """Build a scored list of gaps ONLY at phrase/line boundaries.
 
-    CRITICAL: This function only returns gaps that fall BETWEEN sentences,
-    never inside them. This guarantees that scene boundaries cannot split
-    a lyrical phrase. A scene always starts and ends with a complete phrase.
+    CRITICAL: This function only returns gaps that fall BETWEEN lyrics
+    lines (phrases), never inside them. This guarantees that scene
+    boundaries cannot split a lyrical phrase like "White sheet folded
+    neat and small" across two scenes.
+
+    When lyrics_text is provided (user's pasted lyrics with line breaks),
+    each line defines a phrase. Without it, falls back to punctuation/pause
+    detection.
 
     Each gap gets a score based on:
     - Gap duration (longer pause = better boundary point)
@@ -866,8 +988,8 @@ def _build_phrase_gaps(
     import re
     import math
 
-    # Group words into sentences — gaps are ONLY allowed between sentences
-    sentences = _group_words_into_sentences(words)
+    # Group words into phrases — gaps are ONLY allowed between phrases
+    sentences = _group_words_into_sentences(words, lyrics_text=lyrics_text)
     if len(sentences) < 2:
         return []
 
@@ -931,6 +1053,7 @@ def _snap_boundaries_to_word_gaps(
     words: list[dict],
     search_window: float = 3.0,
     fps: int = 24,
+    lyrics_text: str = "",
 ) -> list[float]:
     """Adjust scene boundaries so they fall ONLY at sentence/phrase breaks.
 
@@ -957,7 +1080,7 @@ def _snap_boundaries_to_word_gaps(
     adjusted = list(boundaries)
 
     # Build scored gaps — ranked by phrase-boundary quality
-    scored_gaps = _build_phrase_gaps(words)
+    scored_gaps = _build_phrase_gaps(words, lyrics_text=lyrics_text)
 
     # Also build a simple list for fast lookup of ALL gaps (even tiny ones)
     all_word_gaps: list[tuple[int, float, float]] = []  # (word_idx, gap_start, gap_end)
@@ -1136,17 +1259,21 @@ async def create_scenes_from_sections(
         if project and project.settings:
             project_fps = project.settings.get("project_fps", 24) or 24
 
-        # Load word timestamps to snap boundaries to phrase gaps
+        # Load word timestamps and lyrics text to snap boundaries to phrase gaps
         lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
         lyrics_result = await session.execute(lyrics_stmt)
         lyrics_record = lyrics_result.scalars().first()
         word_timestamps = (lyrics_record.words or []) if lyrics_record else []
+        # Use user's pasted lyrics (with line breaks) as phrase boundary source
+        user_lyrics_text = (lyrics_record.initial_text or lyrics_record.full_text or "") if lyrics_record else ""
 
         # Build adjusted boundaries that don't cut through phrases
         boundaries = [s.start_time for s in sections]
         if sections:
             boundaries.append(sections[-1].end_time)
-        boundaries = _snap_boundaries_to_word_gaps(boundaries, word_timestamps, fps=project_fps)
+        boundaries = _snap_boundaries_to_word_gaps(
+            boundaries, word_timestamps, fps=project_fps, lyrics_text=user_lyrics_text
+        )
 
         created_scenes = []
 
@@ -1587,38 +1714,9 @@ async def suggest_timeline(
 
     # Word timestamps — critical for alignment
     if word_timestamps:
-        # Group words into phrases (split at gaps > 1.0s or sentence-ending punctuation)
-        import re as _re
-        phrases: list[list[dict]] = []
-        current_phrase: list[dict] = []
-
-        for w_idx, w in enumerate(word_timestamps):
-            word_text = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
-            if not word_text:
-                continue
-            current_phrase.append(w)
-
-            # Check if this is a phrase break point
-            is_phrase_end = False
-            if w_idx < len(word_timestamps) - 1:
-                next_start = word_timestamps[w_idx + 1].get("start", 0)
-                gap = next_start - w.get("end", 0)
-                # Break on: sentence punctuation, long pauses, or moderate pauses after clause punctuation
-                if _re.search(r'[.!?…]$', word_text):
-                    is_phrase_end = True
-                elif gap > 1.0:
-                    is_phrase_end = True
-                elif gap > 0.5 and _re.search(r'[,;:\-–—]$', word_text):
-                    is_phrase_end = True
-            else:
-                is_phrase_end = True  # Last word
-
-            if is_phrase_end and current_phrase:
-                phrases.append(current_phrase)
-                current_phrase = []
-
-        if current_phrase:
-            phrases.append(current_phrase)
+        # Group words into phrases using the same lyrics-line-aware function
+        # that scene boundary snapping uses — ensures consistency
+        phrases = _group_words_into_sentences(word_timestamps, lyrics_text=user_lyrics)
 
         # Build phrase-grouped timing display
         lyrics_block += "LYRICS GROUPED BY PHRASE (each line = one complete phrase that must NOT be split):\n"
@@ -1633,7 +1731,7 @@ async def suggest_timeline(
 
         # Build explicit phrase break points — safe places to put scene boundaries
         lyrics_block += "\nPHRASE BREAK POINTS (safe times to place scene boundaries — ranked by quality):\n"
-        scored_gaps = _build_phrase_gaps(word_timestamps)
+        scored_gaps = _build_phrase_gaps(word_timestamps, lyrics_text=user_lyrics)
         # Show top break points (up to 40, sorted by time for readability)
         top_gaps = sorted(scored_gaps[:40], key=lambda g: g["time"])
         for gap in top_gaps:
@@ -1803,7 +1901,7 @@ async def suggest_timeline(
             # Find sentence gaps within this scene's time range
             scene_gaps = []
             if word_timestamps:
-                all_gaps = _build_phrase_gaps(word_timestamps)
+                all_gaps = _build_phrase_gaps(word_timestamps, lyrics_text=user_lyrics)
                 for gap in all_gaps:
                     if sd["start_time"] < gap["time"] < sd["end_time"]:
                         scene_gaps.append(gap)
@@ -1853,7 +1951,9 @@ async def suggest_timeline(
         boundaries = [validated_scenes[0]["start_time"]]
         for sd in validated_scenes:
             boundaries.append(sd["end_time"])
-        boundaries = _snap_boundaries_to_word_gaps(boundaries, word_timestamps, fps=project_fps)
+        boundaries = _snap_boundaries_to_word_gaps(
+            boundaries, word_timestamps, fps=project_fps, lyrics_text=user_lyrics
+        )
         for i, sd in enumerate(validated_scenes):
             sd["start_time"] = _snap_to_frame(boundaries[i], project_fps)
             sd["end_time"] = _snap_to_frame(boundaries[i + 1], project_fps)
