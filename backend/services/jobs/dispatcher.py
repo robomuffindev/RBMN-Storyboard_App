@@ -45,7 +45,7 @@ class JobEventBroadcaster:
 
     def __init__(self) -> None:
         self._subscribers: list[asyncio.Queue] = []
-        self._lock = asyncio.Lock() if asyncio.get_event_loop().is_running() else None
+        self._lock: asyncio.Lock | None = None  # created lazily in async context
 
     def subscribe(self) -> asyncio.Queue:
         """Create a new subscriber queue for an SSE connection."""

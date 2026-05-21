@@ -117,7 +117,7 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 │  └──────────────────┬─────────────────────────────┘  │
 │                     │ HTTP / SSE                      │
 │  ┌──────────────────▼─────────────────────────────┐  │
-│  │  FastAPI (Python 3.10+)                        │  │
+│  │  FastAPI (Python 3.11.x recommended)            │  │
 │  │  SQLite (WAL mode) via SQLModel + aiosqlite    │  │
 │  │  Job Queue → ComfyUI Dispatcher                │  │
 │  └───────┬──────────────────────┬─────────────────┘  │
@@ -145,7 +145,7 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 
 ## Prerequisites
 
-- **Python 3.10–3.12** — Uses `StrEnum` and async features requiring 3.10+
+- **Python 3.10–3.12** (3.11.x recommended) — Uses `StrEnum` and async features requiring 3.10+. Python 3.13+ is **not supported** due to PyTorch/WhisperX compatibility
 - **Node.js 18+** and **npm** — For building the React frontend
 - **FFmpeg** — On system PATH. Auto-detects GPU encoders (NVENC, AMF, QSV)
 - **At least one remote ComfyUI server** — With the models and nodes listed above installed
