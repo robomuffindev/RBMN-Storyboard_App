@@ -190,14 +190,12 @@ echo [5/6] Installing frontend dependencies...
 
 pushd frontend
 
-:: Delete lockfile if it contains Linux-specific platform binaries
-:: (happens when lockfile was generated on Linux/WSL)
+:: Always remove lockfile before install — it may contain platform-specific
+:: binaries from a different OS (e.g. Linux rollup on a Windows machine).
+:: npm will regenerate it correctly for the current platform.
 if exist "package-lock.json" (
-    findstr /C:"rollup-linux" package-lock.json >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo         Removing Linux-generated lockfile...
-        del package-lock.json
-    )
+    echo         Removing existing lockfile (will regenerate for this platform^)...
+    del package-lock.json
 )
 
 echo         Running npm install...

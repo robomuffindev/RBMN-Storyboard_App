@@ -44,6 +44,7 @@ desktop.ini
 # ---------- Frontend ----------
 frontend/dist/
 frontend/node_modules/
+frontend/package-lock.json
 frontend/vite.config.ts.timestamp-*
 
 # ---------- Logs ----------
