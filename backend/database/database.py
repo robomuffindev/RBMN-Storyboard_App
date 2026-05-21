@@ -227,6 +227,7 @@ async def init_db() -> None:
             "UPDATE app_settings SET export_color_match_clips = 0 WHERE export_color_match_clips = 1",
             "ALTER TABLE app_settings ADD COLUMN ltx_model_gguf VARCHAR DEFAULT 'ltx-2.3-22b-dev-Q8_0.gguf'",
             "ALTER TABLE app_settings ADD COLUMN restrict_explicit_content BOOLEAN DEFAULT 0",
+            "ALTER TABLE app_settings ADD COLUMN project_dir VARCHAR DEFAULT NULL",
         ]:
             try:
                 await conn.execute(text(col_sql))
