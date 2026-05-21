@@ -973,8 +973,10 @@ async def _build_auto_enhance_context(
         )
 
     # Story flow — provides scene composition, camera, and visual diversity
+    # Only include if the per-scene use_story_flow flag is set (defaults to True)
+    scene_use_flow = scene.parameters.get("use_story_flow", True)
     flow_idea = scene.parameters.get("flow_idea", "")
-    if flow_idea:
+    if flow_idea and scene_use_flow:
         parts.append(
             f"SCENE STORYBOARD (describes HOW to compose and frame the scene — camera angle, "
             f"composition, location, and mood. Use this alongside the lyrics above to create a "
@@ -1090,8 +1092,10 @@ async def _build_video_enhance_context(
         )
 
     # Story flow — provides scene composition and camera direction
+    # Only include if the per-scene use_story_flow flag is set (defaults to True)
+    scene_use_flow = scene.parameters.get("use_story_flow", True)
     flow_idea = scene.parameters.get("flow_idea", "")
-    if flow_idea:
+    if flow_idea and scene_use_flow:
         parts.append(
             f"SCENE STORYBOARD (describes HOW to compose and film the scene — camera movement, "
             f"framing, location, and mood. Use this alongside the lyrics above to create "
@@ -1186,6 +1190,11 @@ def _match_words_to_lyrics_lines(
 
     Each lyrics line defines an indivisible phrase. We walk through the
     Whisper words and assign them to lines by matching word counts per line.
+
+    WORD ANCHORING: After initial matching, any words that were skipped
+    (between groups) are merged into the nearest adjacent group. Single-word
+    groups are also merged into their neighbor. This ensures a word like
+    "Black" from "Black hat on a wooden chair" is NEVER orphaned.
     """
     import re
 
@@ -1197,7 +1206,11 @@ def _match_words_to_lyrics_lines(
         raw = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
         whisper_cleaned.append(clean_word(raw))
 
+    # Track which word indices are assigned to which group
+    # This lets us detect orphaned words after matching
+    word_to_group: dict[int, int] = {}  # word_index → group_index
     groups: list[list[dict]] = []
+    group_ranges: list[tuple[int, int]] = []  # (start_idx, end_idx) for each group
     word_idx = 0
 
     for line_idx, line in enumerate(lines):
@@ -1230,16 +1243,83 @@ def _match_words_to_lyrics_lines(
         group_end = min(group_end, len(words))
 
         if best_start < group_end:
+            g_idx = len(groups)
             groups.append(words[best_start:group_end])
+            group_ranges.append((best_start, group_end))
+            for wi in range(best_start, group_end):
+                word_to_group[wi] = g_idx
             word_idx = group_end
         else:
             word_idx = best_start
 
+    # Trailing words → last group
     if word_idx < len(words):
         if groups:
-            groups[-1].extend(words[word_idx:])
+            g_idx = len(groups) - 1
+            groups[g_idx].extend(words[word_idx:])
+            old_start, _ = group_ranges[g_idx]
+            group_ranges[g_idx] = (old_start, len(words))
+            for wi in range(word_idx, len(words)):
+                word_to_group[wi] = g_idx
         else:
             groups.append(words[word_idx:])
+            group_ranges.append((word_idx, len(words)))
+            for wi in range(word_idx, len(words)):
+                word_to_group[wi] = 0
+
+    # ── WORD ANCHORING: merge orphaned words into nearest group ───────
+    # Find any word indices NOT assigned to any group
+    orphaned: list[int] = [i for i in range(len(words)) if i not in word_to_group]
+    if orphaned and groups:
+        logger.info(f"[WordAnchor] Found {len(orphaned)} orphaned word(s): "
+                     f"{[whisper_cleaned[i] for i in orphaned]}")
+        for oi in orphaned:
+            # Find the nearest group by proximity to group boundaries
+            best_group = 0
+            best_dist = float('inf')
+            for gi, (gs, ge) in enumerate(group_ranges):
+                dist = min(abs(oi - gs), abs(oi - ge))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_group = gi
+
+            # Insert the orphaned word into the group at the right position
+            word_obj = words[oi]
+            word_time = word_obj.get("start", 0)
+            inserted = False
+            for pos, gw in enumerate(groups[best_group]):
+                if gw.get("start", 0) > word_time:
+                    groups[best_group].insert(pos, word_obj)
+                    inserted = True
+                    break
+            if not inserted:
+                groups[best_group].append(word_obj)
+
+            word_to_group[oi] = best_group
+            logger.info(f"[WordAnchor] Anchored '{whisper_cleaned[oi]}' → group {best_group}")
+
+    # ── Merge single-word groups into neighbors ──────────────────────
+    # A single-word group means the matching failed for that word's line.
+    # Merge it into the closest adjacent group to prevent orphaned display.
+    if len(groups) > 1:
+        merged_groups: list[list[dict]] = []
+        for gi, group in enumerate(groups):
+            if len(group) == 1 and len(groups) > 1:
+                # Single-word group — merge with neighbor
+                word_text = (group[0].get("word", "") or "").strip()
+                if merged_groups:
+                    # Merge into previous group
+                    merged_groups[-1].extend(group)
+                    logger.info(f"[WordAnchor] Merged single-word '{word_text}' into previous group")
+                elif gi + 1 < len(groups):
+                    # No previous group yet — will prepend to next group
+                    groups[gi + 1] = group + groups[gi + 1]
+                    logger.info(f"[WordAnchor] Merged single-word '{word_text}' into next group")
+                else:
+                    merged_groups.append(group)
+            else:
+                merged_groups.append(group)
+        groups = merged_groups
 
     groups = [g for g in groups if g]
     return groups
@@ -1248,18 +1328,16 @@ def _match_words_to_lyrics_lines(
 def _get_scene_lyrics(scene: Scene, words: list[dict], lyrics_text: str = "") -> str:
     """Extract lyrics text for a scene's time range from word timestamps.
 
-    Uses sentence-aware assignment to prevent splitting sentences across scenes:
+    Uses sentence-aware assignment with WORD ANCHORING:
 
-    1. Groups all words into sentences/phrases (split at punctuation or pauses)
-    2. For each sentence, determines which scene contains the MAJORITY of the
-       sentence's duration — the entire sentence is assigned to that scene
-    3. A sentence is included if the scene containing its majority overlaps
-       with this scene's time range
+    1. Groups all words into sentences/phrases (by lyrics lines or punctuation)
+    2. Word anchoring merges any orphaned single words into their nearest phrase
+    3. For each phrase, >50% duration overlap determines scene assignment
+    4. Entire phrases are assigned atomically — never split
 
     This ensures that if "Black hat on a wooden chair" is a sentence where
     "Black" barely starts before the scene boundary, the ENTIRE sentence
-    stays in the scene where most of its words are spoken — never splitting
-    the first word into the intro.
+    stays in the scene where most of its words are spoken.
     """
     if not words:
         return ""
@@ -1269,8 +1347,9 @@ def _get_scene_lyrics(scene: Scene, words: list[dict], lyrics_text: str = "") ->
         return ""
 
     scene_words: list[dict] = []
+    scene_name = getattr(scene, 'name', f'Scene@{scene.start_time:.1f}')
 
-    for sentence in sentences:
+    for s_idx, sentence in enumerate(sentences):
         if not sentence:
             continue
 
@@ -1284,6 +1363,21 @@ def _get_scene_lyrics(scene: Scene, words: list[dict], lyrics_text: str = "") ->
         overlap = max(0, overlap_end - overlap_start)
 
         sent_duration = max(sent_end - sent_start, 0.01)
+        overlap_pct = overlap / sent_duration if sent_duration > 0 else 0
+
+        # Log for first few scenes to help debug orphaned words
+        if scene.order_index is not None and scene.order_index < 3:
+            sent_text = " ".join(
+                (w.get("word", "") or "").strip() for w in sentence
+            )
+            logger.debug(
+                f"[SceneLyrics] {scene_name} (idx={scene.order_index}, "
+                f"{scene.start_time:.2f}-{scene.end_time:.2f}s) | "
+                f"phrase[{s_idx}] ({len(sentence)} words): \"{sent_text}\" "
+                f"({sent_start:.2f}-{sent_end:.2f}s) | "
+                f"overlap={overlap:.2f}s/{sent_duration:.2f}s = {overlap_pct:.1%} "
+                f"{'→ INCLUDED' if overlap_pct >= 0.5 else '→ excluded'}"
+            )
 
         # The sentence belongs to this scene if MORE THAN HALF of its
         # duration falls within the scene boundaries
@@ -1615,6 +1709,7 @@ class SeqAutoGenRequest(BaseModel):
     vocals_only_audio: bool = False  # If True, send only vocal stems to video generator (better lip-sync)
     skip_audio_mux: bool = False  # If True, keeps LTX model-generated audio (better for lip-sync testing)
     two_pass: bool = False  # If True, use two-pass image generation (scene composition → character composite)
+    use_story_flow: bool = True  # If True, include video flow ideas in LLM enhance context
 
 
 class SeqAutoGenStatusResponse(BaseModel):
@@ -1722,6 +1817,7 @@ async def start_sequential_auto_gen(
             vocals_only_audio=req.vocals_only_audio,
             skip_audio_mux=req.skip_audio_mux,
             two_pass=req.two_pass,
+            use_story_flow=req.use_story_flow,
         )
     )
 
@@ -1906,6 +2002,7 @@ async def _run_windowed_batch(
     skip_audio_mux: bool = False,
     two_pass: bool = False,
     user_lyrics_text: str = "",
+    use_story_flow: bool = True,
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
 
@@ -1961,6 +2058,8 @@ async def _run_windowed_batch(
             if mode != "missing_images_independent":
                 scene_params["ignore_prev_scene_ref"] = False
             scene_params["use_prev_scene_last_frame"] = False
+            # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
+            scene_params["use_story_flow"] = use_story_flow
             # Set character indices so UI shows them as selected
             if characters:
                 scene_params["image_refs_first"] = {
@@ -2312,6 +2411,7 @@ async def _run_sequential_auto_gen(
     vocals_only_audio: bool = False,
     skip_audio_mux: bool = False,
     two_pass: bool = False,
+    use_story_flow: bool = True,
 ):
     """Background task: process scenes sequentially or via continuous dispatch.
 
@@ -2413,6 +2513,7 @@ async def _run_sequential_auto_gen(
                 skip_audio_mux=skip_audio_mux,
                 two_pass=two_pass,
                 user_lyrics_text=user_lyrics_text,
+                use_story_flow=use_story_flow,
             )
             return
 
@@ -2452,6 +2553,8 @@ async def _run_sequential_auto_gen(
                 scene_params = dict(scene.parameters or {})
                 scene_params["ignore_prev_scene_ref"] = False
                 scene_params["use_prev_scene_last_frame"] = False
+                # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
+                scene_params["use_story_flow"] = use_story_flow
                 # Set character indices so UI shows them as selected
                 if proj_chars:
                     scene_params["image_refs_first"] = {

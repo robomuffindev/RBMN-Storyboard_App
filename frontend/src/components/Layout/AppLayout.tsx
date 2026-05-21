@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Eye, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay } from 'lucide-react';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay } from 'lucide-react';
 import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, autoGenerate, generateVideoFlow, renderPreview, getPreviewStatus } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
@@ -56,7 +56,7 @@ export default function AppLayout() {
     window.addEventListener('mouseup', handleMouseUp);
   }, [timelineHeight]);
 
-  const { setProject, setScenes, setSections, setAssets, viewMode, setViewMode } =
+  const { setProject, setScenes, setSections, setAssets } =
     useAppStore();
 
   const { data: project } = useQuery({
@@ -328,26 +328,10 @@ export default function AppLayout() {
         <div className="flex items-center gap-4">
           <div className="flex gap-2 border border-gray-700 rounded-md p-1 bg-gray-800">
             <button
-              onClick={() => setViewMode('scenes')}
-              className={`px-3 py-1 rounded flex items-center gap-1 text-sm font-medium transition-colors ${
-                viewMode === 'scenes'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
+              className="px-3 py-1 rounded flex items-center gap-1 text-sm font-medium bg-blue-600 text-white"
             >
               <Grid3x3 size={16} />
               Scenes
-            </button>
-            <button
-              onClick={() => setViewMode('sections')}
-              className={`px-3 py-1 rounded flex items-center gap-1 text-sm font-medium transition-colors ${
-                viewMode === 'sections'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <Eye size={16} />
-              Sections
             </button>
           </div>
 
@@ -361,7 +345,7 @@ export default function AppLayout() {
             </button>
           )}
 
-          {viewMode === 'scenes' && (stableScenes as Scene[]).length > 0 && (
+          {(stableScenes as Scene[]).length > 0 && (
             <button
               onClick={() => setAutoGenOpen(true)}
               className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
@@ -371,7 +355,7 @@ export default function AppLayout() {
             </button>
           )}
 
-          {viewMode === 'scenes' && (stableScenes as Scene[]).length > 0 && (
+          {(stableScenes as Scene[]).length > 0 && (
             <button
               onClick={handleRenderPreview}
               disabled={previewRendering}

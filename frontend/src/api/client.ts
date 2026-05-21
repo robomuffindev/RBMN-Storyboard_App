@@ -185,6 +185,7 @@ export const startSequentialAutoGen = (
   vocalsOnlyAudio: boolean = false,
   skipAudioMux: boolean = false,
   twoPass: boolean = false,
+  useStoryFlow: boolean = true,
 ) =>
   api.post<{
     status: string;
@@ -200,6 +201,7 @@ export const startSequentialAutoGen = (
     vocals_only_audio: vocalsOnlyAudio,
     skip_audio_mux: skipAudioMux,
     two_pass: twoPass,
+    use_story_flow: useStoryFlow,
   });
 
 export const getSequentialAutoGenStatus = (projectId: string) =>

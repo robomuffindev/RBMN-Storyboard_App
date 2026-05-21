@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, Music, Loader, CheckCircle, AlertCircle, Play, Pause, Mic, Drum, Guitar, Waves, FileText, Sparkles, Scissors, MessageSquare } from 'lucide-react';
-import { analyzeAudio, uploadAsset, getSections, getLyrics, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper } from '@/api/client';
+import { analyzeAudio, uploadAsset, getSections, getLyrics, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes } from '@/api/client';
 import { useAppStore } from '@/store';
 
 interface AudioSetupProps {
@@ -179,6 +179,19 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
           await createScenesFromSections(projectId);
         } catch (e) {
           console.warn('Auto-create scenes failed (may already exist):', e);
+        }
+
+        // Auto-trigger "Suggest Fresh Timeline" to create optimal scene boundaries
+        try {
+          await suggestTimeline(projectId);
+          const res = await getScenes(projectId);
+          const store = useAppStore.getState();
+          store.setScenes(res.data);
+          if (res.data.length > 0) {
+            store.setActiveScene(res.data[0]);
+          }
+        } catch (e) {
+          console.warn('Auto-suggest timeline failed:', e);
         }
       } else {
         console.info('Scenes locked — skipping auto-create from sections');
@@ -552,7 +565,7 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
 
             <div className="bg-blue-900/20 border border-blue-800 rounded-lg p-4">
               <p className="text-xs text-blue-300">
-                Audio analysis complete. Switch to <strong>Sections</strong> view in the toolbar to see sections on the timeline, then click <strong>Create Scenes</strong> to generate scenes from sections.
+                Audio analysis complete. Scenes have been automatically generated from detected sections and a fresh timeline has been suggested.
               </p>
             </div>
           </>

@@ -22,7 +22,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
   const [showAutoGenModal, setShowAutoGenModal] = useState(false);
   const {
     playbackPosition, isPlaying, setPlaybackPosition, togglePlay,
-    viewMode, activeScene, sections, scenes, currentProject,
+    activeScene, scenes, currentProject,
     scenesLocked, setScenesLocked,
   } = useAppStore();
 
@@ -32,14 +32,12 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Items to display on the timeline depend on viewMode
-  const timelineItems = viewMode === 'sections'
-    ? sections.map(s => ({ id: s.id, label: s.label, start_time: s.start_time, end_time: s.end_time, type: 'section' as const }))
-    : scenes.map(s => ({ id: s.id, label: s.name || `Scene ${s.order_index + 1}`, start_time: s.start_time, end_time: s.end_time, type: 'scene' as const }));
+  // Always show scenes on the timeline
+  const timelineItems = scenes.map(s => ({ id: s.id, label: s.name || `Scene ${s.order_index + 1}`, start_time: s.start_time, end_time: s.end_time, type: 'scene' as const }));
 
   const effectiveDuration = duration > 0
     ? duration
-    : Math.max(...[...sections, ...scenes].map(s => s.end_time || 0), 1);
+    : Math.max(...scenes.map(s => s.end_time || 0), 1);
 
   // Find active item on the timeline
   const activeItemId = activeScene?.id || null;
@@ -71,7 +69,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
 
   // Split: find the scene under the playhead and split it
   const handleSplit = () => {
-    if (!onSplitScene || viewMode !== 'scenes') return;
+    if (!onSplitScene) return;
     const sceneAtPlayhead = scenes.find(
       s => s.start_time <= playbackPosition && s.end_time > playbackPosition
     );
@@ -80,7 +78,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
     }
   };
 
-  const canSplit = viewMode === 'scenes' && !!onSplitScene && scenes.some(
+  const canSplit = !!onSplitScene && scenes.some(
     s => s.start_time < playbackPosition - 0.5 && s.end_time > playbackPosition + 0.5
   );
 
@@ -210,7 +208,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
 
         <div className="flex items-center gap-2">
           {/* Split Button */}
-          {viewMode === 'scenes' && onSplitScene && (
+          {onSplitScene && (
             <button
               onClick={handleSplit}
               disabled={!canSplit}
@@ -227,7 +225,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Regenerate Audio Segments */}
-          {viewMode === 'scenes' && currentProject && scenes.length > 0 && (
+          {currentProject && scenes.length > 0 && (
             <button
               onClick={handleRegenerateAudioSegments}
               disabled={isSlicingAudio}
@@ -244,7 +242,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Retrim All Button */}
-          {viewMode === 'scenes' && currentProject && scenes.length > 0 && (
+          {currentProject && scenes.length > 0 && (
             <button
               onClick={handleRetrimAll}
               disabled={isRetrimming}
@@ -261,7 +259,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Auto Gen Button */}
-          {viewMode === 'scenes' && currentProject && scenes.length > 0 && (
+          {currentProject && scenes.length > 0 && (
             <button
               onClick={() => setShowAutoGenModal(true)}
               className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-purple-600/80 hover:bg-purple-600 text-white"
@@ -273,7 +271,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Delete Scene Button */}
-          {viewMode === 'scenes' && onDeleteScene && activeScene && scenes.length > 1 && (
+          {onDeleteScene && activeScene && scenes.length > 1 && (
             <button
               onClick={onDeleteScene}
               className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-red-600/80 hover:bg-red-600 text-white"
@@ -285,7 +283,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Lock Scenes Toggle */}
-          {viewMode === 'scenes' && (
+          {(
             <button
               onClick={() => {
                 const newLocked = !scenesLocked;
@@ -312,7 +310,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Suggest Fresh Timeline */}
-          {viewMode === 'scenes' && currentProject && (
+          {currentProject && (
             <button
               onClick={handleSuggestTimeline}
               disabled={isSuggesting || scenesLocked}
@@ -332,7 +330,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           )}
 
           {/* Clean Up Scenes — only show when there are scenes */}
-          {viewMode === 'scenes' && currentProject && scenes.length > 0 && (
+          {currentProject && scenes.length > 0 && (
             <button
               onClick={handleCleanupScenes}
               disabled={isCleaning}
@@ -400,13 +398,8 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           activeItemId={activeItemId}
           onItemClick={(item) => {
             const store = useAppStore.getState();
-            if (item.type === 'section') {
-              const section = sections.find(s => s.id === item.id);
-              if (section) store.setActiveScene(section as any);
-            } else {
-              const scene = scenes.find(s => s.id === item.id);
-              if (scene) store.setActiveScene(scene);
-            }
+            const scene = scenes.find(s => s.id === item.id);
+            if (scene) store.setActiveScene(scene);
           }}
           onSeek={(time) => setPlaybackPosition(time)}
           onBoundaryDrag={onBoundaryDrag}
@@ -441,6 +434,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
   const [vocalsOnlyAudio, setVocalsOnlyAudio] = useState(false);
   const [skipAudioMux, setSkipAudioMux] = useState(false);
   const [twoPass, setTwoPass] = useState(false);
+  const [useStoryFlow, setUseStoryFlow] = useState(true);
   const [status, setStatus] = useState<{
     status: string;
     mode?: string;
@@ -515,7 +509,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
 
   const handleStart = useCallback(async (mode: string) => {
     try {
-      const res = await startSequentialAutoGen(projectId, mode, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass);
+      const res = await startSequentialAutoGen(projectId, mode, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow);
       setStatus(res.data);
       startPolling();
     } catch (err: any) {
@@ -526,7 +520,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
         error: err?.response?.data?.detail || 'Failed to start',
       });
     }
-  }, [projectId, startPolling, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass]);
+  }, [projectId, startPolling, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow]);
 
   const handleCancel = useCallback(async () => {
     try {
@@ -669,6 +663,34 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
               <div style={{ color: '#888', fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
                 Pass 1 generates scene composition without character refs, Pass 2 composites characters into the scene.
                 Only applies to image-generation modes with character references selected.
+              </div>
+            </div>
+          </label>
+        )}
+
+        {!isRunning && !isDone && !isFailed && !isCancelled && (
+          <label
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+              padding: '10px 12px', marginBottom: 8, borderRadius: 8,
+              background: useStoryFlow ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255,255,255,0.04)',
+              border: useStoryFlow ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(255,255,255,0.08)',
+              transition: 'all 0.2s',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={useStoryFlow}
+              onChange={(e) => setUseStoryFlow(e.target.checked)}
+              style={{ accentColor: '#10b981', width: 16, height: 16, cursor: 'pointer' }}
+            />
+            <div>
+              <div style={{ color: useStoryFlow ? '#10b981' : '#ccc', fontSize: 13, fontWeight: 600 }}>
+                Use Story Flow
+              </div>
+              <div style={{ color: '#888', fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
+                Include the Video Flow storyboard direction in LLM enhance prompts for each scene.
+                Sets the per-scene &quot;Use Story Flow&quot; flag so you can toggle it individually after.
               </div>
             </div>
           </label>

@@ -719,9 +719,17 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const activeRefs = frameSubTab === 'first' ? firstFrameRefs : lastFrameRefs;
   const setActiveRefs = frameSubTab === 'first' ? setFirstFrameRefs : setLastFrameRefs;
 
-  const [useStoryFlow, setUseStoryFlow] = useState(false);
+  const { activeScene, currentProject, assets, jobs, scenes } = useAppStore();
 
-  const { activeScene, currentProject, assets, jobs, viewMode, scenes } = useAppStore();
+  // "Use Story Flow" — persisted in scene.parameters.use_story_flow
+  const useStoryFlow = activeScene?.parameters?.use_story_flow || false;
+
+  const handleSetUseStoryFlow = async (checked: boolean) => {
+    if (!activeScene || !currentProject) return;
+    const newParams = { ...activeScene.parameters, use_story_flow: checked };
+    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+  };
 
   // Get the story flow idea for the current scene
   const sceneFlowIdea = activeScene?.parameters?.flow_idea || '';
@@ -949,12 +957,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     },
   });
 
-  // Auto-switch to lyrics tab in Sections mode
-  useEffect(() => {
-    if (viewMode === 'sections' && (activeTab === 'image' || activeTab === 'video' || activeTab === 'stems' || activeTab === 'movement' || activeTab === 'transitions' || activeTab === 'tools')) {
-      setActiveTab('lyrics');
-    }
-  }, [viewMode, activeTab]);
+  // (Sections mode removed — always in scenes mode now)
 
   // Sync state when active scene changes
   useEffect(() => {
@@ -1031,7 +1034,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   });
 
   const lyricsDebugInfo = (() => {
-    if (!lyricsData) return { reason: 'no lyrics data loaded', wordsCount: 0, sampleWord: null };
+    if (!lyricsData) return { reason: 'no lyrics data loaded', wordsCount: 0, sampleWord: null, initialTextLength: 0 };
     const words = lyricsData.words || [];
     return {
       wordsCount: words.length,
@@ -1039,6 +1042,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       sceneStart: activeScene?.start_time,
       sceneEnd: activeScene?.end_time,
       textLength: lyricsData.text?.length || 0,
+      initialTextLength: (lyricsData.initial_text || '').length,
     };
   })();
 
@@ -1051,39 +1055,212 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     const sceneEnd = activeScene.end_time;
 
     if (words.length > 0 && sceneStart != null && sceneEnd != null && sceneEnd > sceneStart) {
-      // Midpoint assignment with orphan cleanup
-      let assigned = words.filter((w: any) => {
-        const wStart = w.start_time ?? w.start ?? 0;
-        const wEnd = w.end_time ?? w.end ?? 0;
-        const mid = (wStart + wEnd) / 2;
-        return mid >= sceneStart && mid < sceneEnd;
-      });
+      // ── Phrase-aware assignment ──────────────────────────────────────
+      // Group words into phrases using user's pasted lyrics lines, then
+      // assign WHOLE phrases to scenes using >50% overlap. This prevents
+      // a stray word like "Black" from being split from its phrase
+      // "Black hat on a wooden chair".
 
-      // Remove leading orphans (1-2 words isolated by a gap > 1.5s from the rest)
-      if (assigned.length > 2) {
-        for (let i = 1; i < Math.min(3, assigned.length); i++) {
-          const prevEnd = assigned[i - 1].end_time ?? assigned[i - 1].end ?? 0;
-          const currStart = assigned[i].start_time ?? assigned[i].start ?? 0;
-          if (currStart - prevEnd > 1.5) {
-            assigned = assigned.slice(i);
-            break;
+      // Try initial_text first (user's pasted lyrics with line breaks),
+      // then fall back to full_text (Whisper's transcription)
+      const initialText = (lyricsData.initial_text || '').trim();
+      const whisperText = (lyricsData.text || '').trim();
+      const lyricsSource = initialText || whisperText;
+      const phrases: Array<Array<any>> = [];
+
+      const cleanWord = (w: string) => w.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const whisperCleaned = words.map((w: any) => cleanWord(w.word || ''));
+
+      if (lyricsSource) {
+        // Split into lines. initial_text has user line breaks;
+        // whisperText may not, so also try splitting on punctuation/pauses
+        let lines: string[];
+        if (initialText) {
+          lines = initialText.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+        } else {
+          // Whisper text has no line breaks — detect phrase boundaries
+          // via punctuation. Split on . ! ? … and also on long pauses
+          // (we approximate by splitting on >=6 words as a fallback)
+          lines = whisperText.split(/[.!?…]+/).map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+          // If that produced only one giant line, split into ~6-word chunks
+          if (lines.length <= 1 && words.length > 8) {
+            lines = [];
+            const chunkSize = 6;
+            const allWords = whisperText.split(/\s+/);
+            for (let i = 0; i < allWords.length; i += chunkSize) {
+              lines.push(allWords.slice(i, i + chunkSize).join(' '));
+            }
           }
+        }
+
+        // Track which word indices are assigned to which group
+        const wordToGroup: Map<number, number> = new Map();
+        let wordIdx = 0;
+
+        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+          const lineWords = lines[lineIdx].split(/\s+/);
+          const expectedCount = lineWords.length;
+          const firstWord = cleanWord(lineWords[0] || '');
+
+          if (wordIdx >= words.length) break;
+
+          // Find start of this line in Whisper words (small lookahead window)
+          let bestStart = wordIdx;
+          if (firstWord) {
+            const searchEnd = Math.min(wordIdx + 5, words.length);
+            for (let s = wordIdx; s < searchEnd; s++) {
+              if (whisperCleaned[s] === firstWord) {
+                bestStart = s;
+                break;
+              }
+            }
+          }
+
+          // Assign expected word count, capped at next line's first word
+          let groupEnd = bestStart + expectedCount;
+          if (lineIdx + 1 < lines.length) {
+            const nextLineWords = lines[lineIdx + 1].split(/\s+/);
+            const nextFirst = cleanWord(nextLineWords[0] || '');
+            if (nextFirst) {
+              for (let s = Math.max(bestStart + 1, groupEnd - 2); s < Math.min(groupEnd + 5, words.length); s++) {
+                if (whisperCleaned[s] === nextFirst) {
+                  groupEnd = s;
+                  break;
+                }
+              }
+            }
+          }
+          groupEnd = Math.min(groupEnd, words.length);
+
+          if (bestStart < groupEnd) {
+            const gIdx = phrases.length;
+            phrases.push(words.slice(bestStart, groupEnd));
+            for (let wi = bestStart; wi < groupEnd; wi++) {
+              wordToGroup.set(wi, gIdx);
+            }
+            wordIdx = groupEnd;
+          } else {
+            wordIdx = bestStart;
+          }
+        }
+
+        // Remaining words go into last group
+        if (wordIdx < words.length) {
+          if (phrases.length > 0) {
+            const lastIdx = phrases.length - 1;
+            phrases[lastIdx] = [...phrases[lastIdx], ...words.slice(wordIdx)];
+            for (let wi = wordIdx; wi < words.length; wi++) {
+              wordToGroup.set(wi, lastIdx);
+            }
+          } else {
+            phrases.push(words.slice(wordIdx));
+            for (let wi = wordIdx; wi < words.length; wi++) {
+              wordToGroup.set(wi, 0);
+            }
+          }
+        }
+
+        // ── WORD ANCHORING: merge orphaned words into nearest group ──
+        const orphaned: number[] = [];
+        for (let i = 0; i < words.length; i++) {
+          if (!wordToGroup.has(i)) orphaned.push(i);
+        }
+        if (orphaned.length > 0 && phrases.length > 0) {
+          console.log(`[WordAnchor] Found ${orphaned.length} orphaned word(s):`,
+            orphaned.map(i => whisperCleaned[i]));
+          for (const oi of orphaned) {
+            // Find nearest group
+            let bestGroup = 0;
+            let bestDist = Infinity;
+            for (let gi = 0; gi < phrases.length; gi++) {
+              // Find min/max word indices in this group
+              const groupWordIndices: number[] = [];
+              wordToGroup.forEach((g, wi) => { if (g === gi) groupWordIndices.push(wi); });
+              if (groupWordIndices.length > 0) {
+                const gMin = Math.min(...groupWordIndices);
+                const gMax = Math.max(...groupWordIndices);
+                const dist = Math.min(Math.abs(oi - gMin), Math.abs(oi - gMax));
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  bestGroup = gi;
+                }
+              }
+            }
+            // Insert into the group at the right position (by timing)
+            const wordObj = words[oi];
+            const wordTime = wordObj.start_time ?? wordObj.start ?? 0;
+            let inserted = false;
+            for (let pos = 0; pos < phrases[bestGroup].length; pos++) {
+              const gw = phrases[bestGroup][pos];
+              if ((gw.start_time ?? gw.start ?? 0) > wordTime) {
+                phrases[bestGroup].splice(pos, 0, wordObj);
+                inserted = true;
+                break;
+              }
+            }
+            if (!inserted) phrases[bestGroup].push(wordObj);
+            wordToGroup.set(oi, bestGroup);
+            console.log(`[WordAnchor] Anchored '${whisperCleaned[oi]}' → group ${bestGroup}`);
+          }
+        }
+
+        // ── Merge single-word groups into neighbors ─────────────────
+        if (phrases.length > 1) {
+          const mergedPhrases: Array<Array<any>> = [];
+          for (let gi = 0; gi < phrases.length; gi++) {
+            if (phrases[gi].length === 1 && phrases.length > 1) {
+              const wText = (phrases[gi][0].word || '').trim();
+              if (mergedPhrases.length > 0) {
+                mergedPhrases[mergedPhrases.length - 1].push(...phrases[gi]);
+                console.log(`[WordAnchor] Merged single-word '${wText}' into previous group`);
+              } else if (gi + 1 < phrases.length) {
+                phrases[gi + 1] = [...phrases[gi], ...phrases[gi + 1]];
+                console.log(`[WordAnchor] Merged single-word '${wText}' into next group`);
+              } else {
+                mergedPhrases.push(phrases[gi]);
+              }
+            } else {
+              mergedPhrases.push(phrases[gi]);
+            }
+          }
+          phrases.length = 0;
+          phrases.push(...mergedPhrases);
+        }
+      } else {
+        // No lyrics text at all — group ALL words as one phrase so the
+        // >50% overlap rule assigns them atomically (never orphans a word)
+        phrases.push([...words]);
+      }
+
+      // Debug: log phrase grouping for first scene only (reduces console noise)
+      if (activeScene.order_index === 0 && phrases.length > 0) {
+        const firstPhraseWords = phrases[0].map((w: any) => w.word).join(' ');
+        console.log(
+          `[SceneLyrics] Scene 0 (${sceneStart.toFixed(1)}–${sceneEnd.toFixed(1)}s) | ` +
+          `initial_text: ${initialText ? initialText.length + ' chars' : 'EMPTY'} | ` +
+          `phrases: ${phrases.length} | first phrase: "${firstPhraseWords}" ` +
+          `(${(phrases[0][0]?.start_time ?? phrases[0][0]?.start ?? 0).toFixed(2)}s–` +
+          `${(phrases[0][phrases[0].length - 1]?.end_time ?? phrases[0][phrases[0].length - 1]?.end ?? 0).toFixed(2)}s)`
+        );
+      }
+
+      // Assign whole phrases to this scene using >50% overlap rule
+      const sceneWords: any[] = [];
+      for (const phrase of phrases) {
+        if (phrase.length === 0) continue;
+        const phraseStart = phrase[0].start_time ?? phrase[0].start ?? 0;
+        const phraseEnd = phrase[phrase.length - 1].end_time ?? phrase[phrase.length - 1].end ?? 0;
+        const phraseDuration = Math.max(phraseEnd - phraseStart, 0.01);
+        const overlapStart = Math.max(phraseStart, sceneStart);
+        const overlapEnd = Math.min(phraseEnd, sceneEnd);
+        const overlap = Math.max(0, overlapEnd - overlapStart);
+
+        if (overlap >= phraseDuration * 0.5) {
+          sceneWords.push(...phrase);
         }
       }
 
-      // Remove trailing orphans
-      if (assigned.length > 2) {
-        for (let i = assigned.length - 1; i > Math.max(assigned.length - 3, 0); i--) {
-          const prevEnd = assigned[i - 1].end_time ?? assigned[i - 1].end ?? 0;
-          const currStart = assigned[i].start_time ?? assigned[i].start ?? 0;
-          if (currStart - prevEnd > 1.5) {
-            assigned = assigned.slice(0, i);
-            break;
-          }
-        }
-      }
-
-      const result = assigned.map((w: any) => w.word).join(' ');
+      const result = sceneWords.map((w: any) => w.word).join(' ').trim();
       return result || `(No lyrics detected in this section: ${sceneStart.toFixed(1)}s – ${sceneEnd.toFixed(1)}s)`;
     }
 
@@ -1803,8 +1980,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       <div className="flex items-center gap-2 p-3 border-b border-gray-800 bg-gray-950">
         <div className="flex gap-2 flex-1 overflow-x-auto">
           {(['image', 'video', 'movement', 'transitions', 'stems', 'lyrics', 'tools', 'prompt'] as Tab[]).map((tab) => {
-            const isMediaTab = tab === 'image' || tab === 'video' || tab === 'stems' || tab === 'movement' || tab === 'transitions' || tab === 'tools';
-            const isDisabled = isMediaTab && viewMode === 'sections';
+            const isDisabled = false;
             const tabLabels: Record<Tab, string> = {
               image: 'Image',
               video: 'Video',
@@ -2166,7 +2342,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   <input
                     type="checkbox"
                     checked={useStoryFlow}
-                    onChange={(e) => setUseStoryFlow(e.target.checked)}
+                    onChange={(e) => handleSetUseStoryFlow(e.target.checked)}
                     className="w-3.5 h-3.5 accent-purple-500"
                   />
                   <span className="text-xs text-gray-400">Use Story Flow</span>
@@ -2644,7 +2820,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   <input
                     type="checkbox"
                     checked={useStoryFlow}
-                    onChange={(e) => setUseStoryFlow(e.target.checked)}
+                    onChange={(e) => handleSetUseStoryFlow(e.target.checked)}
                     className="w-3.5 h-3.5 accent-purple-500"
                   />
                   <span className="text-xs text-gray-400">Use Story Flow</span>
@@ -3135,7 +3311,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 </div>
               )}
               <div className="p-2 bg-gray-900 rounded text-[10px] text-gray-600 font-mono">
-                <p>words: {lyricsDebugInfo.wordsCount} | text: {lyricsDebugInfo.textLength} chars</p>
+                <p>words: {lyricsDebugInfo.wordsCount} | text: {lyricsDebugInfo.textLength} chars | initial_text: {lyricsDebugInfo.initialTextLength} chars</p>
                 <p>scene: {lyricsDebugInfo.sceneStart?.toFixed?.(1) ?? 'null'}s – {lyricsDebugInfo.sceneEnd?.toFixed?.(1) ?? 'null'}s</p>
                 {lyricsDebugInfo.sampleWord && (
                   <p>sample word: {JSON.stringify(lyricsDebugInfo.sampleWord)}</p>
