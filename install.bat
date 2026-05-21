@@ -190,13 +190,19 @@ echo [5/6] Installing frontend dependencies...
 
 pushd frontend
 
-:: Always remove lockfile before install — it may contain platform-specific
-:: binaries from a different OS (e.g. Linux rollup on a Windows machine).
-:: npm will regenerate it correctly for the current platform.
+:: Clean up any prior failed install or cross-platform artifacts
 if exist "package-lock.json" (
-    echo         Removing existing lockfile (will regenerate for this platform^)...
+    echo         Removing lockfile (will regenerate for this platform^)...
     del package-lock.json
 )
+if exist "node_modules" (
+    echo         Removing old node_modules...
+    rmdir /s /q node_modules
+)
+
+:: Clear npm cache to remove any cached cross-platform binaries
+echo         Clearing npm cache...
+call npm cache clean --force >nul 2>&1
 
 echo         Running npm install...
 call npm install
