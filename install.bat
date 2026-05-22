@@ -150,12 +150,22 @@ if %errorlevel% neq 0 (
 )
 del "%TEMP%\rbmn_corecheck.py" 2>nul
 
-:: Check optional heavy deps
+:: Check optional heavy deps (PyTorch + CUDA)
 echo import torch > "%TEMP%\rbmn_torchcheck.py"
-echo print("         PyTorch OK") >> "%TEMP%\rbmn_torchcheck.py"
+echo cuda = torch.cuda.is_available() >> "%TEMP%\rbmn_torchcheck.py"
+echo print(f"         PyTorch {torch.__version__} — CUDA: {'YES' if cuda else 'NO (CPU only)'}") >> "%TEMP%\rbmn_torchcheck.py"
+echo import sys >> "%TEMP%\rbmn_torchcheck.py"
+echo sys.exit(0 if cuda else 2) >> "%TEMP%\rbmn_torchcheck.py"
 
 python "%TEMP%\rbmn_torchcheck.py" 2>nul
-if %errorlevel% neq 0 (
+if %errorlevel% equ 2 (
+    echo [WARN]  PyTorch is installed but WITHOUT CUDA support.
+    echo         Local Whisper and Demucs will run on CPU (much slower^).
+    echo         To fix, reinstall PyTorch with CUDA:
+    echo           venv\Scripts\activate
+    echo           pip uninstall torch torchvision torchaudio -y
+    echo           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+) else if %errorlevel% neq 0 (
     echo [WARN]  PyTorch not installed. Audio analysis won't work yet.
     echo         To install later, run these in this folder:
     echo           venv\Scripts\activate

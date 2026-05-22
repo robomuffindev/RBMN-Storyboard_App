@@ -132,8 +132,8 @@ class AudioAnalyzer:
                     logger.warning(f"ComfyUI Whisper failed for {label} ({e}), falling back to local")
                     try:
                         return self.transcribe_local(audio_for_whisper, initial_text=initial_text)
-                    except RuntimeError:
-                        logger.warning("Local WhisperX also unavailable — skipping transcription")
+                    except RuntimeError as e2:
+                        logger.warning(f"Local WhisperX also unavailable — skipping transcription: {e2}")
                         return []
             elif whisper_mode == "remote" and whisper_remote_url:
                 try:
@@ -142,14 +142,14 @@ class AudioAnalyzer:
                     logger.warning(f"Remote Whisper failed for {label} ({e}), falling back to local")
                     try:
                         return self.transcribe_local(audio_for_whisper, initial_text=initial_text)
-                    except RuntimeError:
-                        logger.warning("Local WhisperX also unavailable — skipping transcription")
+                    except RuntimeError as e2:
+                        logger.warning(f"Local WhisperX also unavailable — skipping transcription: {e2}")
                         return []
             else:
                 try:
                     return self.transcribe_local(audio_for_whisper, initial_text=initial_text)
-                except RuntimeError:
-                    logger.warning("Local WhisperX not available — skipping transcription")
+                except RuntimeError as e:
+                    logger.warning(f"Local WhisperX not available — skipping transcription: {e}")
                     return []
 
         def _has_meaningful_words(words: List[Dict[str, Any]]) -> bool:
@@ -358,9 +358,17 @@ class AudioAnalyzer:
 
         try:
             import whisperx
+            import torch
+
+            # Auto-detect device: use CUDA if available, otherwise CPU
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
+            logger.info(f"WhisperX device: {device} (compute_type={compute_type})")
 
             # Load model
-            model = whisperx.load_model("base", device="cuda", language="en")
+            model = whisperx.load_model(
+                "base", device=device, language="en", compute_type=compute_type
+            )
 
             # Build transcribe kwargs — pass initial_prompt if lyrics/script provided
             transcribe_kwargs: Dict[str, Any] = {
@@ -379,13 +387,13 @@ class AudioAnalyzer:
             )
 
             # Align words
-            model_a, metadata = whisperx.load_align_model(language_code="en", device="cuda")
+            model_a, metadata = whisperx.load_align_model(language_code="en", device=device)
             result = whisperx.align(
                 result["segments"],
                 model_a,
                 metadata,
                 audio,
-                device="cuda",
+                device=device,
                 return_char_alignments=False,
             )
 
@@ -413,6 +421,7 @@ class AudioAnalyzer:
             logger.error("WhisperX not installed. Install with: pip install openai-whisper-x")
             raise RuntimeError("WhisperX not available")
         except Exception as e:
+            logger.error(f"WhisperX transcription failed: {type(e).__name__}: {e}", exc_info=True)
             raise RuntimeError(f"Transcription error: {e}")
 
     def transcribe_remote(self, audio_path: str, server_url: str, initial_text: Optional[str] = None, whisper_model: str = "large-v2") -> List[Dict[str, Any]]:
