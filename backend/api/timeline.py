@@ -649,6 +649,12 @@ async def rerun_whisper(
         cache_dir = project_path / "cache" / "audio_analysis"
         whisper_input = str(audio_path)
 
+        # Clear any cached transcription so we always re-run fresh
+        import glob
+        for cached in glob.glob(str(cache_dir / "*_transcription.json")):
+            Path(cached).unlink(missing_ok=True)
+            logger.info(f"Cleared cached transcription: {cached}")
+
         logger.info(f"Re-running Whisper on full audio: {whisper_input}")
 
         # Get Whisper settings
@@ -690,6 +696,7 @@ async def rerun_whisper(
             transcription_words = await asyncio.to_thread(
                 analyzer.transcribe_local,
                 whisper_input, initial_text=initial_text,
+                whisper_model=whisper_model,
             )
 
         lyrics_text = " ".join(w.get("word", "") for w in transcription_words) if transcription_words else ""

@@ -131,7 +131,7 @@ class AudioAnalyzer:
                 except RuntimeError as e:
                     logger.warning(f"ComfyUI Whisper failed for {label} ({e}), falling back to local")
                     try:
-                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text)
+                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model)
                     except RuntimeError as e2:
                         logger.warning(f"Local WhisperX also unavailable — skipping transcription: {e2}")
                         return []
@@ -141,13 +141,13 @@ class AudioAnalyzer:
                 except RuntimeError as e:
                     logger.warning(f"Remote Whisper failed for {label} ({e}), falling back to local")
                     try:
-                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text)
+                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model)
                     except RuntimeError as e2:
                         logger.warning(f"Local WhisperX also unavailable — skipping transcription: {e2}")
                         return []
             else:
                 try:
-                    return self.transcribe_local(audio_for_whisper, initial_text=initial_text)
+                    return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model)
                 except RuntimeError as e:
                     logger.warning(f"Local WhisperX not available — skipping transcription: {e}")
                     return []
@@ -316,7 +316,7 @@ class AudioAnalyzer:
         except Exception as e:
             raise RuntimeError(f"Stem separation error: {e}")
 
-    def transcribe_local(self, audio_path: str, initial_text: Optional[str] = None) -> List[Dict[str, Any]]:
+    def transcribe_local(self, audio_path: str, initial_text: Optional[str] = None, whisper_model: str = "base") -> List[Dict[str, Any]]:
         """
         Transcribe audio using local WhisperX.
 
@@ -375,8 +375,9 @@ class AudioAnalyzer:
                 logger.info("Using provided text as Whisper initial_prompt")
 
             # Load model with ASR options
+            logger.info(f"Loading WhisperX model: {whisper_model}")
             model = whisperx.load_model(
-                "base", device=device, language="en",
+                whisper_model, device=device, language="en",
                 compute_type=compute_type, asr_options=asr_options,
             )
 
