@@ -2796,26 +2796,65 @@ async def suggest_timeline(
     # For each validated scene, find which phrase groups overlap with it
     # and collect their original lyrics line text (not Whisper transcription).
     # This ensures prompt generation uses the user's actual lyrics.
+    #
+    # Assignment strategy: START-TIME with BOUNDARY NUDGE
+    # - A phrase belongs to the scene where it STARTS (not overlap %)
+    # - Exception: if a phrase starts in the last ~1s of a scene but most
+    #   of it plays in the NEXT scene, assign to the next scene instead
+    #   (the listener perceives it as part of the new scene)
+    _BOUNDARY_NUDGE = 1.0  # seconds — if phrase starts within this of scene end,
+                            # check if it fits better in the next scene
     scene_lyrics_map: dict[int, str] = {}  # scene_index → lyrics text
     if word_timestamps and phrase_groups:
+        # First, assign each phrase to a scene
+        phrase_assignments: dict[int, int] = {}  # phrase_group_index → scene_index
+        for pi, pg in enumerate(phrase_groups):
+            if not pg:
+                continue
+            pg_start = pg[0].get("start", 0) or pg[0].get("start_time", 0)
+            pg_end = pg[-1].get("end", 0) or pg[-1].get("end_time", 0)
+            phrase_dur = max(0.01, pg_end - pg_start)
+
+            # Find scene that contains the phrase's start time
+            assigned = -1
+            for si, vs in enumerate(validated_scenes):
+                if vs["start_time"] <= pg_start < vs["end_time"]:
+                    assigned = si
+                    break
+
+            # If not found (phrase starts after last scene), assign to last scene
+            if assigned < 0:
+                assigned = len(validated_scenes) - 1
+
+            # Boundary nudge: if phrase starts near end of assigned scene,
+            # check if most of it actually plays in the next scene
+            vs = validated_scenes[assigned]
+            time_to_scene_end = vs["end_time"] - pg_start
+            if (time_to_scene_end <= _BOUNDARY_NUDGE
+                    and assigned + 1 < len(validated_scenes)):
+                # How much of phrase is in current scene vs next scene?
+                overlap_current = max(0.0, min(pg_end, vs["end_time"]) - pg_start)
+                next_vs = validated_scenes[assigned + 1]
+                overlap_next = max(0.0, min(pg_end, next_vs["end_time"]) - next_vs["start_time"])
+                if overlap_next > overlap_current:
+                    logger.info(
+                        f"[LyricsPerScene] Nudging phrase {pi} from scene {assigned} → "
+                        f"{assigned + 1} (starts {time_to_scene_end:.1f}s before boundary, "
+                        f"{overlap_next:.1f}s in next vs {overlap_current:.1f}s in current)"
+                    )
+                    assigned = assigned + 1
+
+            phrase_assignments[pi] = assigned
+
+        # Build scene lyrics from assignments
         for si, vs in enumerate(validated_scenes):
-            s_start = vs["start_time"]
-            s_end = vs["end_time"]
             scene_lines: list[str] = []
-            for pg in phrase_groups:
-                if not pg:
+            for pi, pg in enumerate(phrase_groups):
+                if phrase_assignments.get(pi) != si:
                     continue
-                pg_start = pg[0].get("start", 0)
-                pg_end = pg[-1].get("end", 0)
-                # Phrase overlaps with scene if >50% of phrase is within scene bounds
-                overlap_start = max(pg_start, s_start)
-                overlap_end = min(pg_end, s_end)
-                overlap = max(0.0, overlap_end - overlap_start)
-                phrase_dur = max(0.01, pg_end - pg_start)
-                if overlap / phrase_dur > 0.5:
-                    line_text = _get_phrase_lyrics_line(pg)
-                    if line_text and line_text not in scene_lines:
-                        scene_lines.append(line_text)
+                line_text = _get_phrase_lyrics_line(pg)
+                if line_text and line_text not in scene_lines:
+                    scene_lines.append(line_text)
             if scene_lines:
                 scene_lyrics_map[si] = "\n".join(scene_lines)
                 logger.info(
