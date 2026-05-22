@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, autoGenerate, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics } from '@/api/client';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil } from 'lucide-react';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, autoGenerate, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
 import Timeline from '@/components/Timeline/Timeline';
@@ -30,6 +30,8 @@ export default function AppLayout() {
   const [timelineHeight, setTimelineHeight] = useState(256); // default h-64 = 256px
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
   const isDraggingTimeline = useRef(false);
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
@@ -112,6 +114,18 @@ export default function AppLayout() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scenes', id] });
+    },
+  });
+
+  // Rename project (label only)
+  const renameMutation = useMutation({
+    mutationFn: async (name: string) => {
+      if (!id) return;
+      await updateProject(id, { name });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['project', id] });
+      setRenameModalOpen(false);
     },
   });
 
@@ -485,6 +499,17 @@ export default function AppLayout() {
                 >
                   Download Whisper Transcription
                 </button>
+                <button
+                  onClick={() => {
+                    setNewProjectName(project.name);
+                    setRenameModalOpen(true);
+                    setToolsMenuOpen(false);
+                  }}
+                  className="w-full px-4 py-3 text-sm text-gray-200 hover:bg-gray-700 text-left transition-colors border-t border-gray-700 flex items-center gap-2"
+                >
+                  <Pencil size={14} />
+                  Edit Project Name
+                </button>
               </div>
             )}
           </div>
@@ -497,6 +522,49 @@ export default function AppLayout() {
           </button>
         </div>
       </div>
+
+      {/* Rename Project Modal */}
+      {renameModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-md p-6">
+            <h2 className="text-xl font-bold mb-4">Edit Project Name</h2>
+            <p className="text-sm text-gray-400 mb-4">
+              This changes the display name only. Project files and directories are not affected.
+            </p>
+            <input
+              type="text"
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newProjectName.trim()) {
+                  renameMutation.mutate(newProjectName.trim());
+                }
+              }}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-100 focus:outline-none focus:border-blue-500 mb-4"
+              autoFocus
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setRenameModalOpen(false)}
+                className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (newProjectName.trim()) {
+                    renameMutation.mutate(newProjectName.trim());
+                  }
+                }}
+                disabled={!newProjectName.trim() || renameMutation.isPending}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {renameMutation.isPending ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden gap-4 p-4">

@@ -68,6 +68,9 @@ Videos/
 # ---------- Local ComfyUI workflow files (reference only, not part of app) ----------
 LTX-2.3-Workflows/
 
+# ---------- Dev notes (personal reference, not for public repo) ----------
+devnotes/
+
 # ---------- Dev artifacts (not needed for public repo) ----------
 Devscreenshots/
 transition_comparison.png

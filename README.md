@@ -39,6 +39,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Export Transitions** — Automatic crossfade/dissolve transitions between clips with configurable duration and adjacent-clip color matching
 - **Render Preview** — Quick 720p preview assembly before full export
 - **Scene Locking** — Lock scene boundaries to prevent accidental changes. Persists across app restarts
+- **Edit Project Name** — Rename projects via the toolbar menu (display name only — files and directories unchanged)
 
 ### Technical Highlights
 - **Multi-server ComfyUI** — Concurrent dispatch across multiple remote ComfyUI instances with capability-based routing and worker reservation
