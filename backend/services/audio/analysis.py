@@ -365,26 +365,24 @@ class AudioAnalyzer:
             compute_type = "float16" if device == "cuda" else "int8"
             logger.info(f"WhisperX device: {device} (compute_type={compute_type})")
 
-            # Load model
-            model = whisperx.load_model(
-                "base", device=device, language="en", compute_type=compute_type
-            )
-
-            # Build transcribe kwargs — pass initial_prompt if lyrics/script provided
-            transcribe_kwargs: Dict[str, Any] = {
-                "language": "en",
+            # Build ASR options — these are passed at model load time
+            # (FasterWhisperPipeline.transcribe() no longer accepts them directly)
+            asr_options: Dict[str, Any] = {
                 "condition_on_previous_text": False,
             }
             if initial_text:
-                transcribe_kwargs["initial_prompt"] = initial_text
+                asr_options["initial_prompt"] = initial_text
                 logger.info("Using provided text as Whisper initial_prompt")
+
+            # Load model with ASR options
+            model = whisperx.load_model(
+                "base", device=device, language="en",
+                compute_type=compute_type, asr_options=asr_options,
+            )
 
             # Transcribe with VAD
             audio = whisperx.load_audio(str(audio_path))
-            result = model.transcribe(
-                audio,
-                **transcribe_kwargs,
-            )
+            result = model.transcribe(audio, language="en")
 
             # Align words
             model_a, metadata = whisperx.load_align_model(language_code="en", device=device)
