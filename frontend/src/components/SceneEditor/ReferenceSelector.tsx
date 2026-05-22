@@ -9,6 +9,9 @@
 import { useState, useCallback } from 'react';
 import { Plus, Trash2, Wand2, User, X } from 'lucide-react';
 import { uploadAsset, enhancePrompt } from '@/api/client';
+import { useAssetPicker } from '@/components/AssetManager/AssetPickerModal';
+import { useAppStore } from '@/store';
+import type { Asset } from '@/types/index';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -58,6 +61,23 @@ export default function ReferenceSelector({
   const charSlotsLeft = maxCharRefs - value.characterIndices.length;
 
   const [describingIdx, setDescribingIdx] = useState<number | null>(null);
+  const { assets } = useAppStore();
+
+  // ── Asset picker for "Upload or Choose from Assets" flow ──────────
+
+  const addExtraFromAsset = useCallback(
+    (asset: Asset) => {
+      if (slotsLeft <= 0) return;
+      onChange({
+        ...value,
+        extras: [
+          ...value.extras,
+          { asset_id: asset.id, image_path: asset.rel_path, description: '' },
+        ],
+      });
+    },
+    [value, onChange, slotsLeft]
+  );
 
   // ── Character toggle ──────────────────────────────────────────────
 
@@ -148,6 +168,15 @@ export default function ReferenceSelector({
     [value.extras, projectId, updateExtraDesc]
   );
 
+  const { openPicker, PickerModals } = useAssetPicker({
+    assets: assets || [],
+    onFileUpload: (file) => addExtra(file),
+    onAssetSelect: (asset) => addExtraFromAsset(asset),
+    accept: 'image/*',
+    imagesOnly: true,
+    title: 'Add Reference Image',
+  });
+
   // ── Render ─────────────────────────────────────────────────────────
 
   return (
@@ -222,31 +251,18 @@ export default function ReferenceSelector({
                 Clear
               </button>
             )}
-            <label
-              className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors border cursor-pointer ${
+            <button
+              onClick={() => { if (slotsLeft > 0) openPicker(); }}
+              disabled={slotsLeft <= 0}
+              className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors border ${
                 slotsLeft <= 0
                   ? 'bg-gray-800/40 border-gray-700/40 text-gray-600 cursor-not-allowed'
-                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:border-gray-500'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 cursor-pointer'
               }`}
             >
               <Plus size={10} />
               Add
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                disabled={slotsLeft <= 0}
-                onChange={(e) => {
-                  const files = e.target.files;
-                  if (!files) return;
-                  // Upload as many as slots allow
-                  const toUpload = Array.from(files).slice(0, slotsLeft);
-                  toUpload.forEach((f) => addExtra(f));
-                  e.target.value = ''; // reset
-                }}
-              />
-            </label>
+            </button>
           </div>
         </div>
 
@@ -263,7 +279,7 @@ export default function ReferenceSelector({
               className="flex gap-2 p-2 bg-gray-800/50 border border-gray-700/60 rounded"
             >
               <img
-                src={`/api/files/${extra.image_path}`}
+                src={`/api/projects/${projectId}/assets/${extra.asset_id}/file`}
                 alt={`Ref ${idx + 1}`}
                 className="w-12 h-12 rounded object-cover border border-gray-600 flex-shrink-0"
               />
@@ -313,6 +329,9 @@ export default function ReferenceSelector({
         </span>
         {totalUsed === 0 && <span className="text-gray-600 italic">None — text-to-image mode</span>}
       </div>
+
+      {/* Asset Picker Modals */}
+      <PickerModals />
     </div>
   );
 }

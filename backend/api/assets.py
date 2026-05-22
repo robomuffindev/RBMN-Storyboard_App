@@ -32,6 +32,7 @@ class AssetResponse(BaseModel):
     id: UUID
     project_id: UUID
     filename: str
+    rel_path: str
     asset_type: AssetType
     sha256: str
     duration_sec: Optional[float] = None
@@ -285,8 +286,12 @@ async def delete_asset(
                 detail=f"Asset {asset_id} not found",
             )
 
-        # Delete file
-        asset_path = settings.project_dir / str(project_id) / asset.rel_path
+        # Delete file — handle both rel_path formats (with/without project_id prefix)
+        pid_str = str(project_id)
+        if asset.rel_path.startswith(pid_str + "/") or asset.rel_path.startswith(pid_str + "\\"):
+            asset_path = settings.project_dir / asset.rel_path
+        else:
+            asset_path = settings.project_dir / pid_str / asset.rel_path
         if asset_path.exists():
             asset_path.unlink()
             logger.info(f"Deleted asset file: {asset_path}")
@@ -332,12 +337,32 @@ async def get_asset_file(
                 detail=f"Asset {asset_id} not found",
             )
 
-        asset_path = settings.project_dir / str(project_id) / asset.rel_path
+        # rel_path may be project-relative (e.g. "assets/images/file.png") from
+        # the upload endpoint, or project_dir-relative with project_id prefix
+        # (e.g. "{project_id}/generated/file.png") from the dispatcher.
+        # Try both to handle both formats.
+        pid_str = str(project_id)
+        if asset.rel_path.startswith(pid_str + "/") or asset.rel_path.startswith(pid_str + "\\"):
+            # rel_path already includes project_id — use project_dir / rel_path
+            asset_path = settings.project_dir / asset.rel_path
+        else:
+            # rel_path is project-relative — prepend project_id
+            asset_path = settings.project_dir / pid_str / asset.rel_path
+
         if not asset_path.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Asset file not found on disk",
+            # Fallback: try the other interpretation
+            alt_path = (
+                settings.project_dir / asset.rel_path
+                if not asset.rel_path.startswith(pid_str)
+                else settings.project_dir / pid_str / asset.rel_path
             )
+            if alt_path.exists():
+                asset_path = alt_path
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Asset file not found on disk",
+                )
 
         import mimetypes
         content_type = asset.meta.get("content_type") if asset.meta else None

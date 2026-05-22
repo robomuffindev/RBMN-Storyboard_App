@@ -9,6 +9,9 @@ import {
   enhancePrompt,
   uploadAsset,
 } from '@/api/client';
+import { useAssetPicker } from '@/components/AssetManager/AssetPickerModal';
+import { useAppStore } from '@/store';
+import type { Asset } from '@/types/index';
 
 // ── Resolution presets (shared with ConceptPanel) ─────────────────────
 interface ResolutionPreset {
@@ -97,6 +100,20 @@ export default function CharacterCreatorModal({
 
   // Active image path
   const [activeImagePath, setActiveImagePath] = useState<string | null>(character.image_path);
+
+  // Asset picker for reference images
+  const { assets } = useAppStore();
+  const { openPicker: openRefPicker, PickerModals: RefPickerModals } = useAssetPicker({
+    assets: assets || [],
+    onFileUpload: (file) => handleRefUpload(file),
+    onAssetSelect: (asset: Asset) => {
+      if (refImages.length >= 4) return;
+      setRefImages((prev) => [...prev, { asset_id: asset.id, image_path: asset.rel_path, description: '' }]);
+    },
+    accept: 'image/*',
+    imagesOnly: true,
+    title: 'Add Character Reference',
+  });
 
   // Seed from editing existing character's last generation
   useEffect(() => {
@@ -271,7 +288,9 @@ export default function CharacterCreatorModal({
   };
   const sectionGap: React.CSSProperties = { marginBottom: '1rem' };
 
-  return createPortal(
+  return (<>
+    <RefPickerModals />
+    {createPortal(
     <div style={overlay} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={modal} onClick={(e) => e.stopPropagation()}>
         {/* Header */}
@@ -342,7 +361,7 @@ export default function CharacterCreatorModal({
               {refImages.map((ref, i) => (
                 <div key={i} style={{ position: 'relative', width: 64, height: 64 }}>
                   <img
-                    src={`/api/files/${ref.image_path}`}
+                    src={`/api/projects/${projectId}/assets/${ref.asset_id}/file`}
                     alt={`Ref ${i + 1}`}
                     style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: '0.375rem', border: '1px solid #374151' }}
                   />
@@ -361,16 +380,7 @@ export default function CharacterCreatorModal({
 
               {refImages.length < 4 && (
                 <button
-                  onClick={() => {
-                    const input = document.createElement('input');
-                    input.type = 'file';
-                    input.accept = 'image/*';
-                    input.onchange = (e) => {
-                      const file = (e.target as HTMLInputElement).files?.[0];
-                      if (file) handleRefUpload(file);
-                    };
-                    input.click();
-                  }}
+                  onClick={() => openRefPicker()}
                   style={{
                     width: 64, height: 64, background: '#1f2937', border: '2px dashed #374151',
                     borderRadius: '0.375rem', color: '#6b7280', cursor: 'pointer',
@@ -578,5 +588,6 @@ export default function CharacterCreatorModal({
       )}
     </div>,
     document.body
-  );
+  )}
+  </>);
 }

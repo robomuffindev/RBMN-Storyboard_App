@@ -505,6 +505,31 @@ export default function SettingsPage() {
         <h1 className="text-3xl font-bold">Settings</h1>
       </div>
 
+      {/* Floating Save/Cancel Bar */}
+      <div className="sticky top-0 z-30 bg-gray-900/95 backdrop-blur-sm border-b border-gray-700 shadow-lg">
+        <div className="max-w-3xl mx-auto px-8 py-3 flex justify-end gap-3">
+          <button
+            onClick={() => navigate('/')}
+            className="px-5 py-2 bg-gray-700 hover:bg-gray-600 rounded font-medium text-sm transition-colors flex items-center gap-2"
+          >
+            <X size={16} />
+            Cancel
+          </button>
+          <button
+            onClick={() => updateSettingsMutation.mutate()}
+            disabled={updateSettingsMutation.isPending}
+            className="px-5 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium text-sm transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            {updateSettingsMutation.isPending ? (
+              <Loader size={16} className="animate-spin" />
+            ) : (
+              <Check size={16} />
+            )}
+            {updateSettingsMutation.isPending ? 'Saving...' : 'Save Settings'}
+          </button>
+        </div>
+      </div>
+
       {/* Content */}
       <div className="max-w-3xl mx-auto p-8 space-y-8">
         {/* Project Directory */}

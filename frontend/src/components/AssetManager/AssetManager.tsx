@@ -2,8 +2,9 @@ import { useRef, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { getAssets, uploadAsset, deleteAsset } from '@/api/client';
 import { useAppStore } from '@/store';
-import { Upload, Trash2, Filter } from 'lucide-react';
-import type { AssetType } from '@/types/index';
+import { Upload, Trash2, Filter, Play } from 'lucide-react';
+import { AssetLightbox, isImageFile, isVideoFile } from './AssetPickerModal';
+import type { Asset, AssetType } from '@/types/index';
 
 const assetTypeColors: Record<AssetType, string> = {
   character: 'bg-purple-900',
@@ -35,6 +36,7 @@ export default function AssetManager() {
   const [assetTypeForUpload, setAssetTypeForUpload] = useState<AssetType>('item');
   const { currentProject, assets, addAsset, removeAsset } = useAppStore();
   const [uploading, setUploading] = useState(false);
+  const [lightboxAsset, setLightboxAsset] = useState<Asset | null>(null);
 
   const { refetch } = useQuery({
     queryKey: ['assets', currentProject?.id],
@@ -153,47 +155,91 @@ export default function AssetManager() {
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3">
-            {filteredAssets.map((asset) => (
-              <div
-                key={asset.id}
-                className="bg-gray-800 rounded overflow-hidden hover:bg-gray-700 transition-colors group border border-gray-700"
-              >
-                {asset.asset_type.startsWith('generated') || asset.asset_type === 'reference' ? (
-                  <div className="w-full h-24 bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center">
-                    <div className="text-xs text-gray-500">{assetTypeLabels[asset.asset_type]}</div>
-                  </div>
-                ) : null}
-                <div className="p-2">
-                  <p className="text-xs font-medium text-gray-100 truncate" title={asset.filename}>
-                    {asset.filename}
-                  </p>
-                  <div className="flex items-center justify-between mt-2">
-                    <span
-                      className={`text-xs px-2 py-1 rounded text-white font-medium ${
-                        assetTypeColors[asset.asset_type]
-                      }`}
-                    >
-                      {assetTypeLabels[asset.asset_type]}
-                    </span>
-                    <button
-                      onClick={() => {
-                        if (confirm('Delete this asset?')) {
-                          deleteAssetMutation.mutate(asset.id);
-                        }
-                      }}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:text-red-400 disabled:opacity-50"
-                      disabled={deleteAssetMutation.isPending}
-                      title="Delete asset"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+            {filteredAssets.map((asset) => {
+              const isImage = isImageFile(asset.filename);
+              const isVideo = isVideoFile(asset.filename);
+              const hasVisual = isImage || isVideo;
+
+              return (
+                <div
+                  key={asset.id}
+                  className="bg-gray-800 rounded overflow-hidden hover:bg-gray-700 transition-colors group border border-gray-700"
+                >
+                  {/* Thumbnail area — clickable to open lightbox */}
+                  <button
+                    onClick={() => hasVisual ? setLightboxAsset(asset) : undefined}
+                    className={`w-full h-24 relative block overflow-hidden ${hasVisual ? 'cursor-pointer' : 'cursor-default'}`}
+                    style={{ background: '#1a1a2e' }}
+                  >
+                    {isImage ? (
+                      <img
+                        src={`/api/projects/${asset.project_id}/assets/${asset.id}/file`}
+                        alt={asset.filename}
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                    ) : isVideo ? (
+                      <>
+                        <video
+                          src={`/api/projects/${asset.project_id}/assets/${asset.id}/file`}
+                          className="w-full h-full object-cover"
+                          muted
+                          preload="metadata"
+                        />
+                        {/* Play icon overlay for videos */}
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-colors">
+                          <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center backdrop-blur-sm">
+                            <Play size={16} className="text-white ml-0.5" />
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <div className="text-xs text-gray-500">{assetTypeLabels[asset.asset_type]}</div>
+                      </div>
+                    )}
+                  </button>
+
+                  <div className="p-2">
+                    <p className="text-xs font-medium text-gray-100 truncate" title={asset.filename}>
+                      {asset.filename}
+                    </p>
+                    <div className="flex items-center justify-between mt-2">
+                      <span
+                        className={`text-xs px-2 py-1 rounded text-white font-medium ${
+                          assetTypeColors[asset.asset_type]
+                        }`}
+                      >
+                        {assetTypeLabels[asset.asset_type]}
+                      </span>
+                      <button
+                        onClick={() => {
+                          if (confirm('Delete this asset?')) {
+                            deleteAssetMutation.mutate(asset.id);
+                          }
+                        }}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:text-red-400 disabled:opacity-50"
+                        disabled={deleteAssetMutation.isPending}
+                        title="Delete asset"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
+
+      {/* Lightbox */}
+      {lightboxAsset && (
+        <AssetLightbox
+          asset={lightboxAsset}
+          onClose={() => setLightboxAsset(null)}
+        />
+      )}
     </div>
   );
 }
