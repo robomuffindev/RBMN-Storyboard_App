@@ -19,12 +19,15 @@ def get_database_url() -> str:
     return f"sqlite+aiosqlite:///{db_path}"
 
 
-# Create async engine
+# Create async engine — pool_size raised to handle concurrent asset thumbnail loads
 engine = create_async_engine(
     get_database_url(),
     echo=False,
     future=True,
     pool_pre_ping=True,
+    pool_size=20,
+    max_overflow=40,
+    pool_timeout=60,
     connect_args={
         "timeout": 30,
         "check_same_thread": False,

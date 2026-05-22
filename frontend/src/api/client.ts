@@ -108,6 +108,9 @@ export const updateAsset = (projectId: string, assetId: string, data: Partial<As
 export const deleteAsset = (projectId: string, assetId: string) =>
   api.delete(`/projects/${projectId}/assets/${assetId}`);
 
+export const bulkDeleteAssets = (projectId: string, assetIds: string[]) =>
+  api.post<{ deleted: number; errors: string[] }>(`/projects/${projectId}/assets/bulk-delete`, { asset_ids: assetIds });
+
 export const getAssetFileUrl = (projectId: string, assetId: string) =>
   `/api/projects/${projectId}/assets/${assetId}/file`;
 

@@ -2,8 +2,9 @@ import { useRef, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { getAssets, uploadAsset, deleteAsset } from '@/api/client';
 import { useAppStore } from '@/store';
-import { Upload, Trash2, Filter, Play } from 'lucide-react';
+import { Upload, Trash2, Filter, Play, Settings2 } from 'lucide-react';
 import { AssetLightbox, isImageFile, isVideoFile } from './AssetPickerModal';
+import AssetManageModal from './AssetManageModal';
 import type { Asset, AssetType } from '@/types/index';
 
 const assetTypeColors: Record<AssetType, string> = {
@@ -37,6 +38,7 @@ export default function AssetManager() {
   const { currentProject, assets, addAsset, removeAsset } = useAppStore();
   const [uploading, setUploading] = useState(false);
   const [lightboxAsset, setLightboxAsset] = useState<Asset | null>(null);
+  const [showManageModal, setShowManageModal] = useState(false);
 
   const { refetch } = useQuery({
     queryKey: ['assets', currentProject?.id],
@@ -101,14 +103,24 @@ export default function AssetManager() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Filter & Upload */}
       <div className="p-3 border-b border-gray-800 space-y-3">
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-        >
-          <Upload size={16} />
-          {uploading ? 'Uploading...' : 'Upload Asset'}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            <Upload size={16} />
+            {uploading ? 'Uploading...' : 'Upload'}
+          </button>
+          <button
+            onClick={() => setShowManageModal(true)}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors flex items-center justify-center gap-2"
+            title="Manage assets — bulk view, filter, and delete"
+          >
+            <Settings2 size={16} />
+            Manage
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -181,7 +193,7 @@ export default function AssetManager() {
                     ) : isVideo ? (
                       <>
                         <video
-                          src={`/api/projects/${asset.project_id}/assets/${asset.id}/file`}
+                          src={`/api/projects/${asset.project_id}/assets/${asset.id}/file#t=0.5`}
                           className="w-full h-full object-cover"
                           muted
                           preload="metadata"
@@ -238,6 +250,14 @@ export default function AssetManager() {
         <AssetLightbox
           asset={lightboxAsset}
           onClose={() => setLightboxAsset(null)}
+        />
+      )}
+
+      {/* Manage Modal */}
+      {showManageModal && (
+        <AssetManageModal
+          onClose={() => setShowManageModal(false)}
+          onAssetsDeleted={() => refetch()}
         />
       )}
     </div>

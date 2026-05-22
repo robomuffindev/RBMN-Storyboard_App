@@ -311,6 +311,70 @@ async def delete_asset(
         )
 
 
+class BulkDeleteRequest(BaseModel):
+    """Request model for bulk asset deletion."""
+    asset_ids: list[UUID]
+
+
+@router.post(
+    "/bulk-delete",
+    status_code=status.HTTP_200_OK,
+    summary="Bulk delete assets",
+)
+async def bulk_delete_assets(
+    project_id: UUID,
+    req: BulkDeleteRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Delete multiple assets and their files in one request.
+
+    Args:
+        project_id: UUID of the project.
+        req: List of asset IDs to delete.
+        session: Database session.
+
+    Returns:
+        Dict with count of deleted assets.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        deleted = 0
+        errors = []
+        pid_str = str(project_id)
+
+        for asset_id in req.asset_ids:
+            asset = await session.get(Asset, asset_id)
+            if not asset or asset.project_id != project_id:
+                errors.append(f"Asset {asset_id} not found")
+                continue
+
+            # Delete file
+            if asset.rel_path.startswith(pid_str + "/") or asset.rel_path.startswith(pid_str + "\\"):
+                asset_path = settings.project_dir / asset.rel_path
+            else:
+                asset_path = settings.project_dir / pid_str / asset.rel_path
+            if asset_path.exists():
+                asset_path.unlink()
+                logger.info(f"Deleted asset file: {asset_path}")
+
+            await session.delete(asset)
+            deleted += 1
+
+        await session.commit()
+        logger.info(f"Bulk deleted {deleted} assets from project {project_id}")
+
+        return {"deleted": deleted, "errors": errors}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error bulk deleting assets: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to bulk delete assets",
+        )
+
+
 @router.get(
     "/{asset_id}/file",
     summary="Serve asset file",
@@ -326,7 +390,15 @@ async def get_asset_file(
     HTML5 <audio> and <video> elements require Range headers for seeking/scrubbing.
     This endpoint returns 206 Partial Content when a Range header is present,
     or 200 with the full file otherwise.
+
+    IMPORTANT: We extract all DB data upfront and close the session before
+    returning the file response. This prevents connection pool exhaustion
+    when many thumbnails are loaded concurrently in the Asset Manager.
     """
+    import mimetypes
+    from pathlib import Path
+
+    # --- Phase 1: DB lookup (session is open) ---
     try:
         await _get_project_or_404(project_id, session)
 
@@ -337,24 +409,36 @@ async def get_asset_file(
                 detail=f"Asset {asset_id} not found",
             )
 
-        # rel_path may be project-relative (e.g. "assets/images/file.png") from
-        # the upload endpoint, or project_dir-relative with project_id prefix
-        # (e.g. "{project_id}/generated/file.png") from the dispatcher.
-        # Try both to handle both formats.
+        # Extract everything we need from the ORM object before closing session
+        asset_rel_path = asset.rel_path
+        asset_filename = asset.filename
+        asset_meta = dict(asset.meta) if asset.meta else {}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error looking up asset {asset_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to look up asset",
+        )
+    finally:
+        # Explicitly close session so the connection returns to the pool
+        # BEFORE we start streaming file bytes
+        await session.close()
+
+    # --- Phase 2: File serving (session is closed, no DB connection held) ---
+    try:
         pid_str = str(project_id)
-        if asset.rel_path.startswith(pid_str + "/") or asset.rel_path.startswith(pid_str + "\\"):
-            # rel_path already includes project_id — use project_dir / rel_path
-            asset_path = settings.project_dir / asset.rel_path
+        if asset_rel_path.startswith(pid_str + "/") or asset_rel_path.startswith(pid_str + "\\"):
+            asset_path = settings.project_dir / asset_rel_path
         else:
-            # rel_path is project-relative — prepend project_id
-            asset_path = settings.project_dir / pid_str / asset.rel_path
+            asset_path = settings.project_dir / pid_str / asset_rel_path
 
         if not asset_path.exists():
-            # Fallback: try the other interpretation
             alt_path = (
-                settings.project_dir / asset.rel_path
-                if not asset.rel_path.startswith(pid_str)
-                else settings.project_dir / pid_str / asset.rel_path
+                settings.project_dir / asset_rel_path
+                if not asset_rel_path.startswith(pid_str)
+                else settings.project_dir / pid_str / asset_rel_path
             )
             if alt_path.exists():
                 asset_path = alt_path
@@ -364,16 +448,14 @@ async def get_asset_file(
                     detail="Asset file not found on disk",
                 )
 
-        import mimetypes
-        content_type = asset.meta.get("content_type") if asset.meta else None
+        content_type = asset_meta.get("content_type")
         if not content_type or content_type == "application/octet-stream":
-            content_type = mimetypes.guess_type(asset.filename)[0] or "application/octet-stream"
+            content_type = mimetypes.guess_type(asset_filename)[0] or "application/octet-stream"
 
         file_size = asset_path.stat().st_size
         range_header = request.headers.get("range")
 
         if range_header:
-            # Parse Range: bytes=start-end
             range_spec = range_header.strip().replace("bytes=", "")
             parts = range_spec.split("-")
             start = int(parts[0]) if parts[0] else 0
@@ -402,16 +484,15 @@ async def get_asset_file(
                     "Content-Range": f"bytes {start}-{end}/{file_size}",
                     "Accept-Ranges": "bytes",
                     "Content-Length": str(content_length),
-                    "Content-Disposition": f'inline; filename="{asset.filename}"',
+                    "Content-Disposition": f'inline; filename="{asset_filename}"',
                 },
             )
         else:
-            # Full file response with Accept-Ranges header
             from fastapi.responses import FileResponse
             return FileResponse(
                 asset_path,
                 media_type=content_type,
-                filename=asset.filename,
+                filename=asset_filename,
                 headers={"Accept-Ranges": "bytes"},
             )
     except HTTPException:
