@@ -792,6 +792,72 @@ async def get_lyrics(
         )
 
 
+def _reconstruct_phrases_from_whisper(words: list[dict]) -> list[str]:
+    """Reconstruct phrase lines from Whisper word timestamps.
+
+    When the user hasn't pasted lyrics (initial_text is empty), we can
+    still detect phrase boundaries using signals in the Whisper output:
+    1. Capital letters: Whisper often capitalizes the first word of a new phrase
+    2. Pauses: gaps > 0.4s between words suggest phrase boundaries
+    3. Punctuation: sentence-ending punctuation (. ! ?) marks phrase ends
+
+    Returns a list of phrase strings suitable for use as lyrics_text lines.
+    """
+    if not words:
+        return []
+
+    def get_raw(w: dict) -> str:
+        return (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+
+    phrases: list[str] = []
+    current_words: list[str] = []
+
+    for i, w in enumerate(words):
+        raw = get_raw(w)
+        if not raw:
+            continue
+
+        # Check if this word starts a new phrase
+        is_new_phrase = False
+
+        if i > 0 and current_words:
+            prev_raw = get_raw(words[i - 1])
+            prev_end = words[i - 1].get("end", 0)
+            this_start = w.get("start", 0)
+            gap = this_start - prev_end
+
+            # Capital letter after a pause = strong phrase boundary
+            if raw[0].isupper() and gap > 0.2:
+                is_new_phrase = True
+
+            # Long pause alone = phrase boundary
+            elif gap > 0.8:
+                is_new_phrase = True
+
+            # Sentence-ending punctuation on previous word
+            import re
+            if prev_raw and re.search(r'[.!?…]$', prev_raw):
+                is_new_phrase = True
+
+        if is_new_phrase and current_words:
+            phrases.append(" ".join(current_words))
+            current_words = []
+
+        current_words.append(raw)
+
+    if current_words:
+        phrases.append(" ".join(current_words))
+
+    logger.info(
+        f"[ReconstructPhrases] Built {len(phrases)} phrases from "
+        f"{len(words)} Whisper words using capital letters + pauses"
+    )
+    for i, p in enumerate(phrases[:5]):
+        logger.info(f"[ReconstructPhrases]   Phrase {i}: '{p[:60]}'")
+
+    return phrases
+
+
 def _group_words_into_sentences(
     words: list[dict],
     lyrics_text: str = "",
@@ -864,6 +930,16 @@ def _match_words_to_lyrics_lines(
     Each lyrics line defines an indivisible phrase. We walk through the
     Whisper words and assign them to lines by matching word counts per line.
 
+    MATCHING STRATEGY:
+    1. For each lyrics line, find its first word in the Whisper stream
+       using a wide search window (up to 20 positions) with fuzzy matching.
+    2. Use the NEXT line's first word as an anchor to determine where
+       the current line ends — search a wide window around the expected
+       end position.
+    3. Capital letters in Whisper words are used as a secondary signal:
+       if the next Whisper word starts with a capital letter AND aligns
+       with a lyrics line start, it's a strong boundary indicator.
+
     WORD ANCHORING: After initial matching, any words that were skipped
     (between groups) are merged into the nearest adjacent group. Single-word
     groups are also merged into their neighbor. This ensures a word like
@@ -876,11 +952,48 @@ def _match_words_to_lyrics_lines(
         """Normalize a word for comparison."""
         return re.sub(r'[^a-zA-Z0-9]', '', w).lower()
 
+    def words_similar(a: str, b: str) -> bool:
+        """Check if two cleaned words are similar enough to be a match.
+        Handles Whisper mishearings like walkin/walking, gonna/going to."""
+        if a == b:
+            return True
+        # One is a prefix of the other (walkin/walking, comin/coming)
+        if len(a) >= 3 and len(b) >= 3:
+            if a.startswith(b) or b.startswith(a):
+                return True
+        # Edit distance 1 for words of length 4+
+        if len(a) >= 4 and len(b) >= 4 and abs(len(a) - len(b)) <= 1:
+            diffs = sum(1 for ca, cb in zip(a, b) if ca != cb)
+            diffs += abs(len(a) - len(b))
+            if diffs <= 1:
+                return True
+        return False
+
+    def get_raw_word(w: dict) -> str:
+        """Get raw (uncleaned) word text from a Whisper word dict."""
+        return (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+
+    def starts_with_capital(w: dict) -> bool:
+        """Check if a Whisper word starts with a capital letter."""
+        raw = get_raw_word(w)
+        return bool(raw) and raw[0].isupper()
+
     # Build a flat list of cleaned Whisper words for matching
     whisper_cleaned = []
+    whisper_raw = []
     for w in words:
-        raw = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+        raw = get_raw_word(w)
+        whisper_raw.append(raw)
         whisper_cleaned.append(clean_word(raw))
+
+    logger.info(
+        f"[WordMatch] Matching {len(words)} Whisper words to {len(lines)} lyrics lines"
+    )
+    logger.info(
+        f"[WordMatch] Total lyrics words: "
+        f"{sum(len(l.split()) for l in lines)}, "
+        f"Whisper words: {len(words)}"
+    )
 
     # Track which word indices are assigned to which group
     word_to_group: dict[int, int] = {}
@@ -888,47 +1001,154 @@ def _match_words_to_lyrics_lines(
     group_ranges: list[tuple[int, int]] = []
     word_idx = 0
 
+    # ── SEARCH WINDOW SIZES ──────────────────────────────────────────
+    FIRST_WORD_SEARCH = 20  # How far ahead to look for a line's first word
+    NEXT_LINE_SEARCH = 15   # How far around expected end to look for next line's start
+
     for line_idx, line in enumerate(lines):
-        line_words_clean = [clean_word(w) for w in line.split()]
+        line_words_raw = line.split()
+        line_words_clean = [clean_word(w) for w in line_words_raw]
         expected_count = len(line_words_clean)
 
         if word_idx >= len(words):
+            logger.warning(
+                f"[WordMatch] Ran out of Whisper words at line {line_idx}: "
+                f"'{line[:50]}'"
+            )
             break
 
+        # ── Find first word of this line ─────────────────────────────
         first_word = line_words_clean[0] if line_words_clean else ""
         best_start = word_idx
+
         if first_word:
-            search_end = min(word_idx + 5, len(words))
+            search_end = min(word_idx + FIRST_WORD_SEARCH, len(words))
+            found_first = False
+
+            # Pass 1: exact match
             for s in range(word_idx, search_end):
                 if whisper_cleaned[s] == first_word:
                     best_start = s
+                    found_first = True
                     break
+
+            # Pass 2: fuzzy match (if exact failed)
+            if not found_first:
+                for s in range(word_idx, search_end):
+                    if words_similar(whisper_cleaned[s], first_word):
+                        best_start = s
+                        found_first = True
+                        logger.info(
+                            f"[WordMatch] Line {line_idx}: fuzzy match "
+                            f"'{whisper_raw[s]}' ≈ '{line_words_raw[0]}' at pos {s}"
+                        )
+                        break
+
+            # Pass 3: capital letter heuristic — if a nearby Whisper word
+            # starts with a capital AND is close to expected position,
+            # use it as the boundary even if the word doesn't match
+            if not found_first and line_idx > 0:
+                for s in range(word_idx, min(word_idx + 10, len(words))):
+                    if starts_with_capital(words[s]):
+                        # Check if there's a pause before this word
+                        if s > 0:
+                            prev_end = words[s - 1].get("end", 0)
+                            this_start = words[s].get("start", 0)
+                            gap = this_start - prev_end
+                            if gap > 0.2:  # Some pause before capital word
+                                best_start = s
+                                found_first = True
+                                logger.info(
+                                    f"[WordMatch] Line {line_idx}: capital letter anchor "
+                                    f"'{whisper_raw[s]}' at pos {s} "
+                                    f"(gap={gap:.2f}s before it)"
+                                )
+                                break
+
+            if not found_first:
+                logger.warning(
+                    f"[WordMatch] Line {line_idx}: couldn't find first word "
+                    f"'{first_word}' near pos {word_idx}, "
+                    f"using default pos {best_start}"
+                )
 
         group_end = best_start + expected_count
 
+        # ── Refine end using next line's first word ──────────────────
         if line_idx + 1 < len(lines):
             next_line_words = [clean_word(w) for w in lines[line_idx + 1].split()]
             next_first = next_line_words[0] if next_line_words else ""
             if next_first:
-                for s in range(max(best_start + 1, group_end - 2), min(group_end + 5, len(words))):
+                # Search a wide window around the expected group_end
+                search_start = max(best_start + 1, group_end - 3)
+                search_limit = min(group_end + NEXT_LINE_SEARCH, len(words))
+                found_next = False
+
+                # Pass 1: exact match for next line's first word
+                for s in range(search_start, search_limit):
                     if whisper_cleaned[s] == next_first:
                         group_end = s
+                        found_next = True
                         break
+
+                # Pass 2: fuzzy match
+                if not found_next:
+                    for s in range(search_start, search_limit):
+                        if words_similar(whisper_cleaned[s], next_first):
+                            group_end = s
+                            found_next = True
+                            logger.info(
+                                f"[WordMatch] Line {line_idx}: fuzzy next-line anchor "
+                                f"'{whisper_raw[s]}' ≈ '{next_first}' at pos {s}"
+                            )
+                            break
+
+                # Pass 3: capital letter + pause as next-line boundary
+                if not found_next:
+                    for s in range(search_start, search_limit):
+                        if starts_with_capital(words[s]) and s > 0:
+                            prev_end = words[s - 1].get("end", 0)
+                            this_start = words[s].get("start", 0)
+                            gap = this_start - prev_end
+                            if gap > 0.3:
+                                group_end = s
+                                found_next = True
+                                logger.info(
+                                    f"[WordMatch] Line {line_idx}: capital+pause next-line "
+                                    f"anchor '{whisper_raw[s]}' at pos {s} "
+                                    f"(gap={gap:.2f}s)"
+                                )
+                                break
 
         group_end = min(group_end, len(words))
 
         if best_start < group_end:
             g_idx = len(groups)
-            groups.append(words[best_start:group_end])
+            group_words = words[best_start:group_end]
+            groups.append(group_words)
             group_ranges.append((best_start, group_end))
             for wi in range(best_start, group_end):
                 word_to_group[wi] = g_idx
             word_idx = group_end
+
+            # Log the match
+            matched_text = " ".join(whisper_raw[best_start:group_end])
+            logger.info(
+                f"[WordMatch] Line {line_idx} ({expected_count} words): "
+                f"'{line[:50]}' → Whisper [{best_start}:{group_end}] "
+                f"'{matched_text[:60]}'"
+            )
         else:
             word_idx = best_start
+            logger.warning(
+                f"[WordMatch] Line {line_idx}: empty group "
+                f"(best_start={best_start}, group_end={group_end})"
+            )
 
     # Trailing words → last group
     if word_idx < len(words):
+        trailing_count = len(words) - word_idx
+        trailing_text = " ".join(whisper_raw[word_idx:word_idx + 5])
         if groups:
             g_idx = len(groups) - 1
             groups[g_idx].extend(words[word_idx:])
@@ -936,17 +1156,24 @@ def _match_words_to_lyrics_lines(
             group_ranges[g_idx] = (old_start, len(words))
             for wi in range(word_idx, len(words)):
                 word_to_group[wi] = g_idx
+            logger.info(
+                f"[WordMatch] Appended {trailing_count} trailing words to last group: "
+                f"'{trailing_text}...'"
+            )
         else:
             groups.append(words[word_idx:])
             group_ranges.append((word_idx, len(words)))
             for wi in range(word_idx, len(words)):
                 word_to_group[wi] = 0
+            logger.info(
+                f"[WordMatch] Created single group from {trailing_count} trailing words"
+            )
 
     # ── WORD ANCHORING: merge orphaned words into nearest group ───────
     orphaned: list[int] = [i for i in range(len(words)) if i not in word_to_group]
     if orphaned and groups:
         logger.info(f"[WordAnchor] Found {len(orphaned)} orphaned word(s): "
-                     f"{[whisper_cleaned[i] for i in orphaned]}")
+                     f"{[whisper_raw[i] for i in orphaned]}")
         for oi in orphaned:
             best_group = 0
             best_dist = float('inf')
@@ -968,14 +1195,14 @@ def _match_words_to_lyrics_lines(
                 groups[best_group].append(word_obj)
 
             word_to_group[oi] = best_group
-            logger.info(f"[WordAnchor] Anchored '{whisper_cleaned[oi]}' → group {best_group}")
+            logger.info(f"[WordAnchor] Anchored '{whisper_raw[oi]}' → group {best_group}")
 
     # ── Merge single-word groups into neighbors ──────────────────────
     if len(groups) > 1:
         merged_groups: list[list[dict]] = []
         for gi, group in enumerate(groups):
             if len(group) == 1 and len(groups) > 1:
-                word_text = (group[0].get("word", "") or group[0].get("value", "") or "").strip()
+                word_text = get_raw_word(group[0])
                 if merged_groups:
                     merged_groups[-1].extend(group)
                     logger.info(f"[WordAnchor] Merged single-word '{word_text}' into previous group")
@@ -992,9 +1219,17 @@ def _match_words_to_lyrics_lines(
     groups = [g for g in groups if g]
 
     logger.info(
-        f"Matched {len(words)} Whisper words to {len(lines)} lyrics lines → "
+        f"[WordMatch] RESULT: {len(words)} Whisper words → {len(lines)} lyrics lines → "
         f"{len(groups)} phrase groups"
     )
+    for gi, group in enumerate(groups):
+        g_text = " ".join(get_raw_word(w) for w in group)
+        g_start = group[0].get("start", 0)
+        g_end = group[-1].get("end", 0)
+        logger.info(
+            f"[WordMatch]   Group {gi}: [{g_start:.2f}s–{g_end:.2f}s] "
+            f"({len(group)} words) '{g_text[:60]}'"
+        )
 
     return groups
 
@@ -1762,6 +1997,39 @@ async def suggest_timeline(
         user_lyrics = (getattr(lyrics_record, "initial_text", "") or "").strip()
         whisper_text = (lyrics_record.full_text or "").strip()
         word_timestamps = lyrics_record.words or []
+
+    # ── DIAGNOSTIC: Log lyrics state ────────────────────────────────
+    if user_lyrics:
+        lyrics_lines = [l for l in user_lyrics.splitlines() if l.strip()]
+        logger.info(
+            f"[SuggestTimeline] initial_text has {len(user_lyrics)} chars, "
+            f"{len(lyrics_lines)} lines (phrase-aware mode ACTIVE)"
+        )
+        for i, line in enumerate(lyrics_lines[:5]):
+            logger.info(f"[SuggestTimeline]   Line {i}: '{line[:60]}'")
+        if len(lyrics_lines) > 5:
+            logger.info(f"[SuggestTimeline]   ... and {len(lyrics_lines) - 5} more lines")
+    else:
+        logger.warning(
+            f"[SuggestTimeline] initial_text is EMPTY — phrase-aware mode DISABLED. "
+            f"Whisper text: {len(whisper_text)} chars, "
+            f"Word timestamps: {len(word_timestamps)}"
+        )
+        # If we have Whisper text but no user lyrics, try to reconstruct
+        # phrase boundaries from capital letters and pauses in Whisper output
+        if word_timestamps and not user_lyrics:
+            reconstructed_lines = _reconstruct_phrases_from_whisper(word_timestamps)
+            if reconstructed_lines:
+                user_lyrics = "\n".join(reconstructed_lines)
+                logger.info(
+                    f"[SuggestTimeline] Reconstructed {len(reconstructed_lines)} phrase lines "
+                    f"from Whisper word timestamps (capital letters + pauses)"
+                )
+
+    logger.info(
+        f"[SuggestTimeline] Word timestamps: {len(word_timestamps)}, "
+        f"user_lyrics: {len(user_lyrics)} chars"
+    )
 
     # 3) Concept & style
     proj_settings = project.settings or {}
