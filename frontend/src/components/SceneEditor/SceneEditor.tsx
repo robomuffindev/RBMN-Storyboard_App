@@ -383,12 +383,14 @@ function GenerationDetailsModal({
                 )}
               </div>
 
-              {/* Negative prompt */}
-              {params.negative_prompt && (
+              {/* Negative prompt — show effective (global + scene merged) if available, else scene-level */}
+              {(params.effective_negative_prompt || params.negative_prompt) && (
                 <div>
-                  <span style={{ color: '#9ca3af', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '6px' }}>Negative Prompt</span>
+                  <span style={{ color: '#9ca3af', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '6px' }}>
+                    Negative Prompt{params.effective_negative_prompt && !params.negative_prompt ? ' (Global)' : params.effective_negative_prompt && params.negative_prompt ? ' (Scene Override)' : ''}
+                  </span>
                   <div style={{ backgroundColor: '#1f2937', padding: '10px 12px', borderRadius: '8px', color: '#d1d5db', fontSize: '13px', lineHeight: 1.5 }}>
-                    {params.negative_prompt}
+                    {params.effective_negative_prompt || params.negative_prompt}
                   </div>
                 </div>
               )}

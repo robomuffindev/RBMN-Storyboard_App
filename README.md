@@ -8,16 +8,20 @@ A local desktop application for creating AI-powered music videos and narration v
 
 These videos were generated entirely by the app using ComfyUI + LTX 2.3 video generation:
 
+<a href="https://www.youtube.com/watch?v=jg3y52mkEXI">
+  <img src="https://img.youtube.com/vi/jg3y52mkEXI/maxresdefault.jpg" alt="Sample Output - Latest" width="600"/>
+</a>
+
 <a href="https://www.youtube.com/watch?v=NAf-MVPxjJI">
-  <img src="https://img.youtube.com/vi/NAf-MVPxjJI/maxresdefault.jpg" alt="Sample Output - Latest" width="600"/>
+  <img src="https://img.youtube.com/vi/NAf-MVPxjJI/maxresdefault.jpg" alt="Sample Output 2" width="600"/>
 </a>
 
 <a href="https://www.youtube.com/watch?v=ysumK--oPEI">
-  <img src="https://img.youtube.com/vi/ysumK--oPEI/maxresdefault.jpg" alt="Sample Output 1" width="600"/>
+  <img src="https://img.youtube.com/vi/ysumK--oPEI/maxresdefault.jpg" alt="Sample Output 3" width="600"/>
 </a>
 
 <a href="https://www.youtube.com/watch?v=hmp0o6oHwH8">
-  <img src="https://img.youtube.com/vi/hmp0o6oHwH8/maxresdefault.jpg" alt="Sample Output 2" width="600"/>
+  <img src="https://img.youtube.com/vi/hmp0o6oHwH8/maxresdefault.jpg" alt="Sample Output 4" width="600"/>
 </a>
 
 ## Features
@@ -31,7 +35,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Scene Editor** — Tabbed editor with Image (First Frame / Last Frame sub-tabs), Video, Stems, Lyrics, Tools, Image Movement, and Prompt tabs per scene
 - **Reference Image System** — Select up to 2 characters and upload additional reference images per scene. Workflow auto-selects based on reference count (0–4 images). Uses FLUX Klein "Image N" syntax for precise reference mapping
 - **Two-Pass Image Generation** — Pass 1 generates the scene environment (no characters), Pass 2 composites characters into the scene using the Pass 1 output as a reference. Prevents character IP-Adapter from making all scenes look identical
-- **Prompt Enhancement** — LLM-powered prompt enhancement with context awareness (model type, scene flow, camera action, character descriptions, reference images). Enforces single-paragraph output optimized for FLUX Klein 9B and LTX 2.3
+- **Prompt Enhancement** — LLM-powered prompt enhancement with context awareness (model type, scene flow, camera action, character descriptions, reference images). Enforces single-paragraph output optimized for FLUX Klein 9B and LTX 2.3. Built-in system prompt registry with per-model overrides configurable in Settings
 - **Camera Action Presets** — 24 film-industry camera motions (pan, tilt, dolly, crane, orbit, steadicam, etc.) integrated into video prompt enhancement
 - **Image Direction** — Control the overall visual style with presets (Photorealistic, Cinematic, Cartoon, Anime, Sketch, Watercolor, Oil Painting, 3D Render, Comic Book, Pixel Art, Abstract, Surreal) or custom free-text direction
 - **Auto Generate** — Six intelligent modes: all images, all video (single frame), missing videos, all video (first/last frame chaining), all video (V2V extend for seamless transitions), and independent batch-parallel image generation
@@ -39,6 +43,11 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Export Transitions** — Automatic crossfade/dissolve transitions between clips with configurable duration and adjacent-clip color matching
 - **Render Preview** — Quick 720p preview assembly before full export
 - **Scene Locking** — Lock scene boundaries to prevent accidental changes. Persists across app restarts
+- **Global Negative Prompt** — Set a negative prompt in Settings that applies to all image generation workflows. Per-scene negative prompts override the global when set. The effective negative prompt (global vs scene override) is displayed in each scene's Prompt tab after generation
+- **Custom Workflow Management** — Upload your own ComfyUI workflow JSON files with auto-introspection and field mapping. Assign custom workflows per-server or globally, and select them from the Image/Video tab dropdowns
+- **Asset Manager** — Browse and manage all project assets (characters, reference images, generated images/videos) with thumbnail grid view, lightbox preview, and direct-use-as-reference from the asset library
+- **Settings Import/Export** — Export all app settings to JSON and import on another machine for easy configuration sharing
+- **Project Directory** — Configure where project data is stored via Settings, with the option to move existing data to a new location
 - **Edit Project Name** — Rename projects via the toolbar menu (display name only — files and directories unchanged)
 
 ### Technical Highlights
@@ -78,11 +87,23 @@ Place these in the appropriate directories on your ComfyUI server(s):
 | `gemma_3_12B_it_fp4_mixed.safetensors` | `models/clip/` | [Kijai/gemma-3-12B-it_comfy](https://huggingface.co/Kijai/gemma-3-12B-it_comfy) |
 | `ltx-2.3-spatial-upscaler-x2-1.0.safetensors` | `models/upscale_models/` | [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video) |
 
-#### LoRAs
+#### LoRAs — Image Generation (Flux Klein 9B)
+
+| File | Directory | Download |
+|------|-----------|----------|
+| `lenovo_flux_klein9b.safetensors` | `models/loras/` | Required for T2I workflow |
+| `nicegirls_flux_klein9b.safetensors` | `models/loras/` | Required for T2I workflow |
+| `detail_slider_klein_9b_20260123_065513.safetensors` | `models/loras/` | Required for T2I workflow |
+| `darkBeastFeb1826Latest_dbkBlitzV15.safetensors` | `models/loras/` | Required for T2I workflow |
+| `anime2real-semi.safetensors` | `models/loras/` | Required for 1REF / 2REF / 3REF / 4REF workflows |
+
+#### LoRAs — Video Generation (LTX 2.3)
 
 | File | Directory | Download |
 |------|-----------|----------|
 | `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` | `models/loras/` | [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video) |
+| `ltx-2-19b-ic-lora-detailer.safetensors` | `models/loras/` | Required for FF/LF, I2V, and V2V workflows |
+| `Ltx2.3-Licon-VBVR-I2V-96000-R32.safetensors` | `models/loras/` | Required for FF/LF, I2V, and V2V workflows |
 | `ltx2.3-transition.safetensors` | `models/loras/` | [valiantcat/LTX-2.3-Transition-LORA](https://huggingface.co/valiantcat/LTX-2.3-Transition-LORA) (required for AI transition clips) |
 
 ### Required Custom Nodes
@@ -142,7 +163,7 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 | AI Generation | ComfyUI (remote), FLUX.2 Klein 9B (images), LTX 2.3 (video) |
 | Audio | Demucs (stems, GPU via PyTorch CUDA), Whisper (3 backends), librosa (sections) |
 | Video Assembly | FFmpeg (GPU-accelerated via NVENC/AMF/VAAPI/QSV) |
-| LLM | OpenAI, Anthropic Claude, Google Gemini |
+| LLM | OpenAI (GPT-4o through GPT-5.5), Anthropic Claude (3.5 Sonnet through Opus 4.7), Google Gemini |
 
 ## Prerequisites
 

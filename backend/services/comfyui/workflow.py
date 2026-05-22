@@ -62,6 +62,7 @@ def prepare_klein_workflow(
     height: int,
     seed: int,
     ref_images: Optional[List[str]] = None,
+    negative_prompt: Optional[str] = None,
 ) -> dict:
     """
     Load and prepare a Klein image generation workflow.
@@ -96,6 +97,9 @@ def prepare_klein_workflow(
 
     # Set text prompt — append anti-text suffix to prevent Klein from rendering subtitles/captions
     anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+    # Append global/scene negative prompt as additional anti-text guidance
+    if negative_prompt and negative_prompt.strip():
+        anti_text_suffix += ", " + negative_prompt.strip()
     full_prompt = prompt + anti_text_suffix if prompt else prompt
     set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", full_prompt)
 

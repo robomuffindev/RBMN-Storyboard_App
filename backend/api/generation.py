@@ -224,7 +224,10 @@ async def generate_image(
     """
     try:
         await _get_project_or_404(project_id, session)
-        await _get_scene_or_404(req.scene_id, project_id, session)
+        scene = await _get_scene_or_404(req.scene_id, project_id, session)
+
+        # Read scene-level negative prompt so dispatcher can apply it
+        scene_negative_prompt = scene.negative_prompt or ""
 
         # Resolve seed with fallback chain
         resolved_seed = await _resolve_seed(
@@ -273,6 +276,7 @@ async def generate_image(
                     "seed": resolved_seed,
                     "reference_asset_ids": [],  # No refs for Pass 1
                     **({"frame_type": req.frame_type} if req.frame_type else {}),
+                    "negative_prompt": scene_negative_prompt,
                     "two_pass": True,
                     "two_pass_phase": "base",
                     # Store character refs for Pass 2 (from request or concept data)
@@ -296,6 +300,7 @@ async def generate_image(
                     "seed": resolved_seed,
                     "reference_asset_ids": [str(aid) for aid in req.reference_asset_ids],
                     **({"frame_type": req.frame_type} if req.frame_type else {}),
+                    "negative_prompt": scene_negative_prompt,
                 },
             )
         session.add(job)
@@ -513,9 +518,12 @@ async def enhance_prompt(
         raise
     except Exception as e:
         logger.error(f"Error enhancing prompt: {e}")
+        # Surface the actual error message so users can see what went wrong
+        # (e.g. model not found, invalid API key, unsupported parameter)
+        detail = f"LLM call failed: {e}" if str(e) else "Failed to enhance prompt"
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to enhance prompt",
+            detail=detail,
         )
 
 

@@ -181,6 +181,7 @@ export interface AppSettings {
   video_tail?: number;
   color_correction_enabled?: boolean;
   restrict_explicit_content?: boolean;
+  global_negative_prompt?: string;
   // Export transition settings
   export_transition_type?: string;
   export_transition_duration?: number;

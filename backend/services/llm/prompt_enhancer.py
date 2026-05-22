@@ -425,7 +425,7 @@ class PromptEnhancer:
             raise RuntimeError("OpenAI SDK not installed. Install with: pip install openai")
 
         try:
-            client = OpenAI(api_key=api_key)
+            client = OpenAI(api_key=api_key, timeout=600.0)
 
             if prompt and prompt.strip():
                 user_message = f"Original prompt: {prompt}"
@@ -434,14 +434,27 @@ class PromptEnhancer:
             if context:
                 user_message += f"\n\nContext: {context}"
 
+            effective_model = model or "gpt-4-turbo"
+            # Newer OpenAI models (GPT-4.1+, GPT-5.x, o-series) require
+            # max_completion_tokens instead of the legacy max_tokens parameter
+            _new_style = any(
+                effective_model.startswith(p)
+                for p in ("gpt-4.1", "gpt-5", "o1", "o3", "o4")
+            )
+            token_param = (
+                {"max_completion_tokens": 300}
+                if _new_style
+                else {"max_tokens": 300}
+            )
+
             response = client.chat.completions.create(
-                model=model or "gpt-4-turbo",
+                model=effective_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ],
                 temperature=0.7,
-                max_tokens=300,
+                **token_param,
             )
 
             enhanced = _clean_enhanced_prompt(response.choices[0].message.content)
@@ -467,7 +480,11 @@ class PromptEnhancer:
             raise RuntimeError("Anthropic SDK not installed. Install with: pip install anthropic")
 
         try:
-            client = Anthropic(api_key=api_key)
+            import httpx as _httpx
+            client = Anthropic(
+                api_key=api_key,
+                timeout=_httpx.Timeout(timeout=600.0, connect=10.0),
+            )
 
             if prompt and prompt.strip():
                 user_message = f"Original prompt: {prompt}"
@@ -477,7 +494,7 @@ class PromptEnhancer:
                 user_message += f"\n\nContext: {context}"
 
             response = client.messages.create(
-                model=model or "claude-3-sonnet-20240229",
+                model=model or "claude-sonnet-4-20250514",
                 max_tokens=300,
                 system=system_prompt,
                 messages=[

@@ -52,6 +52,7 @@ export default function SettingsPage() {
     video_tail: 0,
     color_correction_enabled: false,
     restrict_explicit_content: false,
+    global_negative_prompt: '',
     export_transition_type: 'crossfade',
     export_transition_duration: 0.5,
     export_color_match_clips: false,
@@ -118,6 +119,7 @@ export default function SettingsPage() {
         video_tail: savedSettings.video_tail || 0,
         color_correction_enabled: savedSettings.color_correction_enabled === true,
         restrict_explicit_content: savedSettings.restrict_explicit_content === true,
+        global_negative_prompt: savedSettings.global_negative_prompt || '',
         export_transition_type: savedSettings.export_transition_type || 'crossfade',
         export_transition_duration: savedSettings.export_transition_duration ?? 0.5,
         export_color_match_clips: savedSettings.export_color_match_clips === true,
@@ -955,6 +957,21 @@ export default function SettingsPage() {
               nudity and explicit content in outputs. This works across most models as a strong content restriction signal.
             </p>
           </div>
+
+          {/* Global Negative Prompt */}
+          <div className="mt-6 pt-6 border-t border-gray-800">
+            <label className="block text-sm font-medium mb-2">Global Negative Prompt (Image Generation)</label>
+            <textarea
+              value={settings.global_negative_prompt || ''}
+              onChange={(e) => setSettings((prev) => ({ ...prev, global_negative_prompt: e.target.value }))}
+              placeholder="e.g. blurry, low quality, distorted, deformed, ugly, bad anatomy..."
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-20 text-sm"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Applied to all image generation workflows. Appended to the anti-text suffix on every image prompt.
+              Per-scene negative prompts override this when set.
+            </p>
+          </div>
         </section>
 
         {/* Color Correction */}
@@ -1316,6 +1333,7 @@ export default function SettingsPage() {
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
                   >
                     <option value="">Select a model</option>
+                    <option value="claude-opus-4-7">Claude Opus 4.7</option>
                     <option value="claude-opus-4-6">Claude Opus 4.6</option>
                     <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
                     <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>

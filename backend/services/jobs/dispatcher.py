@@ -1010,7 +1010,9 @@ class JobDispatcher:
         seed = params.get("seed") or random.randint(0, 2**32 - 1)
 
         # Check if SFW content restriction is enabled — append suffix to prompt
+        # Also read global negative prompt for image generation
         sfw_suffix = ""
+        global_negative_prompt = ""
         try:
             from sqlmodel import select as sfw_select
             from backend.database.models import AppSettings as SFWAppSettings
@@ -1018,8 +1020,11 @@ class JobDispatcher:
                 sfw_stmt = sfw_select(SFWAppSettings).where(SFWAppSettings.id == 1)
                 sfw_result = await sfw_session.execute(sfw_stmt)
                 sfw_settings = sfw_result.scalars().first()
-                if sfw_settings and sfw_settings.restrict_explicit_content:
-                    sfw_suffix = ", SFW, safe for work, fully clothed, no nudity, no explicit content, no NSFW"
+                if sfw_settings:
+                    if sfw_settings.restrict_explicit_content:
+                        sfw_suffix = ", SFW, safe for work, fully clothed, no nudity, no explicit content, no NSFW"
+                    if sfw_settings.global_negative_prompt:
+                        global_negative_prompt = sfw_settings.global_negative_prompt.strip()
         except Exception:
             pass  # If settings can't be read, skip SFW suffix
 
@@ -1084,8 +1089,15 @@ class JobDispatcher:
                 )
             workflow_path = str(workflows_dir / klein_map[effective_workflow])
             prompt_text = params.get("prompt", "")
-            # Capture the final submitted prompt (includes SFW + image direction + anti-text suffix)
+            # Build effective negative prompt: scene-level overrides global, otherwise use global
+            scene_neg = params.get("negative_prompt", "").strip() if params.get("negative_prompt") else ""
+            effective_neg = scene_neg if scene_neg else global_negative_prompt
+            # Store what was actually used so frontend can display it
+            params["effective_negative_prompt"] = effective_neg
+            # Capture the final submitted prompt (includes SFW + image direction + anti-text suffix + neg prompt)
             anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+            if effective_neg:
+                anti_text_suffix += ", " + effective_neg
             params["submitted_image_prompt"] = (prompt_text + anti_text_suffix) if prompt_text else prompt_text
             return prepare_klein_workflow(
                 workflow_path=workflow_path,
@@ -1094,6 +1106,7 @@ class JobDispatcher:
                 height=params.get("height", 576),
                 seed=seed,
                 ref_images=ref_images,
+                negative_prompt=effective_neg,
             )
 
         # LTX video workflows
