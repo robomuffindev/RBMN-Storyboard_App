@@ -2025,26 +2025,71 @@ async def suggest_timeline(
             raw_boundaries.append(ls["end_time"])
         raw_boundaries.append(total_duration)
 
-        # Snap each interior boundary to nearest phrase gap
+        logger.info(
+            f"[PhraseSnap] {len(split_points)} phrase-gap split points, "
+            f"{len(raw_boundaries)} raw LLM boundaries"
+        )
+        for sp_idx, sp in enumerate(split_points):
+            # Find which phrase this split point falls between
+            phrase_before = ""
+            phrase_after = ""
+            for pi in range(len(phrases) - 1):
+                gap_end = phrases[pi]["end"]
+                gap_start = phrases[pi + 1]["start"]
+                if abs(sp - ((gap_end + gap_start) / 2.0)) < 1.0 or abs(sp - (gap_start - 0.3)) < 1.0:
+                    phrase_before = phrases[pi]["text"][:40]
+                    phrase_after = phrases[pi + 1]["text"][:40]
+                    break
+            logger.info(
+                f"[PhraseSnap] Split point {sp_idx}: {sp:.2f}s "
+                f"(after: \"{phrase_before}\" → before: \"{phrase_after}\")"
+            )
+
+        # Snap each interior boundary to nearest phrase gap.
+        # IMPORTANT: We do NOT track used splits here. Multiple LLM
+        # boundaries may snap to the same phrase gap — that's fine because
+        # sorted(set()) deduplicates them afterward. This prevents the
+        # critical bug where running out of "unused" gaps caused fallback
+        # to raw LLM boundaries that could be mid-phrase.
+        MAX_SNAP_DISTANCE = 8.0  # Don't snap more than 8s away
         snapped: list[float] = [0.0]
-        used_splits: set[int] = set()
         for b_idx in range(1, len(raw_boundaries) - 1):
             boundary = raw_boundaries[b_idx]
-            # Find closest unused split point
+            # Find closest split point within max distance
             best_idx = -1
-            best_dist = 999.0
+            best_dist = MAX_SNAP_DISTANCE
             for sp_idx, sp in enumerate(split_points):
-                if sp_idx in used_splits:
-                    continue
                 dist = abs(sp - boundary)
                 if dist < best_dist:
                     best_dist = dist
                     best_idx = sp_idx
             if best_idx >= 0:
-                used_splits.add(best_idx)
                 snapped.append(split_points[best_idx])
+                logger.info(
+                    f"[PhraseSnap] Boundary {b_idx}: {boundary:.2f}s → "
+                    f"{split_points[best_idx]:.2f}s (snapped to phrase gap, "
+                    f"dist={best_dist:.2f}s)"
+                )
             else:
-                snapped.append(boundary)
+                # No phrase gap within MAX_SNAP_DISTANCE — expand search
+                # to find ANY phrase gap rather than using raw boundary
+                all_dists = [(sp_idx, abs(sp - boundary)) for sp_idx, sp in enumerate(split_points)]
+                all_dists.sort(key=lambda x: x[1])
+                if all_dists:
+                    fallback_idx = all_dists[0][0]
+                    snapped.append(split_points[fallback_idx])
+                    logger.warning(
+                        f"[PhraseSnap] Boundary {b_idx}: {boundary:.2f}s → "
+                        f"{split_points[fallback_idx]:.2f}s (expanded search, "
+                        f"dist={all_dists[0][1]:.2f}s)"
+                    )
+                else:
+                    # Truly no phrase gaps at all (instrumental track?)
+                    snapped.append(boundary)
+                    logger.warning(
+                        f"[PhraseSnap] Boundary {b_idx}: {boundary:.2f}s kept as-is "
+                        f"(no phrase gaps exist)"
+                    )
         snapped.append(total_duration)
 
         # Remove duplicates and sort
@@ -2082,20 +2127,34 @@ async def suggest_timeline(
                             final_boundaries.append(pick)
                             cursor = pick
                         else:
-                            # No phrase gap fits — force-split at max_dur
-                            # Try to find the nearest phrase gap within ±3s
+                            # No phrase gap fits within max_dur window.
+                            # Expand search progressively rather than
+                            # force-splitting mid-phrase.
                             forced = cursor + max_dur
-                            nearby = [
-                                sp for sp in available
-                                if abs(sp - forced) < 3.0 and sp > cursor + 2.0
-                            ]
-                            if nearby:
-                                pick = min(nearby, key=lambda x: abs(x - forced))
-                                final_boundaries.append(pick)
-                                cursor = pick
-                            else:
+                            picked = False
+                            for search_radius in [3.0, 6.0, 10.0, 20.0]:
+                                nearby = [
+                                    sp for sp in available
+                                    if abs(sp - forced) < search_radius and sp > cursor + 2.0
+                                ]
+                                if nearby:
+                                    pick = min(nearby, key=lambda x: abs(x - forced))
+                                    final_boundaries.append(pick)
+                                    cursor = pick
+                                    picked = True
+                                    logger.info(
+                                        f"[PhraseSnap] Force-split found phrase gap at "
+                                        f"{pick:.2f}s (search_radius={search_radius}s)"
+                                    )
+                                    break
+                            if not picked:
+                                # Absolute last resort — no phrase gaps anywhere
                                 final_boundaries.append(forced)
                                 cursor = forced
+                                logger.warning(
+                                    f"[PhraseSnap] Force-split at {forced:.2f}s — "
+                                    f"no phrase gaps found (instrumental section?)"
+                                )
                 else:
                     # No phrase gaps available — force even splits
                     n_splits = math.ceil(dur / max_dur)
@@ -2165,6 +2224,19 @@ async def suggest_timeline(
             if name_counts[vs["name"]] > 1:
                 name_indices[vs["name"]] = name_indices.get(vs["name"], 0) + 1
                 vs["name"] = f"{vs['name']} (Part {name_indices[vs['name']]})"
+
+        # Log which phrases fall in each scene for debugging
+        for vs in validated_scenes:
+            scene_phrases = [
+                p["text"][:50] for p in phrases
+                if p["start"] >= vs["start_time"] - 0.5 and p["end"] <= vs["end_time"] + 0.5
+            ]
+            logger.info(
+                f"[PhraseSnap] Scene '{vs['name']}' [{vs['start_time']:.2f}–{vs['end_time']:.2f}s]: "
+                f"{len(scene_phrases)} phrases"
+            )
+            for pt in scene_phrases:
+                logger.info(f"[PhraseSnap]   → {pt}")
 
         logger.info(
             f"Built {len(validated_scenes)} scenes from {len(phrases)} phrases "
