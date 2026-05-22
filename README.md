@@ -191,6 +191,22 @@ python run.py --mode browser  # Browser mode
 
 **Windows users** can also use the included `install.bat` and `run.bat` scripts.
 
+### Fixing PyTorch CUDA (Existing Installs)
+
+If you installed from an earlier version, your PyTorch may be CPU-only — local Whisper transcription and Demucs stem separation will run much slower (or fail silently). You can check by running:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+If it prints `False` and you have an NVIDIA GPU, run the included fix script:
+
+```
+fix-pytorch-cuda.bat
+```
+
+This auto-detects your GPU and CUDA version, uninstalls the CPU-only PyTorch, and reinstalls the correct CUDA build. New installs from `install.bat` will warn you if this is needed.
+
 ## Typical Workflow
 
 1. **Create a project** — Choose Music Video, Narration (Moving Images), or Narration (Video) mode
