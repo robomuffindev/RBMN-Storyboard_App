@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, autoGenerate, generateVideoFlow, renderPreview, getPreviewStatus } from '@/api/client';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical } from 'lucide-react';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, autoGenerate, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
 import Timeline from '@/components/Timeline/Timeline';
@@ -28,6 +28,8 @@ export default function AppLayout() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const previewPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [timelineHeight, setTimelineHeight] = useState(256); // default h-64 = 256px
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
   const isDraggingTimeline = useRef(false);
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
@@ -288,6 +290,86 @@ export default function AppLayout() {
     setAssets(stableAssets as any[]);
   }, [stableAssets, setAssets]);
 
+  // Close tools menu on click outside
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+        setToolsMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [toolsMenuOpen]);
+
+  // Export Timeline/Lyrics Data handler
+  const handleExportTimelineData = async () => {
+    setToolsMenuOpen(false);
+    if (!id) return;
+    try {
+      const sceneData = scenes ?? [];
+      let lyricsData: any = null;
+      try {
+        const resp = await getLyrics(id);
+        lyricsData = resp.data;
+      } catch { /* no lyrics available */ }
+
+      const words = lyricsData?.words ?? [];
+
+      const exportData = sceneData.map((scene: any, idx: number) => {
+        // Prefer stored lyrics from scene parameters (set by suggest_timeline)
+        // These are the user's real lyrics, not Whisper's garbled transcription
+        let lyrics = scene.parameters?.lyrics || '';
+
+        // Fallback: reconstruct from Whisper word timestamps
+        if (!lyrics && words.length > 0) {
+          const sceneWords = words.filter((w: any) => {
+            const wordStart = w.start_time ?? w.start ?? 0;
+            const wordEnd = w.end_time ?? w.end ?? wordStart;
+            return wordStart >= scene.start_time && wordEnd <= scene.end_time;
+          });
+          lyrics = sceneWords.map((w: any) => w.word ?? w.text ?? '').join(' ').trim();
+        }
+
+        return {
+          scene_number: idx + 1,
+          start_time: scene.start_time,
+          end_time: scene.end_time,
+          duration: Math.round((scene.end_time - scene.start_time) * 1000) / 1000,
+          lyrics: lyrics || '(instrumental)',
+        };
+      });
+
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `timeline-lyrics-${id}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to export timeline data:', err);
+    }
+  };
+
+  // Download Whisper Transcription handler
+  const handleDownloadWhisper = async () => {
+    setToolsMenuOpen(false);
+    if (!id) return;
+    try {
+      const resp = await getLyrics(id);
+      const blob = new Blob([JSON.stringify(resp.data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `whisper-transcription-${id}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download whisper transcription:', err);
+    }
+  };
+
   if (!project) return (
     <div className="h-screen bg-gray-950 text-gray-100 flex items-center justify-center">
       <div className="text-gray-400">Loading project...</div>
@@ -379,6 +461,33 @@ export default function AppLayout() {
             <Download size={20} />
             Export
           </button>
+
+          {/* Tools/Debug Menu */}
+          <div className="relative" ref={toolsMenuRef}>
+            <button
+              onClick={() => setToolsMenuOpen(!toolsMenuOpen)}
+              className="px-3 py-2 text-gray-400 hover:text-gray-100 transition-colors flex items-center"
+              title="Tools"
+            >
+              <MoreVertical size={20} />
+            </button>
+            {toolsMenuOpen && (
+              <div className="absolute right-0 top-full mt-1 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 overflow-hidden">
+                <button
+                  onClick={handleExportTimelineData}
+                  className="w-full px-4 py-3 text-sm text-gray-200 hover:bg-gray-700 text-left transition-colors"
+                >
+                  Export Timeline/Lyrics Data
+                </button>
+                <button
+                  onClick={handleDownloadWhisper}
+                  className="w-full px-4 py-3 text-sm text-gray-200 hover:bg-gray-700 text-left transition-colors border-t border-gray-700"
+                >
+                  Download Whisper Transcription
+                </button>
+              </div>
+            )}
+          </div>
 
           <button
             onClick={() => navigate('/settings')}

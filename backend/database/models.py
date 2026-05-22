@@ -321,6 +321,8 @@ class AppSettings(SQLModel, table=True):
     default_llm_provider: Optional[str] = None
     # Video model max duration in seconds (e.g. LTX 2.3 max ~15s)
     video_max_duration: int = Field(default=15)
+    # Video model min duration in seconds (minimum scene length for timeline)
+    video_min_duration: int = Field(default=5)
     # Video tail: extra seconds added to video generation, then auto-trimmed (0 = disabled)
     video_tail: int = Field(default=0)
     # Color correction: auto-correct color drift between reference frame and generated video

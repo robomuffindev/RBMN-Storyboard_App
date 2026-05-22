@@ -59,6 +59,7 @@ class SettingsResponse(BaseModel):
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     default_llm_provider: Optional[str] = None
     video_max_duration: int = 15
+    video_min_duration: int = 5
     video_tail: int = 0
     color_correction_enabled: bool = True
     restrict_explicit_content: bool = False
@@ -102,6 +103,7 @@ class SettingsUpdate(BaseModel):
     ltx_model_gguf: Optional[str] = None
     default_llm_provider: Optional[str] = None
     video_max_duration: Optional[int] = None
+    video_min_duration: Optional[int] = None
     video_tail: Optional[int] = None
     color_correction_enabled: Optional[bool] = None
     restrict_explicit_content: Optional[bool] = None
@@ -260,6 +262,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
         default_llm_provider=settings.default_llm_provider,
         video_max_duration=settings.video_max_duration or 15,
+        video_min_duration=settings.video_min_duration if settings.video_min_duration is not None else 5,
         video_tail=settings.video_tail or 0,
         color_correction_enabled=settings.color_correction_enabled if settings.color_correction_enabled is not None else True,
         restrict_explicit_content=settings.restrict_explicit_content or False,
@@ -396,6 +399,8 @@ async def update_settings(
             settings.default_llm_provider = req.default_llm_provider or None
         if req.video_max_duration is not None:
             settings.video_max_duration = req.video_max_duration
+        if req.video_min_duration is not None:
+            settings.video_min_duration = req.video_min_duration
         if req.video_tail is not None:
             settings.video_tail = req.video_tail
         if req.color_correction_enabled is not None:
@@ -863,6 +868,7 @@ class SettingsExportData(BaseModel):
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     default_llm_provider: Optional[str] = None
     video_max_duration: int = 15
+    video_min_duration: int = 5
     video_tail: int = 0
     color_correction_enabled: bool = True
     restrict_explicit_content: bool = False
@@ -1022,6 +1028,8 @@ async def import_settings(
             settings.default_llm_provider = data["default_llm_provider"]
         if "video_max_duration" in data:
             settings.video_max_duration = data["video_max_duration"]
+        if "video_min_duration" in data:
+            settings.video_min_duration = data["video_min_duration"]
         if "video_tail" in data:
             settings.video_tail = data["video_tail"]
         if "color_correction_enabled" in data:

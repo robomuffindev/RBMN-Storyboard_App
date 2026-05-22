@@ -48,6 +48,7 @@ export default function SettingsPage() {
     video_prompt_guidance: {},
     video_fps: 24,
     video_max_duration: 15,
+    video_min_duration: 5,
     video_tail: 0,
     color_correction_enabled: false,
     restrict_explicit_content: false,
@@ -113,6 +114,7 @@ export default function SettingsPage() {
         video_prompt_guidance: savedSettings.video_prompt_guidance || {},
         video_fps: savedSettings.video_fps || 24,
         video_max_duration: savedSettings.video_max_duration || 15,
+        video_min_duration: savedSettings.video_min_duration ?? 5,
         video_tail: savedSettings.video_tail || 0,
         color_correction_enabled: savedSettings.color_correction_enabled === true,
         restrict_explicit_content: savedSettings.restrict_explicit_content === true,
@@ -827,19 +829,34 @@ export default function SettingsPage() {
               <p className="text-xs text-gray-500 mt-1">Controls which quantized model file is used in LTX video workflows</p>
             </div>
 
-            {/* Max Duration Field */}
-            <div>
-              <label className="block text-sm font-medium mb-2">Max Duration (seconds)</label>
-              <input
-                type="number"
-                value={settings.video_max_duration || 15}
-                onChange={(e) => setSettings((prev) => ({ ...prev, video_max_duration: parseInt(e.target.value) || 15 }))}
-                min="3"
-                max="60"
-                step="1"
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
-              />
-              <p className="text-xs text-gray-500 mt-1">Maximum seconds per video generation for this model</p>
+            {/* Max / Min Duration Fields */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Max Scene Duration (s)</label>
+                <input
+                  type="number"
+                  value={settings.video_max_duration || 15}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, video_max_duration: parseInt(e.target.value) || 15 }))}
+                  min="3"
+                  max="60"
+                  step="1"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">Maximum seconds per scene / video generation</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Min Scene Duration (s)</label>
+                <input
+                  type="number"
+                  value={settings.video_min_duration ?? 5}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, video_min_duration: parseInt(e.target.value) || 3 }))}
+                  min="2"
+                  max="30"
+                  step="1"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">Minimum seconds per scene (tiny scenes get merged)</p>
+              </div>
             </div>
 
             {/* Video Tail Field */}
@@ -1201,11 +1218,14 @@ export default function SettingsPage() {
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
                   >
                     <option value="">Select a model</option>
-                    <option value="gpt-4o">GPT-4o</option>
-                    <option value="gpt-4o-mini">GPT-4o Mini</option>
+                    <option value="gpt-5.5">GPT-5.5</option>
+                    <option value="gpt-5.4-mini">GPT-5.4 Mini</option>
+                    <option value="gpt-5.4-nano">GPT-5.4 Nano</option>
                     <option value="gpt-4.1">GPT-4.1</option>
                     <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
                     <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
+                    <option value="gpt-4o">GPT-4o</option>
+                    <option value="gpt-4o-mini">GPT-4o Mini</option>
                     <option value="o3-mini">o3 Mini</option>
                   </select>
                 </div>
@@ -1271,11 +1291,12 @@ export default function SettingsPage() {
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
                   >
                     <option value="">Select a model</option>
+                    <option value="claude-opus-4-6">Claude Opus 4.6</option>
+                    <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
+                    <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
                     <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
                     <option value="claude-opus-4-20250514">Claude Opus 4</option>
-                    <option value="claude-haiku-4-20250414">Claude Haiku 4</option>
                     <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                    <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
                   </select>
                 </div>
                 <button

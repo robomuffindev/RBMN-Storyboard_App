@@ -179,6 +179,15 @@ async def init_db() -> None:
         except Exception:
             pass  # Column already exists
 
+        # Add video_min_duration column to app_settings if missing
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN video_min_duration INTEGER DEFAULT 5")
+            )
+            logger.info("Migration: added video_min_duration column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
         # Add video_tail column to app_settings if missing
         try:
             await conn.execute(

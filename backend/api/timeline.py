@@ -882,7 +882,27 @@ def _group_words_into_sentences(
 
     # ── PRIMARY: Use lyrics lines if available ──────────────────────────
     if lyrics_text and lyrics_text.strip():
-        lines = [l.strip() for l in lyrics_text.strip().splitlines() if l.strip()]
+        raw_lines = [l.strip() for l in lyrics_text.strip().splitlines() if l.strip()]
+        # Filter out section headers like [Intro], [Verse 1], [Chorus], etc.
+        # and purely parenthetical lines like (Mm-mm-mm...), (That's right...)
+        # These are structural annotations, not sung lyrics — Whisper won't
+        # detect them, so trying to match them consumes words incorrectly
+        # and desynchronizes all subsequent phrase groups.
+        lines = []
+        for line in raw_lines:
+            # Skip section headers: [Intro], [Verse 1], [Pre-Chorus], etc.
+            if re.match(r'^\[.*\]$', line):
+                logger.info(f"[LyricsFilter] Skipping section header: '{line}'")
+                continue
+            # Skip purely parenthetical lines: (Mm-mm-mm...), (That's right...)
+            if re.match(r'^\(.*\)$', line):
+                logger.info(f"[LyricsFilter] Skipping parenthetical line: '{line}'")
+                continue
+            lines.append(line)
+        logger.info(
+            f"[LyricsFilter] {len(raw_lines)} raw lines → {len(lines)} after filtering "
+            f"({len(raw_lines) - len(lines)} removed)"
+        )
         if lines:
             return _match_words_to_lyrics_lines(words, lines)
 
@@ -927,41 +947,25 @@ def _match_words_to_lyrics_lines(
 ) -> list[list[dict]]:
     """Match Whisper word timestamps to user-provided lyrics lines.
 
-    Each lyrics line defines an indivisible phrase. We walk through the
-    Whisper words and assign them to lines by matching word counts per line.
-
-    MATCHING STRATEGY:
-    1. For each lyrics line, find its first word in the Whisper stream
-       using a wide search window (up to 20 positions) with fuzzy matching.
-    2. Use the NEXT line's first word as an anchor to determine where
-       the current line ends — search a wide window around the expected
-       end position.
-    3. Capital letters in Whisper words are used as a secondary signal:
-       if the next Whisper word starts with a capital letter AND aligns
-       with a lyrics line start, it's a strong boundary indicator.
-
-    WORD ANCHORING: After initial matching, any words that were skipped
-    (between groups) are merged into the nearest adjacent group. Single-word
-    groups are also merged into their neighbor. This ensures a word like
-    "Black" from "Black hat on a wooden chair" is NEVER orphaned into its
-    own group — it always stays anchored to its phrase.
+    TIME-AWARE MULTI-WORD MONOTONIC ANCHOR STRATEGY:
+    - Uses Whisper word TIMESTAMPS (not word-count ratios) to estimate
+      where each lyrics line should appear in the audio stream
+    - Anchors use first 2-3 words of each lyrics line for matching
+    - Search is STRICTLY MONOTONIC: each anchor must be after the previous
+    - Time-based reasonableness check rejects matches >20s from expected
+    - Missed anchors interpolated using TIME positions (not word counts)
     """
     import re
 
     def clean_word(w: str) -> str:
-        """Normalize a word for comparison."""
         return re.sub(r'[^a-zA-Z0-9]', '', w).lower()
 
     def words_similar(a: str, b: str) -> bool:
-        """Check if two cleaned words are similar enough to be a match.
-        Handles Whisper mishearings like walkin/walking, gonna/going to."""
         if a == b:
             return True
-        # One is a prefix of the other (walkin/walking, comin/coming)
         if len(a) >= 3 and len(b) >= 3:
             if a.startswith(b) or b.startswith(a):
                 return True
-        # Edit distance 1 for words of length 4+
         if len(a) >= 4 and len(b) >= 4 and abs(len(a) - len(b)) <= 1:
             diffs = sum(1 for ca, cb in zip(a, b) if ca != cb)
             diffs += abs(len(a) - len(b))
@@ -970,210 +974,321 @@ def _match_words_to_lyrics_lines(
         return False
 
     def get_raw_word(w: dict) -> str:
-        """Get raw (uncleaned) word text from a Whisper word dict."""
         return (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
 
-    def starts_with_capital(w: dict) -> bool:
-        """Check if a Whisper word starts with a capital letter."""
-        raw = get_raw_word(w)
-        return bool(raw) and raw[0].isupper()
-
-    # Build a flat list of cleaned Whisper words for matching
-    whisper_cleaned = []
-    whisper_raw = []
+    # Build cleaned Whisper word arrays and time index
+    whisper_cleaned: list[str] = []
+    whisper_raw: list[str] = []
+    whisper_times: list[float] = []  # start time of each Whisper word
     for w in words:
         raw = get_raw_word(w)
         whisper_raw.append(raw)
         whisper_cleaned.append(clean_word(raw))
+        # Handle both field name conventions: start/end and start_time/end_time
+        whisper_times.append(w.get("start", 0) or w.get("start_time", 0))
+
+    # Total audio span covered by Whisper words
+    audio_start = whisper_times[0] if whisper_times else 0
+    last_w = words[-1] if words else {}
+    audio_end = (last_w.get("end", 0) or last_w.get("end_time", 0)) if words else 0
 
     logger.info(
-        f"[WordMatch] Matching {len(words)} Whisper words to {len(lines)} lyrics lines"
-    )
-    logger.info(
-        f"[WordMatch] Total lyrics words: "
-        f"{sum(len(l.split()) for l in lines)}, "
-        f"Whisper words: {len(words)}"
+        f"[WordMatch] Matching {len(words)} Whisper words to {len(lines)} lyrics lines "
+        f"(audio {audio_start:.1f}s–{audio_end:.1f}s)"
     )
 
-    # Track which word indices are assigned to which group
-    word_to_group: dict[int, int] = {}
+    # Pre-process lyrics lines
+    line_infos: list[dict] = []
+    for line in lines:
+        stripped = re.sub(r'\s*\([^)]*\)\s*', ' ', line).strip()
+        stripped = stripped.replace('…', '').strip()
+        raw_tokens = stripped.split() if stripped else line.split()
+        clean_tokens = [clean_word(w) for w in raw_tokens]
+        clean_tokens = [w for w in clean_tokens if w]
+        line_infos.append({
+            "original": line,
+            "clean_tokens": clean_tokens,
+            "first_word": clean_tokens[0] if clean_tokens else "",
+            "word_count": len(clean_tokens),
+        })
+
+    total_lyrics_words = sum(info["word_count"] for info in line_infos)
+    logger.info(
+        f"[WordMatch] Total lyrics words: {total_lyrics_words}, Whisper words: {len(words)}"
+    )
+
+    # ── Compute expected WORD INDEX for each lyrics line ─────────────
+    # Use word-count ratio through the Whisper stream (NOT time ratio).
+    # This naturally handles instrumental breaks because Whisper has no
+    # words during them — the ratio skips over gaps automatically.
+    cum_words = [0]
+    for info in line_infos:
+        cum_words.append(cum_words[-1] + info["word_count"])
+
+    n_whisper = len(words)
+    expected_indices: list[int] = []
+    for li in range(len(line_infos)):
+        frac = cum_words[li] / max(total_lyrics_words, 1)
+        expected_indices.append(int(frac * n_whisper))
+
+    logger.info(
+        f"[WordMatch] Expected indices (first 10): "
+        f"{expected_indices[:10]} ... (last: {expected_indices[-1] if expected_indices else 'N/A'})"
+    )
+
+    # ══════════════════════════════════════════════════════════════════
+    # BOUNDED WINDOW MONOTONIC ANCHORING
+    #
+    # Key design:
+    # - ALL match types search a BOUNDED window around expected position
+    #   (NOT the entire forward stream — that causes chorus-skipping)
+    # - Within the window, collect ALL candidates and pick CLOSEST to
+    #   expected position (avoids wrong-occurrence in repeated sections)
+    # - After each confirmed anchor, compute drift and adjust remaining
+    #   expected positions to stay accurate
+    # - Prefer stronger match types: exact3 > exact2 > fuzzy2 > exact1 > fuzzy1
+    # ══════════════════════════════════════════════════════════════════
+
+    drift = 0  # cumulative offset: positive = lyrics are later than expected
+
+    # Window size: search ±30% of total words, minimum 60
+    # This is generous enough for tempo variations but prevents
+    # jumping from verse 1 to the final chorus
+    _SEARCH_WINDOW = max(60, n_whisper * 3 // 10)
+
+    def _find_anchor_bounded(
+        tokens: list[str], search_start: int, expected_idx: int,
+    ) -> tuple[int, str]:
+        """Find anchor in a bounded window around expected_idx.
+        Collects ALL candidates per match type, picks closest to expected."""
+        if not tokens:
+            return -1, "none"
+
+        # Bounded search range: [search_start, expected + window]
+        # We always start from search_start (monotonic) but cap the upper end
+        sw_end = min(len(whisper_cleaned), expected_idx + _SEARCH_WINDOW)
+        # Ensure at least some range past search_start
+        sw_end = max(sw_end, min(len(whisper_cleaned), search_start + _SEARCH_WINDOW))
+
+        # --- Try each match type in priority order ---
+        # For each type, collect ALL matches in window, pick closest to expected
+
+        # 3-word exact sequence
+        if len(tokens) >= 3:
+            candidates = []
+            for s in range(search_start, sw_end):
+                if s + 2 < len(whisper_cleaned):
+                    if (whisper_cleaned[s] == tokens[0]
+                            and words_similar(whisper_cleaned[s + 1], tokens[1])
+                            and words_similar(whisper_cleaned[s + 2], tokens[2])):
+                        candidates.append(s)
+            if candidates:
+                return min(candidates, key=lambda p: abs(p - expected_idx)), "exact3"
+
+        # 2-word exact sequence (first word exact, second similar)
+        if len(tokens) >= 2:
+            candidates = []
+            for s in range(search_start, sw_end):
+                if s + 1 < len(whisper_cleaned):
+                    if (whisper_cleaned[s] == tokens[0]
+                            and words_similar(whisper_cleaned[s + 1], tokens[1])):
+                        candidates.append(s)
+            if candidates:
+                return min(candidates, key=lambda p: abs(p - expected_idx)), "exact2"
+
+        # 2-word fuzzy sequence (both words fuzzy)
+        if len(tokens) >= 2:
+            candidates = []
+            for s in range(search_start, sw_end):
+                if s + 1 < len(whisper_cleaned):
+                    if (words_similar(whisper_cleaned[s], tokens[0])
+                            and words_similar(whisper_cleaned[s + 1], tokens[1])):
+                        candidates.append(s)
+            if candidates:
+                return min(candidates, key=lambda p: abs(p - expected_idx)), "fuzzy2"
+
+        # 1-word exact
+        candidates = [s for s in range(search_start, sw_end)
+                      if whisper_cleaned[s] == tokens[0]]
+        if candidates:
+            return min(candidates, key=lambda p: abs(p - expected_idx)), "exact1"
+
+        # 1-word fuzzy
+        candidates = [s for s in range(search_start, sw_end)
+                      if words_similar(whisper_cleaned[s], tokens[0])]
+        if candidates:
+            return min(candidates, key=lambda p: abs(p - expected_idx)), "fuzzy1"
+
+        return -1, "none"
+
+    anchors: list[int] = []  # anchors[i] = Whisper word index, or -1 if missed
+    min_next_pos = 0  # Strict monotonic
+    consecutive_misses = 0
+
+    # Time validation thresholds: reject matches where the audio time
+    # jumps too far from expected. This prevents single common words
+    # like "What" from matching a later chorus instead of the current verse.
+    _TIME_THRESH_STRONG = 40.0  # seconds — for exact3/exact2 (strong signal)
+    _TIME_THRESH_WEAK = 20.0    # seconds — for fuzzy2/exact1/fuzzy1 (weak signal)
+
+    for li, info in enumerate(line_infos):
+        tokens = info["clean_tokens"]
+        if not tokens:
+            anchors.append(-1)
+            continue
+
+        # Apply drift correction to expected index
+        adj_expected = max(min_next_pos, expected_indices[li] + drift)
+        adj_expected = min(adj_expected, n_whisper - 1)
+
+        pos, match_type = _find_anchor_bounded(tokens, min_next_pos, adj_expected)
+
+        if pos >= 0:
+            # TIME VALIDATION: check if the match is at a reasonable audio time
+            match_time = whisper_times[pos] if pos < len(whisper_times) else audio_end
+            # Expected time = Whisper timestamp at the expected word index
+            exp_idx_clamped = max(0, min(adj_expected, n_whisper - 1))
+            expected_time = whisper_times[exp_idx_clamped] if exp_idx_clamped < len(whisper_times) else audio_end
+            time_diff = abs(match_time - expected_time)
+
+            thresh = _TIME_THRESH_STRONG if match_type in ("exact3", "exact2") else _TIME_THRESH_WEAK
+            if time_diff > thresh:
+                # Match is too far from expected time — likely wrong section
+                logger.info(
+                    f"[WordMatch] Line {li}: REJECTED {match_type} '{whisper_raw[pos]}' "
+                    f"at {match_time:.1f}s (expected ~{expected_time:.1f}s, diff={time_diff:.1f}s > {thresh:.0f}s) "
+                    f"| '{info['original'][:40]}'"
+                )
+                anchors.append(-1)
+                consecutive_misses += 1
+            else:
+                anchors.append(pos)
+                min_next_pos = pos + 1
+                consecutive_misses = 0
+
+                # Update drift: how far off was our prediction?
+                raw_expected = expected_indices[li]
+                new_drift = pos - raw_expected
+                # Smooth drift: blend with existing (avoid wild swings)
+                drift = int(0.6 * new_drift + 0.4 * drift)
+
+                if match_type not in ("exact3", "exact2"):
+                    logger.info(
+                        f"[WordMatch] Line {li}: {match_type} anchor "
+                        f"'{whisper_raw[pos]}' ≈ '{info['original'][:40]}' "
+                        f"at pos {pos} ({match_time:.1f}s, expected ~{expected_time:.1f}s, drift={drift})"
+                    )
+        else:
+            anchors.append(-1)
+            consecutive_misses += 1
+            logger.info(
+                f"[WordMatch] Line {li}: MISS for '{info['original'][:40]}' "
+                f"(adj_expected={adj_expected}, searched from {min_next_pos}, drift={drift})"
+            )
+
+    matched_count = sum(1 for a in anchors if a >= 0)
+    logger.info(
+        f"[WordMatch] Anchoring complete: {matched_count}/{len(anchors)} matched, "
+        f"final drift={drift}"
+    )
+
+    # ── Interpolate missed anchors ────────────────────────────────────
+    confirmed = [(i, anchors[i]) for i in range(len(anchors)) if anchors[i] >= 0]
+
+    if not confirmed:
+        # Nothing matched — distribute evenly by word count ratio
+        logger.warning("[WordMatch] No anchors matched! Distributing evenly")
+        for li in range(len(anchors)):
+            anchors[li] = min(expected_indices[li], n_whisper - 1)
+    else:
+        # Add virtual anchors at start and end for edge interpolation
+        if confirmed[0][0] > 0:
+            confirmed.insert(0, (0, 0))
+            anchors[0] = 0
+        if confirmed[-1][0] < len(anchors) - 1:
+            last_li = len(anchors) - 1
+            last_confirmed = confirmed[-1]
+            # Place last virtual anchor near end of Whisper stream
+            last_pos = min(n_whisper - 1, last_confirmed[1] + line_infos[last_confirmed[0]]["word_count"])
+            # But also ensure it reaches the actual end for the last lines
+            last_pos = max(last_pos, n_whisper - 1)
+            confirmed.append((last_li, last_pos))
+            anchors[last_li] = last_pos
+
+        # Interpolate between consecutive confirmed anchors using word-count ratio
+        for ci in range(len(confirmed) - 1):
+            left_li, left_pos = confirmed[ci]
+            right_li, right_pos = confirmed[ci + 1]
+            if right_li - left_li <= 1:
+                continue
+
+            pos_span = max(right_pos - left_pos, 1)
+            # Count words in the gap lines
+            gap_words_total = sum(line_infos[li]["word_count"] for li in range(left_li, right_li + 1))
+            gap_words_total = max(gap_words_total, 1)
+
+            gap_cum = 0
+            for li in range(left_li + 1, right_li):
+                if anchors[li] >= 0:
+                    gap_cum += line_infos[li]["word_count"]
+                    continue
+                gap_cum += line_infos[li]["word_count"]
+                frac = gap_cum / gap_words_total
+                interp_pos = int(left_pos + frac * pos_span)
+                anchors[li] = max(left_pos + 1, min(interp_pos, right_pos - 1))
+                if anchors[li] < len(whisper_times):
+                    interp_time = whisper_times[anchors[li]]
+                    logger.info(
+                        f"[WordMatch] Line {li}: interpolated to pos {anchors[li]} "
+                        f"({interp_time:.1f}s)"
+                    )
+
+    # Ensure strict monotonic after interpolation
+    for i in range(1, len(anchors)):
+        if anchors[i] <= anchors[i - 1]:
+            anchors[i] = anchors[i - 1] + 1
+    # Clamp to valid range
+    for i in range(len(anchors)):
+        anchors[i] = max(0, min(anchors[i], len(words)))
+
+    # ══════════════════════════════════════════════════════════════════
+    # BUILD PHRASE GROUPS from anchor positions
+    # ══════════════════════════════════════════════════════════════════
     groups: list[list[dict]] = []
     group_ranges: list[tuple[int, int]] = []
-    word_idx = 0
+    word_to_group: dict[int, int] = {}
 
-    # ── SEARCH WINDOW SIZES ──────────────────────────────────────────
-    FIRST_WORD_SEARCH = 20  # How far ahead to look for a line's first word
-    NEXT_LINE_SEARCH = 15   # How far around expected end to look for next line's start
+    for li in range(len(anchors)):
+        g_start = anchors[li]
+        g_end = anchors[li + 1] if li + 1 < len(anchors) else len(words)
+        g_end = min(g_end, len(words))
 
-    for line_idx, line in enumerate(lines):
-        line_words_raw = line.split()
-        line_words_clean = [clean_word(w) for w in line_words_raw]
-        expected_count = len(line_words_clean)
+        if g_start >= len(words) or g_start >= g_end:
+            continue
 
-        if word_idx >= len(words):
-            logger.warning(
-                f"[WordMatch] Ran out of Whisper words at line {line_idx}: "
-                f"'{line[:50]}'"
-            )
-            break
+        g_idx = len(groups)
+        group_words = list(words[g_start:g_end])
+        if group_words:
+            group_words[0] = dict(group_words[0])
+            group_words[0]["__source_lyrics_line__"] = line_infos[li]["original"]
+        groups.append(group_words)
+        group_ranges.append((g_start, g_end))
+        for wi in range(g_start, g_end):
+            word_to_group[wi] = g_idx
 
-        # ── Find first word of this line ─────────────────────────────
-        first_word = line_words_clean[0] if line_words_clean else ""
-        best_start = word_idx
-
-        if first_word:
-            search_end = min(word_idx + FIRST_WORD_SEARCH, len(words))
-            found_first = False
-
-            # Pass 1: exact match
-            for s in range(word_idx, search_end):
-                if whisper_cleaned[s] == first_word:
-                    best_start = s
-                    found_first = True
-                    break
-
-            # Pass 2: fuzzy match (if exact failed)
-            if not found_first:
-                for s in range(word_idx, search_end):
-                    if words_similar(whisper_cleaned[s], first_word):
-                        best_start = s
-                        found_first = True
-                        logger.info(
-                            f"[WordMatch] Line {line_idx}: fuzzy match "
-                            f"'{whisper_raw[s]}' ≈ '{line_words_raw[0]}' at pos {s}"
-                        )
-                        break
-
-            # Pass 3: capital letter heuristic — if a nearby Whisper word
-            # starts with a capital AND is close to expected position,
-            # use it as the boundary even if the word doesn't match
-            if not found_first and line_idx > 0:
-                for s in range(word_idx, min(word_idx + 10, len(words))):
-                    if starts_with_capital(words[s]):
-                        # Check if there's a pause before this word
-                        if s > 0:
-                            prev_end = words[s - 1].get("end", 0)
-                            this_start = words[s].get("start", 0)
-                            gap = this_start - prev_end
-                            if gap > 0.2:  # Some pause before capital word
-                                best_start = s
-                                found_first = True
-                                logger.info(
-                                    f"[WordMatch] Line {line_idx}: capital letter anchor "
-                                    f"'{whisper_raw[s]}' at pos {s} "
-                                    f"(gap={gap:.2f}s before it)"
-                                )
-                                break
-
-            if not found_first:
-                logger.warning(
-                    f"[WordMatch] Line {line_idx}: couldn't find first word "
-                    f"'{first_word}' near pos {word_idx}, "
-                    f"using default pos {best_start}"
-                )
-
-        group_end = best_start + expected_count
-
-        # ── Refine end using next line's first word ──────────────────
-        if line_idx + 1 < len(lines):
-            next_line_words = [clean_word(w) for w in lines[line_idx + 1].split()]
-            next_first = next_line_words[0] if next_line_words else ""
-            if next_first:
-                # Search a wide window around the expected group_end
-                search_start = max(best_start + 1, group_end - 3)
-                search_limit = min(group_end + NEXT_LINE_SEARCH, len(words))
-                found_next = False
-
-                # Pass 1: exact match for next line's first word
-                for s in range(search_start, search_limit):
-                    if whisper_cleaned[s] == next_first:
-                        group_end = s
-                        found_next = True
-                        break
-
-                # Pass 2: fuzzy match
-                if not found_next:
-                    for s in range(search_start, search_limit):
-                        if words_similar(whisper_cleaned[s], next_first):
-                            group_end = s
-                            found_next = True
-                            logger.info(
-                                f"[WordMatch] Line {line_idx}: fuzzy next-line anchor "
-                                f"'{whisper_raw[s]}' ≈ '{next_first}' at pos {s}"
-                            )
-                            break
-
-                # Pass 3: capital letter + pause as next-line boundary
-                if not found_next:
-                    for s in range(search_start, search_limit):
-                        if starts_with_capital(words[s]) and s > 0:
-                            prev_end = words[s - 1].get("end", 0)
-                            this_start = words[s].get("start", 0)
-                            gap = this_start - prev_end
-                            if gap > 0.3:
-                                group_end = s
-                                found_next = True
-                                logger.info(
-                                    f"[WordMatch] Line {line_idx}: capital+pause next-line "
-                                    f"anchor '{whisper_raw[s]}' at pos {s} "
-                                    f"(gap={gap:.2f}s)"
-                                )
-                                break
-
-        group_end = min(group_end, len(words))
-
-        if best_start < group_end:
-            g_idx = len(groups)
-            group_words = words[best_start:group_end]
-            groups.append(group_words)
-            group_ranges.append((best_start, group_end))
-            for wi in range(best_start, group_end):
-                word_to_group[wi] = g_idx
-            word_idx = group_end
-
-            # Log the match
-            matched_text = " ".join(whisper_raw[best_start:group_end])
-            logger.info(
-                f"[WordMatch] Line {line_idx} ({expected_count} words): "
-                f"'{line[:50]}' → Whisper [{best_start}:{group_end}] "
-                f"'{matched_text[:60]}'"
-            )
-        else:
-            word_idx = best_start
-            logger.warning(
-                f"[WordMatch] Line {line_idx}: empty group "
-                f"(best_start={best_start}, group_end={group_end})"
-            )
-
-    # Trailing words → last group
-    if word_idx < len(words):
-        trailing_count = len(words) - word_idx
-        trailing_text = " ".join(whisper_raw[word_idx:word_idx + 5])
-        if groups:
-            g_idx = len(groups) - 1
-            groups[g_idx].extend(words[word_idx:])
-            old_start, _ = group_ranges[g_idx]
-            group_ranges[g_idx] = (old_start, len(words))
-            for wi in range(word_idx, len(words)):
-                word_to_group[wi] = g_idx
-            logger.info(
-                f"[WordMatch] Appended {trailing_count} trailing words to last group: "
-                f"'{trailing_text}...'"
-            )
-        else:
-            groups.append(words[word_idx:])
-            group_ranges.append((word_idx, len(words)))
-            for wi in range(word_idx, len(words)):
+    # Handle leading words before first anchor
+    if anchors and anchors[0] > 0 and groups:
+        leading = list(words[0:anchors[0]])
+        if leading:
+            groups[0] = leading + groups[0]
+            old_start, old_end = group_ranges[0]
+            group_ranges[0] = (0, old_end)
+            for wi in range(0, anchors[0]):
                 word_to_group[wi] = 0
-            logger.info(
-                f"[WordMatch] Created single group from {trailing_count} trailing words"
-            )
 
-    # ── WORD ANCHORING: merge orphaned words into nearest group ───────
-    orphaned: list[int] = [i for i in range(len(words)) if i not in word_to_group]
+    # Merge orphaned words into nearest group
+    orphaned = [i for i in range(len(words)) if i not in word_to_group]
     if orphaned and groups:
-        logger.info(f"[WordAnchor] Found {len(orphaned)} orphaned word(s): "
-                     f"{[whisper_raw[i] for i in orphaned]}")
         for oi in orphaned:
             best_group = 0
             best_dist = float('inf')
@@ -1182,7 +1297,6 @@ def _match_words_to_lyrics_lines(
                 if dist < best_dist:
                     best_dist = dist
                     best_group = gi
-
             word_obj = words[oi]
             word_time = word_obj.get("start", 0)
             inserted = False
@@ -1193,29 +1307,23 @@ def _match_words_to_lyrics_lines(
                     break
             if not inserted:
                 groups[best_group].append(word_obj)
-
             word_to_group[oi] = best_group
-            logger.info(f"[WordAnchor] Anchored '{whisper_raw[oi]}' → group {best_group}")
 
-    # ── Merge single-word groups into neighbors ──────────────────────
+    # Merge single-word groups into neighbors
     if len(groups) > 1:
         merged_groups: list[list[dict]] = []
         for gi, group in enumerate(groups):
             if len(group) == 1 and len(groups) > 1:
-                word_text = get_raw_word(group[0])
                 if merged_groups:
                     merged_groups[-1].extend(group)
-                    logger.info(f"[WordAnchor] Merged single-word '{word_text}' into previous group")
                 elif gi + 1 < len(groups):
                     groups[gi + 1] = group + groups[gi + 1]
-                    logger.info(f"[WordAnchor] Merged single-word '{word_text}' into next group")
                 else:
                     merged_groups.append(group)
             else:
                 merged_groups.append(group)
         groups = merged_groups
 
-    # Filter out empty groups
     groups = [g for g in groups if g]
 
     logger.info(
@@ -2072,50 +2180,7 @@ async def suggest_timeline(
     else:
         sections_text = "No song sections detected.\n"
 
-    # ── Build lyrics + word timing text ──────────────────────────────────
-
-    lyrics_block = ""
-    if user_lyrics:
-        lyrics_block += f"USER-PROVIDED LYRICS (use these for structural tags like [Verse 1], [Chorus], etc.):\n{user_lyrics}\n\n"
-
-    if whisper_text and whisper_text != user_lyrics:
-        lyrics_block += f"WHISPER-TRANSCRIBED LYRICS:\n{whisper_text}\n\n"
-
-    # Word timestamps — critical for alignment
-    if word_timestamps:
-        # Group words into phrases using the same lyrics-line-aware function
-        # that scene boundary snapping uses — ensures consistency
-        phrases = _group_words_into_sentences(word_timestamps, lyrics_text=user_lyrics)
-
-        # Build phrase-grouped timing display
-        lyrics_block += "LYRICS GROUPED BY PHRASE (each line = one complete phrase that must NOT be split):\n"
-        for phrase in phrases:
-            first_start = phrase[0].get("start", 0)
-            last_end = phrase[-1].get("end", 0)
-            phrase_text = " ".join(
-                (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
-                for w in phrase
-            )
-            lyrics_block += f"  [{first_start:.2f}s–{last_end:.2f}s] {phrase_text}\n"
-
-        # Build explicit phrase break points — safe places to put scene boundaries
-        lyrics_block += "\nPHRASE BREAK POINTS (safe times to place scene boundaries — ranked by quality):\n"
-        scored_gaps = _build_phrase_gaps(word_timestamps, lyrics_text=user_lyrics)
-        # Show top break points (up to 40, sorted by time for readability)
-        top_gaps = sorted(scored_gaps[:40], key=lambda g: g["time"])
-        for gap in top_gaps:
-            quality = "SENTENCE END" if gap["score"] >= 10 else "VERSE BREAK" if gap["score"] >= 8 else "PHRASE BREAK" if gap["score"] >= 4 else "pause"
-            lyrics_block += (
-                f"  {gap['time']:.2f}s (gap={gap['gap_size']:.1f}s, {quality}, "
-                f"after: \"{gap['word_before']}\")\n"
-            )
-
-        lyrics_block += "\n"
-
-    if not lyrics_block:
-        lyrics_block = "No lyrics available.\n"
-
-    # ── Read video_max_duration from AppSettings ────────────────────────
+    # ── Read video_max_duration from AppSettings (needed for cut points) ─
 
     settings_stmt = select(AppSettings).where(AppSettings.id == 1)
     settings_result = await session.execute(settings_stmt)
@@ -2123,68 +2188,201 @@ async def suggest_timeline(
     if not app_settings:
         raise HTTPException(status_code=400, detail="App settings not configured")
     max_dur = app_settings.video_max_duration or 15
+    min_dur = getattr(app_settings, 'video_min_duration', 5) or 5
+
+    # ── Build the VALID CUT POINTS list ────────────────────────────────
+    # These are the ONLY times where scene boundaries may be placed.
+    # Each cut point sits between two complete phrases — never mid-phrase.
+
+    valid_cuts: list[dict] = []  # [{time, label, after_phrase, before_phrase}, ...]
+
+    if word_timestamps:
+        # Group words into phrases
+        phrase_groups = _group_words_into_sentences(word_timestamps, lyrics_text=user_lyrics)
+
+        def _get_phrase_text(pg: list[dict]) -> str:
+            return " ".join(
+                (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+                for w in pg
+            ).strip()
+
+        def _get_phrase_lyrics_line(pg: list[dict]) -> str:
+            """Get the original user-typed lyrics line for a phrase group.
+            Falls back to Whisper text if no source annotation exists."""
+            if pg and pg[0].get("__source_lyrics_line__"):
+                return pg[0]["__source_lyrics_line__"]
+            return _get_phrase_text(pg)
+
+        # Build cut point before the first phrase (intro → lyrics)
+        if phrase_groups and phrase_groups[0]:
+            first_start = phrase_groups[0][0].get("start", 0)
+            if first_start > 0.3:
+                cut_time = round(first_start - 0.3, 2)
+                valid_cuts.append({
+                    "time": cut_time,
+                    "label": f"CUT_A: {cut_time:.2f}s — before first phrase starts",
+                    "after_phrase": "(instrumental intro)",
+                    "before_phrase": _get_phrase_text(phrase_groups[0])[:60],
+                })
+
+        # Build cut points between each pair of consecutive phrases
+        for i in range(len(phrase_groups) - 1):
+            pg_cur = phrase_groups[i]
+            pg_next = phrase_groups[i + 1]
+            if not pg_cur or not pg_next:
+                continue
+
+            phrase_end = pg_cur[-1].get("end", 0)
+            next_start = pg_next[0].get("start", 0)
+            gap = next_start - phrase_end
+
+            # Place cut 0.3s before next phrase, or at gap midpoint if tight
+            if gap > 0.6:
+                cut_time = round(next_start - 0.3, 2)
+            else:
+                cut_time = round((phrase_end + next_start) / 2.0, 2)
+
+            letter = chr(ord('A') + (len(valid_cuts) % 26))
+            valid_cuts.append({
+                "time": cut_time,
+                "label": f"CUT_{letter}: {cut_time:.2f}s — between phrases (gap={gap:.1f}s)",
+                "after_phrase": _get_phrase_text(pg_cur)[:60],
+                "before_phrase": _get_phrase_text(pg_next)[:60],
+            })
+
+        # Build cut point after the last phrase (lyrics → instrumental outro)
+        if phrase_groups and phrase_groups[-1]:
+            last_end = phrase_groups[-1][-1].get("end", 0)
+            if last_end < total_duration - 1.0:
+                cut_time = round(last_end + 0.3, 2)
+                letter = chr(ord('A') + (len(valid_cuts) % 26))
+                valid_cuts.append({
+                    "time": cut_time,
+                    "label": f"CUT_{letter}: {cut_time:.2f}s — after last phrase ends",
+                    "after_phrase": _get_phrase_text(phrase_groups[-1])[:60],
+                    "before_phrase": "(instrumental outro)",
+                })
+
+        # For long instrumental intro/outro, add evenly-spaced cuts so they
+        # can be split to respect max_dur.  These are "safe" because no
+        # lyrics exist in those regions.
+        if valid_cuts:
+            first_cut = valid_cuts[0]["time"]
+            last_cut = valid_cuts[-1]["time"]
+        else:
+            first_cut = total_duration
+            last_cut = 0.0
+
+        # Intro cuts: if intro > max_dur, add cuts every max_dur-2 seconds
+        if first_cut > max_dur:
+            t = max_dur - 1.0
+            while t < first_cut - 2.0:
+                valid_cuts.append({
+                    "time": round(t, 2),
+                    "label": f"CUT_INTRO: {t:.2f}s — instrumental intro split",
+                    "after_phrase": "(instrumental)",
+                    "before_phrase": "(instrumental)",
+                })
+                t += max_dur - 1.0
+
+        # Outro cuts: if outro > max_dur, add cuts every max_dur-2 seconds
+        if total_duration - last_cut > max_dur:
+            t = last_cut + max_dur - 1.0
+            while t < total_duration - 2.0:
+                valid_cuts.append({
+                    "time": round(t, 2),
+                    "label": f"CUT_OUTRO: {t:.2f}s — instrumental outro split",
+                    "after_phrase": "(instrumental)",
+                    "before_phrase": "(instrumental)",
+                })
+                t += max_dur - 1.0
+
+        # Re-sort valid_cuts by time after adding intro/outro cuts
+        valid_cuts.sort(key=lambda vc: vc["time"])
+
+    # ── Build lyrics block for LLM ──────────────────────────────────────
+
+    lyrics_block = ""
+    if user_lyrics:
+        lyrics_block += f"LYRICS (each line = one complete phrase):\n{user_lyrics}\n\n"
+
+    # Show timed phrases so LLM knows when each phrase occurs
+    if word_timestamps and phrase_groups:
+        lyrics_block += "TIMED PHRASES (each line = one phrase with its time range):\n"
+        for pg in phrase_groups:
+            if not pg:
+                continue
+            p_start = pg[0].get("start", 0)
+            p_end = pg[-1].get("end", 0)
+            p_text = _get_phrase_text(pg)
+            lyrics_block += f"  [{p_start:.2f}s – {p_end:.2f}s] {p_text}\n"
+        lyrics_block += "\n"
+
+    # Show the valid cut points — these are the ONLY allowed boundary times
+    if valid_cuts:
+        lyrics_block += "═══ VALID CUT POINTS ═══\n"
+        lyrics_block += "You MUST use ONLY these exact times for scene boundaries (start_time / end_time).\n"
+        lyrics_block += "Each cut point sits between two complete phrases. Using any other time WILL split a phrase.\n\n"
+        for vc in valid_cuts:
+            lyrics_block += f"  {vc['label']}\n"
+            lyrics_block += f"    ends: \"{vc['after_phrase']}\"\n"
+            lyrics_block += f"    next: \"{vc['before_phrase']}\"\n"
+        lyrics_block += "\n"
+    elif not word_timestamps:
+        lyrics_block += "No word timestamps available.\n"
+
+    if not lyrics_block:
+        lyrics_block = "No lyrics available.\n"
 
     # ── LLM system prompt ────────────────────────────────────────────────
 
     system_prompt = (
-        "You are a professional music video editor and timeline architect. "
-        "Your job is to create an optimal scene breakdown for an AI-generated music video.\n\n"
+        "You are a professional music video editor. Create a scene timeline for an AI-generated music video.\n\n"
 
-        "CRITICAL CONSTRAINTS:\n"
-        f"- Each scene will be rendered by an AI video model that has a MAXIMUM of {max_dur} seconds per generation.\n"
-        f"- Ideal scene duration: {max(3, max_dur // 2)}-{max(5, max_dur - 3)} seconds. Minimum: 3 seconds. Absolute maximum: {max_dur} seconds.\n"
-        "- Scenes must tile the entire duration with no gaps — every second must belong to a scene.\n"
-        "- The first scene starts at 0.0 and the last scene ends at the total duration.\n\n"
+        "═══ RULE #1: PHRASE INTEGRITY (HIGHEST PRIORITY) ═══\n"
+        "NEVER split a lyrical phrase across two scenes. This is non-negotiable.\n"
+        "- Each line of lyrics is ONE phrase. A phrase must be fully contained within a single scene.\n"
+        "- You are given a list of VALID CUT POINTS below. These are the ONLY times you may use "
+        "for start_time and end_time values (plus 0.0 for the first scene and the total duration for the last).\n"
+        "- Using any time that is NOT a valid cut point WILL split a phrase. Do NOT invent your own times.\n"
+        "- Phrases usually start with a capital letter. If you're unsure where a phrase begins, look for capitals.\n"
+        "- It is ALWAYS better to have a slightly longer or shorter scene than to split a phrase.\n\n"
 
-        "PHRASE/SENTENCE INTEGRITY — THIS IS THE #1 PRIORITY:\n"
-        "- NEVER split a phrase, sentence, or verse across two scenes. This is the single most important rule.\n"
-        "- A scene MUST contain COMPLETE lyrical phrases. If a sentence starts in a scene, it must END in that scene.\n"
-        "- Place scene boundaries ONLY at natural language breaks: end of a sentence (period, question mark, exclamation), "
-        "end of a verse/chorus section, or a long pause (> 1 second) between phrases.\n"
-        "- WRONG: Scene 1 ends with 'walking down the' → Scene 2 starts with 'street at night' (sentence split!)\n"
-        "- RIGHT: Scene 1 ends with 'walking down the street at night.' → Scene 2 starts with 'The moon is shining...'\n"
-        "- When the user provides PHRASE BREAK POINTS below, you MUST place scene boundaries at those points. "
-        "These are pre-analyzed natural language boundaries where it's safe to cut.\n"
-        "- If a phrase break point doesn't align perfectly with your ideal scene duration, "
-        "it is ALWAYS better to have a slightly shorter or longer scene than to cut mid-sentence.\n\n"
+        "═══ RULE #2: DURATION CONSTRAINTS ═══\n"
+        f"- Maximum scene duration: {max_dur} seconds. This is an ABSOLUTE hard limit.\n"
+        f"- Ideal scene duration: {max(min_dur, max_dur // 2)}–{max(min_dur + 2, max_dur - 2)} seconds.\n"
+        f"- Minimum scene duration: {min_dur} seconds. Do NOT create scenes shorter than this.\n"
+        "- You MUST keep every scene at or under the maximum. Pick cut points that achieve this.\n"
+        "- There are always enough cut points between phrases to keep scenes under the max.\n"
+        "- If a section has many phrases close together, use more scenes (shorter durations).\n"
+        "- If a section has few phrases spread far apart, each scene can be longer (up to max).\n\n"
 
-        "SCENE BOUNDARY TIMING:\n"
-        "- Scenes (except the very first) should START approximately 0.3 seconds BEFORE "
-        "the first word of the new phrase begins. This gives the viewer a brief moment to register "
-        "the new visual before the vocal comes in — a standard music video editing convention.\n"
-        "- The first scene with vocals should start its boundary BEFORE the first sung word, not after it. "
-        "For example, if the first word starts at 13.5s, the scene should start at ~13.0s.\n\n"
+        "═══ RULE #3: COVERAGE ═══\n"
+        "- First scene starts at 0.0, last scene ends at total duration.\n"
+        "- Scenes must tile with no gaps: scene N end_time = scene N+1 start_time.\n"
+        "- Every second of audio must belong to exactly one scene.\n\n"
 
-        "SECTION HANDLING:\n"
-        "- Focus on MAIN structural sections: [Verse], [Pre-Chorus], [Chorus], [Bridge], [Outro], [Intro]. "
-        "Ignore adlibs, background vocals, tags like [ad-lib], [Background], etc.\n"
-        "- Long sections (e.g. a 30-second verse) MUST be split into 2-3 sub-scenes, but ONLY at "
-        "phrase/sentence boundaries — never mid-sentence.\n"
-        f"- Instrumental breaks, intros, and outros can be single scenes if they're under {max_dur} seconds, "
-        "otherwise split them.\n\n"
+        "═══ SECTION HANDLING ═══\n"
+        "- Long sections (> max duration) must be split at valid cut points.\n"
+        f"- Instrumental intros/outros: single scene if under {max_dur}s, otherwise split evenly.\n"
+        "- Ignore [ad-lib], [Background] tags.\n\n"
 
-        "WHEN NO LYRICS ARE AVAILABLE:\n"
-        "- Use detected sections to determine scene boundaries.\n"
-        f"- If sections are also missing, create evenly-spaced scenes of ~{min(10, max_dur - 2)}-{min(12, max_dur)} seconds each.\n"
-        f"- Still respect the {max_dur}-second maximum.\n\n"
+        "═══ NAMING ═══\n"
+        "- Name scenes based on lyrical content or section: 'Verse 1 - Opening', 'Chorus - Hook', etc.\n"
+        "- Sub-scenes: 'Verse 1 (Part 1)', 'Verse 1 (Part 2)'.\n\n"
 
-        "NAMING CONVENTION:\n"
-        "- Name each scene descriptively based on the lyrical content or section: "
-        "e.g. 'Verse 1 - Opening Lines', 'Chorus - Hook', 'Bridge - Breakdown', 'Outro - Fade'.\n"
-        "- For sub-scenes within a section, append a part number: 'Verse 1 (Part 1)', 'Verse 1 (Part 2)'.\n\n"
-
-        "RETURN FORMAT:\n"
-        "Return ONLY a JSON array of objects, each with:\n"
-        "  { \"name\": \"Scene Name\", \"start_time\": 0.0, \"end_time\": 10.5 }\n"
-        "Ensure start_time of scene N+1 equals end_time of scene N (no gaps).\n"
-        "Round times to 2 decimal places.\n"
-        "No markdown, no explanation — just the JSON array."
+        "═══ RETURN FORMAT ═══\n"
+        "Return ONLY a JSON array:\n"
+        "  [{ \"name\": \"Scene Name\", \"start_time\": 0.0, \"end_time\": 10.5 }, ...]\n"
+        "Use times from the VALID CUT POINTS list. No markdown, no explanation."
     )
 
     # ── LLM user prompt ──────────────────────────────────────────────────
 
     user_prompt = (
         f"Total audio duration: {total_duration:.2f} seconds\n"
+        f"Max scene duration: {max_dur} seconds\n"
+        f"Min scene duration: {min_dur} seconds\n"
     )
     if song_title:
         user_prompt += f"Song Title: {song_title}\n"
@@ -2193,16 +2391,21 @@ async def suggest_timeline(
     if style_text:
         user_prompt += f"Visual Style: {style_text}\n"
     user_prompt += f"\n{sections_text}\n{lyrics_block}\n"
-    user_prompt += "Generate an optimal scene timeline. Return ONLY the JSON array."
+    user_prompt += (
+        "Generate an optimal scene timeline using ONLY the valid cut points for boundaries. "
+        "Return ONLY the JSON array."
+    )
 
     # ── Call LLM ─────────────────────────────────────────────────────────
 
     provider, api_key, model = _get_llm_config(app_settings)
 
+    logger.info(f"[SuggestTimeline] Calling LLM ({provider}/{model}) with {len(valid_cuts)} valid cut points")
+
     try:
         raw_text = await asyncio.to_thread(
             _call_llm, provider, api_key, model, system_prompt, user_prompt,
-            max_tokens=4000,  # Timeline generates scene defs — needs room for 30+ scenes
+            max_tokens=4000,
         )
     except Exception as e:
         logger.error(f"LLM call failed for suggest-timeline: {e}")
@@ -2224,334 +2427,531 @@ async def suggest_timeline(
         logger.error(f"Failed to parse LLM response: {e}\nRaw: {raw_text[:500]}")
         raise HTTPException(status_code=500, detail="Failed to parse LLM scene response")
 
-    # ── Build phrase-aware scene boundaries ──────────────────────────────
-    # Instead of patching LLM output, we build scenes bottom-up from
-    # phrases. The LLM provides scene names and approximate boundaries;
-    # we use phrase timestamps to enforce hard constraints:
-    #   1. No scene exceeds max_dur
-    #   2. No phrase is ever split across scenes
-    #   3. No tiny slices (minimum 3s per scene, merge if smaller)
+    # ── Validate and fix LLM output ─────────────────────────────────────
+    # Strategy: build a clean boundary list from LLM output, snap each
+    # interior boundary to the nearest valid cut point, then split any
+    # oversized scenes.  Boundaries are the ONLY thing that matters —
+    # scene names are cosmetic.
 
-    import math
+    # Build the set of valid cut times for fast lookup.
+    # Include 0.0 and total_duration as always-valid endpoints.
+    valid_cut_times = sorted(set(
+        [0.0, round(total_duration, 3)]
+        + [vc["time"] for vc in valid_cuts]
+    ))
 
-    # Step 1: Build phrase groups with their time ranges
-    phrases: list[dict] = []  # [{start, end, text, words}, ...]
-    if word_timestamps and user_lyrics:
-        phrase_groups = _group_words_into_sentences(word_timestamps, lyrics_text=user_lyrics)
-        for pg in phrase_groups:
-            if not pg:
-                continue
-            p_start = pg[0].get("start", 0)
-            p_end = pg[-1].get("end", 0)
-            p_text = " ".join(
-                (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
-                for w in pg
-            ).strip()
-            phrases.append({"start": p_start, "end": p_end, "text": p_text, "words": pg})
+    def _nearest_valid_cut(t: float, max_dist: float = 999.0) -> Optional[float]:
+        """Find the nearest valid cut point to time t within max_dist.
+        Returns None if no cut point is within max_dist."""
+        if not valid_cut_times:
+            return None
+        best = min(valid_cut_times, key=lambda vt: abs(vt - t))
+        if abs(best - t) > max_dist:
+            return None
+        return best
 
-    # Step 2: Parse LLM scenes for names (we'll use their boundaries as guides)
+    # Parse LLM scenes — extract unique interior boundaries
     llm_scenes: list[dict[str, Any]] = []
     for i, sd in enumerate(scenes_data):
         name = sd.get("name", f"Scene {i + 1}")
         start = float(sd.get("start_time", 0))
         end = float(sd.get("end_time", start + 10))
         start = max(0, min(start, total_duration))
-        end = max(start + 1, min(end, total_duration))
+        end = max(start + 0.5, min(end, total_duration))
         llm_scenes.append({"name": name, "start_time": start, "end_time": end})
 
-    # Ensure contiguous + coverage
-    for i in range(1, len(llm_scenes)):
-        if llm_scenes[i]["start_time"] != llm_scenes[i - 1]["end_time"]:
-            llm_scenes[i]["start_time"] = llm_scenes[i - 1]["end_time"]
-    if llm_scenes:
-        llm_scenes[0]["start_time"] = 0.0
-        llm_scenes[-1]["end_time"] = total_duration
-
-    # Step 3: Build valid boundaries from phrase gaps, enforcing max_dur
-    if phrases:
-        # Collect all valid split points (gaps between phrases)
-        split_points: list[float] = []
-        for i in range(len(phrases) - 1):
-            gap_end = phrases[i]["end"]
-            gap_start = phrases[i + 1]["start"]
-            # Place boundary 0.3s before next phrase starts (lead time)
-            if gap_start - gap_end > 0.6:
-                bp = gap_start - 0.3
-            else:
-                bp = (gap_end + gap_start) / 2.0
-            split_points.append(bp)
-
-        # Also add a split point before the first phrase (for intro scenes)
-        if phrases[0]["start"] > 0.5:
-            bp = phrases[0]["start"] - 0.3
-            split_points.insert(0, bp)
-
-        # Build scenes by walking through LLM boundaries and snapping
-        # each to the nearest phrase gap, then enforcing max_dur
-        raw_boundaries = [0.0]
-        for ls in llm_scenes[:-1]:
-            raw_boundaries.append(ls["end_time"])
-        raw_boundaries.append(total_duration)
-
+    logger.info(f"[SuggestTimeline] LLM returned {len(llm_scenes)} scenes")
+    for i, s in enumerate(llm_scenes):
         logger.info(
-            f"[PhraseSnap] {len(split_points)} phrase-gap split points, "
-            f"{len(raw_boundaries)} raw LLM boundaries"
+            f"[SuggestTimeline]   LLM Scene {i}: '{s['name']}' "
+            f"[{s['start_time']:.2f}–{s['end_time']:.2f}s] "
+            f"dur={s['end_time'] - s['start_time']:.1f}s"
         )
-        for sp_idx, sp in enumerate(split_points):
-            # Find which phrase this split point falls between
-            phrase_before = ""
-            phrase_after = ""
-            for pi in range(len(phrases) - 1):
-                gap_end = phrases[pi]["end"]
-                gap_start = phrases[pi + 1]["start"]
-                if abs(sp - ((gap_end + gap_start) / 2.0)) < 1.0 or abs(sp - (gap_start - 0.3)) < 1.0:
-                    phrase_before = phrases[pi]["text"][:40]
-                    phrase_after = phrases[pi + 1]["text"][:40]
-                    break
-            logger.info(
-                f"[PhraseSnap] Split point {sp_idx}: {sp:.2f}s "
-                f"(after: \"{phrase_before}\" → before: \"{phrase_after}\")"
-            )
 
-        # Snap each interior boundary to nearest phrase gap.
-        # IMPORTANT: We do NOT track used splits here. Multiple LLM
-        # boundaries may snap to the same phrase gap — that's fine because
-        # sorted(set()) deduplicates them afterward. This prevents the
-        # critical bug where running out of "unused" gaps caused fallback
-        # to raw LLM boundaries that could be mid-phrase.
-        MAX_SNAP_DISTANCE = 8.0  # Don't snap more than 8s away
-        snapped: list[float] = [0.0]
-        for b_idx in range(1, len(raw_boundaries) - 1):
-            boundary = raw_boundaries[b_idx]
-            # Find closest split point within max distance
-            best_idx = -1
-            best_dist = MAX_SNAP_DISTANCE
-            for sp_idx, sp in enumerate(split_points):
-                dist = abs(sp - boundary)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = sp_idx
-            if best_idx >= 0:
-                snapped.append(split_points[best_idx])
+    # Extract interior boundaries (between scenes) from LLM output.
+    # These are the end_time of each scene except the last.
+    llm_boundaries: list[float] = []
+    for i in range(len(llm_scenes) - 1):
+        llm_boundaries.append(llm_scenes[i]["end_time"])
+
+    # Snap each interior boundary to the nearest valid cut point.
+    # Use a generous max distance (8s) — if the LLM is further off than
+    # that, it's probably in a region with no phrases and any time is OK.
+    MAX_SNAP = 8.0
+    snapped_boundaries: list[float] = []
+    for bi, b in enumerate(llm_boundaries):
+        nearest = _nearest_valid_cut(b, max_dist=MAX_SNAP)
+        if nearest is not None and abs(nearest - b) > 0.01:
+            logger.info(
+                f"[SuggestTimeline] Boundary {bi}: {b:.2f}s → snapped to "
+                f"valid cut {nearest:.2f}s (dist={abs(nearest - b):.1f}s)"
+            )
+            snapped_boundaries.append(nearest)
+        else:
+            snapped_boundaries.append(b)
+
+    # Remove duplicate boundaries (two LLM scenes snapping to same cut)
+    # while preserving order
+    seen_boundaries: set[float] = set()
+    unique_boundaries: list[float] = []
+    for b in snapped_boundaries:
+        b_rounded = round(b, 3)
+        if b_rounded not in seen_boundaries:
+            seen_boundaries.add(b_rounded)
+            unique_boundaries.append(b)
+
+    # Rebuild scenes from boundaries: [0.0, b1, b2, ..., total_duration]
+    all_boundaries = [0.0] + unique_boundaries + [total_duration]
+
+    # Map back scene names from LLM output
+    rebuilt_scenes: list[dict[str, Any]] = []
+    for i in range(len(all_boundaries) - 1):
+        s_start = all_boundaries[i]
+        s_end = all_boundaries[i + 1]
+        # Find matching LLM scene name
+        if i < len(llm_scenes):
+            name = llm_scenes[i]["name"]
+        else:
+            name = f"Scene {i + 1}"
+        rebuilt_scenes.append({
+            "name": name,
+            "start_time": s_start,
+            "end_time": s_end,
+        })
+
+    logger.info(
+        f"[SuggestTimeline] After boundary validation: "
+        f"{len(rebuilt_scenes)} scenes from {len(all_boundaries)} boundaries"
+    )
+
+    # ── Split oversized scenes at valid cut points ──────────────────────
+    # Use ALL valid_cut_times (which includes intro/outro instrumental cuts)
+    # IMPORTANT: respect min_dur when splitting — never create sub-scenes
+    # shorter than the user's minimum duration setting.
+    validated_scenes: list[dict[str, Any]] = []
+    for sd in rebuilt_scenes:
+        dur = sd["end_time"] - sd["start_time"]
+        if dur > max_dur and len(valid_cut_times) > 2:
+            # Find valid cut points strictly inside this scene, respecting min_dur
+            # from both edges so we don't create tiny head/tail sub-scenes
+            interior_cuts = sorted([
+                vt for vt in valid_cut_times
+                if sd["start_time"] + min_dur < vt < sd["end_time"] - min_dur
+            ])
+            if interior_cuts:
+                sub_scenes: list[dict[str, Any]] = []
+                cursor = sd["start_time"]
+                part = 1
+                while cursor < sd["end_time"] - 0.5:
+                    remaining = sd["end_time"] - cursor
+                    if remaining <= max_dur:
+                        # Remaining chunk fits — take it as the last sub-scene
+                        sub_scenes.append({
+                            "name": f"{sd['name']} (Part {part})" if part > 1 else sd["name"],
+                            "start_time": cursor,
+                            "end_time": sd["end_time"],
+                        })
+                        break
+                    # Find the latest cut that keeps this segment ≤ max_dur
+                    # AND ensures the cut is at least min_dur from cursor
+                    # AND leaves at least min_dur remaining after the cut
+                    candidates = [
+                        c for c in interior_cuts
+                        if c >= cursor + min_dur
+                        and c <= cursor + max_dur
+                        and sd["end_time"] - c >= min_dur
+                    ]
+                    if candidates:
+                        pick = candidates[-1]  # Latest valid cut (maximize scene length)
+                    else:
+                        # Relax: find any cut after cursor + min_dur, even if it
+                        # exceeds max_dur (better than creating a tiny scene)
+                        after_cursor = [
+                            c for c in interior_cuts
+                            if c >= cursor + min_dur
+                            and sd["end_time"] - c >= min_dur
+                        ]
+                        if after_cursor:
+                            pick = after_cursor[0]
+                        else:
+                            # Can't split without violating min_dur — keep as one scene
+                            sub_scenes.append({
+                                "name": f"{sd['name']} (Part {part})" if part > 1 else sd["name"],
+                                "start_time": cursor,
+                                "end_time": sd["end_time"],
+                            })
+                            break
+                    sub_scenes.append({
+                        "name": f"{sd['name']} (Part {part})",
+                        "start_time": cursor,
+                        "end_time": pick,
+                    })
+                    cursor = pick
+                    part += 1
+                validated_scenes.extend(sub_scenes)
                 logger.info(
-                    f"[PhraseSnap] Boundary {b_idx}: {boundary:.2f}s → "
-                    f"{split_points[best_idx]:.2f}s (snapped to phrase gap, "
-                    f"dist={best_dist:.2f}s)"
+                    f"[SuggestTimeline] Split oversized scene '{sd['name']}' "
+                    f"({dur:.1f}s > {max_dur}s) into {len(sub_scenes)} sub-scenes"
                 )
             else:
-                # No phrase gap within MAX_SNAP_DISTANCE — expand search
-                # to find ANY phrase gap rather than using raw boundary
-                all_dists = [(sp_idx, abs(sp - boundary)) for sp_idx, sp in enumerate(split_points)]
-                all_dists.sort(key=lambda x: x[1])
-                if all_dists:
-                    fallback_idx = all_dists[0][0]
-                    snapped.append(split_points[fallback_idx])
+                validated_scenes.append(sd)
+                logger.warning(
+                    f"[SuggestTimeline] Scene '{sd['name']}' is {dur:.1f}s "
+                    f"(exceeds {max_dur}s) but has no interior cuts to split at"
+                )
+        else:
+            validated_scenes.append(sd)
+
+    # ── Frame-snap boundaries ──────────────────────────────────────────
+    # Snap each boundary to the nearest frame, then propagate so scenes
+    # remain perfectly contiguous.  We snap boundaries (not start/end
+    # independently) to avoid creating gaps or overlaps.
+    boundary_times = [0.0]
+    for vs in validated_scenes:
+        boundary_times.append(vs["end_time"])
+
+    # Frame-snap interior boundaries only (keep 0.0 and total_duration exact)
+    for i in range(1, len(boundary_times) - 1):
+        boundary_times[i] = _snap_to_frame(boundary_times[i], project_fps)
+
+    # Ensure last boundary is exactly total_duration
+    boundary_times[-1] = total_duration
+
+    # Rebuild scene times from snapped boundaries
+    for i, vs in enumerate(validated_scenes):
+        vs["start_time"] = boundary_times[i]
+        vs["end_time"] = boundary_times[i + 1]
+
+    # ── PHRASE INTEGRITY CHECK ────────────────────────────────────────
+    # Safety net: after frame snapping, verify no interior boundary falls
+    # inside any phrase group's time range.  If it does, move the boundary
+    # to the nearest gap between phrases (with a small margin).
+    if word_timestamps and phrase_groups:
+        phrase_ranges = []
+        for pg in phrase_groups:
+            if not pg:
+                continue
+            p_start = pg[0].get("start", 0)
+            p_end = pg[-1].get("end", 0)
+            phrase_ranges.append((p_start, p_end))
+
+        integrity_fixes = 0
+        for bi in range(1, len(boundary_times) - 1):  # skip 0.0 and total_duration
+            bt = boundary_times[bi]
+            for p_start, p_end in phrase_ranges:
+                # Is this boundary inside a phrase? (with small margin for frame jitter)
+                if p_start + 0.05 < bt < p_end - 0.05:
+                    # Boundary is inside a phrase — move it out.
+                    # Option 1: move to just before phrase starts (0.15s before)
+                    before_phrase = _snap_to_frame(max(0.0, p_start - 0.15), project_fps)
+                    # Option 2: move to just after phrase ends (0.15s after)
+                    after_phrase = _snap_to_frame(min(total_duration, p_end + 0.15), project_fps)
+                    # Pick whichever is closer to original boundary
+                    dist_before = abs(bt - before_phrase)
+                    dist_after = abs(bt - after_phrase)
+                    new_bt = before_phrase if dist_before <= dist_after else after_phrase
                     logger.warning(
-                        f"[PhraseSnap] Boundary {b_idx}: {boundary:.2f}s → "
-                        f"{split_points[fallback_idx]:.2f}s (expanded search, "
-                        f"dist={all_dists[0][1]:.2f}s)"
+                        f"[PhraseIntegrity] Boundary {bi} at {bt:.3f}s falls inside "
+                        f"phrase [{p_start:.2f}–{p_end:.2f}s], moving to {new_bt:.3f}s"
                     )
+                    boundary_times[bi] = new_bt
+                    integrity_fixes += 1
+                    break  # Fixed this boundary, move to next
+
+        if integrity_fixes > 0:
+            # Re-sort boundaries in case moves caused reordering
+            boundary_times = sorted(set(round(b, 6) for b in boundary_times))
+            # Ensure endpoints are present
+            if boundary_times[0] != 0.0:
+                boundary_times.insert(0, 0.0)
+            if boundary_times[-1] != total_duration:
+                boundary_times.append(total_duration)
+            # Rebuild validated_scenes from fixed boundaries
+            new_validated: list[dict[str, Any]] = []
+            for i in range(len(boundary_times) - 1):
+                s_start = boundary_times[i]
+                s_end = boundary_times[i + 1]
+                if s_end - s_start < 0.1:
+                    continue
+                if i < len(validated_scenes):
+                    name = validated_scenes[i]["name"]
                 else:
-                    # Truly no phrase gaps at all (instrumental track?)
-                    snapped.append(boundary)
+                    name = f"Scene {i + 1}"
+                new_validated.append({
+                    "name": name,
+                    "start_time": s_start,
+                    "end_time": s_end,
+                })
+            validated_scenes = new_validated
+            logger.info(
+                f"[PhraseIntegrity] Fixed {integrity_fixes} boundaries that split phrases. "
+                f"Now {len(validated_scenes)} scenes."
+            )
+
+    # ── MINIMUM DURATION ENFORCEMENT ────────────────────────────────────
+    # Merge scenes that are shorter than min_dur into their neighbors.
+    # Prefer merging into the shorter neighbor to balance scene lengths.
+    # Loop until no more tiny scenes can be merged (skip unmergeable ones).
+    if min_dur > 0 and len(validated_scenes) > 1:
+        merge_count = 0
+        max_passes = len(validated_scenes)  # Can't merge more than we have
+        for _pass in range(max_passes):
+            merged_any = False
+            for i in range(len(validated_scenes)):
+                dur = validated_scenes[i]["end_time"] - validated_scenes[i]["start_time"]
+                if dur >= min_dur - 0.1:
+                    continue  # This scene is fine
+                tiny = validated_scenes[i]
+                tiny_dur = dur
+                # Choose merge direction: prefer shorter neighbor, avoid exceeding max_dur
+                prev_dur = (validated_scenes[i - 1]["end_time"] - validated_scenes[i - 1]["start_time"]) if i > 0 else float('inf')
+                next_dur = (validated_scenes[i + 1]["end_time"] - validated_scenes[i + 1]["start_time"]) if i + 1 < len(validated_scenes) else float('inf')
+                merge_into_prev = i > 0 and (prev_dur + tiny_dur <= max_dur + 0.5 or next_dur == float('inf'))
+                merge_into_next = i + 1 < len(validated_scenes) and (next_dur + tiny_dur <= max_dur + 0.5 or prev_dur == float('inf'))
+                if merge_into_prev and merge_into_next:
+                    # Both fit — pick the shorter neighbor
+                    if prev_dur <= next_dur:
+                        merge_into_next = False
+                    else:
+                        merge_into_prev = False
+                if merge_into_prev:
+                    validated_scenes[i - 1]["end_time"] = tiny["end_time"]
+                    logger.info(
+                        f"[MinDuration] Merged tiny scene '{tiny['name']}' ({tiny_dur:.1f}s) "
+                        f"into previous scene '{validated_scenes[i - 1]['name']}'"
+                    )
+                    validated_scenes.pop(i)
+                    merge_count += 1
+                    merged_any = True
+                    break  # Restart scan — indices shifted
+                elif merge_into_next:
+                    validated_scenes[i + 1]["start_time"] = tiny["start_time"]
+                    # Keep the tiny scene's name if it has lyrics content
+                    logger.info(
+                        f"[MinDuration] Merged tiny scene '{tiny['name']}' ({tiny_dur:.1f}s) "
+                        f"into next scene '{validated_scenes[i + 1]['name']}'"
+                    )
+                    validated_scenes.pop(i)
+                    merge_count += 1
+                    merged_any = True
+                    break  # Restart scan — indices shifted
+                else:
+                    # Can't merge without exceeding max_dur — skip this one, try others
                     logger.warning(
-                        f"[PhraseSnap] Boundary {b_idx}: {boundary:.2f}s kept as-is "
-                        f"(no phrase gaps exist)"
+                        f"[MinDuration] Scene '{tiny['name']}' ({tiny_dur:.1f}s) is under "
+                        f"min_dur={min_dur}s but merging would exceed max_dur={max_dur}s — skipping"
                     )
-        snapped.append(total_duration)
+                    continue
+            if not merged_any:
+                break  # No more mergeable tiny scenes
+        if merge_count > 0:
+            logger.info(f"[MinDuration] Merged {merge_count} tiny scene(s), now {len(validated_scenes)} scenes")
 
-        # Remove duplicates and sort
-        snapped = sorted(set(snapped))
+    # Final sanity: remove any scenes that ended up with zero or negative duration
+    validated_scenes = [
+        vs for vs in validated_scenes
+        if vs["end_time"] - vs["start_time"] > 0.1
+    ]
 
-        # Now enforce max_dur: if any segment exceeds max_dur, insert
-        # additional split points from phrase gaps
-        final_boundaries: list[float] = [snapped[0]]
-        for i in range(1, len(snapped)):
-            seg_start = final_boundaries[-1]
-            seg_end = snapped[i]
-            dur = seg_end - seg_start
+    # De-duplicate names
+    name_counts: dict[str, int] = {}
+    for vs in validated_scenes:
+        name_counts[vs["name"]] = name_counts.get(vs["name"], 0) + 1
+    name_indices: dict[str, int] = {}
+    for vs in validated_scenes:
+        if name_counts[vs["name"]] > 1:
+            name_indices[vs["name"]] = name_indices.get(vs["name"], 0) + 1
+            vs["name"] = f"{vs['name']} (Part {name_indices[vs['name']]})"
 
-            if dur > max_dur:
-                # Find available phrase-gap split points within this segment
-                available = sorted([
-                    sp for sp in split_points
-                    if seg_start + 1.0 < sp < seg_end - 1.0
-                ])
-                if available:
-                    # Greedy: walk forward, accumulate until adding next
-                    # phrase gap would exceed max_dur, then commit the
-                    # latest valid split point and continue.
-                    cursor = seg_start
-                    while cursor + max_dur < seg_end:
-                        # Find all splits between cursor and cursor + max_dur
-                        candidates = [
-                            sp for sp in available
-                            if cursor + 2.0 < sp <= cursor + max_dur
-                        ]
-                        if candidates:
-                            # Take the LAST one (maximize segment length,
-                            # so we don't create needlessly tiny scenes)
-                            pick = candidates[-1]
-                            final_boundaries.append(pick)
-                            cursor = pick
-                        else:
-                            # No phrase gap fits within max_dur window.
-                            # Expand search progressively rather than
-                            # force-splitting mid-phrase.
-                            forced = cursor + max_dur
-                            picked = False
-                            for search_radius in [3.0, 6.0, 10.0, 20.0]:
-                                nearby = [
-                                    sp for sp in available
-                                    if abs(sp - forced) < search_radius and sp > cursor + 2.0
-                                ]
-                                if nearby:
-                                    pick = min(nearby, key=lambda x: abs(x - forced))
-                                    final_boundaries.append(pick)
-                                    cursor = pick
-                                    picked = True
-                                    logger.info(
-                                        f"[PhraseSnap] Force-split found phrase gap at "
-                                        f"{pick:.2f}s (search_radius={search_radius}s)"
-                                    )
-                                    break
-                            if not picked:
-                                # Absolute last resort — no phrase gaps anywhere
-                                final_boundaries.append(forced)
-                                cursor = forced
-                                logger.warning(
-                                    f"[PhraseSnap] Force-split at {forced:.2f}s — "
-                                    f"no phrase gaps found (instrumental section?)"
-                                )
-                else:
-                    # No phrase gaps available — force even splits
-                    n_splits = math.ceil(dur / max_dur)
-                    sub_dur = dur / n_splits
-                    for j in range(1, n_splits):
-                        final_boundaries.append(seg_start + j * sub_dur)
-
-            final_boundaries.append(seg_end)
-
-        # Deduplicate and sort
-        final_boundaries = sorted(set(final_boundaries))
-
-        # Remove tiny segments (< 2s) by merging with neighbors
-        # But never merge if it would create a segment exceeding max_dur
-        merged: list[float] = [final_boundaries[0]]
-        for i in range(1, len(final_boundaries)):
-            seg_from_prev = final_boundaries[i] - merged[-1]
-            is_last = i == len(final_boundaries) - 1
-            if not is_last and seg_from_prev < 2.0:
-                # Check if skipping this boundary would create an oversized segment
-                next_boundary = final_boundaries[i + 1]
-                merged_dur = next_boundary - merged[-1]
-                if merged_dur <= max_dur:
-                    continue  # Safe to merge — skip this boundary
-            merged.append(final_boundaries[i])
-        final_boundaries = merged
-
-        # Snap to frame boundaries
-        final_boundaries = [_snap_to_frame(b, project_fps) for b in final_boundaries]
-
-        # Ensure monotonic
-        clean_boundaries: list[float] = [final_boundaries[0]]
-        for b in final_boundaries[1:]:
-            if b > clean_boundaries[-1]:
-                clean_boundaries.append(b)
-        final_boundaries = clean_boundaries
-
-        # Build scene list from boundaries, using LLM names where possible
-        validated_scenes: list[dict[str, Any]] = []
-        for i in range(len(final_boundaries) - 1):
-            s_start = final_boundaries[i]
-            s_end = final_boundaries[i + 1]
-            # Find the best matching LLM scene name for this time range
-            mid = (s_start + s_end) / 2.0
-            best_name = f"Scene {i + 1}"
-            best_overlap = 0.0
-            for ls in llm_scenes:
-                ov_start = max(s_start, ls["start_time"])
-                ov_end = min(s_end, ls["end_time"])
-                overlap = max(0, ov_end - ov_start)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_name = ls["name"]
-
-            validated_scenes.append({
-                "name": best_name,
-                "start_time": s_start,
-                "end_time": s_end,
+    # Log final scenes with their phrases for debugging
+    if word_timestamps:
+        phrase_list = []
+        for pg in phrase_groups:
+            if not pg:
+                continue
+            phrase_list.append({
+                "start": pg[0].get("start", 0),
+                "end": pg[-1].get("end", 0),
+                "text": _get_phrase_text(pg),
             })
-
-        # De-duplicate names by adding part numbers
-        name_counts: dict[str, int] = {}
-        for vs in validated_scenes:
-            name_counts[vs["name"]] = name_counts.get(vs["name"], 0) + 1
-        name_indices: dict[str, int] = {}
-        for vs in validated_scenes:
-            if name_counts[vs["name"]] > 1:
-                name_indices[vs["name"]] = name_indices.get(vs["name"], 0) + 1
-                vs["name"] = f"{vs['name']} (Part {name_indices[vs['name']]})"
-
-        # Log which phrases fall in each scene for debugging
         for vs in validated_scenes:
             scene_phrases = [
-                p["text"][:50] for p in phrases
+                p["text"][:50] for p in phrase_list
                 if p["start"] >= vs["start_time"] - 0.5 and p["end"] <= vs["end_time"] + 0.5
             ]
             logger.info(
-                f"[PhraseSnap] Scene '{vs['name']}' [{vs['start_time']:.2f}–{vs['end_time']:.2f}s]: "
+                f"[SuggestTimeline] Scene '{vs['name']}' "
+                f"[{vs['start_time']:.2f}–{vs['end_time']:.2f}s]: "
                 f"{len(scene_phrases)} phrases"
             )
             for pt in scene_phrases:
-                logger.info(f"[PhraseSnap]   → {pt}")
+                logger.info(f"[SuggestTimeline]   → {pt}")
 
-        logger.info(
-            f"Built {len(validated_scenes)} scenes from {len(phrases)} phrases "
-            f"(max_dur={max_dur}s, total={total_duration:.1f}s)"
-        )
-    else:
-        # No phrases available — use LLM scenes directly with basic max_dur enforcement
-        validated_scenes = llm_scenes
-        # Simple split for oversized scenes
-        split_scenes: list[dict[str, Any]] = []
-        for sd in validated_scenes:
-            dur = sd["end_time"] - sd["start_time"]
-            if dur > max_dur:
-                n = math.ceil(dur / max_dur)
-                sub = dur / n
-                for j in range(n):
-                    s = _snap_to_frame(sd["start_time"] + j * sub, project_fps)
-                    e = _snap_to_frame(sd["start_time"] + (j + 1) * sub, project_fps)
-                    if j == n - 1:
-                        e = sd["end_time"]
-                    nm = sd["name"] if n == 1 else f"{sd['name']} (Part {j + 1})"
-                    split_scenes.append({"name": nm, "start_time": s, "end_time": e})
+    logger.info(
+        f"[SuggestTimeline] Final: {len(validated_scenes)} scenes "
+        f"(max_dur={max_dur}s, total={total_duration:.1f}s)"
+    )
+
+    # ── Map real lyrics lines to each scene ─────────────────────────────
+    # For each validated scene, find which phrase groups overlap with it
+    # and collect their original lyrics line text (not Whisper transcription).
+    # This ensures prompt generation uses the user's actual lyrics.
+    scene_lyrics_map: dict[int, str] = {}  # scene_index → lyrics text
+    if word_timestamps and phrase_groups:
+        for si, vs in enumerate(validated_scenes):
+            s_start = vs["start_time"]
+            s_end = vs["end_time"]
+            scene_lines: list[str] = []
+            for pg in phrase_groups:
+                if not pg:
+                    continue
+                pg_start = pg[0].get("start", 0)
+                pg_end = pg[-1].get("end", 0)
+                # Phrase overlaps with scene if >50% of phrase is within scene bounds
+                overlap_start = max(pg_start, s_start)
+                overlap_end = min(pg_end, s_end)
+                overlap = max(0.0, overlap_end - overlap_start)
+                phrase_dur = max(0.01, pg_end - pg_start)
+                if overlap / phrase_dur > 0.5:
+                    line_text = _get_phrase_lyrics_line(pg)
+                    if line_text and line_text not in scene_lines:
+                        scene_lines.append(line_text)
+            if scene_lines:
+                scene_lyrics_map[si] = "\n".join(scene_lines)
+                logger.info(
+                    f"[LyricsPerScene] Scene {si} '{vs['name']}': "
+                    f"{len(scene_lines)} lyrics line(s)"
+                )
             else:
-                split_scenes.append(sd)
-        validated_scenes = split_scenes
+                scene_lyrics_map[si] = "(instrumental)"
+                logger.info(
+                    f"[LyricsPerScene] Scene {si} '{vs['name']}': (instrumental)"
+                )
 
-    # ── Final max_dur safety check ────────────────────────────────────
-    # Hard guarantee: no scene exceeds max_dur. Force-split if needed.
-    safety_scenes: list[dict[str, Any]] = []
-    for sd in validated_scenes:
-        dur = sd["end_time"] - sd["start_time"]
-        if dur > max_dur + 0.5:
-            n = math.ceil(dur / max_dur)
-            sub = dur / n
-            for j in range(n):
-                s = _snap_to_frame(sd["start_time"] + j * sub, project_fps)
-                e = _snap_to_frame(sd["start_time"] + (j + 1) * sub, project_fps)
-                if j == n - 1:
-                    e = sd["end_time"]
-                nm = sd["name"] if n == 1 else f"{sd['name']} (Part {j + 1})"
-                safety_scenes.append({"name": nm, "start_time": s, "end_time": e})
-            logger.warning(
-                f"Safety split: '{sd['name']}' still {dur:.1f}s after phrase-aware build"
+    # ── KEYFRAME WORD VERIFICATION PASS ──────────────────────────────────
+    # After mapping lyrics to scenes, verify alignment by checking if
+    # distinctive "keyframe" words from each lyrics line actually appear
+    # in the Whisper data at the scene's time range.
+    #
+    # Strategy:
+    # 1. Build a word→time index from Whisper data (word → list of timestamps)
+    # 2. For each scene's assigned lyrics, extract distinctive words
+    #    (words that appear ≤2 times in the full lyrics = more reliable anchors)
+    # 3. Check if any keyframe word from that lyrics line has a Whisper
+    #    timestamp inside the scene's time window
+    # 4. If NONE of a line's keyframe words appear in the scene's time range,
+    #    search for where they DO appear and reassign if a better scene exists
+    if word_timestamps and phrase_groups and scene_lyrics_map:
+        import re as _re
+
+        def _clean_kw(w: str) -> str:
+            return _re.sub(r'[^a-zA-Z0-9]', '', w).lower()
+
+        # Build Whisper word → timestamps index
+        whisper_word_times: dict[str, list[tuple[float, float]]] = {}
+        for w in word_timestamps:
+            raw = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+            cleaned = _clean_kw(raw)
+            if cleaned and len(cleaned) >= 3:  # Skip tiny words (a, I, no, etc.)
+                t_start = w.get("start", 0) or w.get("start_time", 0)
+                t_end = w.get("end", 0) or w.get("end_time", 0)
+                whisper_word_times.setdefault(cleaned, []).append((t_start, t_end))
+
+        # Count word frequency across ALL lyrics to find distinctive words
+        all_lyrics_text = "\n".join(scene_lyrics_map.values())
+        all_lyrics_words = [_clean_kw(w) for w in all_lyrics_text.split() if _clean_kw(w)]
+        word_freq: dict[str, int] = {}
+        for w in all_lyrics_words:
+            word_freq[w] = word_freq.get(w, 0) + 1
+
+        # For each scene, verify its lyrics keyframe words
+        reassignment_count = 0
+        for si, vs in enumerate(validated_scenes):
+            lyrics_text = scene_lyrics_map.get(si, "")
+            if not lyrics_text or lyrics_text == "(instrumental)":
+                continue
+
+            s_start = vs["start_time"]
+            s_end = vs["end_time"]
+            margin = 1.5  # Allow 1.5s margin for timing jitter
+
+            # Extract keyframe words: distinctive (freq ≤ 2), ≥ 4 chars
+            scene_words = [_clean_kw(w) for w in lyrics_text.split() if _clean_kw(w)]
+            keyframe_words = [
+                w for w in scene_words
+                if len(w) >= 4 and word_freq.get(w, 0) <= 2
+                and w in whisper_word_times
+            ]
+
+            if not keyframe_words:
+                continue  # No distinctive words to verify — skip
+
+            # Check if ANY keyframe word has a Whisper timestamp in this scene
+            found_in_scene = False
+            for kw in keyframe_words:
+                for (t_start, t_end) in whisper_word_times[kw]:
+                    if s_start - margin <= t_start <= s_end + margin:
+                        found_in_scene = True
+                        break
+                if found_in_scene:
+                    break
+
+            if found_in_scene:
+                continue  # Lyrics verified — keyframe word matches scene audio
+
+            # MISMATCH: lyrics don't match this scene's audio.
+            # Find which scene these lyrics actually belong to based on
+            # where the keyframe words ARE spoken.
+            best_scene = -1
+            best_count = 0
+            for kw in keyframe_words:
+                for (t_start, t_end) in whisper_word_times[kw]:
+                    for sj, vs2 in enumerate(validated_scenes):
+                        if sj == si:
+                            continue
+                        if vs2["start_time"] - margin <= t_start <= vs2["end_time"] + margin:
+                            # This keyframe word is spoken during scene sj
+                            if best_scene != sj:
+                                # Count how many keyframe words match scene sj
+                                count = sum(
+                                    1 for kw2 in keyframe_words
+                                    for (t2s, t2e) in whisper_word_times.get(kw2, [])
+                                    if vs2["start_time"] - margin <= t2s <= vs2["end_time"] + margin
+                                )
+                                if count > best_count:
+                                    best_count = count
+                                    best_scene = sj
+
+            if best_scene >= 0 and best_count >= 2:
+                # Swap: move these lyrics to the correct scene
+                old_lyrics = scene_lyrics_map.get(best_scene, "")
+                correct_lyrics = scene_lyrics_map[si]
+
+                # Only reassign if the target scene doesn't already have
+                # this exact text and the lyrics actually belong there
+                if correct_lyrics not in (old_lyrics or ""):
+                    # Append to target scene (don't overwrite existing lyrics)
+                    if old_lyrics and old_lyrics != "(instrumental)":
+                        scene_lyrics_map[best_scene] = old_lyrics + "\n" + correct_lyrics
+                    else:
+                        scene_lyrics_map[best_scene] = correct_lyrics
+
+                    # Remove from source scene — check if other lyrics should stay
+                    scene_lyrics_map[si] = "(instrumental)"
+
+                    reassignment_count += 1
+                    logger.info(
+                        f"[KeyframeVerify] Reassigned lyrics from scene {si} → {best_scene}: "
+                        f"'{correct_lyrics[:60]}' "
+                        f"({best_count} keyframe words confirmed in scene {best_scene}'s time range)"
+                    )
+
+        if reassignment_count > 0:
+            logger.info(
+                f"[KeyframeVerify] Verification complete: {reassignment_count} lyrics reassignment(s)"
             )
         else:
-            safety_scenes.append(sd)
-    validated_scenes = safety_scenes
+            logger.info("[KeyframeVerify] Verification complete: all lyrics confirmed in correct scenes")
 
     # ── Delete existing scenes and create new ones ───────────────────────
 
@@ -2563,6 +2963,10 @@ async def suggest_timeline(
 
     created_ids: list[str] = []
     for i, sd in enumerate(validated_scenes):
+        scene_params: dict[str, Any] = {}
+        # Store real lyrics per scene for prompt generation
+        if i in scene_lyrics_map:
+            scene_params["lyrics"] = scene_lyrics_map[i]
         scene = Scene(
             id=uuid4(),
             project_id=project_id,
@@ -2572,7 +2976,7 @@ async def suggest_timeline(
             end_time=sd["end_time"],
             prompt="",
             negative_prompt="",
-            parameters={},
+            parameters=scene_params,
         )
         session.add(scene)
         await session.flush()

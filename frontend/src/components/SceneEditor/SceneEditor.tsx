@@ -1050,6 +1050,17 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     if (!lyricsData) return '';
     const fullText = lyricsData.text || lyricsData.initial_text || '';
     if (!activeScene) return fullText;
+
+    // ── PREFER stored lyrics from scene parameters ───────────────────
+    // The backend stores original user-typed lyrics per scene during
+    // suggest_timeline, keyed as scene.parameters.lyrics. This is more
+    // accurate than reconstructing from Whisper words (which are garbled).
+    const storedLyrics = (activeScene as any).parameters?.lyrics;
+    if (storedLyrics && typeof storedLyrics === 'string') {
+      return storedLyrics;
+    }
+
+    // ── FALLBACK: reconstruct from Whisper word timestamps ───────────
     const words = lyricsData.words || [];
     const sceneStart = activeScene.start_time;
     const sceneEnd = activeScene.end_time;

@@ -177,6 +177,7 @@ export interface AppSettings {
   video_prompt_guidance?: Record<string, string>;
   video_fps?: number;
   video_max_duration?: number;
+  video_min_duration?: number;
   video_tail?: number;
   color_correction_enabled?: boolean;
   restrict_explicit_content?: boolean;
