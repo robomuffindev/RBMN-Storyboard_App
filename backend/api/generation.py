@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
+from sqlalchemy.exc import OperationalError as SAOperationalError
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2293,19 +2295,31 @@ async def _run_windowed_batch(
         entry = eligible[next_to_submit]
         next_to_submit += 1
 
-        async with session_factory() as session:
-            job = Job(
-                project_id=project_id,
-                scene_id=entry["scene_id"],
-                job_type=entry["job_type"],
-                status=JobStatus.PENDING,
-                priority=0,
-                parameters=entry["parameters"],
-            )
-            session.add(job)
-            await session.flush()
-            job_id = job.id
-            await session.commit()
+        # Retry loop for SQLite "database is locked" under concurrency
+        for _attempt in range(4):
+            try:
+                async with session_factory() as session:
+                    job = Job(
+                        project_id=project_id,
+                        scene_id=entry["scene_id"],
+                        job_type=entry["job_type"],
+                        status=JobStatus.PENDING,
+                        priority=0,
+                        parameters=entry["parameters"],
+                    )
+                    session.add(job)
+                    await session.flush()
+                    job_id = job.id
+                    await session.commit()
+                break
+            except SAOperationalError as exc:
+                if "database is locked" in str(exc) and _attempt < 3:
+                    logger.warning(
+                        f"DB locked on job insert (attempt {_attempt + 1}/4), retrying..."
+                    )
+                    await asyncio.sleep(0.5 * (_attempt + 1))
+                else:
+                    raise
 
         active_jobs[job_id] = entry["scene_name"]
         job_queue.notify()

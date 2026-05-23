@@ -50,8 +50,8 @@ def set_sqlite_pragmas(dbapi_conn, connection_record):
     # Enable foreign key constraints
     cursor.execute("PRAGMA foreign_keys=ON")
 
-    # Busy timeout (5 seconds)
-    cursor.execute("PRAGMA busy_timeout=5000")
+    # Busy timeout — 30 s to handle concurrent auto-gen writes
+    cursor.execute("PRAGMA busy_timeout=30000")
 
     # Cache size (64MB)
     cursor.execute("PRAGMA cache_size=-65536")
