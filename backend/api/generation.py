@@ -3369,7 +3369,9 @@ async def rerun_pass2(
                 detail="No two-pass base image found for this scene. Generate with two-pass mode first.",
             )
 
-        # Verify the base asset exists
+        # Verify the base asset exists (convert string → UUID for session.get)
+        if isinstance(base_asset_id, str):
+            base_asset_id = UUID(base_asset_id)
         base_asset = await session.get(Asset, base_asset_id)
         if not base_asset:
             raise HTTPException(
