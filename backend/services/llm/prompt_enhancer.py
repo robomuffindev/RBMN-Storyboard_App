@@ -4,10 +4,51 @@ LLM Prompt Enhancement
 Enhance user prompts using various LLM providers (OpenAI, Anthropic, Gemini).
 """
 
+import glob as glob_mod
+import json
 import logging
-from typing import Optional
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── LLM Debug Logger (shared with timeline.py) ──────────────────────
+_ENHANCE_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs" / "llm_debug"
+_ENHANCE_LOG_MAX = 20
+
+
+def _write_enhance_log(
+    provider: str, model: str, prompt: str, context: str | None,
+    response: str, enhanced: str, error: str | None = None,
+) -> None:
+    """Write a debug log for enhance calls."""
+    try:
+        _ENHANCE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        fp = _ENHANCE_LOG_DIR / f"{ts}_enhance.json"
+        fp.write_text(json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": "enhance_prompt",
+            "provider": provider,
+            "model": model,
+            "input_prompt": prompt[:500] if prompt else "",
+            "context_snippet": (context[:500] if context else ""),
+            "raw_response": response,
+            "cleaned_result": enhanced,
+            "error": error,
+        }, indent=2, default=str), encoding="utf-8")
+        # Rotate
+        existing = sorted(glob_mod.glob(str(_ENHANCE_LOG_DIR / "*_enhance.json")))
+        if len(existing) > _ENHANCE_LOG_MAX:
+            for old in existing[: len(existing) - _ENHANCE_LOG_MAX]:
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+    except Exception as e:
+        logger.warning(f"[EnhanceLog] Failed to write: {e}")
 
 # Common prefixes that LLMs sometimes add despite instructions
 _STRIP_PREFIXES = [
@@ -441,12 +482,13 @@ class PromptEnhancer:
                 effective_model.startswith(p)
                 for p in ("gpt-4.1", "gpt-5", "chatgpt", "o1", "o3", "o4")
             )
+            enhance_tokens = 800
             extra_params: dict = {}
             if _new_style:
-                extra_params["max_completion_tokens"] = 300
+                extra_params["max_completion_tokens"] = enhance_tokens
                 # These models only accept temperature=1 (the default)
             else:
-                extra_params["max_tokens"] = 300
+                extra_params["max_tokens"] = enhance_tokens
                 extra_params["temperature"] = 0.7
 
             response = client.chat.completions.create(
@@ -458,12 +500,15 @@ class PromptEnhancer:
                 **extra_params,
             )
 
-            enhanced = _clean_enhanced_prompt(response.choices[0].message.content)
+            raw_content = response.choices[0].message.content or ""
+            enhanced = _clean_enhanced_prompt(raw_content)
             logger.info(f"Enhanced prompt ({len(enhanced)} chars)")
+            _write_enhance_log("openai", effective_model, prompt, context, raw_content, enhanced)
             return enhanced
 
         except Exception as e:
             logger.error(f"OpenAI enhancement failed: {e}")
+            _write_enhance_log("openai", model or "?", prompt or "", context, "", "", str(e))
             raise RuntimeError(f"OpenAI API error: {e}")
 
     @staticmethod
@@ -494,21 +539,25 @@ class PromptEnhancer:
             if context:
                 user_message += f"\n\nContext: {context}"
 
+            effective_model = model or "claude-sonnet-4-20250514"
             response = client.messages.create(
-                model=model or "claude-sonnet-4-20250514",
-                max_tokens=300,
+                model=effective_model,
+                max_tokens=800,
                 system=system_prompt,
                 messages=[
                     {"role": "user", "content": user_message},
                 ],
             )
 
-            enhanced = _clean_enhanced_prompt(response.content[0].text)
+            raw_content = response.content[0].text or ""
+            enhanced = _clean_enhanced_prompt(raw_content)
             logger.info(f"Enhanced prompt ({len(enhanced)} chars)")
+            _write_enhance_log("anthropic", effective_model, prompt, context, raw_content, enhanced)
             return enhanced
 
         except Exception as e:
             logger.error(f"Anthropic enhancement failed: {e}")
+            _write_enhance_log("anthropic", model or "?", prompt or "", context, "", "", str(e))
             raise RuntimeError(f"Anthropic API error: {e}")
 
     @staticmethod
@@ -546,15 +595,18 @@ class PromptEnhancer:
             response = model_obj.generate_content(
                 user_message,
                 generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=300,
+                    max_output_tokens=800,
                     temperature=0.7,
                 ),
             )
 
-            enhanced = _clean_enhanced_prompt(response.text)
+            raw_content = response.text or ""
+            enhanced = _clean_enhanced_prompt(raw_content)
             logger.info(f"Enhanced prompt ({len(enhanced)} chars)")
+            _write_enhance_log("gemini", model or "gemini-pro", prompt, context, raw_content, enhanced)
             return enhanced
 
         except Exception as e:
             logger.error(f"Gemini enhancement failed: {e}")
+            _write_enhance_log("gemini", model or "?", prompt or "", context, "", "", str(e))
             raise RuntimeError(f"Gemini API error: {e}")
