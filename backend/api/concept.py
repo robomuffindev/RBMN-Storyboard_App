@@ -992,14 +992,26 @@ def _call_llm(
     if provider == "openai":
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+        # Newer OpenAI models (GPT-4.1+, GPT-5.x, o-series, chatgpt-* series)
+        # require max_completion_tokens instead of the legacy max_tokens param
+        _new_style = any(
+            model.startswith(p)
+            for p in ("gpt-4.1", "gpt-5", "chatgpt", "o1", "o3", "o4")
+        )
+        extra_params: dict = {}
+        if _new_style:
+            extra_params["max_completion_tokens"] = max_tokens
+            # These models only accept temperature=1 (the default)
+        else:
+            extra_params["max_tokens"] = max_tokens
+            extra_params["temperature"] = 0.8
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.8,
-            max_tokens=max_tokens,
+            **extra_params,
         )
         return response.choices[0].message.content
 

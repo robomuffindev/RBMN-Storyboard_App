@@ -1,9 +1,11 @@
 """Timeline and audio analysis endpoints for RBMN Storyboard App."""
 import asyncio
+import glob as glob_mod
 import hashlib
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID, uuid4
@@ -28,6 +30,61 @@ from backend.database.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── LLM Debug Logger ──────────────────────────────────────────────────
+# Writes full LLM request/response to logs/llm_debug/ with auto-rotation.
+# Max 20 log files, oldest deleted when threshold exceeded.
+LLM_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs" / "llm_debug"
+LLM_LOG_MAX_FILES = 20
+
+
+def _write_llm_log(
+    endpoint: str,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    raw_response: str,
+    parsed_result: Any = None,
+    error: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Write a timestamped LLM debug log file with full request/response."""
+    try:
+        LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{ts}_{endpoint}.json"
+        filepath = LLM_LOG_DIR / filename
+
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "endpoint": endpoint,
+            "provider": provider,
+            "model": model,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "raw_response": raw_response,
+            "parsed_result": parsed_result,
+            "error": error,
+        }
+        if extra:
+            log_entry["extra"] = extra
+
+        filepath.write_text(json.dumps(log_entry, indent=2, default=str), encoding="utf-8")
+        logger.info(f"[LLM-Log] Wrote debug log: {filepath}")
+
+        # Rotate: delete oldest files if over threshold
+        existing = sorted(glob_mod.glob(str(LLM_LOG_DIR / "*.json")))
+        if len(existing) > LLM_LOG_MAX_FILES:
+            for old_file in existing[: len(existing) - LLM_LOG_MAX_FILES]:
+                try:
+                    os.remove(old_file)
+                    logger.info(f"[LLM-Log] Rotated old log: {old_file}")
+                except OSError:
+                    pass
+    except Exception as e:
+        logger.warning(f"[LLM-Log] Failed to write debug log: {e}")
 router = APIRouter(prefix="/api/projects/{project_id}/timeline", tags=["timeline"])
 
 
@@ -2270,41 +2327,47 @@ async def suggest_timeline(
                     "before_phrase": "(instrumental outro)",
                 })
 
-        # For long instrumental intro/outro, add evenly-spaced cuts so they
-        # can be split to respect max_dur.  These are "safe" because no
-        # lyrics exist in those regions.
-        if valid_cuts:
-            first_cut = valid_cuts[0]["time"]
-            last_cut = valid_cuts[-1]["time"]
-        else:
-            first_cut = total_duration
-            last_cut = 0.0
+        # For long instrumental regions (intro, outro, AND interior breaks),
+        # add evenly-spaced cuts so scenes can be split to respect max_dur.
+        # These are "safe" because no lyrics exist in those regions.
 
-        # Intro cuts: if intro > max_dur, add cuts every max_dur-2 seconds
-        if first_cut > max_dur:
-            t = max_dur - 1.0
-            while t < first_cut - 2.0:
-                valid_cuts.append({
-                    "time": round(t, 2),
-                    "label": f"CUT_INTRO: {t:.2f}s — instrumental intro split",
-                    "after_phrase": "(instrumental)",
-                    "before_phrase": "(instrumental)",
-                })
-                t += max_dur - 1.0
+        # Build a list of "edge" times: 0.0, each cut point, total_duration
+        # Then scan consecutive pairs for gaps > max_dur and fill them.
+        edge_times = sorted(
+            [0.0, total_duration] + [vc["time"] for vc in valid_cuts]
+        )
 
-        # Outro cuts: if outro > max_dur, add cuts every max_dur-2 seconds
-        if total_duration - last_cut > max_dur:
-            t = last_cut + max_dur - 1.0
-            while t < total_duration - 2.0:
-                valid_cuts.append({
-                    "time": round(t, 2),
-                    "label": f"CUT_OUTRO: {t:.2f}s — instrumental outro split",
-                    "after_phrase": "(instrumental)",
-                    "before_phrase": "(instrumental)",
-                })
-                t += max_dur - 1.0
+        instrumental_cuts: list[dict] = []
+        for ei in range(len(edge_times) - 1):
+            gap_start = edge_times[ei]
+            gap_end = edge_times[ei + 1]
+            gap_len = gap_end - gap_start
+            if gap_len > max_dur:
+                # Fill this gap with evenly-spaced cuts
+                n_splits = int(gap_len / (max_dur - 1.0))
+                step = gap_len / (n_splits + 1)
+                for si in range(1, n_splits + 1):
+                    t = round(gap_start + step * si, 2)
+                    # Don't place within 2s of existing edges
+                    if t > gap_start + 2.0 and t < gap_end - 2.0:
+                        region = "intro" if gap_start == 0.0 else (
+                            "outro" if gap_end == total_duration else "instrumental break"
+                        )
+                        instrumental_cuts.append({
+                            "time": t,
+                            "label": f"CUT_INST: {t:.2f}s — {region} split",
+                            "after_phrase": "(instrumental)",
+                            "before_phrase": "(instrumental)",
+                        })
 
-        # Re-sort valid_cuts by time after adding intro/outro cuts
+        if instrumental_cuts:
+            valid_cuts.extend(instrumental_cuts)
+            logger.info(
+                f"[SuggestTimeline] Added {len(instrumental_cuts)} instrumental "
+                f"split points for gaps > {max_dur}s"
+            )
+
+        # Re-sort valid_cuts by time after adding instrumental cuts
         valid_cuts.sort(key=lambda vc: vc["time"])
 
     # ── Build lyrics block for LLM ──────────────────────────────────────
@@ -2432,7 +2495,29 @@ async def suggest_timeline(
             raise ValueError("Expected a non-empty JSON array")
     except (json.JSONDecodeError, ValueError) as e:
         logger.error(f"Failed to parse LLM response: {e}\nRaw: {raw_text[:500]}")
+        _write_llm_log(
+            endpoint="suggest_timeline",
+            provider=provider, model=model,
+            system_prompt=system_prompt, user_prompt=user_prompt,
+            raw_response=raw_text, error=str(e),
+            extra={"valid_cuts_count": len(valid_cuts), "max_dur": max_dur, "min_dur": min_dur},
+        )
         raise HTTPException(status_code=500, detail="Failed to parse LLM scene response")
+
+    # Write success log with full request/response
+    _write_llm_log(
+        endpoint="suggest_timeline",
+        provider=provider, model=model,
+        system_prompt=system_prompt, user_prompt=user_prompt,
+        raw_response=raw_text, parsed_result=scenes_data,
+        extra={
+            "valid_cuts_count": len(valid_cuts),
+            "valid_cut_times": [vc["time"] for vc in valid_cuts],
+            "max_dur": max_dur,
+            "min_dur": min_dur,
+            "total_duration": total_duration,
+        },
+    )
 
     # ── Validate and fix LLM output ─────────────────────────────────────
     # Strategy: build a clean boundary list from LLM output, snap each
@@ -2535,79 +2620,117 @@ async def suggest_timeline(
     # Use ALL valid_cut_times (which includes intro/outro instrumental cuts)
     # IMPORTANT: respect min_dur when splitting — never create sub-scenes
     # shorter than the user's minimum duration setting.
-    validated_scenes: list[dict[str, Any]] = []
-    for sd in rebuilt_scenes:
-        dur = sd["end_time"] - sd["start_time"]
-        if dur > max_dur and len(valid_cut_times) > 2:
-            # Find valid cut points strictly inside this scene, respecting min_dur
-            # from both edges so we don't create tiny head/tail sub-scenes
+
+    def _split_oversized(
+        scenes_in: list[dict[str, Any]],
+        cut_times: list[float],
+        max_d: float,
+        min_d: float,
+        pass_label: str = "",
+    ) -> list[dict[str, Any]]:
+        """Split any scene exceeding max_d at the nearest valid cut points.
+
+        This is factored out so it can be called TWICE:
+        1) After initial LLM boundary validation
+        2) After phrase integrity checks and min-dur merges (which can re-create oversized scenes)
+        """
+        result: list[dict[str, Any]] = []
+        for sd in scenes_in:
+            dur = sd["end_time"] - sd["start_time"]
+            if dur <= max_d:
+                result.append(sd)
+                continue
+
+            # Find valid cut points strictly inside this scene
+            # Use a relaxed min_d for the inner search: allow 2s minimum
+            # sub-scene to avoid rejecting all cuts when min_d is large
+            effective_min = min(min_d, dur / 3.0, 3.0)
             interior_cuts = sorted([
-                vt for vt in valid_cut_times
-                if sd["start_time"] + min_dur < vt < sd["end_time"] - min_dur
+                vt for vt in cut_times
+                if sd["start_time"] + effective_min < vt < sd["end_time"] - effective_min
             ])
+
+            logger.info(
+                f"[SplitOversized{pass_label}] Scene '{sd['name']}' "
+                f"[{sd['start_time']:.2f}–{sd['end_time']:.2f}s] dur={dur:.1f}s > {max_d}s, "
+                f"found {len(interior_cuts)} interior cuts (effective_min={effective_min:.1f}s)"
+            )
             if interior_cuts:
+                logger.info(
+                    f"[SplitOversized{pass_label}]   Interior cut times: "
+                    f"{[round(c, 2) for c in interior_cuts[:20]]}"
+                )
+
+            if not interior_cuts:
+                # Last resort: create evenly-spaced cuts ignoring phrase boundaries
+                n_parts = max(2, int(dur / max_d) + 1)
+                step = dur / n_parts
+                logger.warning(
+                    f"[SplitOversized{pass_label}] No interior cuts for "
+                    f"'{sd['name']}' ({dur:.1f}s) — force-splitting into {n_parts} "
+                    f"equal parts of ~{step:.1f}s"
+                )
                 sub_scenes: list[dict[str, Any]] = []
-                cursor = sd["start_time"]
-                part = 1
-                while cursor < sd["end_time"] - 0.5:
-                    remaining = sd["end_time"] - cursor
-                    if remaining <= max_dur:
-                        # Remaining chunk fits — take it as the last sub-scene
+                for p in range(n_parts):
+                    s_start = sd["start_time"] + step * p
+                    s_end = sd["start_time"] + step * (p + 1) if p < n_parts - 1 else sd["end_time"]
+                    sub_scenes.append({
+                        "name": f"{sd['name']} (Part {p + 1})" if n_parts > 1 else sd["name"],
+                        "start_time": round(s_start, 3),
+                        "end_time": round(s_end, 3),
+                    })
+                result.extend(sub_scenes)
+                continue
+
+            # Use interior cuts to split
+            sub_scenes = []
+            cursor = sd["start_time"]
+            part = 1
+            while cursor < sd["end_time"] - 0.5:
+                remaining = sd["end_time"] - cursor
+                if remaining <= max_d:
+                    sub_scenes.append({
+                        "name": f"{sd['name']} (Part {part})" if part > 1 else sd["name"],
+                        "start_time": cursor,
+                        "end_time": sd["end_time"],
+                    })
+                    break
+                # Find the latest cut that keeps this segment ≤ max_d
+                candidates = [
+                    c for c in interior_cuts
+                    if c >= cursor + effective_min
+                    and c <= cursor + max_d
+                ]
+                if candidates:
+                    pick = candidates[-1]
+                else:
+                    # Take the first cut after cursor, even if it exceeds max_d
+                    after_cursor = [c for c in interior_cuts if c > cursor + 1.0]
+                    if after_cursor:
+                        pick = after_cursor[0]
+                    else:
                         sub_scenes.append({
                             "name": f"{sd['name']} (Part {part})" if part > 1 else sd["name"],
                             "start_time": cursor,
                             "end_time": sd["end_time"],
                         })
                         break
-                    # Find the latest cut that keeps this segment ≤ max_dur
-                    # AND ensures the cut is at least min_dur from cursor
-                    # AND leaves at least min_dur remaining after the cut
-                    candidates = [
-                        c for c in interior_cuts
-                        if c >= cursor + min_dur
-                        and c <= cursor + max_dur
-                        and sd["end_time"] - c >= min_dur
-                    ]
-                    if candidates:
-                        pick = candidates[-1]  # Latest valid cut (maximize scene length)
-                    else:
-                        # Relax: find any cut after cursor + min_dur, even if it
-                        # exceeds max_dur (better than creating a tiny scene)
-                        after_cursor = [
-                            c for c in interior_cuts
-                            if c >= cursor + min_dur
-                            and sd["end_time"] - c >= min_dur
-                        ]
-                        if after_cursor:
-                            pick = after_cursor[0]
-                        else:
-                            # Can't split without violating min_dur — keep as one scene
-                            sub_scenes.append({
-                                "name": f"{sd['name']} (Part {part})" if part > 1 else sd["name"],
-                                "start_time": cursor,
-                                "end_time": sd["end_time"],
-                            })
-                            break
-                    sub_scenes.append({
-                        "name": f"{sd['name']} (Part {part})",
-                        "start_time": cursor,
-                        "end_time": pick,
-                    })
-                    cursor = pick
-                    part += 1
-                validated_scenes.extend(sub_scenes)
-                logger.info(
-                    f"[SuggestTimeline] Split oversized scene '{sd['name']}' "
-                    f"({dur:.1f}s > {max_dur}s) into {len(sub_scenes)} sub-scenes"
-                )
-            else:
-                validated_scenes.append(sd)
-                logger.warning(
-                    f"[SuggestTimeline] Scene '{sd['name']}' is {dur:.1f}s "
-                    f"(exceeds {max_dur}s) but has no interior cuts to split at"
-                )
-        else:
-            validated_scenes.append(sd)
+                sub_scenes.append({
+                    "name": f"{sd['name']} (Part {part})",
+                    "start_time": cursor,
+                    "end_time": pick,
+                })
+                cursor = pick
+                part += 1
+            result.extend(sub_scenes)
+            logger.info(
+                f"[SplitOversized{pass_label}] Split '{sd['name']}' into "
+                f"{len(sub_scenes)} sub-scenes: "
+                f"{[(round(s['start_time'],1), round(s['end_time'],1)) for s in sub_scenes]}"
+            )
+        return result
+
+    validated_scenes = _split_oversized(rebuilt_scenes, valid_cut_times, max_dur, min_dur, " Pass1")
 
     # ── Frame-snap boundaries ──────────────────────────────────────────
     # Snap each boundary to the nearest frame, then propagate so scenes
@@ -2759,6 +2882,27 @@ async def suggest_timeline(
         vs for vs in validated_scenes
         if vs["end_time"] - vs["start_time"] > 0.1
     ]
+
+    # ── SECOND SPLIT PASS ─────────────────────────────────────────────
+    # Phrase integrity fixes and min-dur merges can re-create oversized
+    # scenes.  Run the splitter again to catch any that slipped through.
+    oversized_count = sum(
+        1 for vs in validated_scenes
+        if vs["end_time"] - vs["start_time"] > max_dur + 0.5
+    )
+    if oversized_count > 0:
+        logger.warning(
+            f"[SuggestTimeline] {oversized_count} scene(s) still exceed "
+            f"max_dur={max_dur}s after phrase/min-dur passes — running split Pass 2"
+        )
+        validated_scenes = _split_oversized(
+            validated_scenes, valid_cut_times, max_dur, min_dur, " Pass2"
+        )
+        # Clean up again
+        validated_scenes = [
+            vs for vs in validated_scenes
+            if vs["end_time"] - vs["start_time"] > 0.1
+        ]
 
     # De-duplicate names
     name_counts: dict[str, int] = {}

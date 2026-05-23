@@ -435,17 +435,19 @@ class PromptEnhancer:
                 user_message += f"\n\nContext: {context}"
 
             effective_model = model or "gpt-4-turbo"
-            # Newer OpenAI models (GPT-4.1+, GPT-5.x, o-series) require
-            # max_completion_tokens instead of the legacy max_tokens parameter
+            # Newer OpenAI models (GPT-4.1+, GPT-5.x, o-series, chatgpt-* series)
+            # require max_completion_tokens instead of the legacy max_tokens parameter
             _new_style = any(
                 effective_model.startswith(p)
-                for p in ("gpt-4.1", "gpt-5", "o1", "o3", "o4")
+                for p in ("gpt-4.1", "gpt-5", "chatgpt", "o1", "o3", "o4")
             )
-            token_param = (
-                {"max_completion_tokens": 300}
-                if _new_style
-                else {"max_tokens": 300}
-            )
+            extra_params: dict = {}
+            if _new_style:
+                extra_params["max_completion_tokens"] = 300
+                # These models only accept temperature=1 (the default)
+            else:
+                extra_params["max_tokens"] = 300
+                extra_params["temperature"] = 0.7
 
             response = client.chat.completions.create(
                 model=effective_model,
@@ -453,8 +455,7 @@ class PromptEnhancer:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ],
-                temperature=0.7,
-                **token_param,
+                **extra_params,
             )
 
             enhanced = _clean_enhanced_prompt(response.choices[0].message.content)
