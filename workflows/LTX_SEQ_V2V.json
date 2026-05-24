@@ -214,7 +214,7 @@
   },
   "160": {
     "inputs": {
-      "strength": 1.0,
+      "strength": 0.5,
       "interpolation": "bicubic",
       "positive": [
         "150",

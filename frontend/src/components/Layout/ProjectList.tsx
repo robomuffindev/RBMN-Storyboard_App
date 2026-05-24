@@ -12,6 +12,7 @@ export default function ProjectList() {
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectMode, setNewProjectMode] = useState<ProjectMode>('music_video');
+  const [lipsyncDefault, setLipsyncDefault] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
 
   // Batch mode state
@@ -49,6 +50,7 @@ export default function ProjectList() {
       const response = await createProject({
         name: newProjectName,
         mode: newProjectMode,
+        settings: { lipsync_default: lipsyncDefault },
       });
       setNewProjectName('');
       setShowNewProjectModal(false);
@@ -285,6 +287,22 @@ export default function ProjectList() {
                     </label>
                   ))}
                 </div>
+              </div>
+
+              {/* Lipsync default */}
+              <div className="mb-6">
+                <label className="flex items-center gap-3 p-3 border border-gray-700 rounded cursor-pointer hover:bg-gray-800 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={lipsyncDefault}
+                    onChange={(e) => setLipsyncDefault(e.target.checked)}
+                    className="w-4 h-4 accent-green-500"
+                  />
+                  <div>
+                    <div className="text-sm font-medium">Enable Lipsync by Default</div>
+                    <div className="text-xs text-gray-500 mt-0.5">Boost audio-video sync for singing on all scenes</div>
+                  </div>
+                </label>
               </div>
 
               <div className="flex gap-4">

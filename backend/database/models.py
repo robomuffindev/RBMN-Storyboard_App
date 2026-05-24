@@ -349,6 +349,13 @@ class AppSettings(SQLModel, table=True):
     global_negative_prompt: Optional[str] = Field(default=None)
     # Project directory path (overrides env PROJECT_DIR when set via Settings UI)
     project_dir: Optional[str] = Field(default=None)
+    # LTXDirector video generation settings
+    director_guide_strength: float = Field(default=0.5)  # LTXDirectorGuide strength (0.0-1.0, official default 0.5)
+    director_audio_guidance: float = Field(default=0.001)  # Audio influence on video (0.001=off, 0.3-0.7=moderate, 1.0=max)
+    director_stitch: bool = Field(default=False)  # Smooth prompt transitions between segments (off=hard cuts for music videos)
+    director_auto_image_desc: bool = Field(default=True)  # Auto-fill image_description from scene context
+    # Global negative prompt for VIDEO generation — set on LTXDirector negative_prompt field
+    global_video_negative_prompt: Optional[str] = Field(default=None)
 
 
 class WorkflowFieldType(StrEnum):

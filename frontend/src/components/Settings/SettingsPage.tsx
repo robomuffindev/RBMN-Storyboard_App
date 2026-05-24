@@ -54,6 +54,11 @@ export default function SettingsPage() {
     restrict_explicit_content: false,
     network_access: false,
     global_negative_prompt: '',
+    director_guide_strength: 0.5,
+    director_audio_guidance: 0.001,
+    director_stitch: false,
+    director_auto_image_desc: true,
+    global_video_negative_prompt: '',
     export_transition_type: 'crossfade',
     export_transition_duration: 0.5,
     export_color_match_clips: false,
@@ -127,6 +132,11 @@ export default function SettingsPage() {
         restrict_explicit_content: savedSettings.restrict_explicit_content === true,
         network_access: savedSettings.network_access === true,
         global_negative_prompt: savedSettings.global_negative_prompt || '',
+        director_guide_strength: savedSettings.director_guide_strength ?? 0.5,
+        director_audio_guidance: savedSettings.director_audio_guidance ?? 0.001,
+        director_stitch: savedSettings.director_stitch ?? false,
+        director_auto_image_desc: savedSettings.director_auto_image_desc ?? true,
+        global_video_negative_prompt: savedSettings.global_video_negative_prompt || '',
         export_transition_type: savedSettings.export_transition_type || 'crossfade',
         export_transition_duration: savedSettings.export_transition_duration ?? 0.5,
         export_color_match_clips: savedSettings.export_color_match_clips === true,
@@ -1051,6 +1061,122 @@ export default function SettingsPage() {
             <p className="text-xs text-gray-400 mt-1">
               Applied to all image generation workflows. Appended to the anti-text suffix on every image prompt.
               Per-scene negative prompts override this when set.
+            </p>
+          </div>
+        </section>
+
+        {/* LTXDirector Settings */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-4">LTX Director (Video Generation)</h2>
+          <p className="text-xs text-gray-400 mb-4">
+            Controls how the LTXDirector node generates video. Director manages frame conditioning,
+            audio-video sync, and prompt transitions between scenes.
+          </p>
+
+          {/* Guide Strength */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium mb-1">
+              Director Guide Strength: {(settings.director_guide_strength ?? 0.5).toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={settings.director_guide_strength ?? 0.5}
+              onChange={(e) => setSettings((prev) => ({ ...prev, director_guide_strength: parseFloat(e.target.value) }))}
+              className="w-full accent-blue-600"
+            />
+            <div className="flex justify-between text-xs text-gray-500 mt-1">
+              <span>0.0 — Free motion</span>
+              <span>0.5 — Official default</span>
+              <span>1.0 — Rigid frame lock</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              How strongly keyframe images constrain video generation. Lower values allow more natural motion;
+              higher values lock the video tightly to reference frames. Official ComfyUI default is 0.5.
+            </p>
+          </div>
+
+          {/* Audio Guidance */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium mb-1">
+              Audio Guidance: {(settings.director_audio_guidance ?? 0.001).toFixed(3)}
+            </label>
+            <input
+              type="range"
+              min="0.001"
+              max="1"
+              step="0.01"
+              value={settings.director_audio_guidance ?? 0.001}
+              onChange={(e) => setSettings((prev) => ({ ...prev, director_audio_guidance: parseFloat(e.target.value) }))}
+              className="w-full accent-blue-600"
+            />
+            <div className="flex justify-between text-xs text-gray-500 mt-1">
+              <span>0.001 — Off (prompt-only)</span>
+              <span>0.3–0.7 — Moderate sync</span>
+              <span>1.0 — Max audio influence</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              How much audio influences video generation. At 0.001, audio has no effect on visuals.
+              Raise this for audio-reactive video where motion syncs to beats and mood.
+            </p>
+          </div>
+
+          {/* Stitch Mode */}
+          <div className="mb-4">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                onClick={() => setSettings((prev) => ({ ...prev, director_stitch: !prev.director_stitch }))}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  settings.director_stitch ? 'bg-blue-600' : 'bg-gray-700'
+                }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                  settings.director_stitch ? 'translate-x-5' : ''
+                }`} />
+              </div>
+              <span className="text-sm font-medium">Stitch Mode (Smooth Prompt Transitions)</span>
+            </label>
+            <p className="text-xs text-gray-400 mt-1">
+              When OFF (default), prompt segments have sharp cuts between them — ideal for beat-driven music videos.
+              When ON, prompt attention softens at segment boundaries for cinematic cross-dissolve transitions.
+            </p>
+          </div>
+
+          {/* Auto Image Description */}
+          <div className="mb-4">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                onClick={() => setSettings((prev) => ({ ...prev, director_auto_image_desc: !(prev.director_auto_image_desc ?? true) }))}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  (settings.director_auto_image_desc ?? true) ? 'bg-blue-600' : 'bg-gray-700'
+                }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                  (settings.director_auto_image_desc ?? true) ? 'translate-x-5' : ''
+                }`} />
+              </div>
+              <span className="text-sm font-medium">Auto Image Description</span>
+            </label>
+            <p className="text-xs text-gray-400 mt-1">
+              Automatically fills the Director's image_description field from the scene prompt, giving the model
+              richer context about what reference images contain for better prompt-image alignment.
+            </p>
+          </div>
+
+          {/* Video Negative Prompt */}
+          <div className="mt-4 pt-4 border-t border-gray-800">
+            <label className="block text-sm font-medium mb-2">Global Negative Prompt (Video Generation)</label>
+            <textarea
+              value={settings.global_video_negative_prompt || ''}
+              onChange={(e) => setSettings((prev) => ({ ...prev, global_video_negative_prompt: e.target.value }))}
+              placeholder="e.g. static, frozen, blurry, jittery, low quality, deformed..."
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-20 text-sm"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Applied to all LTX Director video workflows via the negative_prompt field.
+              Tells the model what to avoid in generated video clips.
             </p>
           </div>
         </section>

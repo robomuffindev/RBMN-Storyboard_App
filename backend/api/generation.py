@@ -388,6 +388,18 @@ async def generate_video(
                 "skip_audio_mux": req.skip_audio_mux,
             },
         )
+
+        # Read lipsync flags from scene parameters and inject into job params
+        scene_stmt = select(Scene).where(Scene.id == req.scene_id, Scene.project_id == project_id)
+        scene_result = await session.execute(scene_stmt)
+        scene_obj = scene_result.scalars().first()
+        if scene_obj and scene_obj.parameters:
+            sp = scene_obj.parameters
+            if sp.get("lipsync_enabled", True):  # Default ON to match frontend
+                job.parameters["lipsync_enabled"] = True
+            if sp.get("vocals_only_for_lipsync"):
+                job.parameters["vocals_only_for_lipsync"] = True
+
         session.add(job)
         await session.commit()
         await session.refresh(job)
@@ -396,7 +408,7 @@ async def generate_video(
             f"Created video generation job {job.id} for scene {req.scene_id} with seed={resolved_seed} | "
             f"workflow={req.workflow_type} ff_asset={req.first_frame_asset_id} "
             f"lf_asset={req.last_frame_asset_id} audio_asset={req.audio_asset_id} "
-            f"w={req.width} h={req.height}"
+            f"w={req.width} h={req.height} lipsync={job.parameters.get('lipsync_enabled', False)}"
         )
 
         # Notify the dispatcher that a new job is available
@@ -1128,6 +1140,17 @@ async def _build_video_enhance_context(
                 f'Previous scene described: "{prev_prompt}". The video should visually continue from that context.'
             )
 
+    # Lipsync awareness — guide LLM to emphasize facial/mouth movement
+    lipsync_on = scene.parameters.get("lipsync_enabled", False)
+    if lipsync_on:
+        parts.append(
+            "LIPSYNC ENABLED: Audio-video synchronization is boosted for this scene. "
+            "The video model will attempt to match mouth movements to the audio. "
+            "Emphasize close-up or medium shots showing the character's face and mouth clearly. "
+            "Describe the character singing, speaking, or vocalizing the lyrics. "
+            "Avoid obscuring the face with objects, heavy shadows, or extreme angles."
+        )
+
     return " | ".join(parts)
 
 
@@ -1720,6 +1743,8 @@ class SeqAutoGenRequest(BaseModel):
     skip_audio_mux: bool = False  # If True, keeps LTX model-generated audio (better for lip-sync testing)
     two_pass: bool = False  # If True, use two-pass image generation (scene composition → character composite)
     use_story_flow: bool = True  # If True, include video flow ideas in LLM enhance context
+    lipsync_enabled: bool = True  # If True, boost audio_guidance for lip-sync on all scenes
+    vocals_only_for_lipsync: bool = False  # If True, send only vocal stems when lipsync is enabled
 
 
 class SeqAutoGenStatusResponse(BaseModel):
@@ -1828,6 +1853,8 @@ async def start_sequential_auto_gen(
             skip_audio_mux=req.skip_audio_mux,
             two_pass=req.two_pass,
             use_story_flow=req.use_story_flow,
+            lipsync_enabled=req.lipsync_enabled,
+            vocals_only_for_lipsync=req.vocals_only_for_lipsync,
         )
     )
 
@@ -2171,6 +2198,8 @@ async def _run_windowed_batch(
                 scene_params["video_mode"] = "single"
                 scene_params["use_prev_lf_as_ff"] = False
                 scene_params["scene_source_type"] = "video"
+                scene_params["lipsync_enabled"] = lipsync_enabled
+                scene_params["vocals_only_for_lipsync"] = vocals_only_for_lipsync
                 scene.parameters = scene_params
                 await session.commit()
 
@@ -2210,6 +2239,8 @@ async def _run_windowed_batch(
                         "vocals_only_audio": vocals_only_audio,
                         "use_stem_selections": not vocals_only_audio,
                         "skip_audio_mux": skip_audio_mux,
+                        "lipsync_enabled": scene_params.get("lipsync_enabled", False),
+                        "vocals_only_for_lipsync": scene_params.get("vocals_only_for_lipsync", False),
                     },
                 })
 
@@ -2434,6 +2465,8 @@ async def _run_sequential_auto_gen(
     skip_audio_mux: bool = False,
     two_pass: bool = False,
     use_story_flow: bool = True,
+    lipsync_enabled: bool = True,
+    vocals_only_for_lipsync: bool = False,
 ):
     """Background task: process scenes sequentially or via continuous dispatch.
 
@@ -2739,9 +2772,11 @@ async def _run_sequential_auto_gen(
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance video failed scene {i}: {e}")
 
-                    # Save video prompt to scene
+                    # Save video prompt and lipsync to scene
                     scene_params = dict(scene.parameters or {})
                     scene_params["video_prompt"] = video_prompt
+                    scene_params["lipsync_enabled"] = lipsync_enabled
+                    scene_params["vocals_only_for_lipsync"] = vocals_only_for_lipsync
                     scene.parameters = scene_params
                     await session.commit()
 
@@ -2759,6 +2794,8 @@ async def _run_sequential_auto_gen(
                             "duration": duration,
                             "framerate": 24,
                             "skip_audio_mux": skip_audio_mux,
+                            "lipsync_enabled": lipsync_enabled,
+                            "vocals_only_for_lipsync": vocals_only_for_lipsync,
                         },
                     )
                     session.add(job)
@@ -2942,9 +2979,11 @@ async def _run_sequential_auto_gen(
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance video failed scene {i}: {e}")
 
-                    # Save video prompt to scene
+                    # Save video prompt and lipsync to scene
                     scene_params = dict(scene.parameters or {})
                     scene_params["video_prompt"] = video_prompt
+                    scene_params["lipsync_enabled"] = lipsync_enabled
+                    scene_params["vocals_only_for_lipsync"] = vocals_only_for_lipsync
                     scene.parameters = scene_params
                     await session.commit()
 
@@ -2962,6 +3001,8 @@ async def _run_sequential_auto_gen(
                             "duration": duration,
                             "framerate": 24,
                             "skip_audio_mux": skip_audio_mux,
+                            "lipsync_enabled": lipsync_enabled,
+                            "vocals_only_for_lipsync": vocals_only_for_lipsync,
                         },
                     )
                     session.add(job)
@@ -3062,9 +3103,11 @@ async def _run_sequential_auto_gen(
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen V2V: enhance video failed scene {i}: {e}")
 
-                    # Save video prompt
+                    # Save video prompt and lipsync
                     scene_params = dict(scene.parameters or {})
                     scene_params["video_prompt"] = video_prompt
+                    scene_params["lipsync_enabled"] = lipsync_enabled
+                    scene_params["vocals_only_for_lipsync"] = vocals_only_for_lipsync
                     scene.parameters = scene_params
                     await session.commit()
 
@@ -3084,6 +3127,8 @@ async def _run_sequential_auto_gen(
                             "duration": duration,
                             "framerate": 24,
                             "skip_audio_mux": skip_audio_mux,
+                            "lipsync_enabled": lipsync_enabled,
+                            "vocals_only_for_lipsync": vocals_only_for_lipsync,
                         },
                     )
                     session.add(job)

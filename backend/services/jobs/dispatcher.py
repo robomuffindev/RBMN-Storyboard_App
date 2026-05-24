@@ -1185,9 +1185,14 @@ class JobDispatcher:
 
             # Sequencer-based workflows use prepare_sequencer_workflow
             if workflow_type.startswith("ltx_seq_"):
-                # Read distilled LoRA and model settings
+                # Read distilled LoRA, model, and Director settings
                 distilled_lora_name = None
                 ltx_model_gguf_override = None
+                director_guide_strength = 0.5
+                director_audio_guidance = 0.001
+                director_stitch = False
+                director_auto_image_desc = True
+                video_neg_prompt = ""
                 try:
                     async with self._session_factory() as seq_session:
                         from backend.database.models import AppSettings as SeqAppSettings
@@ -1198,11 +1203,33 @@ class JobDispatcher:
                             if seq_settings.use_distilled_lora:
                                 distilled_lora_name = seq_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
                             ltx_model_gguf_override = seq_settings.ltx_model_gguf if hasattr(seq_settings, 'ltx_model_gguf') else None
+                            # LTXDirector settings
+                            director_guide_strength = seq_settings.director_guide_strength if seq_settings.director_guide_strength is not None else 0.5
+                            director_audio_guidance = seq_settings.director_audio_guidance if seq_settings.director_audio_guidance is not None else 0.001
+                            director_stitch = seq_settings.director_stitch if seq_settings.director_stitch is not None else False
+                            director_auto_image_desc = seq_settings.director_auto_image_desc if seq_settings.director_auto_image_desc is not None else True
+                            video_neg_prompt = (seq_settings.global_video_negative_prompt or "").strip()
                 except Exception as e:
                     logger.debug(f"Could not read sequencer settings: {e}")
                     ltx_model_gguf_override = None
 
                 effective_last_frame_seq = last_frame if workflow_type == "ltx_seq_fflf" else None
+
+                # Build image description from scene prompt context if auto mode is on
+                image_desc = ""
+                if director_auto_image_desc and first_frame:
+                    # Use a truncated version of the prompt as image context
+                    scene_prompt = params.get("prompt", "")
+                    if scene_prompt:
+                        # Take first 200 chars as a concise description of what's in the image
+                        image_desc = scene_prompt[:200].strip()
+
+                # Lipsync override: boost audio_guidance when lipsync is enabled for this scene
+                lipsync_enabled = params.get("lipsync_enabled", False)
+                if lipsync_enabled:
+                    # Use higher audio guidance for lipsync — minimum 0.7 unless user already set higher
+                    director_audio_guidance = max(director_audio_guidance, 0.7)
+                    logger.info(f"Lipsync enabled — audio_guidance boosted to {director_audio_guidance}")
 
                 return prepare_sequencer_workflow(
                     workflow_path=workflow_path,
@@ -1217,6 +1244,11 @@ class JobDispatcher:
                     last_frame=effective_last_frame_seq,
                     ltx_model_gguf=ltx_model_gguf_override,
                     distilled_lora_name=distilled_lora_name,
+                    negative_prompt=video_neg_prompt,
+                    audio_guidance=director_audio_guidance,
+                    guide_strength=director_guide_strength,
+                    stitch=director_stitch,
+                    image_description=image_desc,
                 )
 
             # Read video_tail and ltx_model_gguf from AppSettings
@@ -1423,8 +1455,15 @@ class JobDispatcher:
                         result["last_frame"] = lf_path
 
                     # ── Stem-based audio for video generation ──
-                    # Priority: vocals_only flag > per-scene StemSelection > regular audio clip
+                    # Priority: vocals_only flag > lipsync vocals_only > per-scene StemSelection > regular audio clip
                     vocals_only = params.get("vocals_only_audio", False)
+                    # Per-scene lipsync vocal isolation — if lipsync is on and vocals_only_for_lipsync is on
+                    if not vocals_only:
+                        lipsync_on = scene_params.get("lipsync_enabled", False)
+                        lipsync_vocals = scene_params.get("vocals_only_for_lipsync", False)
+                        if lipsync_on and lipsync_vocals:
+                            vocals_only = True
+                            logger.info(f"Lipsync vocals-only override for scene {scene.order_index}")
                     use_stem_mix = params.get("use_stem_selections", True)
 
                     if vocals_only:

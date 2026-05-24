@@ -435,6 +435,8 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
   const [skipAudioMux, setSkipAudioMux] = useState(false);
   const [twoPass, setTwoPass] = useState(false);
   const [useStoryFlow, setUseStoryFlow] = useState(true);
+  const [lipsyncEnabled, setLipsyncEnabled] = useState(true);
+  const [vocalsOnlyForLipsync, setVocalsOnlyForLipsync] = useState(false);
   const [status, setStatus] = useState<{
     status: string;
     mode?: string;
@@ -509,7 +511,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
 
   const handleStart = useCallback(async (mode: string) => {
     try {
-      const res = await startSequentialAutoGen(projectId, mode, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow);
+      const res = await startSequentialAutoGen(projectId, mode, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow, lipsyncEnabled, vocalsOnlyForLipsync);
       setStatus(res.data);
       startPolling();
     } catch (err: any) {
@@ -520,7 +522,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
         error: err?.response?.data?.detail || 'Failed to start',
       });
     }
-  }, [projectId, startPolling, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow]);
+  }, [projectId, startPolling, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow, lipsyncEnabled, vocalsOnlyForLipsync]);
 
   const handleCancel = useCallback(async () => {
     try {
@@ -694,6 +696,62 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
               </div>
             </div>
           </label>
+        )}
+
+        {/* Lipsync toggle — only show when not running */}
+        {!isRunning && !isDone && !isFailed && !isCancelled && (
+          <div style={{ marginBottom: 8 }}>
+            <label
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                padding: '10px 12px', borderRadius: 8,
+                background: lipsyncEnabled ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255,255,255,0.04)',
+                border: lipsyncEnabled ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(255,255,255,0.08)',
+                transition: 'all 0.2s',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={lipsyncEnabled}
+                onChange={(e) => setLipsyncEnabled(e.target.checked)}
+                style={{ accentColor: '#22c55e', width: 16, height: 16, cursor: 'pointer' }}
+              />
+              <div>
+                <div style={{ color: lipsyncEnabled ? '#22c55e' : '#ccc', fontSize: 13, fontWeight: 600 }}>
+                  Lipsync
+                </div>
+                <div style={{ color: '#888', fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
+                  Boost audio-video sync for singing scenes. Sets lipsync_enabled on each scene&apos;s parameters.
+                </div>
+              </div>
+            </label>
+            {lipsyncEnabled && (
+              <label
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                  padding: '8px 12px', marginTop: 4, marginLeft: 24, borderRadius: 8,
+                  background: vocalsOnlyForLipsync ? 'rgba(34, 197, 94, 0.1)' : 'rgba(255,255,255,0.02)',
+                  border: vocalsOnlyForLipsync ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid rgba(255,255,255,0.06)',
+                  transition: 'all 0.2s',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={vocalsOnlyForLipsync}
+                  onChange={(e) => setVocalsOnlyForLipsync(e.target.checked)}
+                  style={{ accentColor: '#22c55e', width: 14, height: 14, cursor: 'pointer' }}
+                />
+                <div>
+                  <div style={{ color: vocalsOnlyForLipsync ? '#22c55e' : '#aaa', fontSize: 12, fontWeight: 500 }}>
+                    Send only vocal stem to Generator
+                  </div>
+                  <div style={{ color: '#777', fontSize: 10, lineHeight: 1.4, marginTop: 1 }}>
+                    Isolate voice for cleaner sync. Overrides per-scene stem selections.
+                  </div>
+                </div>
+              </label>
+            )}
+          </div>
         )}
 
         {/* Mode buttons — only show when not running */}

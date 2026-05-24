@@ -21,7 +21,7 @@ const api: AxiosInstance = axios.create({
 });
 
 // ===== Projects =====
-export const createProject = (data: { name: string; mode: string }) =>
+export const createProject = (data: { name: string; mode: string; settings?: Record<string, unknown> }) =>
   api.post<Project>('/projects', data);
 
 export const getProjects = () => api.get<Project[]>('/projects');
@@ -191,6 +191,8 @@ export const startSequentialAutoGen = (
   skipAudioMux: boolean = false,
   twoPass: boolean = false,
   useStoryFlow: boolean = true,
+  lipsyncEnabled: boolean = true,
+  vocalsOnlyForLipsync: boolean = false,
 ) =>
   api.post<{
     status: string;
@@ -207,6 +209,8 @@ export const startSequentialAutoGen = (
     skip_audio_mux: skipAudioMux,
     two_pass: twoPass,
     use_story_flow: useStoryFlow,
+    lipsync_enabled: lipsyncEnabled,
+    vocals_only_for_lipsync: vocalsOnlyForLipsync,
   });
 
 export const getSequentialAutoGenStatus = (projectId: string) =>

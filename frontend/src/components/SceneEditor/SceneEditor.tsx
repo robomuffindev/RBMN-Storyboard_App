@@ -1381,11 +1381,15 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         setActiveHistoryIndex(Math.min(index, newFiltered.length - 1));
       }
 
-      // Clear chosen path if it was the deleted one
+      // If deleted version was the chosen one, auto-fallback to next available or clear
       if (version.output_path === activeChosenPath) {
-        useAppStore.getState().updateSceneInStore(activeScene.id, {
-          parameters: { ...activeScene.parameters, [chosenParamKey]: undefined },
-        });
+        const fallbackVersion = newFiltered.length > 0
+          ? newFiltered[Math.min(index, newFiltered.length - 1)]
+          : null;
+        const newChosenPath = fallbackVersion?.output_path ?? undefined;
+        const newParams = { ...activeScene.parameters, [chosenParamKey]: newChosenPath };
+        await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+        useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
       }
 
       queryClient.invalidateQueries({
@@ -1439,9 +1443,13 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         setVideoHistoryIndex(Math.min(index, newVideoVers.length - 1));
       }
 
-      // Clear chosen video path if it was the deleted one
+      // If deleted video was the chosen one, auto-fallback to next available or clear
       if (version.output_path === chosenVideoPath) {
-        const newParams = { ...activeScene.parameters, chosen_video_path: undefined };
+        const fallbackVideo = newVideoVers.length > 0
+          ? newVideoVers[Math.min(index, newVideoVers.length - 1)]
+          : null;
+        const newChosenVideo = fallbackVideo?.output_path ?? undefined;
+        const newParams = { ...activeScene.parameters, chosen_video_path: newChosenVideo };
         await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
         useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
       }
@@ -1582,6 +1590,24 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   };
 
   // ─── Save video mode to scene parameters ─────────────────────────
+  // Lipsync settings — derived from scene parameters, default ON
+  const lipsyncEnabled = activeScene?.parameters?.lipsync_enabled !== false; // default true
+  const vocalsOnlyForLipsync = activeScene?.parameters?.vocals_only_for_lipsync || false;
+
+  const handleSetLipsync = async (enabled: boolean) => {
+    if (!activeScene || !currentProject) return;
+    const newParams = { ...activeScene.parameters, lipsync_enabled: enabled };
+    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+  };
+
+  const handleSetVocalsOnlyForLipsync = async (enabled: boolean) => {
+    if (!activeScene || !currentProject) return;
+    const newParams = { ...activeScene.parameters, vocals_only_for_lipsync: enabled };
+    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+  };
+
   const handleSetVideoMode = async (mode: 'single' | 'ff_lf' | 'v2v_extend') => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, video_mode: mode };
@@ -2860,6 +2886,32 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <span>Keep Model Audio (skip mux)</span>
                 <span className="text-xs text-gray-500 ml-auto">(better for lip-sync testing)</span>
               </label>
+
+              {/* Lipsync Toggle */}
+              <div className="space-y-1">
+                <label className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer text-sm text-gray-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={lipsyncEnabled}
+                    onChange={(e) => handleSetLipsync(e.target.checked)}
+                    className="w-4 h-4 accent-green-500"
+                  />
+                  <span>Lipsync</span>
+                  <span className="text-xs text-gray-500 ml-auto">(boost audio-video sync for singing)</span>
+                </label>
+                {lipsyncEnabled && (
+                  <label className="flex items-center gap-2 px-3 py-1.5 ml-6 bg-gray-750 hover:bg-gray-700 rounded cursor-pointer text-xs text-gray-400 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={vocalsOnlyForLipsync}
+                      onChange={(e) => handleSetVocalsOnlyForLipsync(e.target.checked)}
+                      className="w-3.5 h-3.5 accent-green-500"
+                    />
+                    <span>Send only vocal stem to Generator</span>
+                    <span className="text-[10px] text-gray-600 ml-auto">(isolate voice for cleaner sync)</span>
+                  </label>
+                )}
+              </div>
 
               <div>
                 <div className="flex items-center gap-2 mb-1">

@@ -26,6 +26,7 @@ class ProjectCreate(BaseModel):
 
     name: str
     mode: ProjectMode = ProjectMode.MUSIC_VIDEO
+    settings: Optional[dict] = None  # Optional initial settings (e.g. lipsync_default)
 
 
 class ProjectUpdate(BaseModel):
@@ -78,6 +79,8 @@ async def create_project(
     try:
         # Create project in database
         project = Project(name=req.name, mode=req.mode)
+        if req.settings:
+            project.settings = req.settings
         session.add(project)
         await session.flush()
 

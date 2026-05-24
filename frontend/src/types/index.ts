@@ -201,6 +201,12 @@ export interface AppSettings {
   distilled_lora_name?: string;
   // Project directory
   project_dir?: string;
+  // LTXDirector video generation settings
+  director_guide_strength?: number;
+  director_audio_guidance?: number;
+  director_stitch?: boolean;
+  director_auto_image_desc?: boolean;
+  global_video_negative_prompt?: string;
 }
 
 export interface RunPodPodConfig {

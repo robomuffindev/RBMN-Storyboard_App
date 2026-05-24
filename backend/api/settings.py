@@ -82,6 +82,12 @@ class SettingsResponse(BaseModel):
     network_access: bool = False
     # Project directory
     project_dir: Optional[str] = None
+    # LTXDirector video generation settings
+    director_guide_strength: float = 0.5
+    director_audio_guidance: float = 0.001
+    director_stitch: bool = False
+    director_auto_image_desc: bool = True
+    global_video_negative_prompt: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -127,6 +133,12 @@ class SettingsUpdate(BaseModel):
     runpod_pods: Optional[list[RunPodPodEntry]] = None
     # Network access
     network_access: Optional[bool] = None
+    # LTXDirector settings
+    director_guide_strength: Optional[float] = None
+    director_audio_guidance: Optional[float] = None
+    director_stitch: Optional[bool] = None
+    director_auto_image_desc: Optional[bool] = None
+    global_video_negative_prompt: Optional[str] = None
 
 
 class ChangeProjectDirRequest(BaseModel):
@@ -290,6 +302,11 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         runpod_pods=[RunPodPodEntry(**p) for p in (settings.runpod_pods or [])],
         network_access=settings.network_access or False,
         project_dir=settings.project_dir or str(env_settings.project_dir),
+        director_guide_strength=settings.director_guide_strength if settings.director_guide_strength is not None else 0.5,
+        director_audio_guidance=settings.director_audio_guidance if settings.director_audio_guidance is not None else 0.001,
+        director_stitch=settings.director_stitch if settings.director_stitch is not None else False,
+        director_auto_image_desc=settings.director_auto_image_desc if settings.director_auto_image_desc is not None else True,
+        global_video_negative_prompt=settings.global_video_negative_prompt,
     )
 
 
@@ -452,6 +469,17 @@ async def update_settings(
             settings.runpod_pods = [p.model_dump() for p in req.runpod_pods]
         if req.network_access is not None:
             settings.network_access = req.network_access
+        # LTXDirector settings
+        if req.director_guide_strength is not None:
+            settings.director_guide_strength = max(0.0, min(1.0, req.director_guide_strength))
+        if req.director_audio_guidance is not None:
+            settings.director_audio_guidance = max(0.001, min(1.0, req.director_audio_guidance))
+        if req.director_stitch is not None:
+            settings.director_stitch = req.director_stitch
+        if req.director_auto_image_desc is not None:
+            settings.director_auto_image_desc = req.director_auto_image_desc
+        if req.global_video_negative_prompt is not None:
+            settings.global_video_negative_prompt = req.global_video_negative_prompt or None
 
         await session.commit()
         await session.refresh(settings)

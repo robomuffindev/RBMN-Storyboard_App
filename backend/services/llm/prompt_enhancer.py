@@ -61,13 +61,31 @@ _STRIP_PREFIXES = [
 
 
 def _collapse_to_single_paragraph(text: str) -> str:
-    """Collapse multi-line text into a single paragraph for LTX video prompts.
+    """Clean up whitespace in prompts.
 
-    LTX Video treats each paragraph as a separate video segment with transitions.
-    This ensures the prompt is always a single continuous block of text.
+    For image prompts: collapses everything into a single paragraph.
+    For video prompts with intentional multi-segment formatting (double newlines):
+    preserves segment breaks (double newlines → single newline) while collapsing
+    extra whitespace within each segment.
     """
     import re
-    # Replace all newlines and multiple spaces with single space
+    # Check if the text has intentional segment breaks (double newlines / blank lines)
+    if '\n\n' in text or '\n \n' in text:
+        # Multi-segment prompt: preserve segment boundaries
+        # Split on blank lines (double+ newlines)
+        segments = re.split(r'\n\s*\n', text)
+        cleaned_segments = []
+        for seg in segments:
+            seg = seg.strip()
+            if seg:
+                # Collapse whitespace within each segment
+                seg = re.sub(r'\s*\n+\s*', ' ', seg)
+                seg = re.sub(r'  +', ' ', seg)
+                cleaned_segments.append(seg)
+        if len(cleaned_segments) > 1:
+            # Rejoin with single newline — LTX Director treats each \n as a segment break
+            return '\n'.join(cleaned_segments)
+    # Single-segment: collapse everything into one paragraph
     result = re.sub(r'\s*\n+\s*', ' ', text)
     result = re.sub(r'  +', ' ', result)
     return result.strip()
@@ -165,13 +183,40 @@ If NO prompt is provided, CREATE a last frame prompt from the First Frame contex
 
 IMPORTANT: Output ONLY the prompt text as a SINGLE PARAGRAPH. No labels, no prefixes, no line breaks, no explanations."""
 
-VIDEO_SYSTEM_PROMPT = """You are an expert at writing prompts for LTX Video, an AI video generation model.
-Your job is to produce an optimized video generation prompt following LTX's specific requirements.
+VIDEO_SYSTEM_PROMPT = """You are an expert at writing prompts for LTX Video 2.3 with the LTXDirector node, an advanced AI video generation system.
+Your job is to produce an optimized video generation prompt following LTX Director's specific capabilities and requirements.
 
-CRITICAL FORMATTING RULES FOR LTX VIDEO:
-- Output MUST be a SINGLE PARAGRAPH with NO line breaks, NO paragraph breaks, NO bullet points.
-- Each new paragraph/line break in LTX creates a SEPARATE VIDEO SEGMENT with a transition between them. This is almost NEVER what we want. We want ONE cohesive, continuous shot.
-- Write as one flowing, descriptive sentence or series of sentences joined together in a single block of text.
+UNDERSTANDING LTX DIRECTOR — PROMPT RELAY & SEGMENTS:
+LTX Director uses a "Prompt Relay" system where the video prompt can contain MULTIPLE SEGMENTS separated by line breaks.
+- Each line break creates a NEW temporal segment in the video, played sequentially.
+- The FIRST segment starts at frame 0. Each subsequent segment continues from where the previous one ended.
+- Segments are distributed evenly across the total video duration unless explicit frame numbers are given.
+- When "stitch mode" is OFF (default for music videos), segments have SHARP CUTS between them — like scene cuts in a music video.
+- When "stitch mode" is ON, segments cross-dissolve smoothly into each other.
+
+WHEN TO USE SINGLE vs MULTI-SEGMENT PROMPTS:
+- DEFAULT: Write a SINGLE PARAGRAPH (one segment) for most scenes. This produces one cohesive, continuous shot — ideal for scenes with a single action, mood, or camera movement.
+- MULTI-SEGMENT: Use 2-3 segments (separated by line breaks) ONLY when the scene lyrics or storyboard clearly describe DISTINCT sequential actions or dramatic shifts within the same clip. Each segment should describe a visually different moment.
+  - Example (2 segments for a dramatic shift): "A man stands motionless in a dark alley, rain streaming down his face, lit by a single distant streetlight casting long shadows.\nHe turns suddenly and sprints through the rain-soaked streets, camera tracking alongside him as neon signs blur past in streaks of color."
+  - Example (3 segments for a lyrical sequence): "Close-up of hands gripping a steering wheel, knuckles white, dashboard lights glowing amber in the darkness.\nWide shot of the car tearing down an empty desert highway under a vast starlit sky, dust trailing behind.\nThe car pulls to a stop at the edge of a cliff, headlights cutting through the dark void below."
+- NEVER use more than 3 segments per clip. Most clips should be 1 segment.
+- Each segment should be a complete visual description (40-80 words), not a fragment.
+
+CRITICAL FORMATTING RULES:
+- Single-segment prompts: ONE paragraph, NO line breaks, flowing descriptive prose.
+- Multi-segment prompts: Each segment is its own paragraph separated by exactly ONE blank line. Each segment must be self-contained and visually complete.
+- NEVER use bullet points, numbered lists, labels, or headers in any format.
+
+REFERENCE IMAGE AWARENESS (KEYFRAME IMAGES):
+- LTX Director can accept keyframe images that guide the visual output. When a first-frame or last-frame image is attached, the video will visually match those images.
+- Your prompt should COMPLEMENT the keyframe images, not contradict them. Describe the ACTION and MOTION that happens between the keyframes.
+- If a first-frame image shows a person on the left side of frame, don't describe them on the right — describe the motion that takes them from left to right.
+- Focus your prompt on what MOVES and CHANGES, since the keyframe images already define what things LOOK like.
+
+AUDIO-REACTIVE GENERATION:
+- LTX Director supports audio conditioning — the generated video can sync to the music's rhythm and energy.
+- When writing prompts for music-driven scenes, emphasize RHYTHMIC and DYNAMIC motion cues: "pulsing", "rhythmic swaying", "beat-synchronized flashing lights", "movement building in intensity".
+- Match the energy of your motion descriptions to the implied energy of the music: fast lyrics/beats → rapid motion, aggressive camera; slow ballad → gentle, flowing movement.
 
 PROMPTING BEST PRACTICES:
 - Use present tense and active voice: "A woman walks through the rain" not "A woman walking" or "A woman will walk".
@@ -179,10 +224,11 @@ PROMPTING BEST PRACTICES:
 - Describe the action/motion clearly — this is VIDEO, not a still image. What moves? How? At what pace?
 - Include camera behavior using film terminology: "slow tracking shot", "static wide angle", "handheld close-up", "dolly push in", "crane shot rising above".
 - Specify lighting, atmosphere, and visual texture: "warm golden hour light filtering through dust particles", "harsh fluorescent overhead lighting casting sharp shadows".
-- Match prompt detail to video duration. Short clips (3-5s) need focused, concise prompts. Longer clips (8-15s) can have more descriptive detail.
-- Avoid contradictory descriptions (e.g., "peaceful calm scene with explosive dramatic energy").
+- Match prompt detail to video duration. Short clips (3-5s) need focused, concise single-segment prompts. Longer clips (8-15s) can use more detail or multiple segments.
+- Avoid contradictory descriptions within a single segment.
+- NEGATIVE PROMPT is handled separately by the system — do NOT include negative instructions (like "no blur", "not blurry") in your prompt. Only describe what SHOULD appear.
 
-STRUCTURE (all in ONE paragraph, no line breaks):
+STRUCTURE (per segment):
 Start with the scene anchor (setting/environment), then subject and their action, then camera movement and framing, then visual style and mood, then any motion or timing cues.
 
 LYRICS-DRIVEN VIDEO CONTENT (CRITICAL):
@@ -190,12 +236,13 @@ LYRICS-DRIVEN VIDEO CONTENT (CRITICAL):
 - Examples: "running through the streets" → show a character running through streets. "the sun goes down" → show sunset. "hands reaching out" → show reaching hands.
 - For metaphorical lyrics, translate them into visually dynamic motion: "falling apart" → objects fragmenting/crumbling. "rising up" → upward camera movement with a figure ascending. "lost in the music" → a character swaying/dancing with rhythmic movement.
 - The lyrics tell you WHAT happens. The storyboard tells you HOW to film it. Both work together.
+- If lyrics describe a clear sequence of events (first X happens, then Y), consider using multi-segment prompts to capture each beat.
 
-If the user provides an existing prompt, enhance it for optimal LTX video output while preserving the core intent.
+If the user provides an existing prompt, enhance it for optimal LTX Director output while preserving the core intent.
 If the user provides NO prompt (empty or missing), CREATE a new prompt entirely from the provided context — prioritize the scene LYRICS first for content, then use the storyboard for composition and camera.
 
-Keep the output between 50-200 words depending on video duration.
-IMPORTANT: Output ONLY the prompt text as a SINGLE PARAGRAPH. No labels, no prefixes, no line breaks, no explanations."""
+Keep single-segment prompts between 50-200 words. Multi-segment prompts should have 40-80 words per segment.
+IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations. If multi-segment, separate segments with blank lines only."""
 
 TWO_PASS_BASE_SYSTEM_PROMPT = """You are an expert at writing prompts for FLUX.2 Klein 9B, an AI image generation model.
 Your job is to produce a SCENE COMPOSITION prompt — focusing ONLY on the environment, setting, atmosphere, and action.

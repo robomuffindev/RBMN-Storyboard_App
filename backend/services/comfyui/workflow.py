@@ -1279,6 +1279,11 @@ def prepare_sequencer_workflow(
     last_frame: Optional[str] = None,
     ltx_model_gguf: Optional[str] = None,
     distilled_lora_name: Optional[str] = None,
+    negative_prompt: str = "",
+    audio_guidance: float = 0.001,
+    guide_strength: float = 0.5,
+    stitch: bool = False,
+    image_description: str = "",
 ) -> dict:
     """
     Load and prepare an LTX Sequencer-based video generation workflow.
@@ -1288,7 +1293,9 @@ def prepare_sequencer_workflow(
     Includes distilled LoRA for fast 8-step generation.
 
     Mutates:
-    - "LTXDirector" → text prompt, duration, width, height, framerate, segments
+    - "LTXDirector" → text prompt, negative_prompt, audio_guidance, stitch,
+      image_description, duration, width, height, framerate, segments
+    - "LTXDirectorGuide" → strength
     - "LOAD IMAGE" or "LOAD FIRST IMAGE FRAME" → first frame image
     - "LOAD LAST IMAGE FRAME" → last frame image (FF/LF only)
     - "Load Audio" → audio path
@@ -1326,6 +1333,28 @@ def prepare_sequencer_workflow(
     except ValueError:
         logger.warning("No LTXDirector node found — falling back to CLIP Text Encode")
         set_node_input(workflow, "CLIP Text Encode (Prompt)", "text", prompt)
+
+    # Set LTXDirector advanced parameters
+    try:
+        set_node_input(workflow, "LTXDirector", "negative_prompt", negative_prompt)
+        set_node_input(workflow, "LTXDirector", "audio_guidance", audio_guidance)
+        set_node_input(workflow, "LTXDirector", "stitch", stitch)
+        if image_description:
+            set_node_input(workflow, "LTXDirector", "image_description", image_description)
+        logger.info(
+            f"LTXDirector: neg_prompt={'yes' if negative_prompt else 'no'}, "
+            f"audio_guidance={audio_guidance}, stitch={stitch}, "
+            f"image_desc={'yes' if image_description else 'no'}"
+        )
+    except ValueError:
+        logger.warning("LTXDirector node not found — skipping advanced params")
+
+    # Set LTXDirectorGuide strength
+    try:
+        set_node_input(workflow, "LTXDirectorGuide", "strength", guide_strength)
+        logger.info(f"LTXDirectorGuide strength set to: {guide_strength}")
+    except ValueError:
+        logger.warning("No LTXDirectorGuide node found — skipping strength override")
 
     # Set dimensions
     set_node_input(workflow, "WIDTH", "value", width)
