@@ -32,11 +32,13 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Video Flow** — LLM-generated per-scene storyboard ideas that describe camera movement, action, mood, and composition for each scene
 - **Suggest Fresh Timeline** — LLM analyzes your lyrics, sections, and timing data to generate optimal scene boundaries with meaningful narrative breaks
 - **Character Creator** — Built-in mini image generator for creating character reference images with version history, using the same reference image system as scene generation
+- **LTXDirector Integration** — Full control over LTX Director video generation parameters: guide strength (keyframe conditioning), audio guidance (audio-to-video influence), stitch mode (smooth vs hard-cut prompt transitions), auto image description, and video negative prompt. All configurable in Settings
 - **Scene Editor** — Tabbed editor with Image (First Frame / Last Frame sub-tabs), Video, Stems, Lyrics, Tools, Image Movement, and Prompt tabs per scene
 - **Reference Image System** — Select up to 2 characters and upload additional reference images per scene. Workflow auto-selects based on reference count (0–4 images). Uses FLUX Klein "Image N" syntax for precise reference mapping
 - **Two-Pass Image Generation** — Pass 1 generates the scene environment (no characters), Pass 2 composites characters into the scene using the Pass 1 output as a reference. Prevents character IP-Adapter from making all scenes look identical
-- **Prompt Enhancement** — LLM-powered prompt enhancement with context awareness (model type, scene flow, camera action, character descriptions, reference images). Enforces single-paragraph output optimized for FLUX Klein 9B and LTX 2.3. Built-in system prompt registry with per-model overrides configurable in Settings
+- **Prompt Enhancement** — LLM-powered prompt enhancement with context awareness (model type, scene flow, camera action, character descriptions, reference images, lipsync state). Built-in system prompt registry with per-model overrides configurable in Settings. Video prompts are Director-aware with multi-segment support
 - **Camera Action Presets** — 24 film-industry camera motions (pan, tilt, dolly, crane, orbit, steadicam, etc.) integrated into video prompt enhancement
+- **Lipsync System** — Per-scene toggle that boosts audio_guidance to 0.7+ for better mouth-to-audio synchronization. Optional vocal stem isolation sends only the vocal track to the generator for cleaner sync signal. Default ON for new projects, configurable in Auto Gen modal and per-scene Video tab
 - **Image Direction** — Control the overall visual style with presets (Photorealistic, Cinematic, Cartoon, Anime, Sketch, Watercolor, Oil Painting, 3D Render, Comic Book, Pixel Art, Abstract, Surreal) or custom free-text direction
 - **Auto Generate** — Six intelligent modes: all images, all video (single frame), missing videos, all video (first/last frame chaining), all video (V2V extend for seamless transitions), and independent batch-parallel image generation
 - **Image Movement (Ken Burns)** — Apply pan, zoom, and motion effects to still images during export
@@ -52,8 +54,10 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 
 ### Technical Highlights
 - **Multi-server ComfyUI** — Concurrent dispatch across multiple remote ComfyUI instances with capability-based routing and worker reservation
+- **LTXDirector Multi-Segment Prompts** — Video prompts can contain multiple segments separated by line breaks, each becoming a sequential temporal segment in the video. LLM prompt enhancer is Director-aware and generates single or multi-segment prompts based on scene content
 - **V2V Extending** — Image-based conditioning from previous scene's last frame for seamless scene-to-scene transitions
 - **AI Transition Clips** — LTX Transition LoRA generates short transition videos between scenes
+- **Lipsync Audio Boost** — Per-scene lipsync toggle boosts Director audio_guidance from base level to 0.7+ for mouth-to-audio sync. Optional vocal stem isolation filters non-vocal audio before sending to generator
 - **GPU Hardware Acceleration** — Auto-detects GPU encoders (NVIDIA NVENC, AMD AMF/VAAPI, Intel QSV) for FFmpeg and CUDA for Demucs
 - **Color Correction** — Automatic per-channel RGB color matching with skip thresholds to avoid unnecessary re-encodes
 - **RunPod Integration** — Optional serverless GPU pod management with auto-spindown
