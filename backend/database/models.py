@@ -299,7 +299,7 @@ class AppSettings(SQLModel, table=True):
     video_model_type: str = Field(default="ltx_2.3")
     single_image_generator: str = Field(default="z_image_turbo")
     use_distilled_lora: bool = Field(default=True)
-    distilled_lora_name: str = Field(default="ltx-2.3-22b-distilled-lora-384.safetensors")
+    distilled_lora_name: str = Field(default="ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
     # Network access — when True, server binds to 0.0.0.0 (LAN/WAN accessible)
     network_access: bool = Field(default=False)
     # LTX GGUF model variant — selectable in Settings to trade quality vs VRAM

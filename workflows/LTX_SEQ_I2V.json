@@ -10,7 +10,7 @@
   },
   "20": {
     "inputs": {
-      "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors",
+      "lora_name": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
       "strength_model": 1.0,
       "model": [
         "10",

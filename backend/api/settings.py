@@ -59,7 +59,7 @@ class SettingsResponse(BaseModel):
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     single_image_generator: str = "z_image_turbo"
     use_distilled_lora: bool = True
-    distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384.safetensors"
+    distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
     video_max_duration: int = 15
     video_min_duration: int = 5
@@ -272,7 +272,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
         single_image_generator=settings.single_image_generator or "z_image_turbo",
         use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
-        distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384.safetensors",
+        distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
         default_llm_provider=settings.default_llm_provider,
         video_max_duration=settings.video_max_duration or 15,
         video_min_duration=settings.video_min_duration if settings.video_min_duration is not None else 5,
@@ -890,7 +890,7 @@ class SettingsExportData(BaseModel):
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     single_image_generator: str = "z_image_turbo"
     use_distilled_lora: bool = True
-    distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384.safetensors"
+    distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
     video_max_duration: int = 15
     video_min_duration: int = 5
@@ -946,7 +946,7 @@ async def export_settings(
             ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
             single_image_generator=settings.single_image_generator or "z_image_turbo",
             use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
-            distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384.safetensors",
+            distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
             default_llm_provider=settings.default_llm_provider,
             video_max_duration=settings.video_max_duration or 15,
             video_tail=settings.video_tail or 0,

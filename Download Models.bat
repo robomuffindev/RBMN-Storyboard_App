@@ -34,7 +34,12 @@ echo   Destination: ComfyUI/models/vae/
 curl -L -C - -o "downloaded_models\vae\ae.safetensors" "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors"
 
 echo.
-echo [4/4] Downloading LTX 2.3 Distilled LoRA (~7.6GB)...
+echo [4/5] Downloading LTX 2.3 Distilled LoRA v1.1 (~7.6GB) [DEFAULT]...
+echo   Destination: ComfyUI/models/loras/
+curl -L -C - -o "downloaded_models\loras\ltx-2.3-22b-distilled-lora-384-1.1.safetensors" "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+
+echo.
+echo [5/5] Downloading LTX 2.3 Distilled LoRA v1.0 (~7.6GB) [OPTIONAL]...
 echo   Destination: ComfyUI/models/loras/
 curl -L -C - -o "downloaded_models\loras\ltx-2.3-22b-distilled-lora-384.safetensors" "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384.safetensors"
 
@@ -54,7 +59,8 @@ echo.
 echo   vae\ae.safetensors
 echo     -> ComfyUI/models/vae/
 echo.
-echo   loras\ltx-2.3-22b-distilled-lora-384.safetensors
+echo   loras\ltx-2.3-22b-distilled-lora-384-1.1.safetensors  (v1.1 - DEFAULT)
+echo   loras\ltx-2.3-22b-distilled-lora-384.safetensors      (v1.0 - optional)
 echo     -> ComfyUI/models/loras/
 echo.
 echo Also install the WhatDreamsCost-ComfyUI custom nodes:

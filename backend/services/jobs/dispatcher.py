@@ -1196,7 +1196,7 @@ class JobDispatcher:
                         seq_settings = seq_result.scalars().first()
                         if seq_settings:
                             if seq_settings.use_distilled_lora:
-                                distilled_lora_name = seq_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384.safetensors"
+                                distilled_lora_name = seq_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
                             ltx_model_gguf_override = seq_settings.ltx_model_gguf if hasattr(seq_settings, 'ltx_model_gguf') else None
                 except Exception as e:
                     logger.debug(f"Could not read sequencer settings: {e}")

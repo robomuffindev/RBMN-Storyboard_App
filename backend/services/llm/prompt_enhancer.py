@@ -95,13 +95,14 @@ CRITICAL FORMATTING RULES:
 - Lead with the primary subject, then build outward: subject → action/pose → environment → lighting → mood → camera/composition.
 
 REFERENCE IMAGE HANDLING (FLUX Klein specific):
-- Klein uses COMPOSITIONAL LANGUAGE to reference images — NOT "Image 1" or "Image 2" tags.
-- Refer to reference images using ordinal descriptions: "the subject from the first image", "the person from the second image", "the environment from the third image".
-- Example with 1 reference: "The subject from the first image stands at the edge of a weathered cliff, wind catching the collar of their dark coat, gazing out across a stormy sea under bruised violet clouds..."
+- Klein understands natural language references to input images. Use direct, descriptive references.
+- With 1 reference image: refer to its content directly — "the product in the image", "the person shown", "the subject" — Klein knows what's in the loaded reference.
+- With 2+ reference images: use ordinal language — "the subject from the first image", "the person in the second image", "the environment from the third image".
+- Example with 1 reference: "The subject in the image stands at the edge of a weathered cliff, wind catching the collar of their dark coat, gazing out across a stormy sea under bruised violet clouds..."
 - Example with 2 references: "The subject from the first image sits across from the person in the second image at a dimly lit table, candlelight casting warm shadows across their faces..."
 - Describe what each referenced subject is DOING — their pose, action, expression, and interaction with the scene.
 - Include enough visual detail about each referenced subject (clothing, features, body language) to reinforce the reference match.
-- NEVER use generic tags like "Image 1" or "@image1" — always use natural compositional language.
+- NEVER use code-style tags like "@image1" or "img_ref_1" — always use natural descriptive language.
 
 PROMPTING BEST PRACTICES:
 - LIGHTING is the single most impactful element — always describe it in detail: direction, color temperature, quality (soft/hard), source.
@@ -148,7 +149,7 @@ CONTINUITY RULES (MOST IMPORTANT):
 - If the context includes a camera action (e.g., "dolly in", "pan right"), describe where the camera ENDS UP, not the movement.
 
 REFERENCE IMAGE HANDLING (FLUX Klein specific):
-- Klein uses COMPOSITIONAL LANGUAGE — NOT "Image 1" tags. Use "the subject from the first image", "the person from the second image".
+- Klein understands natural language references. Use "the subject in the image", "the person from the second image" — direct, descriptive language.
 - The first reference slot in Last Frame mode is the First Frame image itself. Describe the same scene from the first reference image but at its endpoint.
 - Keep all character descriptions identical to how they appear in the First Frame.
 

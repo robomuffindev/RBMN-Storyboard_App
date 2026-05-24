@@ -60,7 +60,7 @@ export default function SettingsPage() {
     export_lfff_trim_enabled: true,
     single_image_generator: 'z_image_turbo',
     use_distilled_lora: true,
-    distilled_lora_name: 'ltx-2.3-22b-distilled-lora-384.safetensors',
+    distilled_lora_name: 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
     runpod_enabled: false,
     runpod_api_key: '',
     runpod_idle_timeout: 30,
@@ -133,7 +133,7 @@ export default function SettingsPage() {
         export_lfff_trim_enabled: savedSettings.export_lfff_trim_enabled ?? true,
         single_image_generator: savedSettings.single_image_generator || 'z_image_turbo',
         use_distilled_lora: savedSettings.use_distilled_lora ?? true,
-        distilled_lora_name: savedSettings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384.safetensors',
+        distilled_lora_name: savedSettings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
         runpod_enabled: savedSettings.runpod_enabled || false,
         runpod_api_key: savedSettings.runpod_api_key || '',
         runpod_idle_timeout: savedSettings.runpod_idle_timeout || 30,
@@ -908,14 +908,16 @@ export default function SettingsPage() {
               </p>
               {(settings.use_distilled_lora ?? true) && (
                 <div className="mt-3">
-                  <label className="block text-sm font-medium mb-2">Distilled LoRA Filename</label>
-                  <input
-                    type="text"
-                    value={settings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384.safetensors'}
+                  <label className="block text-sm font-medium mb-2">Distilled LoRA Version</label>
+                  <select
+                    value={settings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors'}
                     onChange={(e) => setSettings((prev) => ({ ...prev, distilled_lora_name: e.target.value }))}
-                    placeholder="ltx-2.3-22b-distilled-lora-384.safetensors"
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm font-mono"
-                  />
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                  >
+                    <option value="ltx-2.3-22b-distilled-lora-384-1.1.safetensors">v1.1 (Recommended)</option>
+                    <option value="ltx-2.3-22b-distilled-lora-384.safetensors">v1.0</option>
+                  </select>
+                  <p className="text-xs text-gray-400 mt-1">v1.1 has improved aesthetics and audio quality.</p>
                 </div>
               )}
             </div>

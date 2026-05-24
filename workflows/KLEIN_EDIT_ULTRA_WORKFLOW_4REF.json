@@ -192,7 +192,7 @@
   },
   "460": {
     "inputs": {
-      "upscale_method": "nearest-exact",
+      "upscale_method": "lanczos",
       "megapixels": 1,
       "resolution_steps": 1,
       "image": [
@@ -289,7 +289,7 @@
   },
   "447:446": {
     "inputs": {
-      "upscale_method": "nearest-exact",
+      "upscale_method": "lanczos",
       "megapixels": 1,
       "resolution_steps": 1,
       "image": [
@@ -320,7 +320,7 @@
   },
   "515:503": {
     "inputs": {
-      "steps": 4,
+      "steps": 20,
       "width": [
         "302",
         0
@@ -532,7 +532,7 @@
   },
   "516:502": {
     "inputs": {
-      "cfg": 1,
+      "cfg": 5,
       "model": [
         "307",
         0
@@ -598,7 +598,7 @@
   },
   "516:512": {
     "inputs": {
-      "steps": 4,
+      "steps": 20,
       "width": [
         "516:506",
         0
