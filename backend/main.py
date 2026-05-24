@@ -196,6 +196,7 @@ from backend.api import (
     workflows_router,
     concept_router,
     retrim_all_router,
+    batch_router,
 )
 
 app.include_router(projects_router)
@@ -209,6 +210,7 @@ app.include_router(export_router)
 app.include_router(workflows_router)
 app.include_router(concept_router)
 app.include_router(retrim_all_router)
+app.include_router(batch_router)
 app.include_router(files_router)
 
 # Log registered routes for debugging

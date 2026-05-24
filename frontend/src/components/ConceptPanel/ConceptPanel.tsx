@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, Save, Zap, User, ImageIcon, Monitor, Pencil, Music, Sparkles, Users, X } from 'lucide-react';
 import { getConcept, saveConcept, uploadAsset, getLyrics, baseOnLyrics, autogenerateCharacters } from '@/api/client';
+import { handleImgError } from '@/utils/brokenImage';
 import CharacterCreatorModal from './CharacterCreatorModal';
 
 interface Character {
@@ -693,6 +694,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                       className="w-12 h-12 object-cover rounded border border-gray-600 cursor-pointer hover:border-blue-500 transition-colors"
                       onClick={() => setLightboxImage({ src: `/api/files/${char.image_path}`, name: char.name || 'Character' })}
                       title="Click to enlarge"
+                      onError={handleImgError}
                     />
                   ) : (
                     <div className="w-12 h-12 bg-gray-900 rounded border border-gray-700 flex items-center justify-center">
@@ -794,6 +796,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
             <img
               src={lightboxImage.src}
               alt={lightboxImage.name}
+              onError={handleImgError}
               style={{
                 maxWidth: '90vw',
                 maxHeight: '80vh',

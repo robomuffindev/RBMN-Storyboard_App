@@ -297,6 +297,11 @@ class AppSettings(SQLModel, table=True):
     gemini_model: Optional[str] = None
     image_model_type: str = Field(default="flux2_klein_dev_9b")
     video_model_type: str = Field(default="ltx_2.3")
+    single_image_generator: str = Field(default="z_image_turbo")
+    use_distilled_lora: bool = Field(default=True)
+    distilled_lora_name: str = Field(default="ltx-2.3-22b-distilled-lora-384.safetensors")
+    # Network access — when True, server binds to 0.0.0.0 (LAN/WAN accessible)
+    network_access: bool = Field(default=False)
     # LTX GGUF model variant — selectable in Settings to trade quality vs VRAM
     ltx_model_gguf: str = Field(default="ltx-2.3-22b-dev-Q8_0.gguf")
     # System prompt overrides — stored as JSON dicts keyed by model name

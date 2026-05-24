@@ -52,17 +52,22 @@ export default function SettingsPage() {
     video_tail: 0,
     color_correction_enabled: false,
     restrict_explicit_content: false,
+    network_access: false,
     global_negative_prompt: '',
     export_transition_type: 'crossfade',
     export_transition_duration: 0.5,
     export_color_match_clips: false,
     export_lfff_trim_enabled: true,
+    single_image_generator: 'z_image_turbo',
+    use_distilled_lora: true,
+    distilled_lora_name: 'ltx-2.3-22b-distilled-lora-384.safetensors',
     runpod_enabled: false,
     runpod_api_key: '',
     runpod_idle_timeout: 30,
     runpod_pods: [],
   });
   const [customImageModel, setCustomImageModel] = useState('');
+  const [customSingleImageModel, setCustomSingleImageModel] = useState('');
   const [customVideoModel, setCustomVideoModel] = useState('');
   const [promptGuidanceModal, setPromptGuidanceModal] = useState<{ type: 'image' | 'video'; modelName: string } | null>(null);
   const [promptGuidanceText, setPromptGuidanceText] = useState('');
@@ -104,6 +109,7 @@ export default function SettingsPage() {
 
   // Known preset keys for image and video models
   const IMAGE_MODEL_PRESETS = ['flux2_klein_dev_9b', 'flux1_dev', 'z_image', 'qwen_edit'];
+  const SINGLE_IMAGE_PRESETS = ['z_image_turbo', 'flux2_klein_dev_9b'];
   const VIDEO_MODEL_PRESETS = ['ltx_2.3', 'wan_2.2'];
 
   useEffect(() => {
@@ -119,11 +125,15 @@ export default function SettingsPage() {
         video_tail: savedSettings.video_tail || 0,
         color_correction_enabled: savedSettings.color_correction_enabled === true,
         restrict_explicit_content: savedSettings.restrict_explicit_content === true,
+        network_access: savedSettings.network_access === true,
         global_negative_prompt: savedSettings.global_negative_prompt || '',
         export_transition_type: savedSettings.export_transition_type || 'crossfade',
         export_transition_duration: savedSettings.export_transition_duration ?? 0.5,
         export_color_match_clips: savedSettings.export_color_match_clips === true,
         export_lfff_trim_enabled: savedSettings.export_lfff_trim_enabled ?? true,
+        single_image_generator: savedSettings.single_image_generator || 'z_image_turbo',
+        use_distilled_lora: savedSettings.use_distilled_lora ?? true,
+        distilled_lora_name: savedSettings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384.safetensors',
         runpod_enabled: savedSettings.runpod_enabled || false,
         runpod_api_key: savedSettings.runpod_api_key || '',
         runpod_idle_timeout: savedSettings.runpod_idle_timeout || 30,
@@ -136,6 +146,10 @@ export default function SettingsPage() {
       const imgType = savedSettings.image_model_type || 'flux2_klein_dev_9b';
       if (!IMAGE_MODEL_PRESETS.includes(imgType)) {
         setCustomImageModel(imgType);
+      }
+      const singleImgType = savedSettings.single_image_generator || 'z_image_turbo';
+      if (!SINGLE_IMAGE_PRESETS.includes(singleImgType)) {
+        setCustomSingleImageModel(singleImgType);
       }
       const vidType = savedSettings.video_model_type || 'ltx_2.3';
       if (!VIDEO_MODEL_PRESETS.includes(vidType)) {
@@ -706,7 +720,7 @@ export default function SettingsPage() {
             <div>
               <div className="flex items-end gap-2 mb-2">
                 <div className="flex-1">
-                  <label className="block text-sm font-medium mb-2">Image Model</label>
+                  <label className="block text-sm font-medium mb-2">Edit Model (Reference-Based)</label>
                   <select
                     value={IMAGE_MODEL_PRESETS.includes(settings.image_model_type || '') ? settings.image_model_type : 'custom'}
                     onChange={(e) => {
@@ -779,6 +793,43 @@ export default function SettingsPage() {
               )}
             </div>
 
+            {/* Single Image Generator */}
+            <div>
+              <label className="block text-sm font-medium mb-2">Single Image Generator</label>
+              <select
+                value={SINGLE_IMAGE_PRESETS.includes(settings.single_image_generator || '') ? settings.single_image_generator : 'custom'}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'custom') {
+                    setSettings((prev) => ({ ...prev, single_image_generator: customSingleImageModel || 'custom' }));
+                  } else {
+                    setSettings((prev) => ({ ...prev, single_image_generator: val }));
+                    setCustomSingleImageModel('');
+                  }
+                }}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+              >
+                <option value="z_image_turbo">Z-Image Turbo</option>
+                <option value="flux2_klein_dev_9b">FLUX.2 Klein T2I (fallback)</option>
+                <option value="custom">Custom...</option>
+              </select>
+              {!SINGLE_IMAGE_PRESETS.includes(settings.single_image_generator || '') && (
+                <input
+                  type="text"
+                  value={customSingleImageModel || (settings.single_image_generator === 'custom' ? '' : settings.single_image_generator)}
+                  onChange={(e) => {
+                    setCustomSingleImageModel(e.target.value);
+                    setSettings((prev) => ({ ...prev, single_image_generator: e.target.value || 'custom' }));
+                  }}
+                  placeholder="Enter custom single image model name..."
+                  className="w-full mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
+                />
+              )}
+              <p className="text-xs text-gray-500 mt-1">
+                Model used for text-to-image generation when no reference images are needed (e.g., first-pass scene images, character gen without refs). Z-Image Turbo generates images in 8 steps.
+              </p>
+            </div>
+
             {/* Video Model + FPS Row */}
             <div className="grid grid-cols-3 gap-4 items-start">
               <div className="col-span-2">
@@ -839,6 +890,34 @@ export default function SettingsPage() {
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
                 />
               </div>
+            </div>
+
+            {/* Use Distilled LoRA */}
+            <div className="p-4 bg-gray-800 rounded border border-gray-700">
+              <label className="flex items-center gap-2 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={settings.use_distilled_lora ?? true}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, use_distilled_lora: e.target.checked }))}
+                  className="w-4 h-4 rounded"
+                />
+                <span className="text-sm font-medium">Use LTX 2.3 Distilled LoRA (8-step generation)</span>
+              </label>
+              <p className="text-xs text-gray-400 mb-2">
+                When enabled, video generation uses 8 steps instead of 20+.
+              </p>
+              {(settings.use_distilled_lora ?? true) && (
+                <div className="mt-3">
+                  <label className="block text-sm font-medium mb-2">Distilled LoRA Filename</label>
+                  <input
+                    type="text"
+                    value={settings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384.safetensors'}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, distilled_lora_name: e.target.value }))}
+                    placeholder="ltx-2.3-22b-distilled-lora-384.safetensors"
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm font-mono"
+                  />
+                </div>
+              )}
             </div>
 
             {/* LTX Model GGUF Selector */}
@@ -998,6 +1077,34 @@ export default function SettingsPage() {
             </p>
             <p className="text-xs text-gray-500">
               You can also manually trigger color correction per-scene from the Tools tab in the Scene Editor.
+            </p>
+          </div>
+        </section>
+
+        {/* Network Access */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-4">Network Access</h2>
+          <div className="space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                onClick={() => setSettings((prev) => ({ ...prev, network_access: !prev.network_access }))}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  settings.network_access ? 'bg-blue-600' : 'bg-gray-700'
+                }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                  settings.network_access ? 'translate-x-5' : ''
+                }`} />
+              </div>
+              <span className="text-sm font-medium">Allow LAN / WAN Access</span>
+            </label>
+            <p className="text-xs text-gray-400">
+              When enabled, the server binds to all network interfaces (0.0.0.0) instead of localhost only.
+              This allows other machines on your network to access the app by your IP address and port (default: 8899).
+              Useful for checking generation progress from another device.
+            </p>
+            <p className="text-xs text-yellow-500 font-medium">
+              Requires app restart to take effect.
             </p>
           </div>
         </section>

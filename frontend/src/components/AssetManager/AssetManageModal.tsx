@@ -16,6 +16,7 @@ import { X, Trash2, Filter, Check, CheckSquare, Square, Play, AlertTriangle, Ima
 import { bulkDeleteAssets, deleteAsset } from '@/api/client';
 import { useAppStore } from '@/store';
 import { AssetLightbox } from './AssetPickerModal';
+import { handleImgError } from '@/utils/brokenImage';
 import type { Asset, AssetType } from '@/types/index';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff'];
@@ -315,6 +316,7 @@ export default function AssetManageModal({ onClose, onAssetsDeleted }: AssetMana
                           alt={asset.filename}
                           className="w-full h-full object-cover"
                           loading="lazy"
+                          onError={handleImgError}
                         />
                       ) : isVideo ? (
                         <>

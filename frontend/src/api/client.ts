@@ -11,6 +11,8 @@ import type {
   WorkflowConfig,
   WorkflowFieldMapping,
   RunPodPodStatus,
+  BatchItemConfig,
+  BatchRunStatus,
 } from '@/types/index';
 
 const api: AxiosInstance = axios.create({
@@ -550,5 +552,28 @@ export const startRunPodPod = (podId: string) =>
 
 export const stopRunPodPod = (podId: string) =>
   api.post<{ pod_id: string; state: string; error: string }>('/settings/runpod/stop', { pod_id: podId });
+
+// ── Batch Mode ──────────────────────────────────────────────────────
+
+export const uploadBatchAudio = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post<{ upload_path: string; filename: string }>('/batch/upload-audio', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
+  });
+};
+
+export const startBatchRun = (items: Omit<BatchItemConfig, 'id' | 'audioFile'>[]) =>
+  api.post<BatchRunStatus>('/batch/run', { items });
+
+export const getBatchStatus = (batchId: string) =>
+  api.get<BatchRunStatus>(`/batch/${batchId}/status`);
+
+export const cancelBatch = (batchId: string) =>
+  api.post<BatchRunStatus>(`/batch/${batchId}/cancel`);
+
+export const cleanBatchStaging = () =>
+  api.delete('/batch/staging');
 
 export default api;

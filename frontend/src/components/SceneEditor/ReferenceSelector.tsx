@@ -8,6 +8,7 @@
  */
 import { useState, useCallback } from 'react';
 import { Plus, Trash2, Wand2, User, X } from 'lucide-react';
+import { handleImgError } from '@/utils/brokenImage';
 import { uploadAsset, enhancePrompt } from '@/api/client';
 import { useAssetPicker } from '@/components/AssetManager/AssetPickerModal';
 import { useAppStore } from '@/store';
@@ -223,6 +224,7 @@ export default function ReferenceSelector({
                       src={`/api/files/${char.image_path}`}
                       alt={char.name}
                       className="w-5 h-5 rounded-full object-cover"
+                      onError={handleImgError}
                     />
                   ) : (
                     <User size={12} />
@@ -282,6 +284,7 @@ export default function ReferenceSelector({
                 src={`/api/projects/${projectId}/assets/${extra.asset_id}/file`}
                 alt={`Ref ${idx + 1}`}
                 className="w-12 h-12 rounded object-cover border border-gray-600 flex-shrink-0"
+                onError={handleImgError}
               />
               <div className="flex-1 min-w-0 space-y-1">
                 <div className="flex items-center gap-1">

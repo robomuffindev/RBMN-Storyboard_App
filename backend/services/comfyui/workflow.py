@@ -6,6 +6,7 @@ Provides utilities for loading, finding nodes, and mutating workflow configurati
 
 import json
 import logging
+import os
 from typing import Optional, Tuple, Any, List
 
 logger = logging.getLogger(__name__)
@@ -1220,4 +1221,173 @@ def prepare_workflow_from_config(
             raise
 
     logger.info("Workflow prepared from config")
+    return workflow
+
+
+def prepare_zimage_workflow(
+    workflow_path: str,
+    prompt: str,
+    width: int,
+    height: int,
+    seed: int,
+    negative_prompt: Optional[str] = None,
+) -> dict:
+    """
+    Load and prepare a Z-Image Turbo text-to-image workflow.
+
+    Z-Image is text-only — no reference images.
+    Uses KSampler with 8 steps, res_multistep sampler.
+
+    Mutates:
+    - "CLIP Text Encode (Positive Prompt)" → text input
+    - "Empty Latent Image" → width, height
+    - "KSampler" → seed
+    """
+    logger.info(f"Preparing Z-Image workflow from {workflow_path}")
+
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    # Set text prompt with anti-text suffix
+    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+    if negative_prompt and negative_prompt.strip():
+        anti_text_suffix += ", " + negative_prompt.strip()
+    full_prompt = prompt + anti_text_suffix if prompt else prompt
+    set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", full_prompt)
+
+    # Set dimensions
+    set_node_input(workflow, "Empty Latent Image", "width", width)
+    set_node_input(workflow, "Empty Latent Image", "height", height)
+
+    # Set seed
+    set_node_input(workflow, "KSampler", "seed", seed)
+
+    logger.info("Z-Image workflow prepared")
+    return workflow
+
+
+def prepare_sequencer_workflow(
+    workflow_path: str,
+    prompt: str,
+    width: int,
+    height: int,
+    duration: float,
+    framerate: int,
+    seed: int,
+    audio_path: str,
+    first_frame: Optional[str] = None,
+    last_frame: Optional[str] = None,
+    ltx_model_gguf: Optional[str] = None,
+    distilled_lora_name: Optional[str] = None,
+) -> dict:
+    """
+    Load and prepare an LTX Sequencer-based video generation workflow.
+
+    Uses LTXDirector + LTXDirectorGuide nodes for frame conditioning.
+    Supports I2V (single first frame), FF/LF (first + last frame), and V2V extend.
+    Includes distilled LoRA for fast 8-step generation.
+
+    Mutates:
+    - "LTXDirector" → text prompt, duration, width, height, framerate, segments
+    - "LOAD IMAGE" or "LOAD FIRST IMAGE FRAME" → first frame image
+    - "LOAD LAST IMAGE FRAME" → last frame image (FF/LF only)
+    - "Load Audio" → audio path
+    - "WIDTH", "HEIGHT" → dimension constants
+    - "Audio - Video Duration" → duration
+    - "Framerate" → framerate
+    - "RandomNoise" → noise_seed
+    - "Unet Loader (GGUF)" → model GGUF override
+    - "Distilled LoRA" → LoRA filename
+    """
+    logger.info(f"Preparing Sequencer workflow from {workflow_path}")
+
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    # Override LTX GGUF model if specified
+    if ltx_model_gguf:
+        try:
+            set_node_input(workflow, "Unet Loader (GGUF)", "unet_name", ltx_model_gguf)
+            logger.info(f"LTX model GGUF set to: {ltx_model_gguf}")
+        except ValueError:
+            logger.warning("No 'Unet Loader (GGUF)' node found — skipping model override")
+
+    # Override distilled LoRA if specified
+    if distilled_lora_name:
+        try:
+            set_node_input(workflow, "Distilled LoRA", "lora_name", distilled_lora_name)
+            logger.info(f"Distilled LoRA set to: {distilled_lora_name}")
+        except ValueError:
+            logger.warning("No 'Distilled LoRA' node found — skipping LoRA override")
+
+    # Set prompt on LTXDirector node
+    try:
+        set_node_input(workflow, "LTXDirector", "text", prompt)
+    except ValueError:
+        logger.warning("No LTXDirector node found — falling back to CLIP Text Encode")
+        set_node_input(workflow, "CLIP Text Encode (Prompt)", "text", prompt)
+
+    # Set dimensions
+    set_node_input(workflow, "WIDTH", "value", width)
+    set_node_input(workflow, "HEIGHT", "value", height)
+
+    # Set duration and framerate
+    set_node_input(workflow, "Audio - Video Duration", "value", int(duration))
+    set_node_input(workflow, "Framerate", "value", framerate)
+
+    # Set seed
+    set_node_input(workflow, "RandomNoise", "noise_seed", seed)
+
+    # Set audio
+    if audio_path:
+        set_node_input(workflow, "Load Audio", "audio", audio_path)
+
+    # Embed frame images into LTXDirector segments JSON
+    # LTXDirector reads images from the segments field (imageFile key),
+    # NOT from connected LoadImage nodes. Image files must be pre-uploaded
+    # to ComfyUI's input folder.
+    segments_data: dict = {"segments": [], "audioSegments": []}
+    if first_frame:
+        # Extract just the filename if it's a full path
+        ff_name = os.path.basename(first_frame) if "/" in first_frame or "\\" in first_frame else first_frame
+        segments_data["segments"].append({
+            "frame_index": 0,
+            "strength": 1.0,
+            "imageFile": ff_name,
+        })
+    if last_frame:
+        lf_name = os.path.basename(last_frame) if "/" in last_frame or "\\" in last_frame else last_frame
+        segments_data["segments"].append({
+            "frame_index": -1,
+            "strength": 1.0,
+            "imageFile": lf_name,
+        })
+    # If no images at all, still set empty segments
+    try:
+        set_node_input(workflow, "LTXDirector", "segments", json.dumps(segments_data))
+        logger.info(f"Set LTXDirector segments with {len(segments_data['segments'])} image(s)")
+    except ValueError:
+        logger.warning("No LTXDirector node found — segments not set")
+
+    # Also set LoadImage nodes for compatibility (some workflow variants may use them)
+    if first_frame:
+        try:
+            set_node_input(workflow, "LOAD IMAGE", "image", first_frame)
+        except ValueError:
+            try:
+                set_node_input(workflow, "LOAD FIRST IMAGE FRAME", "image", first_frame)
+            except ValueError:
+                pass  # Images handled via segments JSON above
+    if last_frame:
+        try:
+            set_node_input(workflow, "LOAD LAST IMAGE FRAME", "image", last_frame)
+        except ValueError:
+            pass  # Images handled via segments JSON above
+
+    # Apply image processing fixes (same as existing LTX workflows)
+    longer_edge = max(width, height)
+    _update_resize_longer_edge(workflow, longer_edge)
+    _fix_image_resize_stretch(workflow)
+
+    logger.info("Sequencer workflow prepared")
     return workflow

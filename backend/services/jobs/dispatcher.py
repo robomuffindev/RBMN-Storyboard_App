@@ -26,6 +26,8 @@ from ..comfyui.workflow import (
     prepare_v2v_pass1_workflow,
     prepare_v2v_pass2_workflow,
     prepare_transition_workflow,
+    prepare_zimage_workflow,
+    prepare_sequencer_workflow,
     prepare_workflow_from_config,
     stamp_vhs_unique_prefix,
     flatten_group_nodes,
@@ -1063,6 +1065,34 @@ class JobDispatcher:
         except Exception as e:
             logger.debug(f"Could not inject image direction: {e}")
 
+        # Z-Image redirect: when single_image_generator is z_image_turbo and workflow is klein_t2i,
+        # use Z-Image Turbo instead of Klein for text-to-image (no reference images)
+        if workflow_type == "klein_t2i":
+            try:
+                async with self._session_factory() as zig_session:
+                    from backend.database.models import AppSettings as ZigAppSettings
+                    zig_stmt = sfw_select(ZigAppSettings).where(ZigAppSettings.id == 1)
+                    zig_result = await zig_session.execute(zig_stmt)
+                    zig_settings = zig_result.scalars().first()
+                    if zig_settings and zig_settings.single_image_generator == "z_image_turbo":
+                        workflow_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
+                        prompt_text = params.get("prompt", "")
+                        scene_neg = params.get("negative_prompt", "").strip() if params.get("negative_prompt") else ""
+                        effective_neg = scene_neg if scene_neg else global_negative_prompt
+                        params["effective_negative_prompt"] = effective_neg
+                        params["submitted_image_prompt"] = prompt_text
+                        logger.info(f"[{job.id if job else 'N/A'}] Redirecting klein_t2i to Z-Image Turbo")
+                        return prepare_zimage_workflow(
+                            workflow_path=workflow_path,
+                            prompt=prompt_text,
+                            width=params.get("width", 1024),
+                            height=params.get("height", 1024),
+                            seed=seed,
+                            negative_prompt=effective_neg,
+                        )
+            except Exception as e:
+                logger.debug(f"Could not check single_image_generator: {e} — using Klein")
+
         # Klein image workflows
         klein_map = {
             "klein_1ref": "KLEIN_EDIT_ULTRA_WORKFLOW_1REF.json",
@@ -1117,6 +1147,9 @@ class JobDispatcher:
             "ltx_v2v_pass1": "LTX-2-3_V2V_EXTEND_v2_pass1.json",
             "ltx_v2v_pass2": "LTX-2-3_V2V_EXTEND_v2_pass2.json",
             "ltx_transition": "LTX-2-3_TRANSITION_LORA.json",
+            "ltx_seq_i2v": "LTX_SEQ_I2V.json",
+            "ltx_seq_fflf": "LTX_SEQ_FFLF.json",
+            "ltx_seq_v2v": "LTX_SEQ_V2V.json",
         }
 
         if workflow_type in ltx_map:
@@ -1149,6 +1182,42 @@ class JobDispatcher:
             # For I2V workflow, don't pass last_frame — it only has "LOAD IMAGE" node
             # For FF/LF workflow, pass both frames
             effective_last_frame = last_frame if workflow_type == "ltx_fflf" else None
+
+            # Sequencer-based workflows use prepare_sequencer_workflow
+            if workflow_type.startswith("ltx_seq_"):
+                # Read distilled LoRA and model settings
+                distilled_lora_name = None
+                ltx_model_gguf_override = None
+                try:
+                    async with self._session_factory() as seq_session:
+                        from backend.database.models import AppSettings as SeqAppSettings
+                        seq_stmt = sfw_select(SeqAppSettings).where(SeqAppSettings.id == 1)
+                        seq_result = await seq_session.execute(seq_stmt)
+                        seq_settings = seq_result.scalars().first()
+                        if seq_settings:
+                            if seq_settings.use_distilled_lora:
+                                distilled_lora_name = seq_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384.safetensors"
+                            ltx_model_gguf_override = seq_settings.ltx_model_gguf if hasattr(seq_settings, 'ltx_model_gguf') else None
+                except Exception as e:
+                    logger.debug(f"Could not read sequencer settings: {e}")
+                    ltx_model_gguf_override = None
+
+                effective_last_frame_seq = last_frame if workflow_type == "ltx_seq_fflf" else None
+
+                return prepare_sequencer_workflow(
+                    workflow_path=workflow_path,
+                    prompt=params.get("prompt", ""),
+                    width=params.get("width", 768),
+                    height=params.get("height", 512),
+                    duration=params.get("duration", 5.0),
+                    framerate=params.get("framerate", 24),
+                    seed=seed,
+                    audio_path=audio_path or "",
+                    first_frame=first_frame,
+                    last_frame=effective_last_frame_seq,
+                    ltx_model_gguf=ltx_model_gguf_override,
+                    distilled_lora_name=distilled_lora_name,
+                )
 
             # Read video_tail and ltx_model_gguf from AppSettings
             from sqlmodel import select

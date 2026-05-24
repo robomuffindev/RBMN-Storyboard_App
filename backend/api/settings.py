@@ -57,6 +57,9 @@ class SettingsResponse(BaseModel):
     image_model_type: str = "flux2_klein_dev_9b"
     video_model_type: str = "ltx_2.3"
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
+    single_image_generator: str = "z_image_turbo"
+    use_distilled_lora: bool = True
+    distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384.safetensors"
     default_llm_provider: Optional[str] = None
     video_max_duration: int = 15
     video_min_duration: int = 5
@@ -75,6 +78,8 @@ class SettingsResponse(BaseModel):
     runpod_api_key: Optional[str] = None  # Masked
     runpod_idle_timeout: int = 30
     runpod_pods: Optional[list[RunPodPodEntry]] = None
+    # Network access — when True, server binds to 0.0.0.0 (LAN/WAN)
+    network_access: bool = False
     # Project directory
     project_dir: Optional[str] = None
 
@@ -101,6 +106,9 @@ class SettingsUpdate(BaseModel):
     image_model_type: Optional[str] = None
     video_model_type: Optional[str] = None
     ltx_model_gguf: Optional[str] = None
+    single_image_generator: Optional[str] = None
+    use_distilled_lora: Optional[bool] = None
+    distilled_lora_name: Optional[str] = None
     default_llm_provider: Optional[str] = None
     video_max_duration: Optional[int] = None
     video_min_duration: Optional[int] = None
@@ -117,6 +125,8 @@ class SettingsUpdate(BaseModel):
     runpod_api_key: Optional[str] = None
     runpod_idle_timeout: Optional[int] = None
     runpod_pods: Optional[list[RunPodPodEntry]] = None
+    # Network access
+    network_access: Optional[bool] = None
 
 
 class ChangeProjectDirRequest(BaseModel):
@@ -260,6 +270,9 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         image_model_type=settings.image_model_type or "flux2_klein_dev_9b",
         video_model_type=settings.video_model_type or "ltx_2.3",
         ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
+        single_image_generator=settings.single_image_generator or "z_image_turbo",
+        use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
+        distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384.safetensors",
         default_llm_provider=settings.default_llm_provider,
         video_max_duration=settings.video_max_duration or 15,
         video_min_duration=settings.video_min_duration if settings.video_min_duration is not None else 5,
@@ -275,6 +288,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         runpod_api_key=_mask_api_key(settings.runpod_api_key),
         runpod_idle_timeout=settings.runpod_idle_timeout or 30,
         runpod_pods=[RunPodPodEntry(**p) for p in (settings.runpod_pods or [])],
+        network_access=settings.network_access or False,
         project_dir=settings.project_dir or str(env_settings.project_dir),
     )
 
@@ -394,6 +408,12 @@ async def update_settings(
             settings.video_model_type = req.video_model_type
         if req.ltx_model_gguf is not None:
             settings.ltx_model_gguf = req.ltx_model_gguf
+        if req.single_image_generator is not None:
+            settings.single_image_generator = req.single_image_generator
+        if req.use_distilled_lora is not None:
+            settings.use_distilled_lora = req.use_distilled_lora
+        if req.distilled_lora_name is not None:
+            settings.distilled_lora_name = req.distilled_lora_name
         if req.default_llm_provider is not None:
             # Allow empty string to clear the default (fall back to auto-pick)
             settings.default_llm_provider = req.default_llm_provider or None
@@ -430,6 +450,8 @@ async def update_settings(
             settings.runpod_idle_timeout = max(1, req.runpod_idle_timeout)
         if req.runpod_pods is not None:
             settings.runpod_pods = [p.model_dump() for p in req.runpod_pods]
+        if req.network_access is not None:
+            settings.network_access = req.network_access
 
         await session.commit()
         await session.refresh(settings)
@@ -866,6 +888,9 @@ class SettingsExportData(BaseModel):
     image_model_type: str
     video_model_type: str
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
+    single_image_generator: str = "z_image_turbo"
+    use_distilled_lora: bool = True
+    distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384.safetensors"
     default_llm_provider: Optional[str] = None
     video_max_duration: int = 15
     video_min_duration: int = 5
@@ -882,6 +907,8 @@ class SettingsExportData(BaseModel):
     runpod_api_key: Optional[str] = None
     runpod_idle_timeout: int = 30
     runpod_pods: Optional[list[dict]] = None
+    # Network access
+    network_access: bool = False
 
 
 @router.get(
@@ -917,6 +944,9 @@ async def export_settings(
             image_model_type=settings.image_model_type or "flux2_klein_dev_9b",
             video_model_type=settings.video_model_type or "ltx_2.3",
             ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
+            single_image_generator=settings.single_image_generator or "z_image_turbo",
+            use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
+            distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384.safetensors",
             default_llm_provider=settings.default_llm_provider,
             video_max_duration=settings.video_max_duration or 15,
             video_tail=settings.video_tail or 0,
@@ -931,6 +961,7 @@ async def export_settings(
             runpod_api_key=settings.runpod_api_key,
             runpod_idle_timeout=settings.runpod_idle_timeout or 30,
             runpod_pods=settings.runpod_pods,
+            network_access=settings.network_access or False,
         )
 
         # Build filename with date stamp
@@ -1024,6 +1055,12 @@ async def import_settings(
             settings.video_model_type = data["video_model_type"]
         if "ltx_model_gguf" in data:
             settings.ltx_model_gguf = data["ltx_model_gguf"]
+        if "single_image_generator" in data:
+            settings.single_image_generator = data["single_image_generator"]
+        if "use_distilled_lora" in data:
+            settings.use_distilled_lora = data["use_distilled_lora"]
+        if "distilled_lora_name" in data:
+            settings.distilled_lora_name = data["distilled_lora_name"]
         if "default_llm_provider" in data:
             settings.default_llm_provider = data["default_llm_provider"]
         if "video_max_duration" in data:
@@ -1055,6 +1092,8 @@ async def import_settings(
             settings.runpod_idle_timeout = data["runpod_idle_timeout"]
         if "runpod_pods" in data:
             settings.runpod_pods = data["runpod_pods"]
+        if "network_access" in data:
+            settings.network_access = data["network_access"]
 
         await session.commit()
         await session.refresh(settings)

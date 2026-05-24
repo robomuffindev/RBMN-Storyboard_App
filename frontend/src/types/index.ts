@@ -187,11 +187,18 @@ export interface AppSettings {
   export_transition_duration?: number;
   export_color_match_clips?: boolean;
   export_lfff_trim_enabled?: boolean;
+  // Network access — LAN/WAN
+  network_access?: boolean;
   // RunPod integration
   runpod_enabled?: boolean;
   runpod_api_key?: string;
   runpod_idle_timeout?: number;
   runpod_pods?: RunPodPodConfig[];
+  // Single image generator
+  single_image_generator?: string;
+  // Distilled LoRA
+  use_distilled_lora?: boolean;
+  distilled_lora_name?: string;
   // Project directory
   project_dir?: string;
 }
@@ -288,4 +295,39 @@ export interface AudioAnalysisResult {
     bass: string;
     other: string;
   };
+}
+
+// ── Batch Mode ──────────────────────────────────────────────────────
+
+export interface BatchItemConfig {
+  id: string; // client-side UUID for tracking
+  audio_filename: string;
+  audio_upload_path: string;
+  audioFile?: File; // kept client-side for display
+  lyrics_text: string;
+  project_name: string;
+  concept_direction: string;
+  style_text: string;
+  render_type: 'music_video' | 'narration_video';
+  video_mode: 'i2v' | 'v2v';
+  two_pass: boolean;
+  use_story_flow: boolean;
+}
+
+export interface BatchItemStatus {
+  index: number;
+  project_name: string;
+  project_id: string | null;
+  status: 'pending' | 'running' | 'done' | 'failed';
+  current_step: string;
+  error: string | null;
+}
+
+export interface BatchRunStatus {
+  batch_id: string;
+  status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
+  total_items: number;
+  completed_items: number;
+  current_item_index: number;
+  items: BatchItemStatus[];
 }

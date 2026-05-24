@@ -4,6 +4,7 @@ import { getAssets, uploadAsset, deleteAsset } from '@/api/client';
 import { useAppStore } from '@/store';
 import { Upload, Trash2, Filter, Play, Settings2 } from 'lucide-react';
 import { AssetLightbox, isImageFile, isVideoFile } from './AssetPickerModal';
+import { handleImgError } from '@/utils/brokenImage';
 import AssetManageModal from './AssetManageModal';
 import type { Asset, AssetType } from '@/types/index';
 
@@ -189,6 +190,7 @@ export default function AssetManager() {
                         alt={asset.filename}
                         className="w-full h-full object-cover"
                         loading="lazy"
+                        onError={handleImgError}
                       />
                     ) : isVideo ? (
                       <>

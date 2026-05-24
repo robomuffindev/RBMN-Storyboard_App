@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { handleImgError } from '@/utils/brokenImage';
 import {
   generateCharacterImage,
   getCharacterVersions,
@@ -364,6 +365,7 @@ export default function CharacterCreatorModal({
                     src={`/api/projects/${projectId}/assets/${ref.asset_id}/file`}
                     alt={`Ref ${i + 1}`}
                     style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: '0.375rem', border: '1px solid #374151' }}
+                    onError={handleImgError}
                   />
                   <button
                     onClick={() => removeRef(i)}
@@ -510,6 +512,7 @@ export default function CharacterCreatorModal({
                         width: '100%', maxHeight: 300, objectFit: 'contain',
                         borderRadius: '0.375rem', border: '1px solid #374151',
                       }}
+                      onError={handleImgError}
                     />
                     {activeImagePath === currentVersion.output_path && (
                       <span style={{
@@ -582,6 +585,7 @@ export default function CharacterCreatorModal({
             src={`/api/files/${currentVersion.output_path}`}
             alt="Full size"
             style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain', borderRadius: '0.5rem' }}
+            onError={handleImgError}
           />
         </div>,
         document.body

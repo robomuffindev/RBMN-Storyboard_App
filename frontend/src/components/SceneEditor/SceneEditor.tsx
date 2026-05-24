@@ -58,6 +58,8 @@ import {
 type Tab = 'image' | 'video' | 'movement' | 'transitions' | 'stems' | 'lyrics' | 'tools' | 'prompt';
 type FrameSubTab = 'first' | 'last';
 
+import { handleImgError } from '@/utils/brokenImage';
+
 // ─── Lightbox Component ───────────────────────────────────────────────
 function ImageLightbox({
   versions,
@@ -149,6 +151,7 @@ function ImageLightbox({
             src={imageUrl}
             alt={`Generation ${index + 1}`}
             style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain', borderRadius: '8px' }}
+            onError={handleImgError}
           />
         ) : (
           <div style={{ color: '#6b7280', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
@@ -775,11 +778,11 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
   // ─── Derived: split versions by frame type and job type ─────────────
   const imageVersions = useMemo(
-    () => allVersions.filter((v: any) => v.job_type !== 'video'),
+    () => allVersions.filter((v: any) => v.job_type !== 'video' && v.output_path),
     [allVersions]
   );
   const videoVersions = useMemo(
-    () => allVersions.filter((v: any) => v.job_type === 'video'),
+    () => allVersions.filter((v: any) => v.job_type === 'video' && v.output_path),
     [allVersions]
   );
   const firstFrameVersions = useMemo(
@@ -2128,6 +2131,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                           src={`/api/files/${prevSceneLastFramePath}`}
                           alt="Previous scene last frame"
                           className="w-14 h-14 object-cover rounded border border-amber-700/50"
+                          onError={handleImgError}
                         />
                       ) : (
                         <div className="w-14 h-14 bg-gray-700 rounded flex items-center justify-center">
@@ -2199,6 +2203,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                       src={firstFrameUrl}
                       alt="First frame reference"
                       className="w-12 h-12 object-cover rounded border border-gray-600"
+                      onError={handleImgError}
                     />
                   ) : (
                     <div className="w-12 h-12 bg-gray-700 rounded flex items-center justify-center">
@@ -2418,6 +2423,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                             alt={`Generation ${activeHistoryIndex + 1}`}
                             className="max-w-full max-h-[300px] object-contain"
                             loading="lazy"
+                            onError={handleImgError}
                           />
                           <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/30 transition-colors flex items-center justify-center">
                             <span className="text-white text-sm font-medium opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/60 px-3 py-1.5 rounded">
@@ -2607,7 +2613,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 ) : videoMode === 'single' ? (
                   <div className="flex items-center gap-3">
                     {firstFrameUrl ? (
-                      <img src={firstFrameUrl} alt="First frame" className="w-16 h-10 object-cover rounded border border-gray-600" />
+                      <img src={firstFrameUrl} alt="First frame" className="w-16 h-10 object-cover rounded border border-gray-600" onError={handleImgError} />
                     ) : (
                       <div className="w-16 h-10 bg-gray-700 rounded flex items-center justify-center">
                         <ImageIcon size={14} className="text-gray-500" />
@@ -2625,14 +2631,14 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   <div className="flex items-center gap-3">
                     <div className="flex gap-1">
                       {firstFrameUrl ? (
-                        <img src={firstFrameUrl} alt="First frame" className="w-12 h-8 object-cover rounded border border-gray-600" />
+                        <img src={firstFrameUrl} alt="First frame" className="w-12 h-8 object-cover rounded border border-gray-600" onError={handleImgError} />
                       ) : (
                         <div className="w-12 h-8 bg-gray-700 rounded flex items-center justify-center">
                           <span className="text-[8px] text-gray-500">FF</span>
                         </div>
                       )}
                       {chosenLastFramePath ? (
-                        <img src={`/api/files/${chosenLastFramePath}`} alt="Last frame" className="w-12 h-8 object-cover rounded border border-gray-600" />
+                        <img src={`/api/files/${chosenLastFramePath}`} alt="Last frame" className="w-12 h-8 object-cover rounded border border-gray-600" onError={handleImgError} />
                       ) : (
                         <div className="w-12 h-8 bg-gray-700 rounded flex items-center justify-center">
                           <span className="text-[8px] text-gray-500">LF</span>
@@ -3164,7 +3170,19 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Lead In (From Previous Scene)</label>
                 <select
                   value={transitionIn}
-                  onChange={(e) => setTransitionIn(e.target.value)}
+                  onChange={(e) => {
+                    setTransitionIn(e.target.value);
+                    // Auto-save on change
+                    if (activeScene && currentProject) {
+                      const newParams = {
+                        ...activeScene.parameters,
+                        transition_in: e.target.value !== 'none' ? { type: e.target.value, duration: transitionInDuration } : null,
+                        transition_out: transitionOut !== 'none' ? { type: transitionOut, duration: transitionOutDuration } : null,
+                      };
+                      updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                    }
+                  }}
                   className="w-full bg-gray-800 text-white rounded px-3 py-2 text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
                 >
                   <option value="none">None (Hard Cut)</option>
@@ -3191,6 +3209,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                       step="0.1"
                       value={transitionInDuration}
                       onChange={(e) => setTransitionInDuration(parseFloat(e.target.value))}
+                      onMouseUp={() => saveTransitionSettings()}
+                      onTouchEnd={() => saveTransitionSettings()}
                       className="w-full h-1.5 bg-gray-700 rounded-lg cursor-pointer accent-blue-500"
                     />
                     <div className="flex justify-between text-[10px] text-gray-500 mt-1">
@@ -3209,7 +3229,19 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <label className="block text-xs text-gray-400 mb-1.5 font-medium">Lead Out (To Next Scene)</label>
                 <select
                   value={transitionOut}
-                  onChange={(e) => setTransitionOut(e.target.value)}
+                  onChange={(e) => {
+                    setTransitionOut(e.target.value);
+                    // Auto-save on change
+                    if (activeScene && currentProject) {
+                      const newParams = {
+                        ...activeScene.parameters,
+                        transition_in: transitionIn !== 'none' ? { type: transitionIn, duration: transitionInDuration } : null,
+                        transition_out: e.target.value !== 'none' ? { type: e.target.value, duration: transitionOutDuration } : null,
+                      };
+                      updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                    }
+                  }}
                   className="w-full bg-gray-800 text-white rounded px-3 py-2 text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
                 >
                   <option value="none">None (Hard Cut)</option>
@@ -3236,6 +3268,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                       step="0.1"
                       value={transitionOutDuration}
                       onChange={(e) => setTransitionOutDuration(parseFloat(e.target.value))}
+                      onMouseUp={() => saveTransitionSettings()}
+                      onTouchEnd={() => saveTransitionSettings()}
                       className="w-full h-1.5 bg-gray-700 rounded-lg cursor-pointer accent-blue-500"
                     />
                     <div className="flex justify-between text-[10px] text-gray-500 mt-1">
@@ -3245,14 +3279,6 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   </div>
                 )}
               </div>
-
-              {/* Save Button */}
-              <button
-                onClick={saveTransitionSettings}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2 rounded font-medium transition-colors"
-              >
-                Save Transition Settings
-              </button>
 
               {/* Info */}
               <div className="p-3 bg-gray-800/50 rounded border border-gray-700 text-xs text-gray-400">
@@ -3506,6 +3532,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
               src={`/api/files/${activeScene.parameters.two_pass_base_image_path}`}
               alt="Pass 1 Base Image (Scene Only)"
               style={{ maxWidth: '90vw', maxHeight: '85vh', objectFit: 'contain', borderRadius: '8px' }}
+              onError={handleImgError}
             />
             <div style={{ position: 'absolute', top: '12px', left: '12px', backgroundColor: 'rgba(79,70,229,0.9)', color: 'white', padding: '4px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}>
               Pass 1 — Scene Only (Before Character Compositing)

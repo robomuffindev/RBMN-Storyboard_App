@@ -93,10 +93,27 @@ def clear_pycache():
         logging.getLogger("rbmn").info(f"Cleared {count} __pycache__ directories")
 
 
+def _read_network_access_setting() -> bool:
+    """Read network_access from SQLite DB (sync, runs once at startup)."""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path("~/RBMN-Projects/RBMN.db").expanduser()
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT network_access FROM app_settings WHERE id = 1")
+        row = cursor.fetchone()
+        conn.close()
+        return bool(row[0]) if row else False
+    except Exception:
+        return False
+
+
 def main():
     clear_pycache()
     parser = argparse.ArgumentParser(description="Robomuffin Idea Factory")
-    parser.add_argument("--host", default="127.0.0.1", help="Backend host (default: 127.0.0.1)")
+    parser.add_argument("--host", default=None, help="Backend host (default: auto from settings)")
     parser.add_argument("--port", type=int, default=8899, help="Backend port (default: 8899)")
     parser.add_argument(
         "--mode",
@@ -108,6 +125,13 @@ def main():
         "--log-level", default="INFO", help="Log level (default: INFO)"
     )
     args = parser.parse_args()
+
+    # Resolve host: CLI flag > DB setting > default localhost
+    if args.host is None:
+        if _read_network_access_setting():
+            args.host = "0.0.0.0"
+        else:
+            args.host = "127.0.0.1"
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),

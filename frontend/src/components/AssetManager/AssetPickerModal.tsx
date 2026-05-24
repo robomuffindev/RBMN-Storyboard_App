@@ -8,6 +8,7 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Upload, Image, X, Check, Filter } from 'lucide-react';
+import { handleImgError } from '@/utils/brokenImage';
 import type { Asset, AssetType } from '@/types/index';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff'];
@@ -209,6 +210,7 @@ function AssetGallery({ assets, onSelect, onClose, imagesOnly = true, title }: A
                       src={`/api/projects/${asset.project_id}/assets/${asset.id}/file`}
                       alt={asset.filename}
                       style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                      onError={handleImgError}
                     />
                     {isSelected && (
                       <div style={{
@@ -314,6 +316,7 @@ export function AssetLightbox({ asset, onClose }: AssetLightboxProps) {
             src={`/api/projects/${asset.project_id}/assets/${asset.id}/file`}
             alt={asset.filename}
             style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: '0.5rem', objectFit: 'contain' }}
+            onError={handleImgError}
           />
         )}
         <div style={{ textAlign: 'center', marginTop: '0.75rem', color: '#9ca3af', fontSize: '0.8125rem' }}>

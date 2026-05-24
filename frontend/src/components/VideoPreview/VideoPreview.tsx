@@ -1,6 +1,7 @@
 import { useRef, useState, useMemo, useEffect, useCallback } from 'react';
 import { Image, Film, X, MonitorPlay } from 'lucide-react';
 import { useAppStore } from '@/store';
+import { handleImgError } from '@/utils/brokenImage';
 
 interface VideoPreviewProps {
   assembledPreviewUrl?: string | null;
@@ -392,6 +393,7 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview }: Vid
             src={displayImageUrl}
             alt="Generated preview"
             className="h-full max-w-full object-contain absolute inset-0 m-auto"
+            onError={handleImgError}
             style={{
               zIndex: 1,
               opacity: (showImage || showEmpty) ? 1 : 0,
