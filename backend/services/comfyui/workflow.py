@@ -328,13 +328,21 @@ def prepare_ltx_workflow(
     # Set seed
     set_node_input(workflow, "RandomNoise", "noise_seed", seed)
 
+    # Guard: first_frame is required — without it ComfyUI uses its baked-in
+    # default image and produces garbage output with no error.
+    if not first_frame:
+        raise ValueError(
+            "LTX video workflow requires a first frame image but none was provided. "
+            "Ensure the scene has a generated first frame image before running video generation."
+        )
+
     # Frame-to-Frame variant
     if first_frame and last_frame:
         logger.info("Using FF/LF variant")
         set_node_input(workflow, "LOAD FIRST IMAGE FRAME", "image", first_frame)
         set_node_input(workflow, "LOAD LAST IMAGE FRAME", "image", last_frame)
     # Image-to-Video variant
-    elif first_frame:
+    else:
         logger.info("Using I2V variant")
         set_node_input(workflow, "LOAD IMAGE", "image", first_frame)
 

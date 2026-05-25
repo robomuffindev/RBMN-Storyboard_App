@@ -2183,7 +2183,9 @@ async def _run_windowed_batch(
     Phase 2: Fills N worker slots initially, then as each job completes,
     immediately submits the next pending one. No idle workers between jobs.
 
-    Handles both missing_videos_single and missing_images_independent modes.
+    Handles missing_videos_single, missing_images_independent, and their
+    "all" variants (all_video_single → missing_videos_single with override,
+    all_images → missing_images_independent with override).
     """
     lyrics_words = lyrics_words or []
 
@@ -2691,10 +2693,11 @@ async def _run_sequential_auto_gen(
 ):
     """Background task: process scenes sequentially or via continuous dispatch.
 
-    Sequential modes (all_images, all_video_single, all_video_fflf):
+    Sequential modes (all_video_fflf):
       Process one scene at a time, waiting for completion before the next.
 
-    Continuous dispatch modes (missing_videos_single, missing_images_independent):
+    Continuous dispatch modes (all_images, all_video_single,
+      missing_videos_single, missing_images_independent):
       Count available workers N, fill all N slots, then as each job completes
       immediately submit the next pending one. No idle workers between jobs.
     """
@@ -2783,15 +2786,20 @@ async def _run_sequential_auto_gen(
         # - missing_images_independent: images are independent
         windowed_modes = (
             "missing_videos_single", "missing_images_independent",
-            "all_video_single",
+            "all_video_single", "all_images",
         )
         if mode in windowed_modes:
-            # all_video_single should override (re-generate even existing videos)
-            effective_override = override_full_set or mode == "all_video_single"
+            # all_video_single / all_images should override (re-generate even existing)
+            effective_override = override_full_set or mode in ("all_video_single", "all_images")
+            # Map modes to their windowed handler equivalents
+            effective_mode = mode
+            if mode == "all_video_single":
+                effective_mode = "missing_videos_single"
+            elif mode == "all_images":
+                effective_mode = "missing_images_independent"
             await _run_windowed_batch(
                 pid, project_id,
-                # Map all_video_single → missing_videos_single for windowed handler
-                "missing_videos_single" if mode == "all_video_single" else mode,
+                effective_mode,
                 scenes, job_queue, session_factory,
                 comfy_dispatcher=comfy_dispatcher,
                 override_full_set=effective_override,
@@ -2877,7 +2885,8 @@ async def _run_sequential_auto_gen(
                 scene.parameters = scene_params
                 await session.commit()
 
-                # ── MODE: all_images ──
+                # ── MODE: all_images (legacy serial path — now routed through
+                # _run_windowed_batch as missing_images_independent with override)
                 if mode == "all_images":
                     if has_ff and not override_full_set:
                         # Already has image — skip (unless override)

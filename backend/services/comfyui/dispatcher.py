@@ -583,6 +583,7 @@ class ComfyDispatcher:
             raise
         finally:
             worker.in_flight = max(0, worker.in_flight - 1)
+            worker.last_check = datetime.now()  # Update for round-robin tiebreak
 
     def get_status(self) -> Dict[str, Any]:
         """
