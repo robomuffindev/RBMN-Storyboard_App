@@ -42,8 +42,9 @@ router = APIRouter(prefix="/api/batch", tags=["batch"])
 # ── Module-level state ────────────────────────────────────────────────
 _batch_runs: dict[str, dict] = {}
 
-# Base URL for internal API calls
-_INTERNAL_BASE_URL = f"http://{settings.app_host}:{settings.app_port}"
+def _get_internal_base_url() -> str:
+    """Resolve internal base URL dynamically (port may come from DB settings)."""
+    return f"http://{settings.app_host}:{settings.app_port}"
 
 
 # ── Pydantic models ──────────────────────────────────────────────────
@@ -280,7 +281,7 @@ async def _run_batch_pipeline(batch_id: str) -> None:
         logger.error(f"Batch run {batch_id} not found in state")
         return
 
-    base_url = _INTERNAL_BASE_URL
+    base_url = _get_internal_base_url()
 
     try:
         for i, item_state in enumerate(run["items"]):

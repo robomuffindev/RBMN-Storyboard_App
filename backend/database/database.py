@@ -252,6 +252,57 @@ async def init_db() -> None:
             except Exception:
                 pass  # Column already exists
 
+        # Add LTXDirector settings columns to app_settings if missing
+        for col_sql in [
+            "ALTER TABLE app_settings ADD COLUMN director_guide_strength REAL DEFAULT 0.5",
+            "ALTER TABLE app_settings ADD COLUMN director_audio_guidance REAL DEFAULT 0.001",
+            "ALTER TABLE app_settings ADD COLUMN director_stitch BOOLEAN DEFAULT 0",
+            "ALTER TABLE app_settings ADD COLUMN director_auto_image_desc BOOLEAN DEFAULT 1",
+            "ALTER TABLE app_settings ADD COLUMN global_video_negative_prompt TEXT DEFAULT NULL",
+        ]:
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration: {col_sql.split('ADD COLUMN ')[1].split(' ')[0]} added to app_settings")
+            except Exception:
+                pass  # Column already exists
+
+        # Add app_port column to app_settings if missing
+        try:
+            await conn.execute(text(
+                "ALTER TABLE app_settings ADD COLUMN app_port INTEGER DEFAULT 8899"
+            ))
+            logger.info("Migration: app_port added to app_settings")
+        except Exception:
+            pass  # Column already exists
+
+        # Create batch_runs table if it doesn't exist
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS batch_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                project_name TEXT DEFAULT '',
+                mode TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                total_scenes INTEGER DEFAULT 0,
+                completed_scenes INTEGER DEFAULT 0,
+                current_scene_name TEXT,
+                current_step TEXT,
+                scene_results TEXT DEFAULT '{}',
+                error_log TEXT DEFAULT '[]',
+                started_at TEXT,
+                completed_at TEXT,
+                elapsed_ms INTEGER DEFAULT 0,
+                run_settings TEXT DEFAULT '{}',
+                last_asset_url TEXT,
+                last_asset_scene_name TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_batch_runs_project_id ON batch_runs (project_id)"
+        ))
+        logger.info("Migration: batch_runs table ensured")
+
     logger.info("Database initialized successfully")
 
 

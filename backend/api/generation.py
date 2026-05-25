@@ -25,6 +25,8 @@ from backend.database.models import (
     AppSettings,
     GenerationHistory,
     Lyrics,
+    BatchRun,
+    BatchRunStatus,
 )
 from backend.services.jobs.queue import JobQueue
 
@@ -1756,10 +1758,101 @@ class SeqAutoGenStatusResponse(BaseModel):
     current_scene_name: Optional[str] = None
     current_step: Optional[str] = None  # 'enhancing', 'generating_image', 'generating_video'
     error: Optional[str] = None
+    batch_run_id: Optional[str] = None
 
 
 # In-memory tracking per project
 _seq_auto_jobs: dict[str, dict] = {}
+
+
+# ── BatchRun persistence helpers ────────────────────────────────────────────
+
+async def _create_batch_run(
+    session_factory,
+    project_id: UUID,
+    project_name: str,
+    mode: str,
+    total_scenes: int,
+    run_settings: dict,
+) -> str:
+    """Create a new BatchRun record and return its ID."""
+    from uuid import uuid4
+    batch_run = BatchRun(
+        id=uuid4(),
+        project_id=project_id,
+        project_name=project_name,
+        mode=mode,
+        status=BatchRunStatus.RUNNING,
+        total_scenes=total_scenes,
+        started_at=datetime.utcnow(),
+        run_settings=run_settings,
+    )
+    async with session_factory() as session:
+        session.add(batch_run)
+        await session.commit()
+    return str(batch_run.id)
+
+
+async def _update_batch_run(
+    session_factory,
+    batch_run_id: str,
+    **kwargs,
+) -> None:
+    """Update fields on a BatchRun record.
+
+    Accepts any BatchRun column as keyword argument.
+    Special handling:
+    - scene_result=(scene_id, result_dict) → merges into scene_results JSON
+    - error_entry=dict → appends to error_log list
+    """
+    async with session_factory() as session:
+        stmt = select(BatchRun).where(BatchRun.id == batch_run_id)
+        result = await session.execute(stmt)
+        run = result.scalars().first()
+        if not run:
+            return
+
+        # Handle scene_result merge
+        scene_result = kwargs.pop("scene_result", None)
+        if scene_result:
+            sid, sdata = scene_result
+            sr = dict(run.scene_results or {})
+            sr[str(sid)] = sdata
+            run.scene_results = sr
+
+        # Handle error_log append
+        error_entry = kwargs.pop("error_entry", None)
+        if error_entry:
+            el = list(run.error_log or [])
+            el.append(error_entry)
+            run.error_log = el
+
+        # Set remaining fields directly
+        for k, v in kwargs.items():
+            if hasattr(run, k):
+                setattr(run, k, v)
+
+        session.add(run)
+        await session.commit()
+
+
+async def _finish_batch_run(
+    session_factory,
+    batch_run_id: str,
+    status: str,
+    started_at: datetime,
+) -> None:
+    """Mark a batch run as complete/failed/cancelled and compute elapsed time."""
+    now = datetime.utcnow()
+    elapsed = int((now - started_at).total_seconds() * 1000) if started_at else 0
+    await _update_batch_run(
+        session_factory,
+        batch_run_id,
+        status=status,
+        completed_at=now,
+        elapsed_ms=elapsed,
+        current_step="complete" if status == BatchRunStatus.COMPLETED else status,
+    )
 
 
 @router.post(
@@ -1830,6 +1923,28 @@ async def start_sequential_auto_gen(
             f"before starting sequential auto-gen (mode={req.mode})"
         )
 
+    from backend.database import async_session as bg_session_factory
+
+    # Create persistent BatchRun record
+    run_settings = {
+        "mode": req.mode,
+        "override_full_set": req.override_full_set,
+        "vocals_only_audio": req.vocals_only_audio,
+        "skip_audio_mux": req.skip_audio_mux,
+        "two_pass": req.two_pass,
+        "use_story_flow": req.use_story_flow,
+        "lipsync_enabled": req.lipsync_enabled,
+        "vocals_only_for_lipsync": req.vocals_only_for_lipsync,
+    }
+    batch_run_id = await _create_batch_run(
+        bg_session_factory,
+        project_id=project_id,
+        project_name=project.name or "",
+        mode=req.mode,
+        total_scenes=len(scenes),
+        run_settings=run_settings,
+    )
+
     _seq_auto_jobs[pid] = {
         "status": "running",
         "mode": req.mode,
@@ -1838,9 +1953,8 @@ async def start_sequential_auto_gen(
         "current_scene_name": None,
         "current_step": "starting",
         "error": None,
+        "batch_run_id": batch_run_id,
     }
-
-    from backend.database import async_session as bg_session_factory
 
     asyncio.create_task(
         _run_sequential_auto_gen(
@@ -1855,6 +1969,7 @@ async def start_sequential_auto_gen(
             use_story_flow=req.use_story_flow,
             lipsync_enabled=req.lipsync_enabled,
             vocals_only_for_lipsync=req.vocals_only_for_lipsync,
+            batch_run_id=batch_run_id,
         )
     )
 
@@ -1895,6 +2010,14 @@ async def cancel_sequential_auto_gen(
     if info and info.get("status") == "running":
         info["status"] = "cancelled"
         info["current_step"] = "cancelled by user"
+        # Persist cancellation to BatchRun
+        batch_run_id = info.get("batch_run_id")
+        if batch_run_id:
+            from backend.database import async_session as bg_session_factory
+            started_at = info.get("_started_at", datetime.utcnow())
+            asyncio.create_task(
+                _finish_batch_run(bg_session_factory, batch_run_id, BatchRunStatus.CANCELLED, started_at)
+            )
     return SeqAutoGenStatusResponse(**(info or {"status": "idle"}))
 
 
@@ -2040,6 +2163,7 @@ async def _run_windowed_batch(
     two_pass: bool = False,
     user_lyrics_text: str = "",
     use_story_flow: bool = True,
+    batch_run_id: str | None = None,
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
 
@@ -2452,6 +2576,17 @@ async def _run_windowed_batch(
         f"{total_failed} failed (mode={mode})"
     )
 
+    # Persist to BatchRun
+    if batch_run_id:
+        _batch_started_at = _seq_auto_jobs.get(pid, {}).get("_started_at", datetime.utcnow())
+        final_status = BatchRunStatus.COMPLETED if total_failed == 0 else BatchRunStatus.COMPLETED
+        await _update_batch_run(
+            session_factory, batch_run_id,
+            completed_scenes=total_succeeded,
+            current_scene_name=None,
+        )
+        await _finish_batch_run(session_factory, batch_run_id, final_status, _batch_started_at)
+
 
 async def _run_sequential_auto_gen(
     pid: str,
@@ -2467,6 +2602,7 @@ async def _run_sequential_auto_gen(
     use_story_flow: bool = True,
     lipsync_enabled: bool = True,
     vocals_only_for_lipsync: bool = False,
+    batch_run_id: str | None = None,
 ):
     """Background task: process scenes sequentially or via continuous dispatch.
 
@@ -2477,6 +2613,9 @@ async def _run_sequential_auto_gen(
       Count available workers N, fill all N slots, then as each job completes
       immediately submit the next pending one. No idle workers between jobs.
     """
+    _batch_started_at = datetime.utcnow()
+    _seq_auto_jobs[pid]["_started_at"] = _batch_started_at
+
     try:
         async with session_factory() as session:
             # Load project, settings, scenes, lyrics
@@ -2484,6 +2623,8 @@ async def _run_sequential_auto_gen(
             if not project:
                 _seq_auto_jobs[pid]["status"] = "failed"
                 _seq_auto_jobs[pid]["error"] = "Project not found"
+                if batch_run_id:
+                    await _finish_batch_run(session_factory, batch_run_id, BatchRunStatus.FAILED, _batch_started_at)
                 return
 
             settings_stmt = select(AppSettings).where(AppSettings.id == 1)
@@ -2569,6 +2710,7 @@ async def _run_sequential_auto_gen(
                 two_pass=two_pass,
                 user_lyrics_text=user_lyrics_text,
                 use_story_flow=use_story_flow,
+                batch_run_id=batch_run_id,
             )
             return
 
@@ -2578,11 +2720,22 @@ async def _run_sequential_auto_gen(
             # Check for cancellation
             if _seq_auto_jobs.get(pid, {}).get("status") != "running":
                 logger.info(f"Sequential auto-gen cancelled at scene {i}")
+                if batch_run_id:
+                    await _finish_batch_run(session_factory, batch_run_id, BatchRunStatus.CANCELLED, _batch_started_at)
                 return
 
             scene_name = scene.name or f"Scene {scene.order_index + 1}"
             _seq_auto_jobs[pid]["current_scene_name"] = scene_name
             _seq_auto_jobs[pid]["completed_scenes"] = i
+
+            # Update BatchRun progress
+            if batch_run_id:
+                await _update_batch_run(
+                    session_factory, batch_run_id,
+                    current_scene_name=scene_name,
+                    completed_scenes=i,
+                    current_step=f"processing scene {i + 1}/{len(scenes)}",
+                )
 
             # Re-read scene to get latest parameters (may have been updated by previous job)
             async with session_factory() as session:
@@ -3144,6 +3297,24 @@ async def _run_sequential_auto_gen(
 
             prev_scene = scene
 
+            # Record per-scene success on BatchRun
+            if batch_run_id:
+                # Get latest asset URL for preview
+                async with session_factory() as _br_session:
+                    _br_scene = await _br_session.get(Scene, scene.id)
+                    _br_params = _br_scene.parameters or {} if _br_scene else {}
+                    _asset_url = (
+                        _br_params.get("chosen_video_path")
+                        or _br_params.get("chosen_image_path")
+                    )
+                await _update_batch_run(
+                    session_factory, batch_run_id,
+                    completed_scenes=i + 1,
+                    scene_result=(str(scene.id), {"status": "completed", "scene_name": scene_name}),
+                    last_asset_url=_asset_url,
+                    last_asset_scene_name=scene_name,
+                )
+
         # ── Transition LoRA pass (V2V modes only) ──
         # After all scene videos are generated, generate AI transition clips
         # between consecutive scene pairs if use_transition_lora is enabled.
@@ -3243,9 +3414,17 @@ async def _run_sequential_auto_gen(
         _seq_auto_jobs[pid]["status"] = "done"
         _seq_auto_jobs[pid]["completed_scenes"] = len(scenes)
         _seq_auto_jobs[pid]["current_step"] = "complete"
-
         _seq_auto_jobs[pid]["current_scene_name"] = None
         logger.info(f"Sequential auto-gen completed for project {project_id} (mode={mode})")
+
+        # Persist completion to BatchRun
+        if batch_run_id:
+            await _update_batch_run(
+                session_factory, batch_run_id,
+                completed_scenes=len(scenes),
+                current_scene_name=None,
+            )
+            await _finish_batch_run(session_factory, batch_run_id, BatchRunStatus.COMPLETED, _batch_started_at)
 
     except Exception as e:
         logger.error(f"Sequential auto-gen failed: {e}", exc_info=True)
@@ -3254,6 +3433,105 @@ async def _run_sequential_auto_gen(
             "status": "failed",
             "error": str(e),
         }
+        # Persist failure to BatchRun
+        if batch_run_id:
+            await _update_batch_run(
+                session_factory, batch_run_id,
+                error_entry={"error": str(e), "timestamp": datetime.utcnow().isoformat()},
+            )
+            await _finish_batch_run(session_factory, batch_run_id, BatchRunStatus.FAILED, _batch_started_at)
+
+    finally:
+        # Catch-all: if the function returned early (e.g. per-scene failure)
+        # and the BatchRun is still marked RUNNING, sync the final status.
+        if batch_run_id:
+            final_status = _seq_auto_jobs.get(pid, {}).get("status", "failed")
+            final_error = _seq_auto_jobs.get(pid, {}).get("error")
+            if final_status == "failed" and final_error:
+                # Check if BatchRun is still running (not yet finished)
+                try:
+                    async with session_factory() as _chk_session:
+                        _chk_stmt = select(BatchRun).where(BatchRun.id == batch_run_id)
+                        _chk_result = await _chk_session.execute(_chk_stmt)
+                        _chk_run = _chk_result.scalars().first()
+                        if _chk_run and _chk_run.status == BatchRunStatus.RUNNING:
+                            await _update_batch_run(
+                                session_factory, batch_run_id,
+                                error_entry={"error": final_error, "timestamp": datetime.utcnow().isoformat()},
+                            )
+                            await _finish_batch_run(
+                                session_factory, batch_run_id, BatchRunStatus.FAILED, _batch_started_at
+                            )
+                except Exception:
+                    pass  # Best-effort
+
+
+async def _resume_sequential_auto_gen(
+    batch_run_id: str,
+    project_id: str,
+    mode: str,
+    run_settings: dict,
+    scene_results: dict,
+):
+    """Resume a batch run from where it left off.
+
+    Called by the POST /api/batch-runs/{id}/resume endpoint.
+    Loads the project, determines which scenes are already done
+    (via scene_results), and restarts _run_sequential_auto_gen
+    with the same settings. Already-completed scenes are skipped
+    because they already have assets (chosen_image_path / chosen_video_path).
+    """
+    from backend.database import async_session as session_factory
+
+    pid = project_id
+    project_uuid = UUID(project_id)
+
+    # Re-count scenes
+    async with session_factory() as session:
+        scenes_stmt = select(Scene).where(Scene.project_id == project_uuid).order_by(Scene.order_index)
+        scenes_result = await session.execute(scenes_stmt)
+        scenes = list(scenes_result.scalars().all())
+
+        if not scenes:
+            await _update_batch_run(
+                session_factory, batch_run_id,
+                status=BatchRunStatus.FAILED,
+                error_entry={"error": "No scenes found", "timestamp": datetime.utcnow().isoformat()},
+            )
+            return
+
+        # Get app state for job_queue
+        # We need to find the running app's job_queue — import from the FastAPI state
+        from backend.main import app
+        job_queue = app.state.job_queue
+        comfy_dispatcher = app.state.comfy_dispatcher
+
+    # Set up in-memory tracking
+    _seq_auto_jobs[pid] = {
+        "status": "running",
+        "mode": mode,
+        "total_scenes": len(scenes),
+        "completed_scenes": len(scene_results),
+        "current_scene_name": None,
+        "current_step": "resuming...",
+        "error": None,
+        "batch_run_id": batch_run_id,
+    }
+
+    # Extract settings from run_settings snapshot
+    await _run_sequential_auto_gen(
+        pid, project_uuid, mode,
+        job_queue, session_factory,
+        comfy_dispatcher=comfy_dispatcher,
+        override_full_set=run_settings.get("override_full_set", False),
+        vocals_only_audio=run_settings.get("vocals_only_audio", False),
+        skip_audio_mux=run_settings.get("skip_audio_mux", False),
+        two_pass=run_settings.get("two_pass", False),
+        use_story_flow=run_settings.get("use_story_flow", True),
+        lipsync_enabled=run_settings.get("lipsync_enabled", True),
+        vocals_only_for_lipsync=run_settings.get("vocals_only_for_lipsync", False),
+        batch_run_id=batch_run_id,
+    )
 
 
 # ===== Transition Clip Generation =====

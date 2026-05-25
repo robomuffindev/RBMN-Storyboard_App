@@ -302,6 +302,8 @@ class AppSettings(SQLModel, table=True):
     distilled_lora_name: str = Field(default="ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
     # Network access — when True, server binds to 0.0.0.0 (LAN/WAN accessible)
     network_access: bool = Field(default=False)
+    # Custom port — users can set their own port for LAN access requirements
+    app_port: int = Field(default=8899)
     # LTX GGUF model variant — selectable in Settings to trade quality vs VRAM
     ltx_model_gguf: str = Field(default="ltx-2.3-22b-dev-Q8_0.gguf")
     # System prompt overrides — stored as JSON dicts keyed by model name
@@ -356,6 +358,64 @@ class AppSettings(SQLModel, table=True):
     director_auto_image_desc: bool = Field(default=True)  # Auto-fill image_description from scene context
     # Global negative prompt for VIDEO generation — set on LTXDirector negative_prompt field
     global_video_negative_prompt: Optional[str] = Field(default=None)
+
+
+class BatchRunStatus(StrEnum):
+    """Batch run lifecycle status."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
+
+
+class BatchRun(SQLModel, table=True):
+    """Persisted record of an Auto Gen batch run.
+
+    Each time a user starts an Auto Gen mode (all video FF/LF, all images, etc.),
+    a BatchRun is created.  Progress is updated per-scene so the run can be
+    resumed after an app restart.
+    """
+
+    __tablename__ = "batch_runs"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    project_id: UUID = Field(index=True)
+    project_name: str = Field(default="")  # denormalized for display
+
+    # Run configuration
+    mode: str = Field(default="")  # e.g. "all_video_fflf", "all_images", etc.
+    status: str = Field(default=BatchRunStatus.PENDING)
+
+    # Progress
+    total_scenes: int = Field(default=0)
+    completed_scenes: int = Field(default=0)
+    current_scene_name: Optional[str] = None
+    current_step: Optional[str] = None
+
+    # Per-scene results: { scene_id: { status: "done"|"failed"|"skipped"|"pending", error?: str, asset_url?: str } }
+    scene_results: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    # Error log: list of { scene_id, scene_name, error, timestamp }
+    error_log: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+
+    # Timing
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    elapsed_ms: int = Field(default=0)
+
+    # Settings snapshot — everything needed to resume
+    run_settings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # Stores: override_full_set, vocals_only_audio, skip_audio_mux, two_pass,
+    #         use_story_flow, lipsync_enabled, vocals_only_for_lipsync
+
+    # Last completed asset preview (for dashboard thumbnail)
+    last_asset_url: Optional[str] = None
+    last_asset_scene_name: Optional[str] = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class WorkflowFieldType(StrEnum):

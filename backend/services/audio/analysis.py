@@ -21,11 +21,20 @@ logger = logging.getLogger(__name__)
 # is cached after the first call.
 
 class _DemucsDevice:
-    """Detect whether CUDA is available for Demucs stem separation."""
+    """Detect whether CUDA is available for Demucs stem separation.
+
+    Checks torch.cuda.is_available() which covers both NVIDIA CUDA and
+    AMD ROCm (ROCm presents itself through PyTorch's CUDA compatibility
+    layer). Users must install the correct PyTorch build:
+      - NVIDIA: pip install torch --index-url https://download.pytorch.org/whl/cu121
+      - AMD:    pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
+      - CPU:    pip install torch (default — NO GPU)
+    """
 
     def __init__(self):
         self._detected = False
         self.device: str = "cpu"
+        self.gpu_name: str = ""
 
     def detect(self):
         if self._detected:
@@ -35,12 +44,26 @@ class _DemucsDevice:
             import torch
             if torch.cuda.is_available():
                 self.device = "cuda"
-                logger.info("Demucs GPU: CUDA available — will use GPU for stem separation")
+                try:
+                    self.gpu_name = torch.cuda.get_device_name(0)
+                except Exception:
+                    self.gpu_name = "Unknown GPU"
+                logger.info(
+                    f"Demucs GPU: CUDA available ({self.gpu_name}) — "
+                    f"will use GPU for stem separation"
+                )
             else:
-                logger.info("Demucs GPU: CUDA not available — using CPU")
+                logger.warning(
+                    "Demucs GPU: CUDA not available — using CPU. "
+                    "Stem separation will be MUCH slower. "
+                    "Install PyTorch with CUDA: pip install torch --index-url "
+                    "https://download.pytorch.org/whl/cu121  "
+                    "Or run fix-pytorch-cuda.bat on Windows."
+                )
         except ImportError:
-            # PyTorch not installed (Demucs won't work either, but be safe)
-            logger.info("Demucs GPU: PyTorch not found — using CPU")
+            logger.warning("Demucs GPU: PyTorch not found — using CPU")
+        except Exception as e:
+            logger.warning(f"Demucs GPU: detection failed ({e}) — using CPU")
 
     def get_device_flags(self) -> list[str]:
         """Return CLI flags for Demucs device selection."""

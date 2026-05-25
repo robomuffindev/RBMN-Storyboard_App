@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { FolderOpen, Settings } from 'lucide-react';
+import { FolderOpen, Settings, Activity } from 'lucide-react';
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -27,7 +27,7 @@ export default function HomePage() {
 
         {/* Section cards grid */}
         <div className="w-full max-w-3xl">
-          <div className="grid grid-cols-1 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Projects Card */}
             <div
               onClick={() => navigate('/projects')}
@@ -43,6 +43,25 @@ export default function HomePage() {
                 <h2 className="text-2xl font-bold mb-2">Projects</h2>
                 <p className="text-gray-400">
                   Create and manage music video & narration projects
+                </p>
+              </div>
+            </div>
+
+            {/* Batch Runs Card */}
+            <div
+              onClick={() => navigate('/batches')}
+              className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden hover:border-purple-600 hover:shadow-lg transition-all cursor-pointer group"
+            >
+              <div className="h-32 bg-gradient-to-br from-purple-900/20 to-gray-900 flex items-center justify-center">
+                <Activity
+                  size={48}
+                  className="text-purple-400 group-hover:text-purple-300 transition-colors"
+                />
+              </div>
+              <div className="p-8">
+                <h2 className="text-2xl font-bold mb-2">Batch Runs</h2>
+                <p className="text-gray-400">
+                  Monitor auto-generation progress, errors & resume runs
                 </p>
               </div>
             </div>

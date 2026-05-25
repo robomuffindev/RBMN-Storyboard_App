@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil } from 'lucide-react';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft } from 'lucide-react';
 import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, autoGenerate, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
@@ -35,6 +35,8 @@ export default function AppLayout() {
   const isDraggingTimeline = useRef(false);
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
+  // Mobile panel visibility
+  const [mobilePanel, setMobilePanel] = useState<'editor' | 'left' | 'queue'>('editor');
 
   // Timeline resize drag handlers
   const handleTimelineDragStart = useCallback((e: React.MouseEvent) => {
@@ -404,25 +406,25 @@ export default function AppLayout() {
   };
 
   return (
-    <div className="h-screen bg-gray-950 text-gray-100 flex flex-col overflow-hidden">
+    <div className="h-screen bg-gray-950 text-gray-100 flex flex-col overflow-hidden app-root">
       {/* Toolbar */}
-      <div className="bg-gray-900 border-b border-gray-800 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="app-toolbar bg-gray-900 border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-4 min-w-0">
           <button
             onClick={() => navigate('/')}
-            className="px-3 py-2 text-gray-400 hover:text-gray-100 transition-colors flex items-center gap-2 text-sm font-medium"
+            className="px-3 py-2 text-gray-400 hover:text-gray-100 transition-colors flex items-center gap-2 text-sm font-medium flex-shrink-0"
           >
             <ChevronLeft size={20} />
-            Back
+            <span className="hidden sm:inline">Back</span>
           </button>
-          <h1 className="text-2xl font-bold">{project.name}</h1>
-          <span className="px-3 py-1 bg-gray-800 rounded-full text-sm text-gray-300">
+          <h1 className="text-2xl font-bold truncate">{project.name}</h1>
+          <span className="px-3 py-1 bg-gray-800 rounded-full text-sm text-gray-300 hidden md:inline-block flex-shrink-0">
             {getModeLabel(project.mode)}
           </span>
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="flex gap-2 border border-gray-700 rounded-md p-1 bg-gray-800">
+        <div className="flex items-center gap-2 md:gap-4 flex-shrink-0">
+          <div className="hidden md:flex gap-2 border border-gray-700 rounded-md p-1 bg-gray-800">
             <button
               className="px-3 py-1 rounded flex items-center gap-1 text-sm font-medium bg-blue-600 text-white"
             >
@@ -444,10 +446,10 @@ export default function AppLayout() {
           {(stableScenes as Scene[]).length > 0 && (
             <button
               onClick={() => setAutoGenOpen(true)}
-              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+              className="px-3 md:px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
             >
               <Wand2 size={18} />
-              Auto Generate
+              <span className="hidden sm:inline">Auto Generate</span>
             </button>
           )}
 
@@ -455,7 +457,7 @@ export default function AppLayout() {
             <button
               onClick={handleRenderPreview}
               disabled={previewRendering}
-              className={`px-4 py-2 rounded text-sm font-medium transition-colors flex items-center gap-2 ${
+              className={`hidden md:flex px-4 py-2 rounded text-sm font-medium transition-colors items-center gap-2 ${
                 previewRendering
                   ? 'bg-gray-600 text-gray-300 cursor-wait'
                   : previewUrl
@@ -470,10 +472,10 @@ export default function AppLayout() {
 
           <button
             onClick={() => setExportOpen(true)}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+            className="px-3 md:px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
           >
             <Download size={20} />
-            Export
+            <span className="hidden sm:inline">Export</span>
           </button>
 
           {/* Tools/Debug Menu */}
@@ -567,9 +569,9 @@ export default function AppLayout() {
       )}
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden gap-4 p-4">
+      <div className="app-main-content flex-1 flex overflow-hidden gap-4 p-4">
         {/* Left Panel - Scene/Asset Management */}
-        <div className="w-72 bg-gray-900 border border-gray-800 rounded-lg flex flex-col overflow-hidden">
+        <div className={`app-left-panel w-72 bg-gray-900 border border-gray-800 rounded-lg flex flex-col overflow-hidden ${mobilePanel !== 'left' ? 'mobile-hidden' : ''}`}>
           {/* Row 1: Audio / Scenes / Assets */}
           <div className="flex gap-1 p-2 pb-1 border-b-0 border-gray-800">
             <button
@@ -650,7 +652,7 @@ export default function AppLayout() {
         </div>
 
         {/* Middle & Right Panel - Editor & Preview */}
-        <div className="flex-1 flex flex-col overflow-hidden gap-4">
+        <div className={`app-center-panel flex-1 flex flex-col overflow-hidden gap-4 ${mobilePanel !== 'editor' ? 'mobile-hidden' : ''}`}>
           {/* Preview — visible only when editor is collapsed */}
           {editorCollapsed && (
             <div className="flex-1 min-h-0 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -666,14 +668,14 @@ export default function AppLayout() {
         </div>
 
         {/* Generation Panel */}
-        <div className="w-80 bg-gray-900 border border-gray-800 rounded-lg flex flex-col overflow-hidden">
+        <div className={`app-right-panel w-80 bg-gray-900 border border-gray-800 rounded-lg flex flex-col overflow-hidden ${mobilePanel !== 'queue' ? 'mobile-hidden' : ''}`}>
           <GenerationPanel />
         </div>
       </div>
 
       {/* Timeline - Bottom Panel (resizable) */}
       <div
-        className="bg-gray-900 border-t border-gray-800 flex flex-col overflow-hidden flex-shrink-0"
+        className="app-timeline bg-gray-900 border-t border-gray-800 flex flex-col overflow-hidden flex-shrink-0"
         style={{ height: `${timelineHeight}px` }}
       >
         {/* Drag handle */}
@@ -693,6 +695,37 @@ export default function AppLayout() {
 
       {/* Auto Generate Modal */}
       {autoGenOpen && <AutoGenerateModal projectId={id!} onClose={() => setAutoGenOpen(false)} />}
+
+      {/* Mobile Bottom Navigation */}
+      <div className="mobile-nav">
+        <button
+          onClick={() => setMobilePanel('left')}
+          className={`flex flex-col items-center gap-0.5 px-3 py-1 rounded text-xs transition-colors ${
+            mobilePanel === 'left' ? 'text-blue-400' : 'text-gray-500'
+          }`}
+        >
+          <PanelLeft size={18} />
+          <span>Panels</span>
+        </button>
+        <button
+          onClick={() => setMobilePanel('editor')}
+          className={`flex flex-col items-center gap-0.5 px-3 py-1 rounded text-xs transition-colors ${
+            mobilePanel === 'editor' ? 'text-blue-400' : 'text-gray-500'
+          }`}
+        >
+          <Layers size={18} />
+          <span>Editor</span>
+        </button>
+        <button
+          onClick={() => setMobilePanel('queue')}
+          className={`flex flex-col items-center gap-0.5 px-3 py-1 rounded text-xs transition-colors ${
+            mobilePanel === 'queue' ? 'text-blue-400' : 'text-gray-500'
+          }`}
+        >
+          <ListOrdered size={18} />
+          <span>Queue</span>
+        </button>
+      </div>
     </div>
   );
 }

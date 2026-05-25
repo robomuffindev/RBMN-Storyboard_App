@@ -131,6 +131,40 @@ export const useJobEvents = () => {
                   start_time: scene.start_time,
                   end_time: scene.end_time,
                 });
+
+                // Update batch preview PIP with latest completed asset
+                const job = s.jobs.find(j => j.id === jobId);
+                const jType = resolvedJobType as 'image' | 'video';
+                const assetPath = jType === 'video'
+                  ? scene.parameters?.chosen_video_path
+                  : scene.parameters?.chosen_image_path;
+
+                // Build asset URL — find asset ID from result or construct file URL
+                let assetUrl: string | null = null;
+                if (job?.result?.asset_ids?.length) {
+                  assetUrl = `/api/projects/${projectId}/assets/${job.result.asset_ids[0]}/file`;
+                } else if (assetPath) {
+                  // Fallback: use the file serving endpoint
+                  assetUrl = `/api/files/${projectId}/${assetPath}`;
+                }
+
+                const elapsed = job?.started_at
+                  ? Date.now() - new Date(job.started_at).getTime()
+                  : 0;
+
+                s.setLastCompletedAsset({
+                  sceneId,
+                  sceneName: scene.name || `Scene ${scene.order_index + 1}`,
+                  sceneIndex: scene.order_index,
+                  jobType: jType,
+                  projectId,
+                  assetUrl,
+                  prompt: scene.parameters?.prompt
+                    ? String(scene.parameters.prompt).slice(0, 120)
+                    : null,
+                  completedAt: Date.now(),
+                  elapsedMs: elapsed,
+                });
               }).catch(() => {/* ignore fetch errors */});
 
               // V2V trim-A also modifies scene A (previous scene) —

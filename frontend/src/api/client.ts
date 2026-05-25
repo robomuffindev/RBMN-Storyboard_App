@@ -13,6 +13,8 @@ import type {
   RunPodPodStatus,
   BatchItemConfig,
   BatchRunStatus,
+  PersistentBatchRunSummary,
+  PersistentBatchRunDetail,
 } from '@/types/index';
 
 const api: AxiosInstance = axios.create({
@@ -579,5 +581,21 @@ export const cancelBatch = (batchId: string) =>
 
 export const cleanBatchStaging = () =>
   api.delete('/batch/staging');
+
+// ── Persistent Batch Runs (Auto Gen) ──────────────────────────────
+
+export const listPersistentBatchRuns = (projectId?: string) =>
+  api.get<PersistentBatchRunSummary[]>('/batch-runs', {
+    params: projectId ? { project_id: projectId } : undefined,
+  });
+
+export const getPersistentBatchRun = (batchRunId: string) =>
+  api.get<PersistentBatchRunDetail>(`/batch-runs/${batchRunId}`);
+
+export const resumePersistentBatchRun = (batchRunId: string) =>
+  api.post<{ status: string; batch_run_id: string }>(`/batch-runs/${batchRunId}/resume`);
+
+export const deletePersistentBatchRun = (batchRunId: string) =>
+  api.delete<{ status: string; batch_run_id: string }>(`/batch-runs/${batchRunId}`);
 
 export default api;

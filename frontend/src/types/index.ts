@@ -189,6 +189,8 @@ export interface AppSettings {
   export_lfff_trim_enabled?: boolean;
   // Network access — LAN/WAN
   network_access?: boolean;
+  // App port
+  app_port?: number;
   // RunPod integration
   runpod_enabled?: boolean;
   runpod_api_key?: string;
@@ -336,4 +338,32 @@ export interface BatchRunStatus {
   completed_items: number;
   current_item_index: number;
   items: BatchItemStatus[];
+}
+
+// ── Persistent Batch Runs (Auto Gen) ──────────────────────────────
+export type PersistentBatchRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+
+export interface PersistentBatchRunSummary {
+  id: string;
+  project_id: string;
+  project_name: string;
+  mode: string;
+  status: PersistentBatchRunStatus;
+  total_scenes: number;
+  completed_scenes: number;
+  current_scene_name: string | null;
+  current_step: string | null;
+  error_count: number;
+  started_at: string | null;
+  completed_at: string | null;
+  elapsed_ms: number;
+  last_asset_url: string | null;
+  last_asset_scene_name: string | null;
+  created_at: string | null;
+}
+
+export interface PersistentBatchRunDetail extends PersistentBatchRunSummary {
+  scene_results: Record<string, any>;
+  error_log: Array<{ scene_id?: string; scene_name?: string; step?: string; error: string; timestamp?: string }>;
+  run_settings: Record<string, any>;
 }

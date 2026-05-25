@@ -53,6 +53,7 @@ export default function SettingsPage() {
     color_correction_enabled: false,
     restrict_explicit_content: false,
     network_access: false,
+    app_port: 8899,
     global_negative_prompt: '',
     director_guide_strength: 0.5,
     director_audio_guidance: 0.001,
@@ -131,6 +132,7 @@ export default function SettingsPage() {
         color_correction_enabled: savedSettings.color_correction_enabled === true,
         restrict_explicit_content: savedSettings.restrict_explicit_content === true,
         network_access: savedSettings.network_access === true,
+        app_port: savedSettings.app_port || 8899,
         global_negative_prompt: savedSettings.global_negative_prompt || '',
         director_guide_strength: savedSettings.director_guide_strength ?? 0.5,
         director_audio_guidance: savedSettings.director_audio_guidance ?? 0.001,
@@ -1231,6 +1233,28 @@ export default function SettingsPage() {
               This allows other machines on your network to access the app by your IP address and port (default: 8899).
               Useful for checking generation progress from another device.
             </p>
+            <div className="mt-4">
+              <label className="block text-sm font-medium mb-1">Server Port</label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={1024}
+                  max={65535}
+                  value={settings.app_port ?? 8899}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (!isNaN(val)) {
+                      setSettings((prev) => ({ ...prev, app_port: Math.max(1024, Math.min(65535, val)) }));
+                    }
+                  }}
+                  className="w-28 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm"
+                />
+                <span className="text-xs text-gray-500">Default: 8899 (range: 1024-65535)</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                The port number the app listens on. Other devices can reach the app at your-ip:port.
+              </p>
+            </div>
             <p className="text-xs text-yellow-500 font-medium">
               Requires app restart to take effect.
             </p>

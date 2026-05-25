@@ -176,7 +176,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
   return (
     <div className="h-full bg-gray-900 p-3 flex flex-col overflow-hidden">
       {/* Transport Controls */}
-      <div className="flex items-center justify-between mb-2 flex-shrink-0">
+      <div className="flex items-center justify-between mb-2 flex-shrink-0 flex-wrap gap-y-1">
         <div className="flex items-center gap-2">
           <button onClick={skipToPrev} className="p-1.5 text-gray-400 hover:text-white transition-colors" title="Previous section">
             <SkipBack size={16} />
@@ -206,7 +206,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="timeline-toolbar flex items-center gap-2">
           {/* Split Button */}
           {onSplitScene && (
             <button
@@ -754,6 +754,11 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
           </div>
         )}
 
+        {/* Live preview toggle — only show when not running */}
+        {!isRunning && !isDone && !isFailed && !isCancelled && (
+          <LivePreviewToggle />
+        )}
+
         {/* Mode buttons — only show when not running */}
         {!isRunning && !isDone && !isFailed && !isCancelled && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -943,6 +948,41 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
       </div>
     </div>,
     document.body
+  );
+}
+
+
+/** Toggle for enabling live batch preview PIP */
+function LivePreviewToggle() {
+  const enabled = useAppStore((s) => s.batchPreviewEnabled);
+  const setEnabled = useAppStore((s) => s.setBatchPreviewEnabled);
+
+  return (
+    <label
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+        padding: '10px 12px', marginBottom: 8, borderRadius: 8,
+        background: enabled ? 'rgba(168, 85, 247, 0.15)' : 'rgba(255,255,255,0.04)',
+        border: enabled ? '1px solid rgba(168, 85, 247, 0.4)' : '1px solid rgba(255,255,255,0.08)',
+        transition: 'all 0.2s',
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={enabled}
+        onChange={(e) => setEnabled(e.target.checked)}
+        style={{ accentColor: '#a855f7', width: 16, height: 16, cursor: 'pointer' }}
+      />
+      <div>
+        <div style={{ color: enabled ? '#a855f7' : '#ccc', fontSize: 13, fontWeight: 600 }}>
+          Live Preview (PIP)
+        </div>
+        <div style={{ color: '#888', fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
+          Show a floating picture-in-picture preview of each completed asset during batch processing.
+          Draggable, resizable, and closeable.
+        </div>
+      </div>
+    </label>
   );
 }
 

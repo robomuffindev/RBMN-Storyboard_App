@@ -131,6 +131,17 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Server configured to listen on {settings.app_host}:{settings.app_port}")
 
+    # Eagerly detect GPU capabilities at startup so it's visible in logs
+    from backend.services.video.ffmpeg import _gpu as _ffmpeg_gpu
+    from backend.services.audio.analysis import _demucs_device
+    _ffmpeg_gpu.detect()
+    _demucs_device.detect()
+    logger.info(
+        f"GPU status — FFmpeg: {_ffmpeg_gpu.encoder} ({_ffmpeg_gpu.gpu_type}), "
+        f"Demucs: {_demucs_device.device}"
+        f"{(' (' + _demucs_device.gpu_name + ')') if _demucs_device.gpu_name else ''}"
+    )
+
     yield
 
     # Shutdown
@@ -175,11 +186,20 @@ app.add_middleware(
 # Health check endpoint
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with GPU status."""
+    from backend.services.video.ffmpeg import _gpu as _ffmpeg_gpu
+    from backend.services.audio.analysis import _demucs_device
     return {
         "status": "ok",
         "app": "Robomuffin Idea Factory",
         "version": "0.1.0",
+        "gpu": {
+            "ffmpeg_encoder": _ffmpeg_gpu.encoder,
+            "ffmpeg_gpu_type": _ffmpeg_gpu.gpu_type,
+            "ffmpeg_decode_hwaccel": _ffmpeg_gpu.decode_hwaccel or "cpu",
+            "demucs_device": _demucs_device.device,
+            "demucs_gpu_name": _demucs_device.gpu_name or None,
+        },
     }
 
 
@@ -197,6 +217,7 @@ from backend.api import (
     concept_router,
     retrim_all_router,
     batch_router,
+    batch_runs_router,
 )
 
 app.include_router(projects_router)
@@ -211,6 +232,7 @@ app.include_router(workflows_router)
 app.include_router(concept_router)
 app.include_router(retrim_all_router)
 app.include_router(batch_router)
+app.include_router(batch_runs_router)
 app.include_router(files_router)
 
 # Log registered routes for debugging

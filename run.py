@@ -110,11 +110,28 @@ def _read_network_access_setting() -> bool:
         return False
 
 
+def _read_app_port_setting() -> int:
+    """Read app_port from SQLite DB (sync, runs once at startup)."""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path("~/RBMN-Projects/RBMN.db").expanduser()
+    if not db_path.exists():
+        return 8899
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT app_port FROM app_settings WHERE id = 1")
+        row = cursor.fetchone()
+        conn.close()
+        return int(row[0]) if row and row[0] else 8899
+    except Exception:
+        return 8899
+
+
 def main():
     clear_pycache()
     parser = argparse.ArgumentParser(description="Robomuffin Idea Factory")
     parser.add_argument("--host", default=None, help="Backend host (default: auto from settings)")
-    parser.add_argument("--port", type=int, default=8899, help="Backend port (default: 8899)")
+    parser.add_argument("--port", type=int, default=None, help="Backend port (default: from settings or 8899)")
     parser.add_argument(
         "--mode",
         choices=["desktop", "browser", "server"],
@@ -125,6 +142,10 @@ def main():
         "--log-level", default="INFO", help="Log level (default: INFO)"
     )
     args = parser.parse_args()
+
+    # Resolve port: CLI flag > DB setting > default 8899
+    if args.port is None:
+        args.port = _read_app_port_setting()
 
     # Resolve host: CLI flag > DB setting > default localhost
     if args.host is None:

@@ -80,6 +80,8 @@ class SettingsResponse(BaseModel):
     runpod_pods: Optional[list[RunPodPodEntry]] = None
     # Network access — when True, server binds to 0.0.0.0 (LAN/WAN)
     network_access: bool = False
+    # App port
+    app_port: int = 8899
     # Project directory
     project_dir: Optional[str] = None
     # LTXDirector video generation settings
@@ -133,6 +135,8 @@ class SettingsUpdate(BaseModel):
     runpod_pods: Optional[list[RunPodPodEntry]] = None
     # Network access
     network_access: Optional[bool] = None
+    # App port
+    app_port: Optional[int] = None
     # LTXDirector settings
     director_guide_strength: Optional[float] = None
     director_audio_guidance: Optional[float] = None
@@ -301,6 +305,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         runpod_idle_timeout=settings.runpod_idle_timeout or 30,
         runpod_pods=[RunPodPodEntry(**p) for p in (settings.runpod_pods or [])],
         network_access=settings.network_access or False,
+        app_port=settings.app_port or 8899,
         project_dir=settings.project_dir or str(env_settings.project_dir),
         director_guide_strength=settings.director_guide_strength if settings.director_guide_strength is not None else 0.5,
         director_audio_guidance=settings.director_audio_guidance if settings.director_audio_guidance is not None else 0.001,
@@ -469,6 +474,8 @@ async def update_settings(
             settings.runpod_pods = [p.model_dump() for p in req.runpod_pods]
         if req.network_access is not None:
             settings.network_access = req.network_access
+        if req.app_port is not None:
+            settings.app_port = max(1024, min(65535, req.app_port))
         # LTXDirector settings
         if req.director_guide_strength is not None:
             settings.director_guide_strength = max(0.0, min(1.0, req.director_guide_strength))
@@ -990,6 +997,7 @@ async def export_settings(
             runpod_idle_timeout=settings.runpod_idle_timeout or 30,
             runpod_pods=settings.runpod_pods,
             network_access=settings.network_access or False,
+            app_port=settings.app_port or 8899,
         )
 
         # Build filename with date stamp
@@ -1122,6 +1130,8 @@ async def import_settings(
             settings.runpod_pods = data["runpod_pods"]
         if "network_access" in data:
             settings.network_access = data["network_access"]
+        if "app_port" in data:
+            settings.app_port = max(1024, min(65535, int(data["app_port"])))
 
         await session.commit()
         await session.refresh(settings)

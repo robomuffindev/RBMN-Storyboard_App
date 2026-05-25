@@ -48,6 +48,8 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Global Negative Prompt** — Set a negative prompt in Settings that applies to all image generation workflows. Per-scene negative prompts override the global when set. The effective negative prompt (global vs scene override) is displayed in each scene's Prompt tab after generation
 - **Custom Workflow Management** — Upload your own ComfyUI workflow JSON files with auto-introspection and field mapping. Assign custom workflows per-server or globally, and select them from the Image/Video tab dropdowns
 - **Asset Manager** — Browse and manage all project assets (characters, reference images, generated images/videos) with thumbnail grid view, lightbox preview, and direct-use-as-reference from the asset library
+- **Live Batch Preview (PIP)** — Floating picture-in-picture overlay during batch processing shows the last generated image or video with scene name, elapsed time, prompt snippet, and IMAGE/VIDEO badge. Draggable (mouse + touch), resizable (small/medium/large), minimizable. Auto-positions to bottom-right corner
+- **Mobile Responsive Layout** — Full mobile support lets you open the UI on your phone at `http://local-ip:8899` to monitor batch progress. Bottom navigation bar with panel/editor/queue tabs, collapsible sidebars, wrapping toolbars, and full-screen modals on small screens. Tablet breakpoint at 1024px
 - **Settings Import/Export** — Export all app settings to JSON and import on another machine for easy configuration sharing
 - **Project Directory** — Configure where project data is stored via Settings, with the option to move existing data to a new location
 - **Edit Project Name** — Rename projects via the toolbar menu (display name only — files and directories unchanged)
@@ -62,6 +64,8 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Color Correction** — Automatic per-channel RGB color matching with skip thresholds to avoid unnecessary re-encodes
 - **RunPod Integration** — Optional serverless GPU pod management with auto-spindown
 - **Real-time Progress** — SSE pub/sub broadcaster streams progress from ComfyUI to all connected frontends
+- **Live Batch Preview** — Floating PIP overlay streams the latest generated asset during batch processing via SSE events, with scene info and elapsed time
+- **Mobile Responsive** — CSS media queries at 768px/1024px breakpoints with mobile bottom nav bar, panel toggling, and toolbar wrapping for phone/tablet monitoring
 - **Desktop Native** — pywebview wraps the app in a native window (browser mode also available)
 
 ## ComfyUI Server Setup
@@ -229,7 +233,10 @@ python run.py              # Desktop mode (pywebview)
 python run.py --mode browser  # Browser mode
 ```
 
-**Windows users** can also use the included `install.bat` and `run.bat` scripts.
+**Windows users** can also use the included batch scripts:
+- `install.bat` — Full installation
+- `run.bat` — Launch in desktop mode
+- `Run_Browser_Mode.bat` — Launch in browser mode (opens `http://localhost:8899`)
 
 ### Fixing PyTorch CUDA (Existing Installs)
 

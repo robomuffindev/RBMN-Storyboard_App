@@ -1,6 +1,18 @@
 import { create } from 'zustand';
 import type { Project, Scene, SongSection, Asset, Job, WorkflowConfig } from '@/types/index';
 
+export interface LastCompletedAsset {
+  sceneId: string;
+  sceneName: string;
+  sceneIndex: number;
+  jobType: 'image' | 'video';
+  projectId: string;
+  assetUrl: string | null;     // URL to the generated asset
+  prompt: string | null;       // prompt snippet used
+  completedAt: number;         // Date.now() timestamp
+  elapsedMs: number;           // job duration
+}
+
 interface AppState {
   // Data
   currentProject: Project | null;
@@ -18,6 +30,11 @@ interface AppState {
   selectedSectionId: string | null;
   scenesLocked: boolean;
 
+  // Batch preview PIP
+  lastCompletedAsset: LastCompletedAsset | null;
+  batchPreviewVisible: boolean;
+  batchPreviewEnabled: boolean;   // user toggle — when true, PIP auto-shows on job completion
+
   // Actions
   setProject: (project: Project | null) => void;
   setScenes: (scenes: Scene[]) => void;
@@ -32,6 +49,11 @@ interface AppState {
   setViewMode: (mode: 'sections' | 'scenes') => void;
   setSelectedSectionId: (id: string | null) => void;
   setScenesLocked: (locked: boolean) => void;
+
+  // Batch preview
+  setLastCompletedAsset: (asset: LastCompletedAsset | null) => void;
+  setBatchPreviewVisible: (visible: boolean) => void;
+  setBatchPreviewEnabled: (enabled: boolean) => void;
 
   // Job management
   addJob: (job: Job) => void;
@@ -64,6 +86,9 @@ export const useAppStore = create<AppState>((set) => ({
   viewMode: 'scenes',
   selectedSectionId: null,
   scenesLocked: false,
+  lastCompletedAsset: null,
+  batchPreviewVisible: false,
+  batchPreviewEnabled: false,
 
   // Setters
   setProject: (project) => set({ currentProject: project }),
@@ -79,6 +104,12 @@ export const useAppStore = create<AppState>((set) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
   setSelectedSectionId: (id) => set({ selectedSectionId: id }),
   setScenesLocked: (locked) => set({ scenesLocked: locked }),
+  setLastCompletedAsset: (asset) => set((state) => ({
+    lastCompletedAsset: asset,
+    batchPreviewVisible: asset !== null && state.batchPreviewEnabled,
+  })),
+  setBatchPreviewVisible: (visible) => set({ batchPreviewVisible: visible }),
+  setBatchPreviewEnabled: (enabled) => set({ batchPreviewEnabled: enabled }),
 
   // Jobs
   addJob: (job) => set((s) => ({ jobs: [...s.jobs, job] })),

@@ -78,3 +78,96 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #5b6573;
 }
+
+/* ── Mobile Responsive ─────────────────────────────────────────── */
+
+/* Mobile nav toggle buttons at bottom of screen */
+.mobile-nav {
+  @apply fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-700 flex items-center justify-around py-2 px-1;
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .mobile-nav {
+    display: flex;
+  }
+
+  /* Shrink toolbar padding and text on mobile */
+  .app-toolbar {
+    @apply px-3 py-2 gap-2;
+  }
+
+  .app-toolbar h1 {
+    @apply text-base;
+  }
+
+  /* Stack the main content vertically on mobile */
+  .app-main-content {
+    @apply flex-col gap-2 p-2;
+  }
+
+  /* Mobile panels: full width, shown/hidden via toggle */
+  .app-left-panel {
+    width: 100% !important;
+    max-height: 50vh;
+    border-radius: 8px;
+  }
+
+  .app-left-panel.mobile-hidden {
+    display: none !important;
+  }
+
+  .app-center-panel {
+    width: 100% !important;
+  }
+
+  .app-right-panel {
+    width: 100% !important;
+    max-height: 40vh;
+    border-radius: 8px;
+  }
+
+  .app-right-panel.mobile-hidden {
+    display: none !important;
+  }
+
+  /* Timeline: reduce height on mobile */
+  .app-timeline {
+    min-height: 120px;
+    max-height: 180px !important;
+  }
+
+  /* Timeline toolbar: wrap buttons on small screens */
+  .timeline-toolbar {
+    @apply flex-wrap gap-1;
+  }
+
+  .timeline-toolbar button {
+    @apply text-[10px] px-1.5 py-0.5;
+  }
+
+  /* Pad bottom for the mobile nav bar */
+  .app-root {
+    padding-bottom: 56px !important;
+  }
+
+  /* Auto Gen modal: full-screen on mobile */
+  .autogen-modal-inner {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 100vh !important;
+    border-radius: 0 !important;
+    margin: 0;
+  }
+}
+
+/* Tablet responsive (md) */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .app-left-panel {
+    width: 240px !important;
+  }
+
+  .app-right-panel {
+    width: 260px !important;
+  }
+}
