@@ -602,4 +602,9 @@ export const resumePersistentBatchRun = (batchRunId: string) =>
 export const deletePersistentBatchRun = (batchRunId: string) =>
   api.delete<{ status: string; batch_run_id: string }>(`/batch-runs/${batchRunId}`);
 
+export const deletePersistentBatchRunsBulk = (status?: 'completed' | 'failed') =>
+  api.delete<{ status: string; deleted_count: number }>('/batch-runs', {
+    params: status ? { status } : undefined,
+  });
+
 export default api;

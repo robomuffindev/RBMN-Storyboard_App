@@ -174,6 +174,39 @@ async def resume_batch_run(
     return {"status": "resuming", "batch_run_id": str(run.id)}
 
 
+@router.delete("")
+async def delete_batch_runs_bulk(
+    status: Optional[str] = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete batch run records in bulk.
+
+    - No status filter: deletes ALL non-running batch runs.
+    - status=completed: deletes only completed runs.
+    - status=failed: deletes failed and cancelled runs.
+    """
+    stmt = select(BatchRun).where(BatchRun.status != BatchRunStatus.RUNNING)
+
+    if status == "completed":
+        stmt = stmt.where(BatchRun.status == BatchRunStatus.COMPLETED)
+    elif status == "failed":
+        stmt = stmt.where(
+            BatchRun.status.in_([BatchRunStatus.FAILED, BatchRunStatus.CANCELLED])
+        )
+    # else: delete all non-running
+
+    result = await session.execute(stmt)
+    runs = result.scalars().all()
+    count = len(runs)
+
+    for run in runs:
+        await session.delete(run)
+
+    await session.commit()
+    logger.info("Bulk deleted %d batch runs (filter=%s)", count, status or "all")
+    return {"status": "deleted", "deleted_count": count}
+
+
 @router.delete("/{batch_run_id}")
 async def delete_batch_run(
     batch_run_id: str,

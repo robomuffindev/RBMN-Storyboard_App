@@ -13,8 +13,9 @@ import {
   RefreshCw,
   Eye,
   Loader2,
+  ChevronDown,
 } from 'lucide-react';
-import { listPersistentBatchRuns, deletePersistentBatchRun } from '@/api/client';
+import { listPersistentBatchRuns, deletePersistentBatchRun, deletePersistentBatchRunsBulk } from '@/api/client';
 import type { PersistentBatchRunSummary } from '@/types/index';
 
 function formatElapsed(ms: number): string {
@@ -73,11 +74,29 @@ function StatusIcon({ status }: { status: string }) {
   }
 }
 
+/** Live-ticking elapsed timer for running batches */
+function LiveElapsed({ startedAt }: { startedAt: string }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const normalized = startedAt.endsWith('Z') ? startedAt : startedAt + 'Z';
+    const startMs = new Date(normalized).getTime();
+    const update = () => setElapsed(Math.max(0, Date.now() - startMs));
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+
+  return <>{formatElapsed(elapsed)}</>;
+}
+
 export default function BatchesDashboard() {
   const navigate = useNavigate();
   const [runs, setRuns] = useState<PersistentBatchRunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'running' | 'completed' | 'failed'>('all');
+  const [clearMenuOpen, setClearMenuOpen] = useState(false);
+  const clearMenuRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchRuns = async () => {
@@ -99,6 +118,33 @@ export default function BatchesDashboard() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  // Close clear menu on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (clearMenuRef.current && !clearMenuRef.current.contains(e.target as Node)) {
+        setClearMenuOpen(false);
+      }
+    };
+    if (clearMenuOpen) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [clearMenuOpen]);
+
+  const handleBulkDelete = async (statusFilter?: 'completed' | 'failed') => {
+    const label = statusFilter === 'completed'
+      ? `all ${completedCount} completed`
+      : statusFilter === 'failed'
+        ? `all ${failedCount} failed`
+        : `all ${completedCount + failedCount} non-running`;
+    if (!confirm(`Delete ${label} batch run records? This cannot be undone.`)) return;
+    setClearMenuOpen(false);
+    try {
+      await deletePersistentBatchRunsBulk(statusFilter);
+      await fetchRuns();
+    } catch (err) {
+      console.error('Failed to bulk delete batch runs:', err);
+    }
+  };
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -146,6 +192,50 @@ export default function BatchesDashboard() {
               <RefreshCw size={16} />
               <span className="hidden sm:inline">Refresh</span>
             </button>
+
+            {/* Clear menu */}
+            {runs.length > runningCount && (
+              <div className="relative" ref={clearMenuRef}>
+                <button
+                  onClick={() => setClearMenuOpen(!clearMenuOpen)}
+                  className="px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+                >
+                  <Trash2 size={16} />
+                  <span className="hidden sm:inline">Clear</span>
+                  <ChevronDown size={14} className={`transition-transform ${clearMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {clearMenuOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-48 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-20 py-1">
+                    <button
+                      onClick={() => handleBulkDelete()}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors flex items-center gap-2"
+                    >
+                      <Trash2 size={14} />
+                      Clear All
+                    </button>
+                    {completedCount > 0 && (
+                      <button
+                        onClick={() => handleBulkDelete('completed')}
+                        className="w-full text-left px-4 py-2 text-sm text-green-400 hover:bg-gray-700 transition-colors flex items-center gap-2"
+                      >
+                        <CheckCircle size={14} />
+                        Clear Completed ({completedCount})
+                      </button>
+                    )}
+                    {failedCount > 0 && (
+                      <button
+                        onClick={() => handleBulkDelete('failed')}
+                        className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700 transition-colors flex items-center gap-2"
+                      >
+                        <XCircle size={14} />
+                        Clear Failed ({failedCount})
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={() => navigate('/settings')}
               className="px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
@@ -280,10 +370,20 @@ export default function BatchesDashboard() {
                   {/* Card body */}
                   <div className="p-4">
                     <h3 className="text-lg font-semibold mb-1 truncate">{run.project_name}</h3>
-                    <div className="flex items-center gap-3 text-sm text-gray-400 mb-3">
-                      <span className="capitalize">{run.mode.replace(/_/g, ' ')}</span>
-                      <span className="text-gray-600">|</span>
-                      <span>{run.completed_scenes}/{run.total_scenes} scenes</span>
+                    <div className="flex items-center justify-between text-sm text-gray-400 mb-3">
+                      <div className="flex items-center gap-3">
+                        <span className="capitalize">{run.mode.replace(/_/g, ' ')}</span>
+                        <span className="text-gray-600">|</span>
+                        <span>{run.completed_scenes}/{run.total_scenes} scenes</span>
+                      </div>
+                      <span className="flex items-center gap-1 text-xs font-mono tabular-nums">
+                        <Clock size={12} className="text-gray-500" />
+                        {run.status === 'running' && run.started_at ? (
+                          <LiveElapsed startedAt={run.started_at} />
+                        ) : (
+                          formatElapsed(run.elapsed_ms)
+                        )}
+                      </span>
                     </div>
 
                     {/* Progress bar for non-running too */}

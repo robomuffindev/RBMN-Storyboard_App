@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-05-25
+
+### Added
+- **Batch Mode System** — Queue multiple audio files with per-item configuration (render type, video mode, two-pass, story flow, auto characters) and run them as a batch pipeline
+- **Persistent Batch Runs (Auto Gen Dashboard)** — All Auto Gen runs are persisted to the database with full tracking. New `/batches` dashboard shows all runs with status cards, progress bars, and filtering
+- **Batch Run Detail View** — Click any batch run card to see per-scene progress, live activity feed with step-by-step logging, image/video lightbox, and error details
+- **Live Activity Feed** — Real-time step log during batch processing with scene names, worker IPs, asset thumbnails, and timestamps
+- **Auto Character Generation in Batch** — Optional checkbox to auto-generate characters during batch processing using the concept/lyrics-based character autogeneration pipeline
+- **Concept Data Persistence in Batch** — Batch pipeline now reads and persists song_title, concept_text, and style_text from the base-on-lyrics LLM response to project settings
+- **Live Elapsed Timers** — Running batch cards on dashboard show live-ticking elapsed time computed from `started_at`; completed batches show final elapsed time
+- **Video Thumbnails on Dashboard** — Batch run cards display the last generated asset (image or video) as a thumbnail with video poster frame support via `<video preload="metadata">`
+- **Persistent Auto Gen Status Bar** — Active Auto Gen runs show a status bar in the project view with progress, current step, and link to batch detail
+
+### Fixed
+- Video autoplay disabled on batch detail screen — videos are present but require manual play
+- Broken video thumbnails on Batches dashboard when last asset is a video (now uses `<video>` tag with `#t=0.1` fragment)
+- Erratic elapsed timer on batch detail screen — now computed from `started_at` instead of stale `elapsed_ms` field
+- Live activity feed stopping auto-refresh after terminal state — added 5-second delayed poll stop
+- "Just now" showing on all activity feed timestamps — fixed UTC timestamp parsing (append 'Z' suffix for correct JS Date parsing)
+- Batch-created projects missing song_title and concept text — batch pipeline now persists base-on-lyrics response
+
+## [1.2.0] - 2026-05-24
+
+### Added
+- **LTXDirector Full Integration** — Settings UI for guide strength, audio guidance, stitch mode, auto image description, and video negative prompt. All parameters wired through dispatcher to ComfyUI workflow
+- **Per-Scene Lipsync System** — Toggle in Video tab (default ON) that boosts audio_guidance to 0.7+ for mouth-to-audio sync. Optional vocal stem isolation, wired into Auto Gen modal and manual generation
+- **Lipsync Default for New Projects** — "Enable Lipsync by Default" checkbox on New Project screen
+- **VIDEO_SYSTEM_PROMPT Rewrite** — Full LTXDirector awareness with multi-segment prompt documentation, keyframe image guidance, audio-reactive tips, and negative prompt delegation
+- **Image/Video Deletion Auto-Fallback** — Deleting chosen image/video auto-selects next available version
+- **Live Batch Preview PIP** — Floating draggable overlay during batch processing showing last generated asset with scene info
+- **Mobile Responsive Layout** — Full mobile support with bottom nav bar, panel toggling, and tablet breakpoint
+
+### Fixed
+- SceneEditor handler operation order (API-first pattern)
+- Lipsync default mismatch in manual generate_video
+- Missing vocals_only_for_lipsync in windowed batch mode
+
+## [1.1.0] - 2026-05-23
+
+### Added
+- **Three-Model Architecture** — Klein 9B (edit/reference), Z-Image Turbo (fast T2I), LTX 2.3 (video) with automatic workflow routing
+- **Distilled LoRA v1.1** — Updated to improved aesthetics and audio quality, 8-step generation
+- **LAN/WAN Network Access** — Settings toggle to allow remote access to the app
+- **Custom Port Setting** — Configurable app port in Settings
+
+### Fixed
+- Klein workflow CFG, steps, and upscale method audited against official templates
+- Per-scene transition persistence
+
 ## [1.0.0] - 2026-05-19
 
 ### Added
