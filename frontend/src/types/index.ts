@@ -320,6 +320,7 @@ export interface BatchItemConfig {
   video_mode: 'i2v' | 'v2v';
   two_pass: boolean;
   use_story_flow: boolean;
+  auto_characters: boolean;
 }
 
 export interface BatchItemStatus {
@@ -362,8 +363,18 @@ export interface PersistentBatchRunSummary {
   created_at: string | null;
 }
 
+export interface BatchRunStepEntry {
+  step: string;
+  scene_name?: string;
+  timestamp: string;
+  asset_url?: string | null;
+  worker_url?: string | null;
+  type: 'scene_start' | 'scene_prepare' | 'scene_complete' | 'scene_failed' | 'step_change' | 'info';
+}
+
 export interface PersistentBatchRunDetail extends PersistentBatchRunSummary {
   scene_results: Record<string, any>;
   error_log: Array<{ scene_id?: string; scene_name?: string; step?: string; error: string; timestamp?: string }>;
   run_settings: Record<string, any>;
+  step_log: BatchRunStepEntry[];
 }

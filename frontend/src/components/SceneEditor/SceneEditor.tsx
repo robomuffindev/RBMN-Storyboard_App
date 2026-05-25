@@ -992,6 +992,18 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         setImageSeedLast(activeScene.parameters.image_seed_last?.toString() || '');
         setVideoSeedOverride(!!activeScene.parameters.video_seed_override);
         setVideoSeed(activeScene.parameters.video_seed?.toString() || '');
+      } else {
+        // New scene with no parameters — reset to defaults
+        setOverrideResolution(false);
+        setImageWidth(1536);
+        setImageHeight(1024);
+        setImageSeed('');
+        setImageSeedOverrideFirst(false);
+        setImageSeedFirst('');
+        setImageSeedOverrideLast(false);
+        setImageSeedLast('');
+        setVideoSeedOverride(false);
+        setVideoSeed('');
       }
       // Camera action
       setCameraAction(activeScene.parameters?.camera_action || 'none');
@@ -1010,6 +1022,21 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       setTransitionOut(activeScene.parameters?.transition_out?.type || 'none');
       setTransitionInDuration(activeScene.parameters?.transition_in?.duration ?? 0.5);
       setTransitionOutDuration(activeScene.parameters?.transition_out?.duration ?? 0.5);
+    } else {
+      // No active scene (e.g. project switch) — clear all prompt state
+      // so stale data from previous project doesn't leak through
+      setPrompt('');
+      setNegativePrompt('');
+      setLastFramePrompt('');
+      setLastFrameNegPrompt('');
+      setVideoPrompt('');
+      setFirstFrameRefs({ characterIndices: [], extras: [] });
+      setLastFrameRefs({ characterIndices: [], extras: [] });
+      setCameraAction('none');
+      setCustomCameraAction('');
+      setMovementEffect('none');
+      setTransitionIn('none');
+      setTransitionOut('none');
     }
   }, [activeScene?.id]);
 

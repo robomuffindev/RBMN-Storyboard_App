@@ -303,6 +303,26 @@ async def init_db() -> None:
         ))
         logger.info("Migration: batch_runs table ensured")
 
+        # Add step_log column to batch_runs if missing
+        try:
+            await conn.execute(text(
+                "ALTER TABLE batch_runs ADD COLUMN step_log TEXT DEFAULT '[]'"
+            ))
+            logger.info("Migration: step_log added to batch_runs")
+        except Exception:
+            pass  # Column already exists
+
+        # ── Stale batch run cleanup ──
+        # If the app was killed while a batch was running, those runs are stuck
+        # in "running" / "pending" forever.  Mark them as failed on startup.
+        stale = await conn.execute(text(
+            "UPDATE batch_runs SET status = 'failed', "
+            "current_step = 'Interrupted — app was restarted' "
+            "WHERE status IN ('running', 'pending')"
+        ))
+        if stale.rowcount:
+            logger.info(f"Migration: marked {stale.rowcount} stale batch run(s) as failed")
+
     logger.info("Database initialized successfully")
 
 

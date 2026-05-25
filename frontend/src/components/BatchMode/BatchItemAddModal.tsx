@@ -18,6 +18,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
   const [videoMode, setVideoMode] = useState<'i2v' | 'v2v'>('i2v');
   const [twoPass, setTwoPass] = useState(true);
   const [useStoryFlow, setUseStoryFlow] = useState(true);
+  const [autoCharacters, setAutoCharacters] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
 
@@ -54,6 +55,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
         video_mode: videoMode,
         two_pass: twoPass,
         use_story_flow: useStoryFlow,
+        auto_characters: autoCharacters,
       };
 
       onAdd(item);
@@ -218,6 +220,15 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
               className="w-4 h-4 rounded"
             />
             Use story flow
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+            <input
+              type="checkbox"
+              checked={autoCharacters}
+              onChange={(e) => setAutoCharacters(e.target.checked)}
+              className="w-4 h-4 rounded"
+            />
+            Auto-generate characters
           </label>
         </div>
 

@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime
 from typing import Optional
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -452,6 +453,16 @@ async def get_asset_file(
         if not content_type or content_type == "application/octet-stream":
             content_type = mimetypes.guess_type(asset_filename)[0] or "application/octet-stream"
 
+        # Sanitize filename for HTTP headers — latin-1 codec can't handle
+        # Unicode chars like ’ (right single quote) in Content-Disposition.
+        # Use RFC 5987 filename* for UTF-8 and an ASCII fallback for filename.
+        safe_filename = asset_filename.encode("ascii", errors="replace").decode("ascii")
+        # Build RFC 5987 Content-Disposition with both ASCII and UTF-8 variants
+        cd_header = (
+            f'inline; filename="{safe_filename}"; '
+            f"filename*=UTF-8''{quote(asset_filename)}"
+        )
+
         file_size = asset_path.stat().st_size
         range_header = request.headers.get("range")
 
@@ -484,7 +495,7 @@ async def get_asset_file(
                     "Content-Range": f"bytes {start}-{end}/{file_size}",
                     "Accept-Ranges": "bytes",
                     "Content-Length": str(content_length),
-                    "Content-Disposition": f'inline; filename="{asset_filename}"',
+                    "Content-Disposition": cd_header,
                 },
             )
         else:
@@ -492,8 +503,11 @@ async def get_asset_file(
             return FileResponse(
                 asset_path,
                 media_type=content_type,
-                filename=asset_filename,
-                headers={"Accept-Ranges": "bytes"},
+                filename=safe_filename,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Disposition": cd_header,
+                },
             )
     except HTTPException:
         raise

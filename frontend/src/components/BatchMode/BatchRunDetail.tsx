@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -12,9 +12,13 @@ import {
   Loader2,
   ChevronDown,
   ChevronRight,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   ExternalLink,
   Image as ImageIcon,
-  Video,
+  Circle,
+  Settings,
+  X,
 } from 'lucide-react';
 import {
   getPersistentBatchRun,
@@ -22,7 +26,9 @@ import {
   deletePersistentBatchRun,
   cancelSequentialAutoGen,
 } from '@/api/client';
-import type { PersistentBatchRunDetail as BatchRunDetailType } from '@/types/index';
+import type { PersistentBatchRunDetail as BatchRunDetailType, BatchRunStepEntry } from '@/types/index';
+
+/* ─── Helpers ─── */
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return '< 1s';
@@ -35,44 +41,246 @@ function formatElapsed(ms: number): string {
   return `${s}s`;
 }
 
+function formatRelativeTime(iso: string): string {
+  // Backend sends UTC timestamps without 'Z' suffix — append it so JS parses as UTC
+  const normalized = iso.endsWith('Z') ? iso : iso + 'Z';
+  const diff = Date.now() - new Date(normalized).getTime();
+  const sec = Math.max(0, Math.floor(diff / 1000));
+  if (sec < 5) return 'just now';
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ago`;
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function statusColor(status: string): string {
+function statusBadgeClasses(status: string): string {
   switch (status) {
-    case 'running': return 'text-blue-400';
-    case 'completed': return 'text-green-400';
-    case 'failed': return 'text-red-400';
-    case 'cancelled': return 'text-yellow-400';
-    case 'paused': return 'text-orange-400';
-    case 'done': return 'text-green-400';
-    case 'skipped': return 'text-gray-500';
-    default: return 'text-gray-400';
+    case 'running': return 'bg-blue-500/20 text-blue-400 border-blue-500/40';
+    case 'completed': case 'done': return 'bg-green-500/20 text-green-400 border-green-500/40';
+    case 'failed': return 'bg-red-500/20 text-red-400 border-red-500/40';
+    case 'cancelled': return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40';
+    case 'paused': return 'bg-orange-500/20 text-orange-400 border-orange-500/40';
+    default: return 'bg-gray-500/20 text-gray-400 border-gray-500/40';
   }
 }
 
-function StatusIcon({ status, size = 16 }: { status: string; size?: number }) {
+function progressBarColor(status: string): string {
   switch (status) {
-    case 'running':
-      return <Loader2 size={size} className="text-blue-400 animate-spin" />;
-    case 'completed':
-    case 'done':
-      return <CheckCircle size={size} className="text-green-400" />;
-    case 'failed':
-      return <XCircle size={size} className="text-red-400" />;
-    case 'cancelled':
-      return <Pause size={size} className="text-yellow-400" />;
-    case 'paused':
-      return <Pause size={size} className="text-orange-400" />;
-    case 'skipped':
-      return <ChevronRight size={size} className="text-gray-500" />;
-    default:
-      return <Clock size={size} className="text-gray-400" />;
+    case 'completed': case 'done': return 'bg-green-500';
+    case 'failed': return 'bg-red-500';
+    case 'cancelled': return 'bg-yellow-500';
+    default: return 'bg-blue-500';
   }
 }
+
+function scenePillBorder(status: string): string {
+  switch (status) {
+    case 'completed': case 'done': return 'border-green-500/60 bg-green-500/10 text-green-300';
+    case 'failed': return 'border-red-500/60 bg-red-500/10 text-red-300';
+    case 'running': return 'border-blue-500/60 bg-blue-500/10 text-blue-300';
+    case 'skipped': return 'border-gray-600 bg-gray-800 text-gray-500';
+    default: return 'border-gray-700 bg-gray-800/50 text-gray-500';
+  }
+}
+
+/* ─── Feed Entry Row ─── */
+
+function FeedEntry({ entry, onImageClick }: { entry: BatchRunStepEntry; onImageClick?: () => void }) {
+  const dotColor = (() => {
+    switch (entry.type) {
+      case 'scene_start': return 'text-blue-400';
+      case 'scene_complete': return 'text-green-400';
+      case 'scene_failed': return 'text-red-400';
+      default: return 'text-gray-500';
+    }
+  })();
+
+  const icon = (() => {
+    switch (entry.type) {
+      case 'scene_start': return <Circle size={10} className={`${dotColor} fill-current`} />;
+      case 'scene_complete': return <CheckCircle size={14} className="text-green-400" />;
+      case 'scene_failed': return <XCircle size={14} className="text-red-400" />;
+      default: return <Circle size={6} className="text-gray-600 fill-current" />;
+    }
+  })();
+
+  return (
+    <div className="flex items-start gap-3 py-2 px-3 hover:bg-gray-800/30 transition-colors group">
+      <div className="mt-1 shrink-0 w-4 flex items-center justify-center">{icon}</div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          {entry.scene_name && (
+            <span className="text-xs font-medium text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">
+              {entry.scene_name}
+            </span>
+          )}
+          <span className="text-sm text-gray-300">{entry.step}</span>
+          {entry.worker_url && (
+            <span className="text-[10px] font-mono text-cyan-400/70 bg-cyan-500/10 px-1.5 py-0.5 rounded" title={entry.worker_url}>
+              {(() => {
+                try {
+                  const u = new URL(entry.worker_url);
+                  return u.hostname + (u.port ? `:${u.port}` : '');
+                } catch {
+                  return entry.worker_url;
+                }
+              })()}
+            </span>
+          )}
+        </div>
+        {entry.type === 'scene_complete' && entry.asset_url && (
+          entry.asset_url.match(/\.(mp4|webm)(\?|$)|\/video\//i) ? (
+            <div
+              className="relative w-8 h-8 rounded overflow-hidden mt-1.5 border border-gray-700 cursor-pointer hover:border-purple-500 hover:ring-1 hover:ring-purple-500/50 transition-all shrink-0"
+              onClick={onImageClick}
+            >
+              <video
+                src={entry.asset_url}
+                muted
+                playsInline
+                preload="metadata"
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                <Play size={10} className="text-white fill-current" />
+              </div>
+            </div>
+          ) : (
+            <img
+              src={entry.asset_url}
+              alt=""
+              className="w-8 h-8 rounded object-cover mt-1.5 border border-gray-700 cursor-pointer hover:border-purple-500 hover:ring-1 hover:ring-purple-500/50 transition-all shrink-0"
+              onClick={onImageClick}
+            />
+          )
+        )}
+      </div>
+      <span className="text-xs text-gray-600 shrink-0 mt-0.5" title={formatRelativeTime(entry.timestamp)}>
+        {(() => {
+          const normalized = entry.timestamp.endsWith('Z') ? entry.timestamp : entry.timestamp + 'Z';
+          return new Date(normalized).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        })()}
+      </span>
+    </div>
+  );
+}
+
+/* ─── Lightbox Overlay ─── */
+
+interface LightboxImage {
+  url: string;
+  sceneName?: string;
+}
+
+function Lightbox({
+  images,
+  currentIndex,
+  onClose,
+  onPrev,
+  onNext,
+}: {
+  images: LightboxImage[];
+  currentIndex: number;
+  onClose: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const current = images[currentIndex];
+  if (!current) return null;
+
+  const isVideo = /\.(mp4|webm)(\?|$)|\/video\//i.test(current.url);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') onPrev();
+      else if (e.key === 'ArrowRight') onNext();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose, onPrev, onNext]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[9999] bg-black/90 backdrop-blur-sm flex items-center justify-center"
+      onClick={onClose}
+    >
+      {/* Close button */}
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 p-2 bg-gray-800/80 hover:bg-gray-700 rounded-full transition-colors z-10"
+      >
+        <X size={20} className="text-gray-300" />
+      </button>
+
+      {/* Counter */}
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 text-sm text-gray-400 bg-gray-900/80 px-3 py-1 rounded-full z-10">
+        {currentIndex + 1} / {images.length}
+      </div>
+
+      {/* Scene name */}
+      {current.sceneName && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-sm font-medium text-purple-400 bg-purple-500/10 border border-purple-500/30 px-3 py-1 rounded-full z-10">
+          {current.sceneName}
+        </div>
+      )}
+
+      {/* Prev button */}
+      {images.length > 1 && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onPrev(); }}
+          className="absolute left-3 top-1/2 -translate-y-1/2 p-3 bg-gray-800/80 hover:bg-gray-700 rounded-full transition-colors z-10"
+        >
+          <ChevronLeftIcon size={24} className="text-gray-300" />
+        </button>
+      )}
+
+      {/* Next button */}
+      {images.length > 1 && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onNext(); }}
+          className="absolute right-3 top-1/2 -translate-y-1/2 p-3 bg-gray-800/80 hover:bg-gray-700 rounded-full transition-colors z-10"
+        >
+          <ChevronRightIcon size={24} className="text-gray-300" />
+        </button>
+      )}
+
+      {/* Content */}
+      <div
+        className="max-w-[90vw] max-h-[85vh] flex items-center justify-center"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {isVideo ? (
+          <video
+            key={current.url}
+            src={current.url}
+            loop
+            muted
+            playsInline
+            controls
+            className="max-w-full max-h-[85vh] object-contain rounded-lg"
+          />
+        ) : (
+          <img
+            src={current.url}
+            alt={current.sceneName || 'Preview'}
+            className="max-w-full max-h-[85vh] object-contain rounded-lg"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Main Component ─── */
 
 export default function BatchRunDetail() {
   const navigate = useNavigate();
@@ -83,49 +291,125 @@ export default function BatchRunDetail() {
   const [showErrors, setShowErrors] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [resuming, setResuming] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const feedEndRef = useRef<HTMLDivElement>(null);
+  const feedContainerRef = useRef<HTMLDivElement>(null);
+  const prevLogLenRef = useRef(0);
 
-  const fetchRun = async () => {
+  /** Compute elapsed from started_at so it's always smooth and monotonic */
+  const computeElapsedFromStart = useCallback((data: BatchRunDetailType) => {
+    if (data.status === 'running' && data.started_at) {
+      const normalized = data.started_at.endsWith('Z') ? data.started_at : data.started_at + 'Z';
+      return Math.max(0, Date.now() - new Date(normalized).getTime());
+    }
+    return data.elapsed_ms;
+  }, []);
+
+  const fetchRun = useCallback(async () => {
     if (!batchRunId) return;
     try {
       const res = await getPersistentBatchRun(batchRunId);
       setRun(res.data);
-      // Update preview from last asset
-      if (res.data.last_asset_url) {
-        setPreviewUrl(res.data.last_asset_url);
-      }
+      setLiveElapsedMs(computeElapsedFromStart(res.data));
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to load batch run');
     } finally {
       setLoading(false);
     }
-  };
+  }, [batchRunId, computeElapsedFromStart]);
 
+  // Auto-scroll feed when new entries arrive
+  useEffect(() => {
+    if (!run) return;
+    const logLen = run.step_log?.length ?? 0;
+    if (logLen > prevLogLenRef.current) {
+      prevLogLenRef.current = logLen;
+      requestAnimationFrame(() => {
+        feedEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      });
+    }
+  }, [run?.step_log?.length]);
+
+  // Polling — always poll while running/pending, stop when terminal
   useEffect(() => {
     fetchRun();
     pollRef.current = setInterval(fetchRun, 3000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [batchRunId]);
+  }, [fetchRun]);
 
-  // Stop polling when run is terminal
+  // Stop polling only when we've confirmed a terminal state
   useEffect(() => {
-    if (run && run.status !== 'running' && run.status !== 'pending') {
+    if (!run || run.status === 'running' || run.status === 'pending') return;
+    // Give one extra poll to catch final data, then stop
+    const stopTimer = setTimeout(() => {
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
-    }
+    }, 5000);
+    return () => clearTimeout(stopTimer);
   }, [run?.status]);
+
+  // Client-side tick: update elapsed every second while running
+  useEffect(() => {
+    if (run?.status === 'running' && run?.started_at) {
+      const normalizedStart = run.started_at.endsWith('Z') ? run.started_at : run.started_at + 'Z';
+      const startMs = new Date(normalizedStart).getTime();
+      tickRef.current = setInterval(() => {
+        setLiveElapsedMs(Math.max(0, Date.now() - startMs));
+      }, 1000);
+    } else {
+      if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
+      // Use server value for terminal states
+      if (run) setLiveElapsedMs(run.elapsed_ms);
+    }
+    return () => { if (tickRef.current) clearInterval(tickRef.current); };
+  }, [run?.status, run?.started_at]);
+
+  // ── Derived data (must be before early returns to keep hook order stable) ──
+  const pct = run && run.total_scenes > 0
+    ? Math.round((run.completed_scenes / run.total_scenes) * 100)
+    : 0;
+
+  const sceneEntries = Object.entries(run?.scene_results || {}).sort(
+    (a, b) => (a[1]?.order ?? 0) - (b[1]?.order ?? 0)
+  );
+
+  const canResume = run?.status === 'failed' || run?.status === 'cancelled' || run?.status === 'paused';
+  const isRunning = run?.status === 'running';
+  const isTerminal = run ? !isRunning && run.status !== 'pending' : false;
+  const stepLog = run?.step_log || [];
+
+  // Collect all asset images/videos from step log for lightbox navigation
+  const lightboxImages: LightboxImage[] = stepLog
+    .filter((e) => e.type === 'scene_complete' && e.asset_url)
+    .map((e) => ({ url: e.asset_url!, sceneName: e.scene_name }));
+
+  const openLightbox = useCallback((url: string) => {
+    const idx = lightboxImages.findIndex((img) => img.url === url);
+    setLightboxIndex(idx >= 0 ? idx : 0);
+    setLightboxOpen(true);
+  }, [lightboxImages]);
+
+  const lightboxPrev = useCallback(() => {
+    setLightboxIndex((i) => (i > 0 ? i - 1 : lightboxImages.length - 1));
+  }, [lightboxImages.length]);
+
+  const lightboxNext = useCallback(() => {
+    setLightboxIndex((i) => (i < lightboxImages.length - 1 ? i + 1 : 0));
+  }, [lightboxImages.length]);
 
   const handleResume = async () => {
     if (!batchRunId) return;
     setResuming(true);
     try {
       await resumePersistentBatchRun(batchRunId);
-      // Start polling again
       if (!pollRef.current) {
         pollRef.current = setInterval(fetchRun, 3000);
       }
@@ -158,6 +442,8 @@ export default function BatchRunDetail() {
     }
   };
 
+  /* ─── Loading / Error states ─── */
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100 flex items-center justify-center">
@@ -182,255 +468,314 @@ export default function BatchRunDetail() {
     );
   }
 
-  const pct = run.total_scenes > 0
-    ? Math.round((run.completed_scenes / run.total_scenes) * 100)
-    : 0;
-
-  const sceneEntries = Object.entries(run.scene_results || {}).sort(
-    (a, b) => (a[1]?.order ?? 0) - (b[1]?.order ?? 0)
-  );
-
-  const canResume = run.status === 'failed' || run.status === 'cancelled' || run.status === 'paused';
+  /* ─── Render ─── */
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 p-4 md:p-8">
-      <div className="max-w-5xl mx-auto">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
-          <div className="flex items-center gap-3">
+    <div className="min-h-screen bg-gray-950 text-gray-100">
+      {/* Top Bar */}
+      <div className="sticky top-0 z-40 bg-gray-950/95 backdrop-blur border-b border-gray-800">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => navigate('/batches')}
-              className="px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+              className="p-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors shrink-0"
+              title="Back to Batches"
             >
               <ArrowLeft size={18} />
-              <span className="hidden sm:inline">Batches</span>
             </button>
-            <div>
-              <h1 className="text-xl md:text-3xl font-bold">{run.project_name}</h1>
-              <div className="flex items-center gap-2 mt-1">
-                <StatusIcon status={run.status} />
-                <span className={`text-sm font-medium capitalize ${statusColor(run.status)}`}>
+            <div className="min-w-0">
+              <h1 className="text-lg md:text-xl font-bold truncate">{run.project_name}</h1>
+              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                <span className={`text-xs font-semibold uppercase px-2 py-0.5 rounded-full border ${statusBadgeClasses(run.status)}`}>
                   {run.status}
                 </span>
-                <span className="text-gray-600 text-sm">|</span>
-                <span className="text-gray-400 text-sm capitalize">{run.mode.replace(/_/g, ' ')}</span>
+                <span className="text-xs text-gray-500 capitalize">{run.mode.replace(/_/g, ' ')}</span>
+                <span className="text-xs text-gray-600">|</span>
+                <span className="text-xs text-gray-400 flex items-center gap-1">
+                  <Clock size={12} />
+                  {formatElapsed(liveElapsedMs)}
+                </span>
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {run.status === 'running' && (
+          <div className="flex items-center gap-2 shrink-0">
+            {isRunning && (
               <button
                 onClick={handleCancel}
-                className="px-3 py-2 bg-yellow-700 hover:bg-yellow-600 rounded text-sm font-medium transition-colors flex items-center gap-2"
+                className="px-3 py-1.5 bg-yellow-600/20 hover:bg-yellow-600/30 border border-yellow-600/40 text-yellow-400 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5"
               >
-                <Pause size={16} />
-                Cancel
+                <Pause size={14} /> Cancel
               </button>
             )}
             {canResume && (
               <button
                 onClick={handleResume}
                 disabled={resuming}
-                className="px-3 py-2 bg-green-700 hover:bg-green-600 rounded text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+                className="px-3 py-1.5 bg-green-600/20 hover:bg-green-600/30 border border-green-600/40 text-green-400 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
               >
-                {resuming ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                {resuming ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
                 Resume
               </button>
             )}
             <button
               onClick={() => navigate(`/project/${run.project_id}`)}
-              className="px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5"
             >
-              <ExternalLink size={16} />
+              <ExternalLink size={14} />
               <span className="hidden sm:inline">Open Project</span>
             </button>
-            {run.status !== 'running' && (
+            {isTerminal && (
               <button
                 onClick={handleDelete}
-                className="px-3 py-2 bg-gray-800 hover:bg-red-900 rounded text-sm font-medium transition-colors text-gray-400 hover:text-red-400 flex items-center gap-2"
+                className="p-1.5 bg-gray-800 hover:bg-red-900/50 border border-gray-700 hover:border-red-700 rounded-lg transition-colors text-gray-500 hover:text-red-400"
+                title="Delete run"
               >
                 <Trash2 size={16} />
               </button>
             )}
           </div>
         </div>
+      </div>
 
-        {/* Progress section */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 md:p-6 mb-6">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-gray-400">Progress</span>
+      <div className="max-w-7xl mx-auto px-4 py-4">
+        {/* Progress Bar */}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-sm text-gray-400">Scene Progress</span>
             <span className="text-sm font-mono text-gray-300">
-              {run.completed_scenes}/{run.total_scenes} scenes ({pct}%)
+              {run.completed_scenes}/{run.total_scenes} scenes &middot; {pct}%
             </span>
           </div>
-          <div className="h-3 bg-gray-800 rounded-full overflow-hidden mb-3">
+          <div className="h-3 bg-gray-800 rounded-full overflow-hidden">
             <div
-              className={`h-full rounded-full transition-all duration-700 ${
-                run.status === 'completed' ? 'bg-green-500' :
-                run.status === 'failed' ? 'bg-red-500' :
-                run.status === 'cancelled' ? 'bg-yellow-500' :
-                'bg-blue-500'
-              }`}
+              className={`h-full rounded-full transition-all duration-700 ease-out ${progressBarColor(run.status)} ${isRunning ? 'animate-pulse' : ''}`}
               style={{ width: `${pct}%` }}
             />
           </div>
-          <div className="flex flex-wrap gap-4 text-sm text-gray-400">
-            {run.current_step && run.status === 'running' && (
-              <div className="flex items-center gap-2">
-                <Loader2 size={14} className="animate-spin text-blue-400" />
-                <span>{run.current_scene_name && `${run.current_scene_name} — `}{run.current_step}</span>
-              </div>
-            )}
-            <div className="flex items-center gap-1">
-              <Clock size={14} />
-              <span>{formatElapsed(run.elapsed_ms)}</span>
-            </div>
-            {run.started_at && (
-              <span>Started: {formatDate(run.started_at)}</span>
-            )}
-            {run.completed_at && (
-              <span>Finished: {formatDate(run.completed_at)}</span>
-            )}
-          </div>
         </div>
 
-        {/* Preview + Scene list side by side on desktop */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-6">
-          {/* Preview panel */}
-          <div className="lg:col-span-2">
-            <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-800 text-sm font-medium text-gray-300">
-                Latest Preview
+        {/* 2-column layout */}
+        <div className="flex flex-col lg:flex-row gap-4" style={{ minHeight: 'calc(100vh - 200px)' }}>
+
+          {/* Left: Live Activity Feed */}
+          <div className="lg:w-[60%] flex flex-col">
+            <div className="bg-gray-900 border border-gray-800 rounded-lg flex flex-col flex-1 overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2">
+                  {isRunning && (
+                    <span className="relative flex h-2.5 w-2.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+                    </span>
+                  )}
+                  <span className="text-sm font-medium text-gray-300">Live Activity</span>
+                </div>
+                <span className="text-xs text-gray-600">{stepLog.length} entries</span>
               </div>
-              <div className="aspect-video bg-black flex items-center justify-center">
-                {previewUrl ? (
-                  previewUrl.match(/\.(mp4|webm)$/i) ? (
-                    <video
-                      key={previewUrl}
-                      src={previewUrl}
-                      autoPlay
-                      loop
-                      muted
-                      playsInline
-                      className="w-full h-full object-contain"
-                    />
+
+              <div
+                ref={feedContainerRef}
+                className="flex-1 overflow-y-auto min-h-0"
+                style={{ maxHeight: 'calc(100vh - 280px)' }}
+              >
+                {stepLog.length === 0 && !isRunning ? (
+                  <div className="flex items-center justify-center h-48 text-gray-600 text-sm">
+                    Waiting for activity...
+                  </div>
+                ) : stepLog.length === 0 && isRunning ? (
+                  <div className="flex flex-col items-center justify-center h-48 gap-3">
+                    <Loader2 size={24} className="text-purple-400 animate-spin" />
+                    <span className="text-gray-400 text-sm">
+                      {run?.current_step ? `${run.current_step}...` : 'Starting up...'}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-800/50">
+                    {stepLog.map((entry, i) => (
+                      <FeedEntry
+                        key={`${entry.timestamp}-${i}`}
+                        entry={entry}
+                        onImageClick={entry.asset_url ? () => openLightbox(entry.asset_url!) : undefined}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Live "now happening" indicator */}
+                {isRunning && run.current_step && (
+                  <div className="flex items-center gap-3 py-3 px-3 bg-blue-500/5 border-t border-blue-500/20">
+                    <span className="relative flex h-2.5 w-2.5 shrink-0">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+                    </span>
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      {run.current_scene_name && (
+                        <span className="text-xs font-medium text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded shrink-0">
+                          {run.current_scene_name}
+                        </span>
+                      )}
+                      <span className="text-sm text-blue-300 truncate">{run.current_step}</span>
+                    </div>
+                  </div>
+                )}
+
+                <div ref={feedEndRef} />
+              </div>
+            </div>
+          </div>
+
+          {/* Right: Preview + Stats */}
+          <div className="lg:w-[40%] flex flex-col gap-4">
+            {/* Preview Panel */}
+            <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+              <div className="aspect-video bg-black flex items-center justify-center relative group/preview">
+                {run.last_asset_url ? (
+                  run.last_asset_url.match(/\.(mp4|webm)(\?|$)|\/video\//i) ? (
+                    <>
+                      <video
+                        key={run.last_asset_url}
+                        src={run.last_asset_url}
+                        loop
+                        muted
+                        playsInline
+                        controls
+                        className="w-full h-full object-contain"
+                      />
+                      {/* Lightbox button overlay for videos */}
+                      <button
+                        onClick={() => openLightbox(run.last_asset_url!)}
+                        className="absolute top-2 right-2 p-1.5 bg-gray-900/70 hover:bg-gray-800 rounded-lg transition-colors opacity-0 group-hover/preview:opacity-100 z-10"
+                        title="Open in lightbox"
+                      >
+                        <ExternalLink size={14} className="text-gray-300" />
+                      </button>
+                    </>
                   ) : (
                     <img
-                      src={previewUrl}
-                      alt="Preview"
-                      className="w-full h-full object-contain"
+                      src={run.last_asset_url}
+                      alt="Latest preview"
+                      className="w-full h-full object-contain cursor-pointer"
+                      onClick={() => openLightbox(run.last_asset_url!)}
                     />
                   )
                 ) : (
-                  <div className="text-gray-600 flex flex-col items-center gap-2">
-                    <ImageIcon size={40} />
-                    <span className="text-sm">No preview yet</span>
+                  <div className="text-gray-700 flex flex-col items-center gap-2">
+                    <ImageIcon size={36} />
+                    <span className="text-xs">No preview yet</span>
                   </div>
                 )}
               </div>
               {run.last_asset_scene_name && (
-                <div className="px-4 py-2 border-t border-gray-800 text-xs text-gray-500">
-                  {run.last_asset_scene_name}
+                <div className="px-3 py-2 border-t border-gray-800">
+                  <span className="text-xs font-medium text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded">
+                    {run.last_asset_scene_name}
+                  </span>
                 </div>
               )}
             </div>
-          </div>
 
-          {/* Scene checklist */}
-          <div className="lg:col-span-3">
+            {/* Scene Progress Grid */}
             <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-800 text-sm font-medium text-gray-300">
-                Scene Progress
+              <div className="px-4 py-2.5 border-b border-gray-800 text-sm font-medium text-gray-300">
+                Scenes
               </div>
-              <div className="max-h-96 overflow-y-auto">
+              <div className="p-3">
                 {sceneEntries.length === 0 ? (
-                  <div className="p-6 text-center text-gray-500 text-sm">
-                    No scene results recorded yet.
-                  </div>
+                  <p className="text-center text-gray-600 text-sm py-4">No scenes recorded yet</p>
                 ) : (
-                  <div className="divide-y divide-gray-800">
+                  <div className="flex flex-wrap gap-1.5">
                     {sceneEntries.map(([sceneId, data]) => (
-                      <div key={sceneId} className="flex items-center gap-3 px-4 py-2.5 text-sm">
-                        <StatusIcon status={data.status || 'pending'} size={14} />
-                        <span className="flex-1 truncate">{data.name || sceneId}</span>
-                        {data.image_path && (
-                          <span className="text-gray-600" title="Image done">
-                            <ImageIcon size={14} className="text-green-600" />
-                          </span>
-                        )}
-                        {data.video_path && (
-                          <span className="text-gray-600" title="Video done">
-                            <Video size={14} className="text-green-600" />
-                          </span>
-                        )}
-                        <span className={`text-xs capitalize ${statusColor(data.status || 'pending')}`}>
-                          {data.status || 'pending'}
-                        </span>
-                      </div>
+                      <span
+                        key={sceneId}
+                        className={`text-xs px-2 py-1 rounded-full border truncate max-w-[120px] ${scenePillBorder(data.status || 'pending')}`}
+                        title={`${data.scene_name || data.name || sceneId}: ${data.status || 'pending'}`}
+                      >
+                        {data.scene_name || data.name || sceneId}
+                      </span>
                     ))}
                   </div>
                 )}
               </div>
             </div>
+
+            {/* Error Count Badge + Expandable Log */}
+            {run.error_log && run.error_log.length > 0 && (
+              <div className="bg-gray-900 border border-red-900/40 rounded-lg overflow-hidden">
+                <button
+                  onClick={() => setShowErrors(!showErrors)}
+                  className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2 text-sm font-medium text-red-400">
+                    <AlertTriangle size={14} />
+                    <span>{run.error_log.length} Error{run.error_log.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  {showErrors ? <ChevronDown size={14} className="text-gray-500" /> : <ChevronRight size={14} className="text-gray-500" />}
+                </button>
+                {showErrors && (
+                  <div className="border-t border-gray-800 max-h-60 overflow-y-auto">
+                    {run.error_log.map((entry, i) => (
+                      <div key={i} className="px-4 py-2.5 border-b border-gray-800/50 text-sm">
+                        <div className="flex items-center gap-2 mb-1">
+                          {entry.scene_name && (
+                            <span className="text-gray-300 font-medium text-xs">{entry.scene_name}</span>
+                          )}
+                          {entry.step && (
+                            <span className="text-gray-500 text-xs">({entry.step})</span>
+                          )}
+                          {entry.timestamp && (
+                            <span className="text-gray-600 text-xs ml-auto">{formatRelativeTime(entry.timestamp)}</span>
+                          )}
+                        </div>
+                        <p className="text-red-300/80 font-mono text-xs break-all">{entry.error}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Collapsible Run Settings */}
+            {run.run_settings && Object.keys(run.run_settings).length > 0 && (
+              <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2 text-sm text-gray-400">
+                    <Settings size={14} />
+                    <span>Run Settings</span>
+                  </div>
+                  {showSettings ? <ChevronDown size={14} className="text-gray-500" /> : <ChevronRight size={14} className="text-gray-500" />}
+                </button>
+                {showSettings && (
+                  <div className="border-t border-gray-800 p-4">
+                    <pre className="text-xs text-gray-500 font-mono whitespace-pre-wrap break-all">
+                      {JSON.stringify(run.run_settings, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Timestamps */}
+            <div className="text-xs text-gray-600 flex flex-wrap gap-x-4 gap-y-1 px-1">
+              {run.started_at && <span>Started: {formatDate(run.started_at)}</span>}
+              {run.completed_at && <span>Finished: {formatDate(run.completed_at)}</span>}
+            </div>
           </div>
         </div>
-
-        {/* Error log (collapsible) */}
-        {run.error_log && run.error_log.length > 0 && (
-          <div className="bg-gray-900 border border-red-900/40 rounded-lg overflow-hidden mb-6">
-            <button
-              onClick={() => setShowErrors(!showErrors)}
-              className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
-            >
-              <div className="flex items-center gap-2 text-sm font-medium text-red-400">
-                <AlertTriangle size={16} />
-                Errors ({run.error_log.length})
-              </div>
-              {showErrors ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            </button>
-            {showErrors && (
-              <div className="border-t border-gray-800 max-h-80 overflow-y-auto">
-                {run.error_log.map((entry, i) => (
-                  <div key={i} className="px-4 py-3 border-b border-gray-800/50 text-sm">
-                    <div className="flex items-center gap-2 mb-1">
-                      {entry.scene_name && (
-                        <span className="text-gray-300 font-medium">{entry.scene_name}</span>
-                      )}
-                      {entry.step && (
-                        <span className="text-gray-500">({entry.step})</span>
-                      )}
-                      {entry.timestamp && (
-                        <span className="text-gray-600 text-xs ml-auto">{formatDate(entry.timestamp)}</span>
-                      )}
-                    </div>
-                    <p className="text-red-300/80 font-mono text-xs break-all">{entry.error}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Run settings (collapsible) */}
-        {run.run_settings && Object.keys(run.run_settings).length > 0 && (
-          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden mb-6">
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
-            >
-              <span className="text-sm font-medium text-gray-300">Run Settings</span>
-              {showSettings ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            </button>
-            {showSettings && (
-              <div className="border-t border-gray-800 p-4">
-                <pre className="text-xs text-gray-400 font-mono whitespace-pre-wrap break-all">
-                  {JSON.stringify(run.run_settings, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        )}
       </div>
+
+      {/* Lightbox overlay */}
+      {lightboxOpen && lightboxImages.length > 0 && (
+        <Lightbox
+          images={lightboxImages}
+          currentIndex={lightboxIndex}
+          onClose={() => setLightboxOpen(false)}
+          onPrev={lightboxPrev}
+          onNext={lightboxNext}
+        />
+      )}
     </div>
   );
 }

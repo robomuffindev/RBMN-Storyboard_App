@@ -1778,8 +1778,8 @@ async def _create_batch_run(
     """Create a new BatchRun record and return its ID."""
     from uuid import uuid4
     batch_run = BatchRun(
-        id=uuid4(),
-        project_id=project_id,
+        id=str(uuid4()),
+        project_id=str(project_id),
         project_name=project_name,
         mode=mode,
         status=BatchRunStatus.RUNNING,
@@ -1826,6 +1826,16 @@ async def _update_batch_run(
             el = list(run.error_log or [])
             el.append(error_entry)
             run.error_log = el
+
+        # Handle step_log append
+        step_entry = kwargs.pop("step_entry", None)
+        if step_entry:
+            sl = list(run.step_log or [])
+            # Keep last 200 entries to avoid DB bloat
+            if len(sl) >= 200:
+                sl = sl[-199:]
+            sl.append(step_entry)
+            run.step_log = sl
 
         # Set remaining fields directly
         for k, v in kwargs.items():
@@ -2164,6 +2174,8 @@ async def _run_windowed_batch(
     user_lyrics_text: str = "",
     use_story_flow: bool = True,
     batch_run_id: str | None = None,
+    lipsync_enabled: bool = False,
+    vocals_only_for_lipsync: bool = True,
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
 
@@ -2367,6 +2379,18 @@ async def _run_windowed_batch(
                         "vocals_only_for_lipsync": scene_params.get("vocals_only_for_lipsync", False),
                     },
                 })
+                if batch_run_id:
+                    await _update_batch_run(
+                        session_factory, batch_run_id,
+                        current_scene_name=scene_name,
+                        current_step=f"preparing scene {i + 1}/{len(scenes)}",
+                        step_entry={
+                            "step": f"prepared scene {i + 1}/{len(scenes)}",
+                            "scene_name": scene_name,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "type": "scene_prepare",
+                        },
+                    )
 
             elif mode == "missing_images_independent":
                 if has_ff and not override_full_set:
@@ -2419,6 +2443,18 @@ async def _run_windowed_batch(
                     "job_type": JobType.IMAGE,
                     "parameters": img_params,
                 })
+                if batch_run_id:
+                    await _update_batch_run(
+                        session_factory, batch_run_id,
+                        current_scene_name=scene_name,
+                        current_step=f"preparing scene {i + 1}/{len(scenes)}",
+                        step_entry={
+                            "step": f"prepared scene {i + 1}/{len(scenes)}",
+                            "scene_name": scene_name,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "type": "scene_prepare",
+                        },
+                    )
 
     if not eligible:
         _seq_auto_jobs[pid]["status"] = "done"
@@ -2482,6 +2518,22 @@ async def _run_windowed_batch(
             f"Continuous dispatch: submitted job {job_id} for "
             f"{entry['scene_name']} ({next_to_submit}/{total_eligible})"
         )
+
+        # Log scene_start in BatchRun activity feed
+        if batch_run_id:
+            try:
+                await _update_batch_run(
+                    session_factory, batch_run_id,
+                    step_entry={
+                        "step": f"starting ({next_to_submit}/{total_eligible})",
+                        "scene_name": entry["scene_name"],
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "type": "scene_start",
+                    },
+                )
+            except Exception:
+                pass  # Non-critical
+
         return True
 
     # Fill initial worker slots
@@ -2531,7 +2583,41 @@ async def _run_windowed_batch(
                     )
 
         # Remove completed jobs and immediately submit replacements
+        total_done = total_succeeded + total_failed
         for jid in completed_this_round:
+            # Track per-job completion in BatchRun before removing from active_jobs
+            if batch_run_id:
+                c_scene_name = active_jobs.get(jid, "unknown")
+                try:
+                    async with session_factory() as _br_s:
+                        _cjob = await _br_s.get(Job, jid)
+                        _c_scene = await _br_s.get(Scene, _cjob.scene_id) if _cjob and _cjob.scene_id else None
+                        _c_params = _c_scene.parameters or {} if _c_scene else {}
+                        _c_raw = _c_params.get("chosen_video_path") or _c_params.get("chosen_image_path")
+                        _c_url = f"/api/files/{_c_raw}" if _c_raw else None
+                        _c_status = "completed" if _cjob and _cjob.status in ("done", JobStatus.DONE) else "failed"
+                        _c_worker = _cjob.worker_url if _cjob else None
+                    await _update_batch_run(
+                        session_factory, batch_run_id,
+                        completed_scenes=total_done,
+                        scene_result=(str(_cjob.scene_id) if _cjob and _cjob.scene_id else str(jid), {
+                            "status": _c_status,
+                            "scene_name": c_scene_name,
+                        }),
+                        last_asset_url=_c_url if _c_status == "completed" else None,
+                        last_asset_scene_name=c_scene_name if _c_status == "completed" else None,
+                        step_entry={
+                            "step": f"{_c_status} ({total_done}/{total_eligible})",
+                            "scene_name": c_scene_name,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "asset_url": _c_url,
+                            "worker_url": _c_worker,
+                            "type": "scene_complete" if _c_status == "completed" else "scene_failed",
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Windowed batch: BatchRun update failed for job {jid}: {e}")
+
             del active_jobs[jid]
             # Reset elapsed timeout since we're making progress
             elapsed = 0.0
@@ -2540,7 +2626,6 @@ async def _run_windowed_batch(
                 await _submit_next()
 
         # Update progress tracker
-        total_done = total_succeeded + total_failed
         if pid in _seq_auto_jobs:
             _seq_auto_jobs[pid]["completed_scenes"] = total_done
             _seq_auto_jobs[pid]["current_step"] = (
@@ -2579,7 +2664,7 @@ async def _run_windowed_batch(
     # Persist to BatchRun
     if batch_run_id:
         _batch_started_at = _seq_auto_jobs.get(pid, {}).get("_started_at", datetime.utcnow())
-        final_status = BatchRunStatus.COMPLETED if total_failed == 0 else BatchRunStatus.COMPLETED
+        final_status = BatchRunStatus.COMPLETED
         await _update_batch_run(
             session_factory, batch_run_id,
             completed_scenes=total_succeeded,
@@ -2693,11 +2778,23 @@ async def _run_sequential_auto_gen(
         # These modes process scenes in windows of N (= number of available
         # workers) rather than one-at-a-time or all-at-once.  This keeps
         # the generation queue visible and manageable.
-        if mode in ("missing_videos_single", "missing_images_independent"):
+        # Modes that can dispatch N jobs concurrently across all workers:
+        # - missing_videos_single / all_video_single: I2V — each scene independent
+        # - missing_images_independent: images are independent
+        windowed_modes = (
+            "missing_videos_single", "missing_images_independent",
+            "all_video_single",
+        )
+        if mode in windowed_modes:
+            # all_video_single should override (re-generate even existing videos)
+            effective_override = override_full_set or mode == "all_video_single"
             await _run_windowed_batch(
-                pid, project_id, mode, scenes, job_queue, session_factory,
+                pid, project_id,
+                # Map all_video_single → missing_videos_single for windowed handler
+                "missing_videos_single" if mode == "all_video_single" else mode,
+                scenes, job_queue, session_factory,
                 comfy_dispatcher=comfy_dispatcher,
-                override_full_set=override_full_set,
+                override_full_set=effective_override,
                 project=project, lyrics_words=lyrics_words,
                 enhancer=enhancer, llm_provider=llm_provider,
                 llm_api_key=llm_api_key, llm_model=llm_model,
@@ -2711,6 +2808,8 @@ async def _run_sequential_auto_gen(
                 user_lyrics_text=user_lyrics_text,
                 use_story_flow=use_story_flow,
                 batch_run_id=batch_run_id,
+                lipsync_enabled=lipsync_enabled,
+                vocals_only_for_lipsync=vocals_only_for_lipsync,
             )
             return
 
@@ -2735,6 +2834,12 @@ async def _run_sequential_auto_gen(
                     current_scene_name=scene_name,
                     completed_scenes=i,
                     current_step=f"processing scene {i + 1}/{len(scenes)}",
+                    step_entry={
+                        "step": f"starting scene {i + 1}/{len(scenes)}",
+                        "scene_name": scene_name,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "type": "scene_start",
+                    },
                 )
 
             # Re-read scene to get latest parameters (may have been updated by previous job)
@@ -3299,20 +3404,48 @@ async def _run_sequential_auto_gen(
 
             # Record per-scene success on BatchRun
             if batch_run_id:
-                # Get latest asset URL for preview
+                # Get latest asset URL for preview — use /api/files/ prefix for frontend
+                # Also fetch the last job's worker_url for display
+                _seq_worker_url = None
                 async with session_factory() as _br_session:
                     _br_scene = await _br_session.get(Scene, scene.id)
                     _br_params = _br_scene.parameters or {} if _br_scene else {}
-                    _asset_url = (
+                    _raw_path = (
                         _br_params.get("chosen_video_path")
                         or _br_params.get("chosen_image_path")
                     )
+                    _asset_url = f"/api/files/{_raw_path}" if _raw_path else None
+                    # Find most recent job for this scene to get worker_url
+                    _last_job_stmt = (
+                        select(Job)
+                        .where(Job.scene_id == scene.id)
+                        .order_by(Job.created_at.desc())
+                        .limit(1)
+                    )
+                    _last_job_res = await _br_session.execute(_last_job_stmt)
+                    _last_job = _last_job_res.scalar_one_or_none()
+                    if _last_job:
+                        _seq_worker_url = _last_job.worker_url
                 await _update_batch_run(
                     session_factory, batch_run_id,
                     completed_scenes=i + 1,
-                    scene_result=(str(scene.id), {"status": "completed", "scene_name": scene_name}),
+                    scene_result=(str(scene.id), {
+                        "status": "completed",
+                        "scene_name": scene_name,
+                        "order": i,
+                        "image_path": f"/api/files/{_br_params.get('chosen_image_path')}" if _br_params.get("chosen_image_path") else None,
+                        "video_path": f"/api/files/{_br_params.get('chosen_video_path')}" if _br_params.get("chosen_video_path") else None,
+                    }),
                     last_asset_url=_asset_url,
                     last_asset_scene_name=scene_name,
+                    step_entry={
+                        "step": f"completed scene {i + 1}/{len(scenes)}",
+                        "scene_name": scene_name,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "asset_url": _asset_url,
+                        "worker_url": _seq_worker_url,
+                        "type": "scene_complete",
+                    },
                 )
 
         # ── Transition LoRA pass (V2V modes only) ──

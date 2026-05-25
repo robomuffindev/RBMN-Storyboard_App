@@ -224,6 +224,7 @@ export const getSequentialAutoGenStatus = (projectId: string) =>
     current_scene_name?: string;
     current_step?: string;
     error?: string;
+    batch_run_id?: string;
   }>(`/projects/${projectId}/generate/auto-sequential/status`);
 
 export const cancelSequentialAutoGen = (projectId: string) =>
@@ -581,6 +582,9 @@ export const cancelBatch = (batchId: string) =>
 
 export const cleanBatchStaging = () =>
   api.delete('/batch/staging');
+
+export const getActiveBatches = () =>
+  api.get<Array<BatchRunStatus & { items: Array<{ batch_run_id?: string }> }>>('/batch/active');
 
 // ── Persistent Batch Runs (Auto Gen) ──────────────────────────────
 

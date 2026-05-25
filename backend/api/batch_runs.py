@@ -49,6 +49,7 @@ class BatchRunDetail(BatchRunSummary):
     scene_results: dict = {}
     error_log: list = []
     run_settings: dict = {}
+    step_log: list = []
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
@@ -121,6 +122,7 @@ async def get_batch_run(
         scene_results=r.scene_results or {},
         error_log=r.error_log or [],
         run_settings=r.run_settings or {},
+        step_log=r.step_log or [],
     )
 
 

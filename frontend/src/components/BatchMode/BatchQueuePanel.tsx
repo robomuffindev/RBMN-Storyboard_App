@@ -52,6 +52,7 @@ function BatchItemCard({ item, index, onUpdate, onRemove, isRunning, itemStatus 
   const [editVideoMode, setEditVideoMode] = useState(item.video_mode);
   const [editTwoPass, setEditTwoPass] = useState(item.two_pass);
   const [editStoryFlow, setEditStoryFlow] = useState(item.use_story_flow);
+  const [editAutoChars, setEditAutoChars] = useState(item.auto_characters);
 
   const handleSave = () => {
     onUpdate(index, {
@@ -60,6 +61,7 @@ function BatchItemCard({ item, index, onUpdate, onRemove, isRunning, itemStatus 
       video_mode: editVideoMode,
       two_pass: editTwoPass,
       use_story_flow: editStoryFlow,
+      auto_characters: editAutoChars,
     });
     setEditing(false);
   };
@@ -69,6 +71,7 @@ function BatchItemCard({ item, index, onUpdate, onRemove, isRunning, itemStatus 
     setEditVideoMode(item.video_mode);
     setEditTwoPass(item.two_pass);
     setEditStoryFlow(item.use_story_flow);
+    setEditAutoChars(item.auto_characters);
     setEditing(false);
   };
 
@@ -137,6 +140,15 @@ function BatchItemCard({ item, index, onUpdate, onRemove, isRunning, itemStatus 
                 />
                 Story flow
               </label>
+              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editAutoChars}
+                  onChange={(e) => setEditAutoChars(e.target.checked)}
+                  className="w-3 h-3"
+                />
+                Auto characters
+              </label>
             </div>
           ) : (
             <div className="flex flex-wrap gap-2">
@@ -151,6 +163,9 @@ function BatchItemCard({ item, index, onUpdate, onRemove, isRunning, itemStatus 
               )}
               {item.use_story_flow && (
                 <span className="px-2 py-0.5 bg-gray-800 rounded text-xs text-gray-400">Flow</span>
+              )}
+              {item.auto_characters && (
+                <span className="px-2 py-0.5 bg-gray-800 rounded text-xs text-gray-400">Auto Chars</span>
               )}
             </div>
           )}

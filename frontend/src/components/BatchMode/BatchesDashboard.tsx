@@ -230,11 +230,21 @@ export default function BatchesDashboard() {
                   {/* Thumbnail / last asset preview */}
                   <div className="h-32 md:h-40 bg-gradient-to-br from-gray-800 to-gray-900 relative overflow-hidden">
                     {run.last_asset_url ? (
-                      <img
-                        src={run.last_asset_url}
-                        alt="Last generated"
-                        className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity"
-                      />
+                      run.last_asset_url.match(/\.(mp4|webm)(\?|$)|\/video\//i) ? (
+                        <video
+                          src={`${run.last_asset_url}#t=0.1`}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity"
+                        />
+                      ) : (
+                        <img
+                          src={run.last_asset_url}
+                          alt="Last generated"
+                          className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity"
+                        />
+                      )
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
                         <Play size={40} className="text-gray-700" />

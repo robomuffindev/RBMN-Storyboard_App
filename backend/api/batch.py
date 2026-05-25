@@ -25,6 +25,8 @@ from backend.database.models import (
     AppSettings,
     Asset,
     AssetType,
+    BatchRun,
+    BatchRunStatus as BatchRunStatusEnum,
     Lyrics,
     Project,
     ProjectMode,
@@ -61,6 +63,7 @@ class BatchItemConfig(BaseModel):
     video_mode: str = "i2v"  # i2v | v2v
     two_pass: bool = True
     use_story_flow: bool = True
+    auto_characters: bool = False
 
 
 class BatchRunRequest(BaseModel):
@@ -250,6 +253,38 @@ async def cancel_batch_run(batch_id: str):
     return {"batch_id": batch_id, "status": "cancelled"}
 
 
+@router.get("/active")
+async def get_active_batches():
+    """Return any in-memory batch runs that are still tracked.
+
+    Also returns batch_run_ids (persistent DB IDs) for each item so the
+    frontend can reconnect after navigating away and find them in /batches.
+    """
+    active = []
+    for bid, run in _batch_runs.items():
+        if run["status"] in ("running", "done", "failed", "cancelled"):
+            items_status = []
+            for item_state in run["items"]:
+                items_status.append({
+                    "index": item_state["index"],
+                    "project_name": item_state["project_name"],
+                    "project_id": item_state.get("project_id"),
+                    "status": item_state["status"],
+                    "current_step": item_state.get("current_step", ""),
+                    "error": item_state.get("error"),
+                    "batch_run_id": item_state.get("batch_run_id"),
+                })
+            active.append({
+                "batch_id": bid,
+                "status": run["status"],
+                "total_items": len(run["items"]),
+                "completed_items": sum(1 for s in run["items"] if s["status"] in ("done", "failed")),
+                "current_item_index": run.get("current_item_index", -1),
+                "items": items_status,
+            })
+    return active
+
+
 @router.delete("/staging")
 async def cleanup_staging():
     """Clean up any leftover batch staging files."""
@@ -320,6 +355,17 @@ async def _run_batch_pipeline(batch_id: str) -> None:
                 item_state["error"] = str(exc)
                 item_state["current_step"] = f"failed: {exc}"
 
+                # Mark the BatchRun as failed
+                br_id = item_state.get("batch_run_id")
+                if br_id:
+                    from datetime import datetime
+                    asyncio.create_task(_update_batch_run_db(
+                        br_id,
+                        status=BatchRunStatusEnum.FAILED,
+                        current_step=f"failed: {exc}",
+                        completed_at=datetime.utcnow(),
+                    ))
+
             # Clean up staging file for this item
             try:
                 staging_path = Path(config.audio_upload_path)
@@ -362,6 +408,36 @@ async def _run_batch_pipeline(batch_id: str) -> None:
         pass
 
 
+async def _update_batch_run_db(batch_run_id: str, **kwargs) -> None:
+    """Update a BatchRun record in the database.
+
+    Supports a special `step_entry` kwarg that appends to the step_log list
+    instead of replacing it, matching the behavior of generation.py's
+    _update_batch_run helper.
+    """
+    step_entry = kwargs.pop("step_entry", None)
+    try:
+        async with async_session() as session:
+            from sqlmodel import select as sel
+            stmt = sel(BatchRun).where(BatchRun.id == batch_run_id)
+            result = await session.execute(stmt)
+            run = result.scalars().first()
+            if not run:
+                return
+            for k, v in kwargs.items():
+                if hasattr(run, k):
+                    setattr(run, k, v)
+            # Append step_entry to the step_log list
+            if step_entry:
+                current_log = list(run.step_log or [])
+                current_log.append(step_entry)
+                run.step_log = current_log
+            session.add(run)
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"Failed to update BatchRun {batch_run_id}: {e}")
+
+
 async def _process_single_item(
     batch_id: str,
     item_index: int,
@@ -373,9 +449,62 @@ async def _process_single_item(
 
     run = _batch_runs[batch_id]
 
-    def _update_step(step: str) -> None:
+    # ── Create persistent BatchRun for this item ─────────────────────
+    from datetime import datetime
+    batch_run_id = str(uuid4())
+    run_settings = {
+        "audio_filename": config.audio_filename,
+        "audio_upload_path": config.audio_upload_path,
+        "lyrics_text": config.lyrics_text,
+        "project_name": config.project_name,
+        "concept_direction": config.concept_direction,
+        "style_text": config.style_text,
+        "render_type": config.render_type,
+        "video_mode": config.video_mode,
+        "two_pass": config.two_pass,
+        "use_story_flow": config.use_story_flow,
+    }
+    try:
+        async with async_session() as session:
+            _now = datetime.utcnow()
+            batch_run = BatchRun(
+                id=batch_run_id,
+                project_id="",  # will be set once project is created
+                project_name=item_state["project_name"],
+                mode="full_pipeline",
+                status=BatchRunStatusEnum.RUNNING,
+                total_scenes=0,  # will be updated after timeline
+                started_at=_now,
+                run_settings=run_settings,
+                current_step="initializing",
+                step_log=[{
+                    "step": "initializing batch pipeline",
+                    "timestamp": _now.isoformat(),
+                    "type": "info",
+                }],
+            )
+            session.add(batch_run)
+            await session.commit()
+        item_state["batch_run_id"] = batch_run_id
+    except Exception as e:
+        logger.warning(f"Failed to create BatchRun for batch item {item_index}: {e}")
+        batch_run_id = None
+
+    def _update_step(step: str, entry_type: str = "info", scene_name: str | None = None) -> None:
         item_state["current_step"] = step
         logger.info(f"Batch {batch_id} item {item_index}: {step}")
+        if batch_run_id:
+            _step_entry: dict = {
+                "step": step,
+                "timestamp": datetime.utcnow().isoformat(),
+                "type": entry_type,
+            }
+            if scene_name:
+                _step_entry["scene_name"] = scene_name
+            asyncio.create_task(_update_batch_run_db(
+                batch_run_id, current_step=step,
+                step_entry=_step_entry,
+            ))
 
     def _check_cancelled() -> None:
         if run["status"] == "cancelled":
@@ -402,6 +531,12 @@ async def _process_single_item(
 
     item_state["project_id"] = str(project_id)
     logger.info(f"Batch item {item_index}: created project {project_id}")
+
+    # Update BatchRun with project_id now that it's known
+    if batch_run_id:
+        asyncio.create_task(_update_batch_run_db(
+            batch_run_id, project_id=str(project_id),
+        ))
 
     # ── Step 2: Copy audio to project ─────────────────────────────
     _update_step("copying audio")
@@ -617,6 +752,19 @@ async def _process_single_item(
 
     logger.info(f"Batch item {item_index}: timeline suggested")
 
+    # Update BatchRun with scene count after timeline is suggested
+    if batch_run_id:
+        try:
+            async with async_session() as session:
+                scene_count_stmt = select(Scene).where(Scene.project_id == project_id)
+                scene_count_result = await session.execute(scene_count_stmt)
+                scenes_list = scene_count_result.scalars().all()
+                asyncio.create_task(_update_batch_run_db(
+                    batch_run_id, total_scenes=len(scenes_list),
+                ))
+        except Exception:
+            pass
+
     # ── Step 5: Generate concept from lyrics ──────────────────────
     _update_step("generating concept from lyrics")
     _check_cancelled()
@@ -631,22 +779,53 @@ async def _process_single_item(
                 f"Base-on-lyrics returned {resp.status_code}: {resp.text}"
             )
 
-    # If concept_direction or style_text provided, update project settings
-    if config.concept_direction or config.style_text:
-        async with async_session() as session:
-            stmt = select(Project).where(Project.id == project_id)
-            result = await session.execute(stmt)
-            project = result.scalars().first()
-            if project:
-                proj_settings = dict(project.settings) if project.settings else {}
-                if config.concept_direction:
-                    proj_settings["concept_direction"] = config.concept_direction
-                if config.style_text:
-                    proj_settings["style_text"] = config.style_text
-                project.settings = proj_settings
-                await session.commit()
+    # Persist generated concept data (song_title, concept_text, style_text)
+    # The base-on-lyrics endpoint only *returns* the data; we must save it.
+    concept_data = {}
+    if resp.status_code == 200:
+        try:
+            concept_data = resp.json()
+        except Exception:
+            pass
+
+    async with async_session() as session:
+        stmt = select(Project).where(Project.id == project_id)
+        result = await session.execute(stmt)
+        project = result.scalars().first()
+        if project:
+            proj_settings = dict(project.settings) if project.settings else {}
+            # Save LLM-generated concept fields
+            if concept_data.get("song_title"):
+                proj_settings["song_title"] = concept_data["song_title"]
+            if concept_data.get("concept_text"):
+                proj_settings["concept_text"] = concept_data["concept_text"]
+            if concept_data.get("style_text"):
+                proj_settings["style_text"] = concept_data["style_text"]
+            # Override with user-provided values from batch config
+            if config.concept_direction:
+                proj_settings["concept_direction"] = config.concept_direction
+            if config.style_text:
+                proj_settings["style_text"] = config.style_text
+            project.settings = proj_settings
+            await session.commit()
 
     logger.info(f"Batch item {item_index}: concept generated")
+
+    # ── Step 5b: Auto-generate characters (optional) ─────────────
+    if config.auto_characters:
+        _update_step("auto-generating characters")
+        _check_cancelled()
+
+        async with httpx.AsyncClient(base_url=base_url, timeout=120) as client:
+            resp = await client.post(
+                f"/api/projects/{project_id}/concept/characters/autogenerate",
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Character autogenerate returned {resp.status_code}: {resp.text}"
+                )
+            else:
+                logger.info(f"Batch item {item_index}: characters auto-generated")
 
     # ── Step 6: Generate video flow ───────────────────────────────
     _update_step("generating video flow")
@@ -654,7 +833,7 @@ async def _process_single_item(
 
     async with httpx.AsyncClient(base_url=base_url, timeout=120) as client:
         resp = await client.post(
-            f"/api/projects/{project_id}/concept/video-flow",
+            f"/api/projects/{project_id}/concept/flow/generate",
         )
         if resp.status_code != 200:
             logger.warning(
@@ -760,3 +939,12 @@ async def _process_single_item(
 
     # ── Step 9: Done ──────────────────────────────────────────────
     _update_step("completed")
+
+    # Mark BatchRun as completed
+    if batch_run_id:
+        asyncio.create_task(_update_batch_run_db(
+            batch_run_id,
+            status=BatchRunStatusEnum.COMPLETED,
+            completed_at=datetime.utcnow(),
+            current_step="completed",
+        ))

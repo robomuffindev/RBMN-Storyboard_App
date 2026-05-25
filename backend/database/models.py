@@ -381,8 +381,8 @@ class BatchRun(SQLModel, table=True):
 
     __tablename__ = "batch_runs"
 
-    id: UUID = Field(default_factory=uuid4, primary_key=True)
-    project_id: UUID = Field(index=True)
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    project_id: str = Field(default="", index=True)
     project_name: str = Field(default="")  # denormalized for display
 
     # Run configuration
@@ -414,6 +414,9 @@ class BatchRun(SQLModel, table=True):
     # Last completed asset preview (for dashboard thumbnail)
     last_asset_url: Optional[str] = None
     last_asset_scene_name: Optional[str] = None
+
+    # Live activity log: list of { step, scene_name?, timestamp, asset_url? }
+    step_log: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
