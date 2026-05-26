@@ -27,7 +27,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 ## Features
 
 ### Creative Pipeline
-- **Audio Analysis** — Upload a song and automatically detect sections (intro, verse, chorus, bridge, outro), separate stems (vocals, drums, bass, other) via Demucs, and transcribe lyrics via Whisper (local, remote Gradio, or ComfyUI workflow) with automatic hallucination deduplication
+- **Audio Analysis** — Upload a song and automatically detect sections (intro, verse, chorus, bridge, outro), separate stems (vocals, drums, bass, other) via Demucs, and transcribe lyrics via Whisper (local WhisperX, remote Gradio, OpenAI-compatible, or ComfyUI workflow — server type auto-detected) with automatic hallucination deduplication
 - **Concept & Style** — Define your video's overall concept, visual style, and characters with reference images. "Base on Lyrics" lets an LLM generate your concept and style from the song's lyrics automatically
 - **Video Flow** — LLM-generated per-scene storyboard ideas that describe camera movement, action, mood, and composition for each scene
 - **Suggest Fresh Timeline** — LLM analyzes your lyrics, sections, and timing data to generate optimal scene boundaries with meaningful narrative breaks
@@ -62,7 +62,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **V2V Extending** — Image-based conditioning from previous scene's last frame for seamless scene-to-scene transitions
 - **AI Transition Clips** — LTX Transition LoRA generates short transition videos between scenes
 - **Lipsync Audio Boost** — Per-scene lipsync toggle boosts Director audio_guidance from base level to 0.7+ for mouth-to-audio sync. Optional vocal stem isolation filters non-vocal audio before sending to generator
-- **GPU Hardware Acceleration** — Auto-detects GPU encoders (NVIDIA NVENC, AMD AMF/VAAPI, Intel QSV) for FFmpeg and CUDA for Demucs
+- **GPU Hardware Acceleration** — Auto-detects GPU encoders (NVIDIA NVENC, AMD AMF/VAAPI, Intel QSV) for FFmpeg and CUDA for Demucs. Enable/disable toggle and re-detect button in Settings with live status cards showing detected hardware for both FFmpeg and Demucs
 - **Color Correction** — Automatic per-channel RGB color matching with skip thresholds to avoid unnecessary re-encodes
 - **RunPod Integration** — Optional serverless GPU pod management with auto-spindown
 - **Real-time Progress** — SSE pub/sub broadcaster streams progress from ComfyUI to all connected frontends
