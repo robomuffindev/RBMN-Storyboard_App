@@ -298,6 +298,12 @@ See `.env.example` for the full list. Key variables:
 
 Current version: **1.3.0** — See [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Support
+
+<a href="https://ko-fi.com/robomuffinlabs" target="_blank">
+  <img src="Screenshots/ko-fi_button_robomuffin_labs_nobg_small.webp" alt="Support Robomuffin Labs on Ko-fi" height="48" />
+</a>
+
 ## License
 
 This project is proprietary. All rights reserved.
