@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus } from '@/api/client';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
 import Timeline from '@/components/Timeline/Timeline';
@@ -516,13 +516,28 @@ export default function AppLayout() {
           )}
 
           {(stableScenes as Scene[]).length > 0 && (
-            <button
-              onClick={() => setAutoGenOpen(true)}
-              className="px-3 md:px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
-            >
-              <Wand2 size={18} />
-              <span className="hidden sm:inline">Auto Generate</span>
-            </button>
+            autoGenStatus === 'running' ? (
+              <button
+                onClick={() => setAutoGenOpen(true)}
+                className="px-3 md:px-4 py-2 bg-purple-600/80 hover:bg-purple-600 rounded text-sm font-medium transition-colors flex items-center gap-2 border border-purple-500/40"
+              >
+                <Loader2 size={16} className="animate-spin" />
+                <span className="hidden sm:inline font-mono text-xs">
+                  {autoGenTotal > 0 ? `${autoGenCompleted}/${autoGenTotal}` : 'Running...'}
+                </span>
+                <span className="sm:hidden font-mono text-xs">
+                  {autoGenTotal > 0 ? `${Math.round((autoGenCompleted / autoGenTotal) * 100)}%` : '...'}
+                </span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setAutoGenOpen(true)}
+                className="px-3 md:px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                <Wand2 size={18} />
+                <span className="hidden sm:inline">Auto Generate</span>
+              </button>
+            )
           )}
 
           {(stableScenes as Scene[]).length > 0 && (
@@ -766,7 +781,19 @@ export default function AppLayout() {
       {exportOpen && <ExportModal projectId={id!} onClose={() => setExportOpen(false)} />}
 
       {/* Auto Generate Modal */}
-      {autoGenOpen && <AutoGenerateModal projectId={id!} onClose={() => setAutoGenOpen(false)} onStarted={startAutoGenPolling} />}
+      {autoGenOpen && <AutoGenerateModal
+        projectId={id!}
+        onClose={() => setAutoGenOpen(false)}
+        onMinimize={() => setAutoGenOpen(false)}
+        onStarted={startAutoGenPolling}
+        autoGenStatus={autoGenStatus}
+        autoGenMode={autoGenMode}
+        autoGenCompleted={autoGenCompleted}
+        autoGenTotal={autoGenTotal}
+        autoGenStep={autoGenStep}
+        autoGenSceneName={autoGenSceneName}
+        autoGenBatchRunId={autoGenBatchRunId}
+      />}
 
       {/* Auto-gen Status Bar */}
       {autoGenStatus !== 'idle' && !autoGenDismissed && (
@@ -1254,12 +1281,26 @@ const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string
   },
 ];
 
-function AutoGenerateModal({ projectId, onClose, onStarted }: { projectId: string; onClose: () => void; onStarted: () => void }) {
+function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenStatus, autoGenMode, autoGenCompleted, autoGenTotal, autoGenStep, autoGenSceneName, autoGenBatchRunId }: {
+  projectId: string;
+  onClose: () => void;
+  onMinimize: () => void;
+  onStarted: () => void;
+  autoGenStatus: string;
+  autoGenMode: string;
+  autoGenCompleted: number;
+  autoGenTotal: number;
+  autoGenStep: string | null;
+  autoGenSceneName: string | null;
+  autoGenBatchRunId: string | null;
+}) {
   const navigate = useNavigate();
   const [mode, setMode] = useState<AutoGenMode>('enhanced_all');
-  const [isRunning, setIsRunning] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
 
   // Advanced options
   const [twoPass, setTwoPass] = useState(true);
@@ -1269,8 +1310,38 @@ function AutoGenerateModal({ projectId, onClose, onStarted }: { projectId: strin
   const [skipAudioMux, setSkipAudioMux] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  const isBackendRunning = autoGenStatus === 'running';
+  const isBackendDone = autoGenStatus === 'done' || autoGenStatus === 'completed';
+  const isBackendFailed = autoGenStatus === 'failed';
+  const isBackendCancelled = autoGenStatus === 'cancelled';
+  const isBackendTerminal = isBackendDone || isBackendFailed || isBackendCancelled;
+  const progressPct = autoGenTotal > 0 ? Math.round((autoGenCompleted / autoGenTotal) * 100) : 0;
+
+  // Elapsed time timer
+  useEffect(() => {
+    if (isBackendRunning && !startTime) {
+      setStartTime(Date.now());
+    }
+    if (isBackendRunning) {
+      const timer = setInterval(() => {
+        if (startTime) setElapsed(Math.floor((Date.now() - startTime) / 1000));
+      }, 1000);
+      return () => clearInterval(timer);
+    }
+    return undefined;
+  }, [isBackendRunning, startTime]);
+
+  const formatElapsed = (secs: number) => {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  };
+
   const handleQueue = async () => {
-    setIsRunning(true);
+    setIsStarting(true);
     setError(null);
     setStatusMsg(null);
 
@@ -1303,152 +1374,312 @@ function AutoGenerateModal({ projectId, onClose, onStarted }: { projectId: strin
         vocalsOnlyForLipsync,
       );
 
-      setStatusMsg('Auto-gen started! Check the status bar below or view batch details.');
+      setStatusMsg(null);
+      setStartTime(Date.now());
+      setIsStarting(false);
       onStarted(); // start polling in AppLayout
-
-      // Close after a brief pause
-      setTimeout(() => onClose(), 1200);
     } catch (e: any) {
       const detail = e?.response?.data?.detail || e?.message || 'Auto-generation failed';
       setError(detail);
-      setIsRunning(false);
+      setIsStarting(false);
     }
   };
 
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[9999] p-4">
-      <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
-        <h2 className="text-xl font-bold mb-1 text-gray-100">Auto Generate</h2>
-        <p className="text-sm text-gray-400 mb-4">
-          Select a mode, configure options, then start. Progress will show in a status bar below.
-        </p>
+  const handleCancel = async () => {
+    try {
+      await cancelSequentialAutoGen(projectId);
+    } catch { /* ignore */ }
+  };
 
-        {/* Mode selection */}
-        <div className="flex flex-col gap-2 mb-4">
-          {AUTO_GEN_OPTIONS.map((opt) => (
-            <label
-              key={opt.value}
-              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
-                mode === opt.value
-                  ? 'bg-purple-900/30 border-purple-500/50'
-                  : 'bg-gray-800 border-gray-700 hover:border-gray-600'
-              } ${isRunning ? 'opacity-60 cursor-default' : ''}`}
-            >
-              <input
-                type="radio"
-                name="auto_gen_mode"
-                value={opt.value}
-                checked={mode === opt.value}
-                onChange={() => setMode(opt.value)}
-                disabled={isRunning}
-                className="mt-0.5 accent-purple-500"
-              />
-              <div>
-                <div className="font-semibold text-sm text-gray-200">{opt.label}</div>
-                <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">{opt.description}</div>
-              </div>
-            </label>
-          ))}
+  const getModeLabel = (m: string) => {
+    switch (m) {
+      case 'all_video_fflf': return 'Video (Use Previous Frame)';
+      case 'all_video_v2v': return 'Video (V2V Extend)';
+      case 'all_video_single': return 'Video (Single Frame)';
+      case 'missing_videos_single': return 'Missing Videos (Single Frame)';
+      case 'all_images': return 'Images Only';
+      case 'missing_images_independent': return 'Images (Independent)';
+      case 'enhanced_all': return 'Full Pipeline (All)';
+      case 'enhanced_missing': return 'Full Pipeline (Missing)';
+      default: return m.replace(/_/g, ' ');
+    }
+  };
+
+  // Show progress view when backend is running or terminal
+  const showProgress = isBackendRunning || isBackendTerminal;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-[9999] p-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onMinimize(); }}
+    >
+      <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold text-gray-100">Auto Generate</h2>
+          <div className="flex items-center gap-1">
+            {(isBackendRunning || isStarting) && (
+              <button
+                onClick={onMinimize}
+                className="p-1.5 hover:bg-gray-800 rounded-lg transition-colors text-gray-500 hover:text-gray-300"
+                title="Minimize — keep running in background"
+              >
+                <Minimize2 size={16} />
+              </button>
+            )}
+            {!isStarting && (
+              <button
+                onClick={onClose}
+                className="p-1.5 hover:bg-gray-800 rounded-lg transition-colors text-gray-500 hover:text-gray-300"
+                title="Close"
+              >
+                <XCircle size={16} />
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Advanced Options Toggle */}
-        <button
-          onClick={() => setShowAdvanced(a => !a)}
-          className="text-xs text-purple-400 hover:text-purple-300 mb-3 flex items-center gap-1 transition-colors"
-        >
-          {showAdvanced ? '▼' : '▶'} Advanced Options
-        </button>
+        {/* ─── Progress View (when running or terminal) ─── */}
+        {showProgress && (
+          <div className="flex flex-col gap-4">
+            {/* Mode label */}
+            <div className="flex items-center gap-2">
+              {isBackendRunning && <Loader2 size={16} className="text-purple-400 animate-spin" />}
+              {isBackendDone && <CheckCircle size={16} className="text-green-400" />}
+              {isBackendFailed && <XCircle size={16} className="text-red-400" />}
+              {isBackendCancelled && <XCircle size={16} className="text-yellow-400" />}
+              <span className="text-sm font-medium text-purple-300">
+                {getModeLabel(autoGenMode)}
+              </span>
+            </div>
 
-        {showAdvanced && (
-          <div className="mb-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg space-y-2.5">
-            <label className="flex items-center gap-2.5 cursor-pointer">
-              <input type="checkbox" checked={twoPass} onChange={e => setTwoPass(e.target.checked)} disabled={isRunning}
-                className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
-              <div>
-                <span className="text-sm text-gray-200">Two-Pass Image Generation</span>
-                <p className="text-xs text-gray-500">Pass 1: scene composition, Pass 2: character compositing</p>
+            {/* Progress bar */}
+            <div className="bg-gray-800 rounded-lg h-7 overflow-hidden relative">
+              <div
+                className="h-full rounded-lg transition-all duration-700 ease-out"
+                style={{
+                  width: `${progressPct}%`,
+                  background: isBackendDone ? 'linear-gradient(90deg, #059669, #34d399)' :
+                              isBackendFailed ? 'linear-gradient(90deg, #dc2626, #f87171)' :
+                              isBackendCancelled ? 'linear-gradient(90deg, #d97706, #fbbf24)' :
+                              'linear-gradient(90deg, #7c3aed, #a78bfa)',
+                }}
+              />
+              <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white">
+                {autoGenCompleted} / {autoGenTotal} scenes ({progressPct}%)
               </div>
-            </label>
+            </div>
 
-            <label className="flex items-center gap-2.5 cursor-pointer">
-              <input type="checkbox" checked={useStoryFlow} onChange={e => setUseStoryFlow(e.target.checked)} disabled={isRunning}
-                className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
-              <div>
-                <span className="text-sm text-gray-200">Use Story Flow</span>
-                <p className="text-xs text-gray-500">Incorporate video flow ideas into prompt generation</p>
+            {/* Current scene + step */}
+            {isBackendRunning && (
+              <div className="text-sm space-y-1">
+                {autoGenSceneName && (
+                  <div>
+                    <span className="text-gray-500">Current: </span>
+                    <span className="text-gray-200 font-medium">{autoGenSceneName}</span>
+                  </div>
+                )}
+                {autoGenStep && (
+                  <div>
+                    <span className="text-gray-500">Step: </span>
+                    <span className="text-purple-400">{autoGenStep}</span>
+                  </div>
+                )}
+                {elapsed > 0 && (
+                  <div>
+                    <span className="text-gray-500">Time: </span>
+                    <span className="text-blue-400 font-medium">{formatElapsed(elapsed)}</span>
+                  </div>
+                )}
               </div>
-            </label>
-
-            <label className="flex items-center gap-2.5 cursor-pointer">
-              <input type="checkbox" checked={lipsyncEnabled} onChange={e => setLipsyncEnabled(e.target.checked)} disabled={isRunning}
-                className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
-              <div>
-                <span className="text-sm text-gray-200">Lipsync-Aware Prompts</span>
-                <p className="text-xs text-gray-500">Tell the LLM to include singing/speaking cues</p>
-              </div>
-            </label>
-
-            {lipsyncEnabled && (
-              <label className="flex items-center gap-2.5 cursor-pointer ml-6">
-                <input type="checkbox" checked={vocalsOnlyForLipsync} onChange={e => setVocalsOnlyForLipsync(e.target.checked)} disabled={isRunning}
-                  className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
-                <div>
-                  <span className="text-sm text-gray-200">Vocals-Only Audio for Lipsync</span>
-                  <p className="text-xs text-gray-500">Use isolated vocal stem instead of full mix</p>
-                </div>
-              </label>
             )}
 
-            <label className="flex items-center gap-2.5 cursor-pointer">
-              <input type="checkbox" checked={skipAudioMux} onChange={e => setSkipAudioMux(e.target.checked)} disabled={isRunning}
-                className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
-              <div>
-                <span className="text-sm text-gray-200">Skip Audio Mux</span>
-                <p className="text-xs text-gray-500">Don't embed audio in generated video files</p>
+            {/* Terminal status message */}
+            {isBackendTerminal && (
+              <div className={`p-3 rounded-lg text-sm font-medium ${
+                isBackendDone ? 'bg-green-950 border border-green-900 text-green-300' :
+                isBackendCancelled ? 'bg-yellow-950 border border-yellow-900 text-yellow-300' :
+                'bg-red-950 border border-red-900 text-red-300'
+              }`}>
+                {isBackendDone && `Completed! All ${autoGenCompleted} scenes processed${elapsed > 0 ? ` in ${formatElapsed(elapsed)}` : ''}.`}
+                {isBackendCancelled && `Cancelled after ${autoGenCompleted} of ${autoGenTotal} scenes.`}
+                {isBackendFailed && `Failed after ${autoGenCompleted} of ${autoGenTotal} scenes.`}
               </div>
-            </label>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex gap-3">
+              {isBackendRunning && (
+                <>
+                  <button
+                    onClick={onMinimize}
+                    className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors text-sm"
+                  >
+                    Minimize
+                  </button>
+                  <button
+                    onClick={handleCancel}
+                    className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-medium text-white transition-colors text-sm"
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+              {isBackendTerminal && (
+                <button
+                  onClick={onClose}
+                  className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors text-sm"
+                >
+                  Close
+                </button>
+              )}
+              {autoGenBatchRunId && (
+                <button
+                  onClick={() => { onClose(); navigate(`/batches/${autoGenBatchRunId}`); }}
+                  className="flex-1 px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 rounded-lg font-medium text-purple-300 transition-colors text-sm"
+                >
+                  View Details
+                </button>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Status / Error messages */}
-        {statusMsg && (
-          <div className={`p-2.5 mb-3 rounded text-sm ${error ? 'bg-red-950 border border-red-900 text-red-300' : 'bg-green-950 border border-green-900 text-green-300'}`}>
-            {statusMsg}
-          </div>
-        )}
-        {error && (
-          <div className="p-2.5 mb-3 rounded text-sm bg-red-950 border border-red-900 text-red-300">
-            {error}
-          </div>
-        )}
+        {/* ─── Config View (before starting) ─── */}
+        {!showProgress && (
+          <>
+            <p className="text-sm text-gray-400 mb-4">
+              Select a mode, configure options, then start. You can minimize this window while it runs.
+            </p>
 
-        {/* Actions */}
-        <div className="flex gap-3">
-          <button
-            onClick={onClose}
-            disabled={isRunning}
-            className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleQueue}
-            disabled={isRunning}
-            className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold text-white transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
-          >
-            {isRunning ? 'Starting...' : 'Start Auto Gen'}
-          </button>
-        </div>
+            {/* Mode selection */}
+            <div className="flex flex-col gap-2 mb-4">
+              {AUTO_GEN_OPTIONS.map((opt) => (
+                <label
+                  key={opt.value}
+                  className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                    mode === opt.value
+                      ? 'bg-purple-900/30 border-purple-500/50'
+                      : 'bg-gray-800 border-gray-700 hover:border-gray-600'
+                  } ${isStarting ? 'opacity-60 cursor-default' : ''}`}
+                >
+                  <input
+                    type="radio"
+                    name="auto_gen_mode"
+                    value={opt.value}
+                    checked={mode === opt.value}
+                    onChange={() => setMode(opt.value)}
+                    disabled={isStarting}
+                    className="mt-0.5 accent-purple-500"
+                  />
+                  <div>
+                    <div className="font-semibold text-sm text-gray-200">{opt.label}</div>
+                    <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">{opt.description}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
 
-        {/* View Batches link */}
-        <div className="mt-3 text-center">
-          <button
-            onClick={() => { onClose(); navigate('/batches'); }}
-            className="text-xs text-gray-500 hover:text-purple-400 transition-colors"
-          >
-            View all batch runs →
-          </button>
-        </div>
+            {/* Advanced Options Toggle */}
+            <button
+              onClick={() => setShowAdvanced(a => !a)}
+              className="text-xs text-purple-400 hover:text-purple-300 mb-3 flex items-center gap-1 transition-colors"
+            >
+              {showAdvanced ? '▼' : '▶'} Advanced Options
+            </button>
+
+            {showAdvanced && (
+              <div className="mb-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg space-y-2.5">
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input type="checkbox" checked={twoPass} onChange={e => setTwoPass(e.target.checked)} disabled={isStarting}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
+                  <div>
+                    <span className="text-sm text-gray-200">Two-Pass Image Generation</span>
+                    <p className="text-xs text-gray-500">Pass 1: scene composition, Pass 2: character compositing</p>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input type="checkbox" checked={useStoryFlow} onChange={e => setUseStoryFlow(e.target.checked)} disabled={isStarting}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
+                  <div>
+                    <span className="text-sm text-gray-200">Use Story Flow</span>
+                    <p className="text-xs text-gray-500">Incorporate video flow ideas into prompt generation</p>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input type="checkbox" checked={lipsyncEnabled} onChange={e => setLipsyncEnabled(e.target.checked)} disabled={isStarting}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
+                  <div>
+                    <span className="text-sm text-gray-200">Lipsync-Aware Prompts</span>
+                    <p className="text-xs text-gray-500">Tell the LLM to include singing/speaking cues</p>
+                  </div>
+                </label>
+
+                {lipsyncEnabled && (
+                  <label className="flex items-center gap-2.5 cursor-pointer ml-6">
+                    <input type="checkbox" checked={vocalsOnlyForLipsync} onChange={e => setVocalsOnlyForLipsync(e.target.checked)} disabled={isStarting}
+                      className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
+                    <div>
+                      <span className="text-sm text-gray-200">Vocals-Only Audio for Lipsync</span>
+                      <p className="text-xs text-gray-500">Use isolated vocal stem instead of full mix</p>
+                    </div>
+                  </label>
+                )}
+
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input type="checkbox" checked={skipAudioMux} onChange={e => setSkipAudioMux(e.target.checked)} disabled={isStarting}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
+                  <div>
+                    <span className="text-sm text-gray-200">Skip Audio Mux</span>
+                    <p className="text-xs text-gray-500">Don't embed audio in generated video files</p>
+                  </div>
+                </label>
+              </div>
+            )}
+
+            {/* Status / Error messages */}
+            {statusMsg && (
+              <div className={`p-2.5 mb-3 rounded text-sm ${error ? 'bg-red-950 border border-red-900 text-red-300' : 'bg-green-950 border border-green-900 text-green-300'}`}>
+                {statusMsg}
+              </div>
+            )}
+            {error && (
+              <div className="p-2.5 mb-3 rounded text-sm bg-red-950 border border-red-900 text-red-300">
+                {error}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex gap-3">
+              <button
+                onClick={onClose}
+                disabled={isStarting}
+                className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleQueue}
+                disabled={isStarting}
+                className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold text-white transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
+              >
+                {isStarting ? 'Starting...' : 'Start Auto Gen'}
+              </button>
+            </div>
+
+            {/* View Batches link */}
+            <div className="mt-3 text-center">
+              <button
+                onClick={() => { onClose(); navigate('/batches'); }}
+                className="text-xs text-gray-500 hover:text-purple-400 transition-colors"
+              >
+                View all batch runs →
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
