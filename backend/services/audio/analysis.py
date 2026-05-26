@@ -35,6 +35,7 @@ class _DemucsDevice:
         self._detected = False
         self.device: str = "cpu"
         self.gpu_name: str = ""
+        self.disabled: bool = False  # Set True to force CPU
 
     def detect(self):
         if self._detected:
@@ -68,6 +69,8 @@ class _DemucsDevice:
     def get_device_flags(self) -> list[str]:
         """Return CLI flags for Demucs device selection."""
         self.detect()
+        if self.disabled:
+            return ["-d", "cpu"]
         return ["-d", self.device]
 
 
@@ -492,22 +495,41 @@ class AudioAnalyzer:
 
     @staticmethod
     def _detect_whisper_server_type(base_url: str) -> str:
-        """Detect which type of Whisper server is running."""
+        """Detect which type of Whisper server is running.
+
+        Check order matters:
+        1. OpenAI-compatible first — has a very specific endpoint
+           (/v1/audio/transcriptions) that no other server exposes.
+        2. Gradio second — uses /config with Gradio-specific keys
+           (components, dependencies).  The /info heuristic is tightened
+           to require 'gradio_version' rather than the generic 'version'
+           which almost any server returns.
+        3. Generic fallback.
+        """
         import requests
 
-        # Check for Gradio app (Whisper-WebUI is a Gradio app)
-        # Gradio apps expose /info and /config endpoints
+        # 1. Check for OpenAI-compatible (most specific endpoint)
         try:
-            r = requests.get(f"{base_url}/info", timeout=5)
-            if r.status_code == 200:
-                info = r.json()
-                if "version" in info or "api" in str(info).lower():
-                    logger.info(f"Detected Gradio app at {base_url}")
-                    return "gradio"
+            r = requests.options(f"{base_url}/v1/audio/transcriptions", timeout=5)
+            if r.status_code < 500:
+                logger.info(f"Detected OpenAI-compatible Whisper at {base_url}")
+                return "openai"
         except Exception:
             pass
 
-        # Also check /config (another Gradio indicator)
+        # Also try GET on /v1/models as a secondary OpenAI indicator
+        try:
+            r = requests.get(f"{base_url}/v1/models", timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if "data" in data or "models" in str(data).lower():
+                    logger.info(f"Detected OpenAI-compatible Whisper via /v1/models at {base_url}")
+                    return "openai"
+        except Exception:
+            pass
+
+        # 2. Check for Gradio app (Whisper-WebUI is a Gradio app)
+        # Gradio /config has very specific keys that no other server uses
         try:
             r = requests.get(f"{base_url}/config", timeout=5)
             if r.status_code == 200:
@@ -518,11 +540,15 @@ class AudioAnalyzer:
         except Exception:
             pass
 
-        # Check for OpenAI-compatible
+        # Gradio /info — require 'gradio_version' (Gradio-specific), not
+        # the generic 'version' key which many servers return
         try:
-            r = requests.options(f"{base_url}/v1/audio/transcriptions", timeout=5)
-            if r.status_code < 500:
-                return "openai"
+            r = requests.get(f"{base_url}/info", timeout=5)
+            if r.status_code == 200:
+                info = r.json()
+                if "gradio_version" in str(info) or "named_endpoints" in info:
+                    logger.info(f"Detected Gradio app at {base_url}")
+                    return "gradio"
         except Exception:
             pass
 

@@ -90,6 +90,7 @@ class SettingsResponse(BaseModel):
     director_stitch: bool = False
     director_auto_image_desc: bool = True
     global_video_negative_prompt: Optional[str] = None
+    gpu_acceleration_enabled: bool = True
 
     class Config:
         from_attributes = True
@@ -143,6 +144,7 @@ class SettingsUpdate(BaseModel):
     director_stitch: Optional[bool] = None
     director_auto_image_desc: Optional[bool] = None
     global_video_negative_prompt: Optional[str] = None
+    gpu_acceleration_enabled: Optional[bool] = None
 
 
 class ChangeProjectDirRequest(BaseModel):
@@ -241,6 +243,16 @@ async def _get_or_create_settings(session: AsyncSession) -> AppSettings:
             await session.flush()
             logger.info("Backfilled empty settings from .env values")
 
+    # Sync GPU runtime state with stored setting
+    try:
+        from backend.services.video.ffmpeg import _gpu
+        from backend.services.audio.analysis import _demucs_device
+        gpu_enabled = getattr(settings, 'gpu_acceleration_enabled', True)
+        _gpu.disabled = not gpu_enabled
+        _demucs_device.disabled = not gpu_enabled
+    except Exception:
+        pass  # Non-critical
+
     return settings
 
 
@@ -312,6 +324,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         director_stitch=settings.director_stitch if settings.director_stitch is not None else False,
         director_auto_image_desc=settings.director_auto_image_desc if settings.director_auto_image_desc is not None else True,
         global_video_negative_prompt=settings.global_video_negative_prompt,
+        gpu_acceleration_enabled=settings.gpu_acceleration_enabled if settings.gpu_acceleration_enabled is not None else True,
     )
 
 
@@ -487,9 +500,25 @@ async def update_settings(
             settings.director_auto_image_desc = req.director_auto_image_desc
         if req.global_video_negative_prompt is not None:
             settings.global_video_negative_prompt = req.global_video_negative_prompt or None
+        if req.gpu_acceleration_enabled is not None:
+            settings.gpu_acceleration_enabled = req.gpu_acceleration_enabled
 
         await session.commit()
         await session.refresh(settings)
+
+        # Sync GPU runtime state immediately after save
+        if req.gpu_acceleration_enabled is not None:
+            try:
+                from backend.services.video.ffmpeg import _gpu
+                from backend.services.audio.analysis import _demucs_device
+                _gpu.disabled = not settings.gpu_acceleration_enabled
+                _demucs_device.disabled = not settings.gpu_acceleration_enabled
+                logger.info(
+                    f"GPU acceleration {'enabled' if settings.gpu_acceleration_enabled else 'disabled'} "
+                    f"(FFmpeg: {_gpu.encoder}, Demucs: {_demucs_device.device})"
+                )
+            except Exception:
+                pass  # Non-critical
 
         # Reconfigure RunPod manager if RunPod settings changed
         if any([
@@ -572,6 +601,51 @@ async def update_settings(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update settings",
         )
+
+
+@router.get("/gpu-status")
+async def get_gpu_status():
+    """Return detected GPU acceleration capabilities for FFmpeg and Demucs."""
+    from backend.services.video.ffmpeg import _gpu
+    from backend.services.audio.analysis import _demucs_device
+
+    # Force detection if not already done
+    _gpu.detect()
+    _demucs_device.detect()
+
+    return {
+        "ffmpeg": {
+            "encoder": _gpu.encoder,
+            "decoder": _gpu.decode_hwaccel or "cpu",
+            "gpu_type": _gpu.gpu_type,
+            "using_gpu": _gpu.encoder != "libx264",
+        },
+        "demucs": {
+            "device": _demucs_device.device,
+            "gpu_name": _demucs_device.gpu_name,
+            "using_gpu": _demucs_device.device == "cuda",
+        },
+    }
+
+
+@router.post("/gpu-status/redetect")
+async def redetect_gpu():
+    """Force re-detection of GPU capabilities."""
+    from backend.services.video.ffmpeg import _gpu
+    from backend.services.audio.analysis import _demucs_device
+
+    _gpu._detected = False
+    _gpu.encoder = "libx264"
+    _gpu.decode_hwaccel = ""
+    _gpu.gpu_type = "cpu"
+    _gpu.detect()
+
+    _demucs_device._detected = False
+    _demucs_device.device = "cpu"
+    _demucs_device.gpu_name = ""
+    _demucs_device.detect()
+
+    return await get_gpu_status()
 
 
 @router.post(

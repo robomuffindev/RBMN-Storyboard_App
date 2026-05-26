@@ -21,9 +21,11 @@ import {
   purgeJobs,
   browseDirectory,
   changeProjectDir,
+  getGpuStatus,
+  redetectGpu,
 } from '@/api/client';
-import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle } from 'lucide-react';
-import type { AppSettings, SystemPromptOverrideEntry, RunPodPodConfig, RunPodPodStatus } from '@/types/index';
+import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle, Cpu, Monitor } from 'lucide-react';
+import type { AppSettings, SystemPromptOverrideEntry, RunPodPodConfig, RunPodPodStatus, GpuStatus } from '@/types/index';
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -71,8 +73,13 @@ export default function SettingsPage() {
     runpod_api_key: '',
     runpod_idle_timeout: 30,
     runpod_pods: [],
+    gpu_acceleration_enabled: true,
   });
   const [customImageModel, setCustomImageModel] = useState('');
+  // GPU status state
+  const [gpuStatus, setGpuStatus] = useState<GpuStatus | null>(null);
+  const [gpuLoading, setGpuLoading] = useState(false);
+  const [gpuRedetecting, setGpuRedetecting] = useState(false);
   const [customSingleImageModel, setCustomSingleImageModel] = useState('');
   const [customVideoModel, setCustomVideoModel] = useState('');
   const [promptGuidanceModal, setPromptGuidanceModal] = useState<{ type: 'image' | 'video'; modelName: string } | null>(null);
@@ -150,6 +157,7 @@ export default function SettingsPage() {
         runpod_api_key: savedSettings.runpod_api_key || '',
         runpod_idle_timeout: savedSettings.runpod_idle_timeout || 30,
         runpod_pods: savedSettings.runpod_pods || [],
+        gpu_acceleration_enabled: savedSettings.gpu_acceleration_enabled ?? true,
       });
       // Initialize project directory input
       setProjectDirInput(savedSettings.project_dir || '');
@@ -184,6 +192,27 @@ export default function SettingsPage() {
       .then((res) => setBuiltinVideoPrompt(res.data.prompt))
       .catch(() => setBuiltinVideoPrompt(''));
   }, [settings.video_model_type]);
+
+  // Fetch GPU status on mount
+  useEffect(() => {
+    setGpuLoading(true);
+    getGpuStatus()
+      .then((res) => setGpuStatus(res.data))
+      .catch(() => setGpuStatus(null))
+      .finally(() => setGpuLoading(false));
+  }, []);
+
+  const handleRedetectGpu = async () => {
+    setGpuRedetecting(true);
+    try {
+      const res = await redetectGpu();
+      setGpuStatus(res.data);
+    } catch {
+      // keep existing status
+    } finally {
+      setGpuRedetecting(false);
+    }
+  };
 
   // Helpers for system prompt override state
   const getImageOverride = (): SystemPromptOverrideEntry => {
@@ -2024,6 +2053,99 @@ export default function SettingsPage() {
                 </div>
               </div>
             </div>
+          )}
+        </section>
+
+        {/* GPU Acceleration */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-2 flex items-center gap-2">
+            <Monitor size={20} />
+            GPU Acceleration
+          </h2>
+          <p className="text-sm text-gray-400 mb-4">
+            Auto-detected GPU capabilities for FFmpeg encoding/decoding and Demucs audio separation.
+            Disable to force CPU-only processing.
+          </p>
+
+          <div className="flex items-center gap-3 mb-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.gpu_acceleration_enabled ?? true}
+                onChange={(e) => setSettings({ ...settings, gpu_acceleration_enabled: e.target.checked })}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500"
+              />
+              <span className="text-sm font-medium">Enable GPU Acceleration</span>
+            </label>
+            <button
+              onClick={handleRedetectGpu}
+              disabled={gpuRedetecting}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={gpuRedetecting ? 'animate-spin' : ''} />
+              Re-detect
+            </button>
+          </div>
+
+          {gpuLoading ? (
+            <div className="flex items-center gap-2 text-gray-400 text-sm">
+              <Loader size={14} className="animate-spin" />
+              Detecting GPU...
+            </div>
+          ) : gpuStatus ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* FFmpeg */}
+              <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
+                <h3 className="text-sm font-semibold mb-2 flex items-center gap-2">
+                  <Cpu size={14} />
+                  FFmpeg
+                  {gpuStatus.ffmpeg.using_gpu ? (
+                    <span className="ml-auto px-2 py-0.5 bg-green-900/50 text-green-400 text-xs rounded-full">GPU Active</span>
+                  ) : (
+                    <span className="ml-auto px-2 py-0.5 bg-yellow-900/50 text-yellow-400 text-xs rounded-full">CPU Only</span>
+                  )}
+                </h3>
+                <div className="space-y-1 text-sm text-gray-300">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">GPU Type:</span>
+                    <span>{gpuStatus.ffmpeg.gpu_type || 'None detected'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Encoder:</span>
+                    <span className="font-mono text-xs">{gpuStatus.ffmpeg.encoder}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Decoder:</span>
+                    <span className="font-mono text-xs">{gpuStatus.ffmpeg.decoder}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Demucs */}
+              <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
+                <h3 className="text-sm font-semibold mb-2 flex items-center gap-2">
+                  <Cpu size={14} />
+                  Demucs (Audio Separation)
+                  {gpuStatus.demucs.using_gpu ? (
+                    <span className="ml-auto px-2 py-0.5 bg-green-900/50 text-green-400 text-xs rounded-full">GPU Active</span>
+                  ) : (
+                    <span className="ml-auto px-2 py-0.5 bg-yellow-900/50 text-yellow-400 text-xs rounded-full">CPU Only</span>
+                  )}
+                </h3>
+                <div className="space-y-1 text-sm text-gray-300">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Device:</span>
+                    <span>{gpuStatus.demucs.device}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">GPU Name:</span>
+                    <span>{gpuStatus.demucs.gpu_name || 'None detected'}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">GPU status unavailable. Click Re-detect to check again.</p>
           )}
         </section>
 

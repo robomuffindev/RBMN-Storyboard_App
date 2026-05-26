@@ -358,6 +358,8 @@ class AppSettings(SQLModel, table=True):
     director_auto_image_desc: bool = Field(default=True)  # Auto-fill image_description from scene context
     # Global negative prompt for VIDEO generation — set on LTXDirector negative_prompt field
     global_video_negative_prompt: Optional[str] = Field(default=None)
+    # GPU acceleration — when False, forces CPU encoding/decoding even if GPU is detected
+    gpu_acceleration_enabled: bool = Field(default=True)
 
 
 class BatchRunStatus(StrEnum):

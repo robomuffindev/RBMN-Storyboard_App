@@ -209,6 +209,22 @@ export interface AppSettings {
   director_stitch?: boolean;
   director_auto_image_desc?: boolean;
   global_video_negative_prompt?: string;
+  // GPU acceleration
+  gpu_acceleration_enabled?: boolean;
+}
+
+export interface GpuStatus {
+  ffmpeg: {
+    encoder: string;
+    decoder: string;
+    gpu_type: string;
+    using_gpu: boolean;
+  };
+  demucs: {
+    device: string;
+    gpu_name: string;
+    using_gpu: boolean;
+  };
 }
 
 export interface RunPodPodConfig {

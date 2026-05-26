@@ -11,6 +11,7 @@ import type {
   WorkflowConfig,
   WorkflowFieldMapping,
   RunPodPodStatus,
+  GpuStatus,
   BatchItemConfig,
   BatchRunStatus,
   PersistentBatchRunSummary,
@@ -559,6 +560,13 @@ export const startRunPodPod = (podId: string) =>
 
 export const stopRunPodPod = (podId: string) =>
   api.post<{ pod_id: string; state: string; error: string }>('/settings/runpod/stop', { pod_id: podId });
+
+// ===== GPU Status =====
+export const getGpuStatus = () =>
+  api.get<GpuStatus>('/settings/gpu-status');
+
+export const redetectGpu = () =>
+  api.post<GpuStatus>('/settings/gpu-status/redetect');
 
 // ── Batch Mode ──────────────────────────────────────────────────────
 

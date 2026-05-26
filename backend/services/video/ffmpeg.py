@@ -50,6 +50,7 @@ class _GPUAccel:
         self.encoder: str = "libx264"  # CPU fallback
         self.decode_hwaccel: str = ""  # e.g. "cuda", "d3d11va", "vaapi", "qsv"
         self.gpu_type: str = "cpu"
+        self.disabled: bool = False  # Set True to force CPU even when GPU detected
 
     def _test_encoder(self, encoder: str) -> bool:
         """Test if an encoder actually works by encoding a tiny synthetic clip.
@@ -156,6 +157,8 @@ class _GPUAccel:
         cores decoding input clips even when encoding uses GPU.
         """
         self.detect()
+        if self.disabled:
+            return []
         if self.decode_hwaccel:
             return ["-hwaccel", self.decode_hwaccel]
         return []
@@ -171,6 +174,8 @@ class _GPUAccel:
           CPU libx264:   -crf (constant rate factor, 0-51)
         """
         self.detect()
+        if self.disabled:
+            return ["-c:v", "libx264", "-crf", str(crf), "-preset", "fast"]
         if self.encoder == "h264_nvenc":
             return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(crf)]
         elif self.encoder == "h264_amf":
