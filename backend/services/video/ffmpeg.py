@@ -62,7 +62,7 @@ class _GPUAccel:
             result = subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1:r=1",
+                    "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
                     "-frames:v", "1",
                     "-c:v", encoder,
                     "-f", "null", "-",
@@ -84,7 +84,7 @@ class _GPUAccel:
                 [
                     "ffmpeg", "-y",
                     "-hwaccel", hwaccel,
-                    "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1:r=1",
+                    "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
                     "-frames:v", "1",
                     "-f", "null", "-",
                 ],

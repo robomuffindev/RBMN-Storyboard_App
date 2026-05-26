@@ -2370,6 +2370,67 @@ async def suggest_timeline(
         # Re-sort valid_cuts by time after adding instrumental cuts
         valid_cuts.sort(key=lambda vc: vc["time"])
 
+    else:
+        # No word timestamps — instrumental track.
+        # Seed edge_times from section boundaries so the gap-filler can
+        # place evenly-spaced cut points across long sections.
+        section_times: list[float] = []
+        if sections:
+            for s in sections:
+                if s.start_time > 0.0:
+                    section_times.append(s.start_time)
+                if s.end_time < total_duration:
+                    section_times.append(s.end_time)
+
+        edge_times = sorted(set([0.0, total_duration] + section_times))
+
+        instrumental_cuts: list[dict] = []
+        for ei in range(len(edge_times) - 1):
+            gap_start = edge_times[ei]
+            gap_end = edge_times[ei + 1]
+            gap_len = gap_end - gap_start
+            if gap_len > max_dur:
+                n_splits = int(gap_len / (max_dur - 1.0))
+                step = gap_len / (n_splits + 1)
+                for si in range(1, n_splits + 1):
+                    t = round(gap_start + step * si, 2)
+                    if t > gap_start + 2.0 and t < gap_end - 2.0:
+                        region = "intro" if gap_start == 0.0 else (
+                            "outro" if gap_end == total_duration else "instrumental break"
+                        )
+                        instrumental_cuts.append({
+                            "time": t,
+                            "label": f"CUT_INST: {t:.2f}s — {region} split",
+                            "after_phrase": "(instrumental)",
+                            "before_phrase": "(instrumental)",
+                        })
+
+        if instrumental_cuts:
+            valid_cuts.extend(instrumental_cuts)
+            valid_cuts.sort(key=lambda vc: vc["time"])
+            logger.info(
+                f"[SuggestTimeline] Added {len(instrumental_cuts)} instrumental "
+                f"cut points for instrumental track (no word timestamps)"
+            )
+
+        # Also add section boundaries as cut points directly
+        for st in section_times:
+            if st > 2.0 and st < total_duration - 2.0:
+                # Don't duplicate if already near an existing cut
+                if not any(abs(vc["time"] - st) < 1.0 for vc in valid_cuts):
+                    valid_cuts.append({
+                        "time": round(st, 2),
+                        "label": f"CUT_SEC: {st:.2f}s — section boundary",
+                        "after_phrase": "(instrumental)",
+                        "before_phrase": "(instrumental)",
+                    })
+
+        valid_cuts.sort(key=lambda vc: vc["time"])
+        logger.info(
+            f"[SuggestTimeline] Instrumental track: {len(valid_cuts)} total cut points "
+            f"from {len(section_times)} section boundaries"
+        )
+
     # ── Build lyrics block for LLM ──────────────────────────────────────
 
     lyrics_block = ""
@@ -2494,15 +2555,37 @@ async def suggest_timeline(
         if not isinstance(scenes_data, list) or len(scenes_data) == 0:
             raise ValueError("Expected a non-empty JSON array")
     except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Failed to parse LLM response: {e}\nRaw: {raw_text[:500]}")
-        _write_llm_log(
-            endpoint="suggest_timeline",
-            provider=provider, model=model,
-            system_prompt=system_prompt, user_prompt=user_prompt,
-            raw_response=raw_text, error=str(e),
-            extra={"valid_cuts_count": len(valid_cuts), "max_dur": max_dur, "min_dur": min_dur},
-        )
-        raise HTTPException(status_code=500, detail="Failed to parse LLM scene response")
+        # Fallback: try to extract a JSON array from within a prose response.
+        # LLMs sometimes wrap valid JSON in explanation text, especially when
+        # given 0 cut points (instrumental tracks).
+        extracted = None
+        try:
+            start_idx = raw_text.find("[{")
+            end_idx = raw_text.rfind("]")
+            if start_idx != -1 and end_idx > start_idx:
+                candidate = raw_text[start_idx:end_idx + 1]
+                extracted = json.loads(candidate)
+                if not isinstance(extracted, list) or len(extracted) == 0:
+                    extracted = None
+        except (json.JSONDecodeError, Exception):
+            extracted = None
+
+        if extracted:
+            logger.info(
+                f"[SuggestTimeline] Extracted JSON array from prose response "
+                f"({len(extracted)} scenes)"
+            )
+            scenes_data = extracted
+        else:
+            logger.error(f"Failed to parse LLM response: {e}\nRaw: {raw_text[:500]}")
+            _write_llm_log(
+                endpoint="suggest_timeline",
+                provider=provider, model=model,
+                system_prompt=system_prompt, user_prompt=user_prompt,
+                raw_response=raw_text, error=str(e),
+                extra={"valid_cuts_count": len(valid_cuts), "max_dur": max_dur, "min_dur": min_dur},
+            )
+            raise HTTPException(status_code=500, detail="Failed to parse LLM scene response")
 
     # Write success log with full request/response
     _write_llm_log(
