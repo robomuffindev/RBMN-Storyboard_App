@@ -275,6 +275,15 @@ async def init_db() -> None:
         except Exception:
             pass  # Column already exists
 
+        # Add gpu_acceleration_enabled column to app_settings if missing
+        try:
+            await conn.execute(text(
+                "ALTER TABLE app_settings ADD COLUMN gpu_acceleration_enabled BOOLEAN DEFAULT 1"
+            ))
+            logger.info("Migration: gpu_acceleration_enabled added to app_settings")
+        except Exception:
+            pass  # Column already exists
+
         # Create batch_runs table if it doesn't exist
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS batch_runs (
