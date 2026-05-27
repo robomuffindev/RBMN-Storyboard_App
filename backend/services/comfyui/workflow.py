@@ -56,6 +56,32 @@ def set_node_input(workflow: dict, title: str, input_name: str, value: Any) -> N
     logger.debug(f"Set {title}.{input_name} = {value}")
 
 
+def _update_power_lora_distilled(workflow: dict, distilled_lora_name: str) -> None:
+    """
+    Update the distilled LoRA filename in PowerLoraLoader nodes.
+
+    Non-Sequencer LTX workflows use PowerLoraLoader with lora_1, lora_2, etc.
+    sub-dicts. The distilled LoRA is always in lora_1. This function finds any
+    PowerLoraLoader node and updates lora_1.lora to the user's selection.
+    """
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type", "")
+        if "PowerLoraLoader" in class_type:
+            inputs = node.get("inputs", {})
+            lora_1 = inputs.get("lora_1")
+            if isinstance(lora_1, dict) and "lora" in lora_1:
+                old_name = lora_1["lora"]
+                lora_1["lora"] = distilled_lora_name
+                logger.info(
+                    f"PowerLoraLoader distilled LoRA updated: "
+                    f"{old_name} → {distilled_lora_name}"
+                )
+                return
+    logger.debug("No PowerLoraLoader node found — distilled LoRA not updated")
+
+
 def prepare_klein_workflow(
     workflow_path: str,
     prompt: str,
@@ -239,6 +265,7 @@ def prepare_ltx_workflow(
     first_frame: Optional[str] = None,
     last_frame: Optional[str] = None,
     ltx_model_gguf: Optional[str] = None,
+    distilled_lora_name: Optional[str] = None,
 ) -> dict:
     """
     Load and prepare an LTX video generation workflow.
@@ -290,6 +317,10 @@ def prepare_ltx_workflow(
             logger.info(f"LTX model GGUF set to: {ltx_model_gguf}")
         except ValueError:
             logger.warning("No 'Unet Loader (GGUF)' node found — skipping model override")
+
+    # Override distilled LoRA if specified
+    if distilled_lora_name:
+        _update_power_lora_distilled(workflow, distilled_lora_name)
 
     # Set text prompt
     set_node_input(workflow, "CLIP Text Encode (Prompt)", "text", prompt)
@@ -772,6 +803,7 @@ def prepare_transition_workflow(
     last_frame: str,
     ltx_model_gguf: Optional[str] = None,
     transition_strength: float = 1.0,
+    distilled_lora_name: Optional[str] = None,
 ) -> dict:
     """
     Load and prepare a Transition LoRA workflow.
@@ -820,6 +852,10 @@ def prepare_transition_workflow(
             logger.info(f"Transition LTX model GGUF set to: {ltx_model_gguf}")
         except ValueError:
             logger.warning("No 'Unet Loader (GGUF)' node found — skipping model override")
+
+    # Override distilled LoRA if specified
+    if distilled_lora_name:
+        _update_power_lora_distilled(workflow, distilled_lora_name)
 
     # Set text prompt — ensure trigger word is present.
     # Model card recommends placing trigger word at the END of the prompt

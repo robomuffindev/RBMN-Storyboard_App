@@ -296,7 +296,7 @@ See `.env.example` for the full list. Key variables:
 
 ## Version
 
-Current version: **1.3.0** — See [CHANGELOG.md](CHANGELOG.md) for release history.
+Current version: **1.3.1** — See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Support
 

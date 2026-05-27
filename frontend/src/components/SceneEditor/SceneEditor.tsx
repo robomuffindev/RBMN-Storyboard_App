@@ -53,6 +53,7 @@ import {
   Palette,
   Eye,
   RefreshCw,
+  Pencil,
 } from 'lucide-react';
 
 type Tab = 'image' | 'video' | 'movement' | 'transitions' | 'stems' | 'lyrics' | 'tools' | 'prompt';
@@ -642,6 +643,11 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const [activeTab, setActiveTab] = useState<Tab>('image');
   const [frameSubTab, setFrameSubTab] = useState<FrameSubTab>('first');
 
+  // Lyrics override state
+  const [isEditingLyrics, setIsEditingLyrics] = useState(false);
+  const [editedLyrics, setEditedLyrics] = useState('');
+  const [isSavingLyrics, setIsSavingLyrics] = useState(false);
+
   // First frame state
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
@@ -1005,6 +1011,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         setVideoSeedOverride(false);
         setVideoSeed('');
       }
+      // Reset lyrics editing state on scene change
+      setIsEditingLyrics(false);
+      setEditedLyrics('');
       // Camera action
       setCameraAction(activeScene.parameters?.camera_action || 'none');
       setCustomCameraAction(activeScene.parameters?.custom_camera_action || '');
@@ -3408,26 +3417,122 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           {/* ══════════ LYRICS TAB ══════════ */}
           {activeTab === 'lyrics' && (
             <div className="text-sm space-y-3">
-              {sceneLyrics ? (
-                <>
-                  <p className="font-medium text-gray-300">
-                    Scene Lyrics
-                    {activeScene && activeScene.start_time != null && (
-                      <span className="text-xs text-gray-500 ml-2">
-                        ({activeScene.start_time.toFixed(1)}s – {activeScene.end_time.toFixed(1)}s)
-                      </span>
+              <div className="flex items-center justify-between">
+                <p className="font-medium text-gray-300">
+                  Scene Lyrics
+                  {activeScene && activeScene.start_time != null && (
+                    <span className="text-xs text-gray-500 ml-2">
+                      ({activeScene.start_time.toFixed(1)}s – {activeScene.end_time.toFixed(1)}s)
+                    </span>
+                  )}
+                </p>
+                <div className="flex items-center gap-2">
+                  {(activeScene as any)?.parameters?.lyrics_override && (
+                    <span className="text-[10px] text-yellow-500 bg-yellow-500/10 px-1.5 py-0.5 rounded">
+                      Overridden
+                    </span>
+                  )}
+                  {!isEditingLyrics ? (
+                    <button
+                      onClick={() => {
+                        setEditedLyrics(sceneLyrics || '');
+                        setIsEditingLyrics(true);
+                      }}
+                      className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+                      title="Override lyrics for this scene"
+                    >
+                      <Pencil size={12} />
+                      Override
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setIsEditingLyrics(false)}
+                      className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+                    >
+                      <X size={12} />
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {isEditingLyrics ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={editedLyrics}
+                    onChange={(e) => setEditedLyrics(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-200 text-sm leading-relaxed resize-y min-h-[120px] focus:border-blue-500 focus:outline-none"
+                    rows={8}
+                    placeholder="Edit lyrics for this scene..."
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        if (!activeScene || !currentProject) return;
+                        setIsSavingLyrics(true);
+                        try {
+                          const newParams = {
+                            ...activeScene.parameters,
+                            lyrics: editedLyrics,
+                            lyrics_override: true,
+                          };
+                          await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                          useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                          setIsEditingLyrics(false);
+                        } catch (err) {
+                          console.error('Failed to save lyrics override:', err);
+                        } finally {
+                          setIsSavingLyrics(false);
+                        }
+                      }}
+                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors"
+                      disabled={isSavingLyrics}
+                    >
+                      <Save size={14} />
+                      {isSavingLyrics ? 'Saving...' : 'Save Override'}
+                    </button>
+                    {(activeScene as any)?.parameters?.lyrics_override && (
+                      <button
+                        onClick={async () => {
+                          if (!activeScene || !currentProject) return;
+                          setIsSavingLyrics(true);
+                          try {
+                            const newParams = { ...activeScene.parameters };
+                            delete (newParams as any).lyrics;
+                            delete (newParams as any).lyrics_override;
+                            await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                            useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                            setIsEditingLyrics(false);
+                          } catch (err) {
+                            console.error('Failed to reset lyrics:', err);
+                          } finally {
+                            setIsSavingLyrics(false);
+                          }
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-red-600/80 hover:bg-red-600 rounded text-sm font-medium transition-colors"
+                        disabled={isSavingLyrics}
+                        title="Remove override and restore auto-detected lyrics"
+                      >
+                        <RotateCcw size={14} />
+                        Reset
+                      </button>
                     )}
+                  </div>
+                  <p className="text-[10px] text-gray-500">
+                    Override lyrics are used for prompt enhancement and export subtitles. Reset to restore auto-detected lyrics.
                   </p>
-                  <p className="p-3 bg-gray-800 rounded text-gray-300 leading-relaxed whitespace-pre-wrap">
-                    {sceneLyrics}
-                  </p>
-                </>
+                </div>
+              ) : sceneLyrics ? (
+                <p className="p-3 bg-gray-800 rounded text-gray-300 leading-relaxed whitespace-pre-wrap">
+                  {sceneLyrics}
+                </p>
               ) : (
                 <div className="text-center py-8 text-gray-400">
                   <p className="text-sm">No lyrics available for this scene</p>
                   <p className="text-xs text-gray-500 mt-1">Process audio to generate lyrics with timestamps</p>
                 </div>
               )}
+
               <div className="p-2 bg-gray-900 rounded text-[10px] text-gray-600 font-mono">
                 <p>words: {lyricsDebugInfo.wordsCount} | text: {lyricsDebugInfo.textLength} chars | initial_text: {lyricsDebugInfo.initialTextLength} chars</p>
                 <p>scene: {lyricsDebugInfo.sceneStart?.toFixed?.(1) ?? 'null'}s – {lyricsDebugInfo.sceneEnd?.toFixed?.(1) ?? 'null'}s</p>

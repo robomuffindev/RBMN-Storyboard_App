@@ -1251,10 +1251,11 @@ class JobDispatcher:
                     image_description=image_desc,
                 )
 
-            # Read video_tail and ltx_model_gguf from AppSettings
+            # Read video_tail, ltx_model_gguf, and distilled LoRA from AppSettings
             from sqlmodel import select
             video_tail = 0
             ltx_model_gguf = None
+            distilled_lora_name = None
             async with self._session_factory() as session:
                 try:
                     from backend.database.models import AppSettings as DBAppSettings
@@ -1264,6 +1265,8 @@ class JobDispatcher:
                     if db_settings:
                         video_tail = db_settings.video_tail or 0
                         ltx_model_gguf = db_settings.ltx_model_gguf or None
+                        if db_settings.use_distilled_lora:
+                            distilled_lora_name = db_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
                 except Exception as e:
                     logger.warning(f"Failed to read video settings: {e}")
 
@@ -1336,6 +1339,7 @@ class JobDispatcher:
                     audio_path=audio_path or "",
                     first_frame=v2v_first_frame,
                     ltx_model_gguf=ltx_model_gguf,
+                    distilled_lora_name=distilled_lora_name,
                 )
 
             # V2V Pass 2: load intermediate video → upscale → refine
@@ -1386,6 +1390,7 @@ class JobDispatcher:
                     last_frame=transition_last,
                     ltx_model_gguf=ltx_model_gguf,
                     transition_strength=params.get("transition_lora_strength", 1.0),
+                    distilled_lora_name=distilled_lora_name,
                 )
 
             return prepare_ltx_workflow(
@@ -1400,6 +1405,7 @@ class JobDispatcher:
                 first_frame=first_frame,
                 last_frame=effective_last_frame,
                 ltx_model_gguf=ltx_model_gguf,
+                distilled_lora_name=distilled_lora_name,
             )
 
         raise Exception(f"Unknown workflow type: {workflow_type}")
