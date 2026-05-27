@@ -4,7 +4,7 @@ import { useAppStore } from '@/store';
 import WaveformDisplay from '@/components/Timeline/WaveformDisplay';
 import TimelineOverlay from '@/components/Timeline/TimelineOverlay';
 import { suggestTimeline, sliceSceneAudio, getScenes, startSequentialAutoGen, getSequentialAutoGenStatus, cancelSequentialAutoGen, cleanupScenes, updateProject, retrimAllScenes } from '@/api/client';
-import { Play, Pause, ZoomIn, ZoomOut, Scissors, SkipBack, SkipForward, RotateCcw, RefreshCw, Trash2, Wand2, Lock, Unlock, Music, Zap, X } from 'lucide-react';
+import { Play, Pause, ZoomIn, ZoomOut, Scissors, SkipBack, SkipForward, RotateCcw, RefreshCw, Trash2, Wand2, Lock, Unlock, Music, Zap, X, Minimize2, Maximize2, Loader2 } from 'lucide-react';
 
 interface TimelineProps {
   onSplitScene?: (sceneId: string, splitTime: number) => void;
@@ -450,6 +450,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [minimized, setMinimized] = useState(false);
 
   const isRunning = status?.status === 'running';
   const isDone = status?.status === 'done';
@@ -537,6 +538,37 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
     ? Math.round((status.completed_scenes / status.total_scenes) * 100)
     : 0;
 
+  // Minimized pill — floating button at bottom-right
+  if (minimized && (isRunning || isDone || isFailed || isCancelled)) {
+    return createPortal(
+      <button
+        onClick={() => setMinimized(false)}
+        style={{
+          position: 'fixed', bottom: 16, right: 16, zIndex: 9999,
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 14px', borderRadius: 9999,
+          background: 'rgba(26, 26, 46, 0.95)', backdropFilter: 'blur(8px)',
+          border: '1px solid rgba(124, 58, 237, 0.3)',
+          boxShadow: '0 4px 20px rgba(124, 58, 237, 0.1)',
+          color: '#e0e0e0', cursor: 'pointer',
+          transition: 'all 0.3s',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(124, 58, 237, 0.5)'; }}
+        onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(124, 58, 237, 0.3)'; }}
+      >
+        {isRunning && <Loader2 size={14} className="animate-spin" style={{ color: '#60a5fa' }} />}
+        {isDone && <span style={{ color: '#6ee7b7', fontSize: 14 }}>✓</span>}
+        {isFailed && <span style={{ color: '#fca5a5', fontSize: 14 }}>✗</span>}
+        {isCancelled && <span style={{ color: '#fbbf24', fontSize: 14 }}>⊘</span>}
+        <span style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 600, color: '#ccc' }}>
+          {isRunning ? `${progressPct}%` : isDone ? 'Done' : isFailed ? 'Failed' : 'Cancelled'}
+        </span>
+        <Maximize2 size={12} style={{ color: '#888' }} />
+      </button>,
+      document.body
+    );
+  }
+
   return createPortal(
     <div
       style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)' }}
@@ -548,11 +580,24 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
           <h2 style={{ color: '#e0e0e0', fontSize: 18, fontWeight: 600, margin: 0 }}>
             {overrideFullSet ? 'Auto Generate — Full Set' : 'Auto Generate Missing Scenes'}
           </h2>
-          {!isRunning && (
-            <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: 4 }}>
-              <X size={20} />
-            </button>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {isRunning && (
+              <button
+                onClick={() => setMinimized(true)}
+                style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: 4, borderRadius: 4, transition: 'color 0.2s' }}
+                onMouseEnter={e => (e.currentTarget.style.color = '#ccc')}
+                onMouseLeave={e => (e.currentTarget.style.color = '#888')}
+                title="Minimize"
+              >
+                <Minimize2 size={18} />
+              </button>
+            )}
+            {!isRunning && (
+              <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: 4 }}>
+                <X size={20} />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Override toggle — only show when not running */}
@@ -906,13 +951,21 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
               )}
             </div>
 
-            {/* Cancel button */}
-            <button
-              onClick={handleCancel}
-              style={{ background: '#dc2626', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 500, fontSize: 13 }}
-            >
-              Cancel
-            </button>
+            {/* Cancel + Minimize buttons */}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={() => setMinimized(true)}
+                style={{ flex: 1, background: '#374151', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 500, fontSize: 13 }}
+              >
+                Minimize
+              </button>
+              <button
+                onClick={handleCancel}
+                style={{ flex: 1, background: '#dc2626', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 500, fontSize: 13 }}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
 
