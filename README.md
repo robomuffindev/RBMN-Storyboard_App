@@ -34,6 +34,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Character Creator** — Built-in mini image generator for creating character reference images with version history, using the same reference image system as scene generation
 - **LTXDirector Integration** — Full control over LTX Director video generation parameters: guide strength (keyframe conditioning), audio guidance (audio-to-video influence), stitch mode (smooth vs hard-cut prompt transitions), auto image description, and video negative prompt. All configurable in Settings
 - **Scene Editor** — Tabbed editor with Image (First Frame / Last Frame sub-tabs), Video, Stems, Lyrics, Tools, Image Movement, and Prompt tabs per scene
+- **Per-Scene Lyrics Override** — Manually edit auto-detected lyrics on any scene via the Lyrics tab Override button. Saves persist to scene parameters with a visual "Overridden" badge; Reset reverts to auto-detected lyrics
 - **Reference Image System** — Select up to 2 characters and upload additional reference images per scene. Workflow auto-selects based on reference count (0–4 images). Uses FLUX Klein "Image N" syntax for precise reference mapping
 - **Two-Pass Image Generation** — Pass 1 generates the scene environment (no characters), Pass 2 composites characters into the scene using the Pass 1 output as a reference. Prevents character IP-Adapter from making all scenes look identical
 - **Prompt Enhancement** — LLM-powered prompt enhancement with context awareness (model type, scene flow, camera action, character descriptions, reference images, lipsync state). Built-in system prompt registry with per-model overrides configurable in Settings. Video prompts are Director-aware with multi-segment support
@@ -296,7 +297,7 @@ See `.env.example` for the full list. Key variables:
 
 ## Version
 
-Current version: **1.3.1** — See [CHANGELOG.md](CHANGELOG.md) for release history.
+Current version: **1.3.2** — See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Support
 

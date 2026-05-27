@@ -940,6 +940,19 @@ class JobDispatcher:
             await self.job_queue.mark_failed(job.id, error_msg)
             return
 
+        # If output files were listed in history but ALL downloads failed,
+        # the job produced nothing usable — mark as failed, not completed.
+        if output_files and not saved_assets:
+            error_msg = (
+                f"ComfyUI reported {len(output_files)} output file(s) "
+                f"({', '.join(f.get('filename', '?') for f in output_files)}) "
+                f"but all downloads failed. The files may have been lost or the "
+                f"server disconnected before transfer completed."
+            )
+            logger.error(f"[{job_id_str}] {error_msg}")
+            await self.job_queue.mark_failed(job.id, error_msg)
+            return
+
         result = {
             "prompt_id": prompt_id,
             "worker": worker.url,

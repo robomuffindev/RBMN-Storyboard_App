@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Set, Any, Generator
 from datetime import datetime
 
-from .client import ComfyUIClient, ComfyUIConnectionError, ComfyUIVRAMError
+from .client import ComfyUIClient, ComfyUIConnectionError, ComfyUIVRAMError, ComfyUIWorkflowError
 
 logger = logging.getLogger(__name__)
 
@@ -513,18 +513,21 @@ class ComfyDispatcher:
                         f"ComfyUI execution OOM: status={status_str}, "
                         f"check server console for details"
                     )
-                # For non-OOM errors, raise a generic error so the job fails
-                if status_str == "error":
-                    # Extract error details from messages if available
-                    err_detail = ""
-                    for msg_entry in messages:
-                        if isinstance(msg_entry, (list, tuple)) and len(msg_entry) >= 2:
-                            if msg_entry[0] == "execution_error":
-                                err_detail = str(msg_entry[1])[:500]
-                                break
-                    raise Exception(
-                        f"ComfyUI execution failed: status={status_str}. {err_detail}"
-                    )
+                # For non-OOM errors, raise a generic error so the job fails.
+                # This covers status_str == "error", "interrupted", or any
+                # other non-success value.  Previously only "error" was caught,
+                # allowing interrupted/partial executions to slip through as
+                # "completed".
+                # Extract error details from messages if available
+                err_detail = ""
+                for msg_entry in messages:
+                    if isinstance(msg_entry, (list, tuple)) and len(msg_entry) >= 2:
+                        if msg_entry[0] in ("execution_error", "execution_interrupted"):
+                            err_detail = str(msg_entry[1])[:500]
+                            break
+                raise ComfyUIWorkflowError(
+                    f"ComfyUI execution failed: status={status_str}. {err_detail}"
+                )
 
             if not _has_file_outputs(history):
                 for _retry in range(1, 11):

@@ -472,6 +472,9 @@ class ComfyUIClient:
                                 f"WS [{prompt_id[:8]}] EXECUTION INTERRUPTED: "
                                 f"{json.dumps(data, default=str)[:500]}"
                             )
+                            raise ComfyUIWorkflowError(
+                                f"Execution interrupted: {json.dumps(data, default=str)[:300]}"
+                            )
 
                     # Execution error
                     if msg_type == "execution_error":
