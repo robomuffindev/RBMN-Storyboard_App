@@ -454,7 +454,7 @@ async def enhance_prompt(
         HTTPException: If project not found or LLM provider unavailable.
     """
     try:
-        await _get_project_or_404(project_id, session)
+        project = await _get_project_or_404(project_id, session)
 
         # Get settings for the specified provider
         settings_stmt = select(AppSettings).where(AppSettings.id == 1)
@@ -508,6 +508,18 @@ async def enhance_prompt(
         model_override = overrides.get(gen_model_name, {})
         if isinstance(model_override, dict) and model_override.get("enabled") and model_override.get("text", "").strip():
             system_prompt_override = model_override["text"]
+
+        # When project mode is narration, use narration-specific prompts
+        # (only if no user override is already set)
+        if not system_prompt_override and project.mode in ("narration_images", "narration_video"):
+            from backend.services.llm.prompt_enhancer import (
+                NARRATION_IMAGE_SYSTEM_PROMPT,
+                NARRATION_VIDEO_SYSTEM_PROMPT,
+            )
+            if req.is_video:
+                system_prompt_override = NARRATION_VIDEO_SYSTEM_PROMPT
+            else:
+                system_prompt_override = NARRATION_IMAGE_SYSTEM_PROMPT
 
         # Call LLM service to enhance prompt
         from backend.services.llm.prompt_enhancer import PromptEnhancer
@@ -1527,6 +1539,18 @@ async def auto_generate(
             vid_override_entry = vid_overrides.get(video_model, {})
             if isinstance(vid_override_entry, dict) and vid_override_entry.get("enabled") and vid_override_entry.get("text", "").strip():
                 video_sys_override = vid_override_entry["text"]
+
+            # When project mode is narration, use narration-specific prompts
+            # (only if no user override is already set)
+            if project.mode in ("narration_images", "narration_video"):
+                from backend.services.llm.prompt_enhancer import (
+                    NARRATION_IMAGE_SYSTEM_PROMPT,
+                    NARRATION_VIDEO_SYSTEM_PROMPT,
+                )
+                if not image_sys_override:
+                    image_sys_override = NARRATION_IMAGE_SYSTEM_PROMPT
+                if not video_sys_override:
+                    video_sys_override = NARRATION_VIDEO_SYSTEM_PROMPT
 
         # Auto-generate video flow if no scenes have flow ideas
         # This ensures each scene gets a unique storyboard idea for differentiation
@@ -2757,6 +2781,18 @@ async def _run_sequential_auto_gen(
                 vid_entry = vid_overrides.get(video_model, {})
                 if isinstance(vid_entry, dict) and vid_entry.get("enabled") and vid_entry.get("text", "").strip():
                     video_sys_override = vid_entry["text"]
+
+                # When project mode is narration, use narration-specific prompts
+                # (only if no user override is already set)
+                if project.mode in ("narration_images", "narration_video"):
+                    from backend.services.llm.prompt_enhancer import (
+                        NARRATION_IMAGE_SYSTEM_PROMPT as _N_IMG,
+                        NARRATION_VIDEO_SYSTEM_PROMPT as _N_VID,
+                    )
+                    if not image_sys_override:
+                        image_sys_override = _N_IMG
+                    if not video_sys_override:
+                        video_sys_override = _N_VID
 
         # ── Auto-generate video flow if missing ─────────────────────────
         # Ensures each scene has a unique storyboard idea before generation

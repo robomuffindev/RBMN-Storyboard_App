@@ -615,4 +615,31 @@ export const deletePersistentBatchRunsBulk = (status?: 'completed' | 'failed') =
     params: status ? { status } : undefined,
   });
 
+// ── Narration Mode ──────────────────────────────────────────────────
+
+export const uploadSrt = (projectId: string, file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post(`/projects/${projectId}/timeline/upload-srt`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
+export const getBackingTracks = (projectId: string) =>
+  api.get(`/projects/${projectId}/backing-tracks`);
+
+export const uploadBackingTrack = (projectId: string, file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post(`/projects/${projectId}/backing-tracks`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
+export const updateBackingTrack = (projectId: string, trackId: string, data: any) =>
+  api.patch(`/projects/${projectId}/backing-tracks/${trackId}`, data);
+
+export const deleteBackingTrack = (projectId: string, trackId: string) =>
+  api.delete(`/projects/${projectId}/backing-tracks/${trackId}`);
+
 export default api;

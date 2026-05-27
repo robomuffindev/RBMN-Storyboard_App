@@ -430,6 +430,10 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
 
 /** Auto-generation modal with sequential processing modes */
 function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+  const currentProject = useAppStore((s) => s.currentProject);
+  const projectMode = currentProject?.mode || 'music_video';
+  const isNarrationImages = projectMode === 'narration_images';
+
   const [overrideFullSet, setOverrideFullSet] = useState(false);
   const [vocalsOnlyAudio, setVocalsOnlyAudio] = useState(false);
   const [skipAudioMux, setSkipAudioMux] = useState(false);
@@ -807,7 +811,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
         {/* Mode buttons — only show when not running */}
         {!isRunning && !isDone && !isFailed && !isCancelled && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button
+            {!isNarrationImages && (<><button
               onClick={() => handleStart('all_video_fflf')}
               style={{ background: '#7c3aed', color: 'white', border: 'none', borderRadius: 8, padding: '14px 16px', cursor: 'pointer', textAlign: 'left', transition: 'background 0.2s' }}
               onMouseEnter={e => (e.currentTarget.style.background = '#6d28d9')}
@@ -865,7 +869,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
                 Generates videos for scenes that don&apos;t have one yet, using the existing first-frame image.
                 Only generates a first-frame image if the scene has none at all. Video prompts auto-enhanced via LLM.
               </div>
-            </button>
+            </button></>)}
 
             <button
               onClick={() => handleStart('all_images')}

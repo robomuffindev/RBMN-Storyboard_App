@@ -321,6 +321,32 @@ export interface AudioAnalysisResult {
   };
 }
 
+// ── Narration Mode ─────────────────────────────────────────────────
+
+export interface BackingTrack {
+  id: string;
+  project_id: string;
+  filename: string;
+  rel_path: string;
+  order_index: number;
+  start_time: number;
+  end_time: number;
+  trim_start: number;
+  trim_end: number;
+  volume_db: number;
+  fade_in_sec: number;
+  fade_out_sec: number;
+}
+
+export interface SubtitleSettings {
+  subtitles_enabled: boolean;
+  subtitle_font: string;
+  subtitle_size: number;
+  subtitle_color: string;
+  subtitle_position: string;
+  subtitle_outline: number;
+}
+
 // ── Batch Mode ──────────────────────────────────────────────────────
 
 export interface BatchItemConfig {

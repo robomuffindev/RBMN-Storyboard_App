@@ -14,7 +14,7 @@ from sqlmodel import select
 
 from backend.config import settings as app_settings
 from backend.database import get_session
-from backend.database.models import Project, Job, JobType, JobStatus, Scene, Asset, AssetType, AppSettings
+from backend.database.models import Project, Job, JobType, JobStatus, Scene, Asset, AssetType, AppSettings, Lyrics
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["export"])
@@ -36,6 +36,15 @@ class ExportRequest(BaseModel):
     transition_type: Optional[str] = None  # none, crossfade, dissolve — None = use settings default
     transition_duration: Optional[float] = None  # seconds — None = use settings default
     color_match_clips: Optional[bool] = None  # None = use settings default
+    # Subtitle burn-in options
+    subtitles_enabled: bool = False
+    subtitle_font: str = "Arial"
+    subtitle_size: int = 24
+    subtitle_color: str = "white"       # white, yellow, cyan, etc.
+    subtitle_position: str = "bottom"   # bottom, top, center
+    subtitle_outline: int = 2
+    # Audio normalization
+    normalize_audio: bool = False
 
 
 class ExportProgressResponse(BaseModel):
@@ -467,11 +476,75 @@ async def export_project(
                     exp_crf = export_params.get("final_crf", 16)
 
                     if project_mode in ("narration_images", "narration_video"):
+                        # Load backing tracks for narration projects
+                        from backend.database.models import BackingTrack
+                        bt_stmt = (
+                            select(BackingTrack)
+                            .where(BackingTrack.project_id == pid)
+                            .order_by(BackingTrack.order_index)
+                        )
+                        bt_result = await bg_session.execute(bt_stmt)
+                        bt_rows = bt_result.scalars().all()
+                        narr_backing_tracks = None
+                        if bt_rows:
+                            narr_backing_tracks = []
+                            for bt in bt_rows:
+                                bt_path = str(app_settings.project_dir / str(pid) / bt.rel_path)
+                                narr_backing_tracks.append({
+                                    "path": bt_path,
+                                    "start_time": bt.start_time,
+                                    "end_time": bt.end_time,
+                                    "trim_start": bt.trim_start,
+                                    "trim_end": bt.trim_end,
+                                    "volume_db": bt.volume_db,
+                                    "fade_in_sec": bt.fade_in_sec,
+                                    "fade_out_sec": bt.fade_out_sec,
+                                })
+
+                        # Build subtitle style if enabled
+                        narr_subtitle_words = None
+                        narr_subtitle_style = None
+                        if export_params.get("subtitles_enabled"):
+                            lyrics_row_narr = (
+                                await bg_session.execute(
+                                    select(Lyrics).where(Lyrics.project_id == pid)
+                                )
+                            ).scalar_one_or_none()
+                            if lyrics_row_narr and lyrics_row_narr.words:
+                                narr_subtitle_words = lyrics_row_narr.words
+                                pos_map_narr = {"bottom": 2, "top": 8, "center": 5}
+                                color_map_narr = {
+                                    "white": "&H00FFFFFF",
+                                    "yellow": "&H0000FFFF",
+                                    "cyan": "&H00FFFF00",
+                                    "green": "&H0000FF00",
+                                    "red": "&H000000FF",
+                                }
+                                narr_subtitle_style = {
+                                    "font_name": export_params.get("subtitle_font", "Arial"),
+                                    "font_size": export_params.get("subtitle_size", 24),
+                                    "primary_color": color_map_narr.get(
+                                        export_params.get("subtitle_color", "white"), "&H00FFFFFF"
+                                    ),
+                                    "outline_width": export_params.get("subtitle_outline", 2),
+                                    "alignment": pos_map_narr.get(
+                                        export_params.get("subtitle_position", "bottom"), 2
+                                    ),
+                                }
+
                         await asyncio.to_thread(
                             assemble_narration_video,
                             scene_dicts, master_audio, output_path,
                             exp_w, exp_h, exp_fps,
+                            default_transition=transition_type,
+                            default_transition_duration=transition_dur,
+                            color_match_clips=color_match,
                             progress_callback=on_progress,
+                            final_crf=exp_crf,
+                            backing_tracks=narr_backing_tracks,
+                            subtitle_words=narr_subtitle_words,
+                            subtitle_style=narr_subtitle_style,
+                            normalize_audio_enabled=bool(export_params.get("normalize_audio")),
                         )
                     else:
                         await asyncio.to_thread(
@@ -484,6 +557,110 @@ async def export_project(
                             progress_callback=on_progress,
                             final_crf=exp_crf,
                         )
+
+                    # ── Post-assembly: subtitle burn-in ──────────────
+                    # For narration modes, subtitles are handled inside
+                    # assemble_narration_video, so skip the post-assembly step.
+                    if (
+                        export_params.get("subtitles_enabled")
+                        and project_mode not in ("narration_images", "narration_video")
+                    ):
+                        _export_progress[pid_s]["step"] = "Burning subtitles..."
+                        _export_progress[pid_s]["percent"] = 96
+
+                        # Load word-level timestamps from Lyrics table
+                        lyrics_row = (
+                            await bg_session.execute(
+                                select(Lyrics).where(Lyrics.project_id == pid)
+                            )
+                        ).scalar_one_or_none()
+
+                        if lyrics_row and lyrics_row.words:
+                            from backend.services.video.ffmpeg import (
+                                generate_ass_subtitles,
+                                burn_subtitles,
+                            )
+
+                            # Map subtitle_position to ASS alignment
+                            pos_map = {"bottom": 2, "top": 8, "center": 5}
+                            alignment = pos_map.get(
+                                export_params.get("subtitle_position", "bottom"), 2
+                            )
+
+                            # Map color names to ASS AABBGGRR format
+                            color_map = {
+                                "white": "&H00FFFFFF",
+                                "yellow": "&H0000FFFF",
+                                "cyan": "&H00FFFF00",
+                                "green": "&H0000FF00",
+                                "red": "&H000000FF",
+                            }
+                            sub_color = export_params.get("subtitle_color", "white")
+                            primary_color = color_map.get(sub_color, "&H00FFFFFF")
+
+                            style_opts = {
+                                "font_name": export_params.get("subtitle_font", "Arial"),
+                                "font_size": export_params.get("subtitle_size", 24),
+                                "primary_color": primary_color,
+                                "outline_width": export_params.get("subtitle_outline", 2),
+                                "alignment": alignment,
+                            }
+
+                            tmp_ass = str(Path(output_path).parent / "subtitles.ass")
+                            sub_output = str(
+                                Path(output_path).parent
+                                / f"sub_{Path(output_path).name}"
+                            )
+
+                            await asyncio.to_thread(
+                                generate_ass_subtitles,
+                                lyrics_row.words,
+                                tmp_ass,
+                                style_opts,
+                            )
+                            await asyncio.to_thread(
+                                burn_subtitles, output_path, tmp_ass, sub_output
+                            )
+
+                            # Replace original with subtitled version
+                            import shutil
+                            shutil.move(sub_output, output_path)
+                            try:
+                                Path(tmp_ass).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                            logger.info("Subtitles burned into export")
+                        else:
+                            logger.warning(
+                                "Subtitles enabled but no word timestamps found"
+                            )
+
+                    # ── Post-assembly: audio normalization ────────────
+                    # For narration modes, normalization is handled inside
+                    # assemble_narration_video, so skip the post-assembly step.
+                    if (
+                        export_params.get("normalize_audio")
+                        and project_mode not in ("narration_images", "narration_video")
+                    ):
+                        _export_progress[pid_s]["step"] = "Normalizing audio..."
+                        _export_progress[pid_s]["percent"] = 98
+
+                        from backend.services.video.ffmpeg import (
+                            normalize_audio as ffmpeg_normalize_audio,
+                        )
+
+                        norm_output = str(
+                            Path(output_path).parent
+                            / f"norm_{Path(output_path).name}"
+                        )
+                        await asyncio.to_thread(
+                            ffmpeg_normalize_audio, output_path, norm_output
+                        )
+
+                        import shutil
+                        shutil.move(norm_output, output_path)
+                        logger.info("Audio normalization applied to export")
 
                     # Compute relative path for download URL
                     rel_path = f"{pid}/exports/{Path(output_path).name}"
@@ -538,6 +715,14 @@ async def export_project(
                 "final_crf": final_crf,
                 "transition_type": req.transition_type,
                 "transition_duration": req.transition_duration,
+                "color_match_clips": req.color_match_clips,
+                "subtitles_enabled": req.subtitles_enabled,
+                "subtitle_font": req.subtitle_font,
+                "subtitle_size": req.subtitle_size,
+                "subtitle_color": req.subtitle_color,
+                "subtitle_position": req.subtitle_position,
+                "subtitle_outline": req.subtitle_outline,
+                "normalize_audio": req.normalize_audio,
             })
         )
 
@@ -607,6 +792,9 @@ async def render_preview(
                         720,          # preview width
                         480,          # preview height
                         preview_fps,  # from project settings
+                        default_transition=transition_type,
+                        default_transition_duration=transition_dur,
+                        color_match_clips=color_match,
                     )
                 else:
                     await asyncio.to_thread(

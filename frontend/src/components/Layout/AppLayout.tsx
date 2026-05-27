@@ -14,6 +14,7 @@ import VideoPreview from '@/components/VideoPreview/VideoPreview';
 import ConceptPanel from '@/components/ConceptPanel/ConceptPanel';
 import VideoFlowPanel from '@/components/VideoFlowPanel/VideoFlowPanel';
 import AutoGenStatusBar from '@/components/BatchMode/AutoGenStatusBar';
+import BackingTrackTimeline from '@/components/BackingTrackTimeline/BackingTrackTimeline';
 
 const EMPTY_ARRAY: never[] = [];
 
@@ -118,6 +119,18 @@ export default function AppLayout() {
   });
 
   // Use stable references for arrays to avoid infinite re-render loops
+  // Fetch lyrics for subtitle preview (narration modes)
+  const isNarrationProject = project?.mode === 'narration_images' || project?.mode === 'narration_video';
+  const { data: lyricsData } = useQuery({
+    queryKey: ['lyrics', id],
+    queryFn: async () => {
+      const resp = await getLyrics(id!);
+      return resp.data;
+    },
+    enabled: !!id && isNarrationProject,
+  });
+  const subtitleWords = lyricsData?.words ?? [];
+
   const stableScenes = scenes ?? EMPTY_ARRAY;
   const stableSections = sections ?? EMPTY_ARRAY;
   const stableAssets = assets ?? EMPTY_ARRAY;
@@ -743,7 +756,12 @@ export default function AppLayout() {
           {/* Preview — visible only when editor is collapsed */}
           {editorCollapsed && (
             <div className="flex-1 min-h-0 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <VideoPreview assembledPreviewUrl={previewUrl} onExitPreview={() => setPreviewUrl(null)} />
+              <VideoPreview
+                assembledPreviewUrl={previewUrl}
+                onExitPreview={() => setPreviewUrl(null)}
+                words={isNarrationProject ? subtitleWords : undefined}
+                subtitlesEnabled={isNarrationProject}
+              />
             </div>
           )}
 
@@ -775,6 +793,12 @@ export default function AppLayout() {
         <div className="flex-1 overflow-hidden">
           <Timeline onSplitScene={handleSplitScene} onBoundaryDrag={handleBoundaryDrag} onDeleteScene={handleDeleteScene} />
         </div>
+        {project && project.mode !== 'music_video' && id && (
+          <BackingTrackTimeline
+            projectId={id}
+            totalDuration={stableScenes.length > 0 ? Math.max(...stableScenes.map((s: any) => s.end_time || 0)) : 0}
+          />
+        )}
       </div>
 
       {/* Export Modal */}
@@ -957,6 +981,15 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [transitionType, setTransitionType] = useState('crossfade');  // default from AppSettings
   const [transitionDuration, setTransitionDuration] = useState(0.5);
   const [colorCorrection, setColorCorrection] = useState(false);
+  // Narration-only settings
+  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
+  const [subtitleFont, setSubtitleFont] = useState('Arial');
+  const [subtitleSize, setSubtitleSize] = useState(24);
+  const [subtitleColor, setSubtitleColor] = useState('#FFFFFF');
+  const [subtitlePosition, setSubtitlePosition] = useState('bottom');
+  const [subtitleOutline, setSubtitleOutline] = useState(2);
+  const [normalizeAudio, setNormalizeAudio] = useState(false);
   const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed'>('config');
   const [progressPercent, setProgressPercent] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
@@ -978,6 +1011,15 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
         transition_type: transitionType,
         transition_duration: transitionDuration,
         color_match_clips: colorCorrection,
+        ...(isNarration ? {
+          subtitles_enabled: subtitlesEnabled,
+          subtitle_font: subtitleFont,
+          subtitle_size: subtitleSize,
+          subtitle_color: subtitleColor,
+          subtitle_position: subtitlePosition,
+          subtitle_outline: subtitleOutline,
+          normalize_audio: normalizeAudio,
+        } : {}),
       });
     },
     onSuccess: () => {
@@ -1136,6 +1178,105 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                   Color Correction (match colors between adjacent clips)
                 </label>
               </div>
+
+              {/* Narration-only: Subtitle & Normalize controls */}
+              {isNarration && (
+                <>
+                  <div className="border-t border-gray-700 pt-3 mt-2">
+                    <div className="flex items-center gap-3 mb-3">
+                      <input
+                        type="checkbox"
+                        id="subtitlesEnabled"
+                        checked={subtitlesEnabled}
+                        onChange={(e) => setSubtitlesEnabled(e.target.checked)}
+                        className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500"
+                      />
+                      <label htmlFor="subtitlesEnabled" className="text-sm font-medium">
+                        Burn-in Subtitles
+                      </label>
+                    </div>
+
+                    {subtitlesEnabled && (
+                      <div className="space-y-3 pl-7">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Font</label>
+                            <select
+                              value={subtitleFont}
+                              onChange={(e) => setSubtitleFont(e.target.value)}
+                              className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
+                            >
+                              <option value="Arial">Arial</option>
+                              <option value="Helvetica">Helvetica</option>
+                              <option value="Times New Roman">Times New Roman</option>
+                              <option value="Courier New">Courier New</option>
+                              <option value="Impact">Impact</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Size</label>
+                            <input
+                              type="number"
+                              value={subtitleSize}
+                              min={12}
+                              max={72}
+                              onChange={(e) => setSubtitleSize(parseInt(e.target.value) || 24)}
+                              className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Color</label>
+                            <input
+                              type="color"
+                              value={subtitleColor}
+                              onChange={(e) => setSubtitleColor(e.target.value)}
+                              className="w-full h-8 bg-gray-800 border border-gray-700 rounded cursor-pointer"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Position</label>
+                            <select
+                              value={subtitlePosition}
+                              onChange={(e) => setSubtitlePosition(e.target.value)}
+                              className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
+                            >
+                              <option value="bottom">Bottom</option>
+                              <option value="top">Top</option>
+                              <option value="center">Center</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Outline</label>
+                            <input
+                              type="number"
+                              value={subtitleOutline}
+                              min={0}
+                              max={8}
+                              onChange={(e) => setSubtitleOutline(parseInt(e.target.value) || 0)}
+                              className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="normalizeAudio"
+                      checked={normalizeAudio}
+                      onChange={(e) => setNormalizeAudio(e.target.checked)}
+                      className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500"
+                    />
+                    <label htmlFor="normalizeAudio" className="text-sm font-medium">
+                      Normalize Audio (loudness normalization)
+                    </label>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="flex gap-4">

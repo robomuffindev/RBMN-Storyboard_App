@@ -2,8 +2,9 @@
 FFmpeg Video Operations
 
 Provides video processing primitives: normalization, trimming, concatenation,
-audio mixing, and effects.  Automatically detects GPU hardware acceleration
-(NVIDIA NVENC / AMD AMF) and uses it for encoding when available.
+audio mixing, effects, subtitle burn-in, and audio normalization.
+Automatically detects GPU hardware acceleration (NVIDIA NVENC / AMD AMF)
+and uses it for encoding when available.
 """
 
 import json
@@ -11,7 +12,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -1811,4 +1812,359 @@ def trim_tail_frames(
 
     _run_ffmpeg(cmd, "trim_tail_frames")
     logger.info(f"Tail frames trimmed: {output_path} ({keep_frames} frames)")
+    return output_path
+
+
+# ── Subtitle & Audio Post-Processing ──────────────────────────────────
+
+
+def generate_ass_subtitles(
+    words: List[Dict[str, Any]],
+    output_path: str,
+    style_opts: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate an ASS (Advanced SubStation Alpha) subtitle file from word timestamps.
+
+    Groups words into subtitle lines of ~5-8 words, breaking on timing gaps
+    > 0.3s for natural phrasing.
+
+    Args:
+        words: List of ``{word, start, end}`` dicts (from Lyrics table).
+        output_path: Path to write the .ass file.
+        style_opts: Optional dict overriding default style values:
+            font_name, font_size, primary_color, outline_color,
+            outline_width, alignment, margin_v.
+
+    Returns:
+        The output_path.
+    """
+    opts = {
+        "font_name": "Arial",
+        "font_size": 24,
+        "primary_color": "&H00FFFFFF",   # white (ASS AABBGGRR)
+        "outline_color": "&H00000000",   # black
+        "outline_width": 2,
+        "alignment": 2,                  # bottom center
+        "margin_v": 30,
+    }
+    if style_opts:
+        opts.update(style_opts)
+
+    # ── Group words into subtitle lines ──────────────────────────────
+    lines: list[dict] = []  # [{text, start, end}, ...]
+    current_words: list[str] = []
+    line_start: float = 0.0
+    line_end: float = 0.0
+
+    for i, w in enumerate(words):
+        word_text = w.get("word", "").strip()
+        if not word_text:
+            continue
+
+        w_start = float(w.get("start", 0))
+        w_end = float(w.get("end", w_start + 0.1))
+
+        if not current_words:
+            line_start = w_start
+
+        # Check if we should break to a new line:
+        # - timing gap > 0.3s from previous word end, or
+        # - reached 8 words in current line
+        gap = w_start - line_end if current_words else 0
+        if current_words and (gap > 0.3 or len(current_words) >= 8):
+            lines.append({
+                "text": " ".join(current_words),
+                "start": line_start,
+                "end": line_end,
+            })
+            current_words = []
+            line_start = w_start
+
+        current_words.append(word_text)
+        line_end = w_end
+
+    # Flush remaining words
+    if current_words:
+        lines.append({
+            "text": " ".join(current_words),
+            "start": line_start,
+            "end": line_end,
+        })
+
+    # ── Format ASS timecodes ─────────────────────────────────────────
+    def _ass_time(seconds: float) -> str:
+        """Convert seconds to ASS timestamp ``H:MM:SS.cc``."""
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h}:{m:02d}:{s:05.2f}"
+
+    # ── Write ASS file ───────────────────────────────────────────────
+    ass_content = (
+        "[Script Info]\n"
+        "Title: RBMN Subtitles\n"
+        "ScriptType: v4.00+\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "YCbCr Matrix: None\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{opts['font_name']},{opts['font_size']},"
+        f"{opts['primary_color']},&H000000FF,"
+        f"{opts['outline_color']},&H00000000,"
+        f"0,0,0,0,100,100,0,0,1,{opts['outline_width']},0,"
+        f"{opts['alignment']},10,10,{opts['margin_v']},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    for line in lines:
+        start_tc = _ass_time(line["start"])
+        end_tc = _ass_time(line["end"])
+        text = line["text"].replace("\n", "\\N")
+        ass_content += f"Dialogue: 0,{start_tc},{end_tc},Default,,0,0,0,,{text}\n"
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text(ass_content, encoding="utf-8")
+    logger.info(f"Generated ASS subtitles: {output_path} ({len(lines)} lines)")
+    return output_path
+
+
+def burn_subtitles(video_path: str, ass_path: str, output_path: str) -> str:
+    """Burn ASS subtitles into a video using the ``ass`` video filter.
+
+    Args:
+        video_path: Input video path.
+        ass_path: Path to the .ass subtitle file.
+        output_path: Output video path with burned-in subtitles.
+
+    Returns:
+        The output_path.
+
+    Raises:
+        RuntimeError: If FFmpeg fails.
+    """
+    logger.info(f"Burning subtitles: {video_path} + {ass_path} → {output_path}")
+
+    # Escape special characters in ASS path for FFmpeg filter syntax
+    # (colons, backslashes, single quotes need escaping)
+    escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
+
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-vf", f"ass={escaped_ass}",
+        "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+        "-c:a", "copy",
+        "-y",
+        output_path,
+    ]
+
+    _run_ffmpeg(cmd, "burn_subtitles")
+    logger.info(f"Subtitles burned: {output_path}")
+    return output_path
+
+
+def normalize_audio(input_path: str, output_path: str, target_lufs: float = -16) -> str:
+    """Two-pass EBU R128 loudness normalization using FFmpeg loudnorm filter.
+
+    Pass 1 measures the input loudness; Pass 2 applies linear normalization
+    using the measured values for transparent, artefact-free gain adjustment.
+
+    Args:
+        input_path: Input audio/video path.
+        output_path: Output audio path (normalized).
+        target_lufs: Target integrated loudness in LUFS (default -16).
+
+    Returns:
+        The output_path.
+
+    Raises:
+        RuntimeError: If either pass fails.
+    """
+    logger.info(f"Normalizing audio (target {target_lufs} LUFS): {input_path}")
+
+    # ── Pass 1: Measure ──────────────────────────────────────────────
+    measure_cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
+        "-f", "null", "-",
+    ]
+
+    logger.debug(f"Loudnorm pass 1: {' '.join(measure_cmd)}")
+    try:
+        result = subprocess.run(
+            measure_cmd,
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Audio normalization pass 1 timed out (>10 min)")
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg not found. Install with: apt install ffmpeg")
+
+    # Parse the JSON block from stderr (loudnorm outputs to stderr)
+    stderr = result.stderr
+    json_match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', stderr, re.DOTALL)
+    if not json_match:
+        raise RuntimeError(
+            f"Failed to parse loudnorm measurement output. stderr tail: "
+            f"{stderr[-500:]}"
+        )
+
+    try:
+        measured = json.loads(json_match.group())
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid loudnorm JSON: {e}")
+
+    m_i = measured.get("input_i", "-24.0")
+    m_tp = measured.get("input_tp", "-2.0")
+    m_lra = measured.get("input_lra", "7.0")
+    m_thresh = measured.get("input_thresh", "-34.0")
+
+    logger.info(
+        f"Loudnorm measured: I={m_i}, TP={m_tp}, LRA={m_lra}, thresh={m_thresh}"
+    )
+
+    # ── Pass 2: Apply ────────────────────────────────────────────────
+    apply_filter = (
+        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:"
+        f"measured_I={m_i}:measured_TP={m_tp}:"
+        f"measured_LRA={m_lra}:measured_thresh={m_thresh}:"
+        f"linear=true"
+    )
+
+    apply_cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-af", apply_filter,
+        "-ar", "48000",
+        "-y",
+        output_path,
+    ]
+
+    _run_ffmpeg(apply_cmd, "loudnorm_apply")
+    logger.info(f"Audio normalized: {output_path}")
+    return output_path
+
+
+def mix_audio_tracks(
+    narration_path: str,
+    backing_tracks: List[Dict[str, Any]],
+    output_path: str,
+) -> str:
+    """Mix narration audio with backing tracks using FFmpeg complex filter.
+
+    Args:
+        narration_path: Path to the narration/main audio file.
+        backing_tracks: List of backing track dicts, each with:
+            - path (str): audio file path
+            - start_time (float): when to start playing in the timeline (seconds)
+            - end_time (float): when to stop playing (seconds)
+            - trim_start (float): trim from the start of the backing track file
+            - trim_end (float): trim from the end of the backing track file
+            - volume_db (float): volume adjustment in dB (negative = quieter)
+            - fade_in_sec (float): fade-in duration in seconds
+            - fade_out_sec (float): fade-out duration in seconds
+        output_path: Output mixed audio path.
+
+    Returns:
+        The output_path.
+
+    Raises:
+        RuntimeError: If FFmpeg fails.
+    """
+    if not backing_tracks:
+        logger.info("No backing tracks — copying narration as-is")
+        cmd = [
+            "ffmpeg",
+            "-i", narration_path,
+            "-c:a", "copy",
+            "-y",
+            output_path,
+        ]
+        _run_ffmpeg(cmd, "copy_narration")
+        return output_path
+
+    logger.info(
+        f"Mixing {len(backing_tracks)} backing track(s) with narration: "
+        f"{narration_path}"
+    )
+
+    # Build inputs: [0] = narration, [1..N] = backing tracks
+    inputs = ["-i", narration_path]
+    for bt in backing_tracks:
+        inputs.extend(["-i", bt["path"]])
+
+    # Build filter graph
+    filter_parts: list[str] = []
+    mix_inputs: list[str] = ["[0:a]"]  # narration is always input 0
+
+    for idx, bt in enumerate(backing_tracks, start=1):
+        label = f"bt{idx}"
+        trim_start = float(bt.get("trim_start", 0))
+        trim_end = float(bt.get("trim_end", 0))
+        start_time = float(bt.get("start_time", 0))
+        volume_db = float(bt.get("volume_db", 0))
+        fade_in = float(bt.get("fade_in_sec", 0))
+        fade_out = float(bt.get("fade_out_sec", 0))
+
+        # Build per-track filter chain
+        chain: list[str] = []
+
+        # Trim the backing track file
+        if trim_start > 0 or trim_end > 0:
+            atrim = f"atrim=start={trim_start}"
+            if trim_end > 0:
+                atrim += f":end={trim_end}"
+            chain.append(atrim)
+            chain.append("asetpts=PTS-STARTPTS")
+
+        # Volume adjustment
+        if volume_db != 0:
+            chain.append(f"volume={volume_db}dB")
+
+        # Fade in
+        if fade_in > 0:
+            chain.append(f"afade=t=in:d={fade_in}")
+
+        # Fade out
+        if fade_out > 0:
+            # Need the track duration to compute fade start
+            # Use a large value for st — FFmpeg clamps to actual duration
+            chain.append(f"afade=t=out:st=99999:d={fade_out}")
+
+        # Delay to position in timeline
+        if start_time > 0:
+            delay_ms = int(start_time * 1000)
+            chain.append(f"adelay={delay_ms}|{delay_ms}")
+
+        chain_str = ",".join(chain) if chain else "anull"
+        filter_parts.append(f"[{idx}:a]{chain_str}[{label}]")
+        mix_inputs.append(f"[{label}]")
+
+    # Combine all inputs with amix
+    n_inputs = len(mix_inputs)
+    mix_str = "".join(mix_inputs)
+    filter_parts.append(f"{mix_str}amix=inputs={n_inputs}:duration=longest[out]")
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        "ffmpeg",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[out]",
+        "-c:a", "aac", "-b:a", "192k",
+        "-y",
+        output_path,
+    ]
+
+    _run_ffmpeg(cmd, "mix_audio")
+    logger.info(f"Audio mixed: {output_path}")
     return output_path

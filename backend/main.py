@@ -218,6 +218,7 @@ from backend.api import (
     retrim_all_router,
     batch_router,
     batch_runs_router,
+    backing_tracks_router,
 )
 
 app.include_router(projects_router)
@@ -233,6 +234,7 @@ app.include_router(concept_router)
 app.include_router(retrim_all_router)
 app.include_router(batch_router)
 app.include_router(batch_runs_router)
+app.include_router(backing_tracks_router)
 app.include_router(files_router)
 
 # Log registered routes for debugging

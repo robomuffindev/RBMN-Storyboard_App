@@ -273,6 +273,26 @@ class Lyrics(SQLModel, table=True):
     project: Project = Relationship(back_populates="lyrics")
 
 
+class BackingTrack(SQLModel, table=True):
+    """Backing audio track for narration projects (background music, sound effects)."""
+
+    __tablename__ = "backing_tracks"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    project_id: UUID = Field(foreign_key="projects.id", index=True)
+    filename: str = Field(default="")
+    rel_path: str = Field(default="")  # relative path within project dir
+    order_index: int = Field(default=0)
+    start_time: float = Field(default=0.0)  # offset in project timeline (seconds)
+    end_time: float = Field(default=0.0)  # end position in timeline
+    trim_start: float = Field(default=0.0)  # trim start within the audio file
+    trim_end: float = Field(default=0.0)  # trim end within the audio file (0 = full length)
+    volume_db: float = Field(default=0.0)  # volume adjustment in dB
+    fade_in_sec: float = Field(default=0.0)
+    fade_out_sec: float = Field(default=0.0)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class AppSettings(SQLModel, table=True):
     """Application-wide settings (singleton)."""
 

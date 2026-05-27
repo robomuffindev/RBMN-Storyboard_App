@@ -17,6 +17,7 @@ from sqlmodel import select
 
 from backend.config import settings
 from backend.database import get_session
+from backend.services.audio.analysis import AudioAnalyzer
 from backend.database.models import (
     Project,
     Scene,
@@ -3380,3 +3381,89 @@ async def slice_audio_for_single_scene(
     except Exception as e:
         logger.error(f"Single scene audio slicing failed: {e}")
         raise HTTPException(status_code=500, detail=f"Audio slicing failed: {e}")
+
+
+@router.post(
+    "/upload-srt",
+    summary="Upload SRT file to set narration word timestamps",
+)
+async def upload_srt(
+    project_id: UUID,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Upload an SRT subtitle file and parse it into word-level timestamps.
+
+    The SRT is parsed using AudioAnalyzer._parse_srt_to_words() and the
+    resulting words are saved as the project's Lyrics record (upsert).
+
+    Args:
+        project_id: UUID of the project.
+        file: The .srt file to upload.
+        session: Database session.
+
+    Returns:
+        Dictionary with word_count and full_text.
+
+    Raises:
+        HTTPException: If project not found, file is not .srt, or parsing fails.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        # Validate file extension
+        if not file.filename or not file.filename.lower().endswith(".srt"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File must be an .srt subtitle file",
+            )
+
+        # Read file content
+        content = await file.read()
+        srt_text = content.decode("utf-8")
+
+        # Parse SRT into word-level timestamps
+        words = AudioAnalyzer._parse_srt_to_words(srt_text)
+        if not words:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No words could be parsed from the SRT file",
+            )
+
+        # Reconstruct full text from parsed words
+        full_text = " ".join(w["word"] for w in words)
+
+        # Upsert lyrics record
+        existing_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
+        existing_result = await session.execute(existing_stmt)
+        existing_lyrics = existing_result.scalars().first()
+
+        if existing_lyrics:
+            existing_lyrics.full_text = full_text
+            existing_lyrics.words = words
+        else:
+            lyrics_record = Lyrics(
+                project_id=project_id,
+                full_text=full_text,
+                words=words,
+            )
+            session.add(lyrics_record)
+
+        await session.commit()
+        logger.info(
+            f"SRT upload for project {project_id}: {len(words)} words, "
+            f"{len(full_text)} chars"
+        )
+
+        return {
+            "word_count": len(words),
+            "full_text": full_text,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading SRT for project {project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process SRT file: {str(e)}",
+        )

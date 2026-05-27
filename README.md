@@ -53,6 +53,13 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Mobile Responsive Layout** — Full mobile support lets you open the UI on your phone at `http://local-ip:8899` to monitor batch progress. Bottom navigation bar with panel/editor/queue tabs, collapsible sidebars, wrapping toolbars, and full-screen modals on small screens. Tablet breakpoint at 1024px
 - **Batch Mode** — Queue multiple audio files with per-item configuration (render type, video mode, two-pass, story flow, auto character generation) and process them as a batch pipeline. Each item gets its own project with full concept/lyrics/character generation
 - **Auto Gen Dashboard** — All Auto Gen runs are persisted and viewable on the `/batches` dashboard with status cards (running/completed/failed), progress bars, video/image thumbnails, and live-ticking elapsed timers. Click any card to see per-scene detail with live activity feed, step-by-step logs, worker IPs, asset previews, and error reports
+- **Narration Images Mode** — Create narration-driven still image slideshows with Ken Burns effects. UI auto-hides video-specific tabs, forcing an image-only workflow optimized for documentary and storytelling content
+- **Narration Videos Mode** — Full video pipeline for speech narrations with storytelling-focused LLM prompts. Same powerful generation as Music Video mode, tuned for documentary and narration pacing
+- **SRT Upload** — Import .srt subtitle files (e.g., from ElevenLabs cloud TTS) as an alternative to Whisper transcription, parsed into word-level timestamps
+- **Subtitle Burn-In** — Configurable ASS subtitle overlay (font, size, color, position, outline) burned into final export via FFmpeg for narration modes
+- **Subtitle Preview** — Live subtitle overlay synced to playback in the video preview panel
+- **Backing Track Timeline** — Add background music tracks below the main scene timeline with per-track volume sliders, drag-drop upload, and delete controls
+- **Audio Normalization** — Optional two-pass loudnorm normalization (target -16 LUFS) during export for consistent audio levels across narration and backing tracks
 - **Settings Import/Export** — Export all app settings to JSON and import on another machine for easy configuration sharing
 - **Project Directory** — Configure where project data is stored via Settings, with the option to move existing data to a new location
 - **Edit Project Name** — Rename projects via the toolbar menu (display name only — files and directories unchanged)
@@ -297,7 +304,7 @@ See `.env.example` for the full list. Key variables:
 
 ## Version
 
-Current version: **1.3.2** — See [CHANGELOG.md](CHANGELOG.md) for release history.
+Current version: **1.4.0** — See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Support
 

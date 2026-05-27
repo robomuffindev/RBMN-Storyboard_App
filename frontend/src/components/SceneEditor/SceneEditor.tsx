@@ -2057,7 +2057,18 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       {/* Tabs + Scene Source toggle + Collapse toggle */}
       <div className="flex items-center gap-2 p-3 border-b border-gray-800 bg-gray-950">
         <div className="flex gap-2 flex-1 overflow-x-auto">
-          {(['image', 'video', 'movement', 'transitions', 'stems', 'lyrics', 'tools', 'prompt'] as Tab[]).map((tab) => {
+          {(['image', 'video', 'movement', 'transitions', 'stems', 'lyrics', 'tools', 'prompt'] as Tab[]).filter((tab) => {
+            const mode = currentProject?.mode;
+            if (mode === 'narration_images') {
+              // Hide video, transitions, stems tabs
+              return !['video', 'transitions', 'stems'].includes(tab);
+            }
+            if (mode === 'narration_video') {
+              // Hide stems tab (no stem separation for narration)
+              return tab !== 'stems';
+            }
+            return true; // music_video: show all
+          }).map((tab) => {
             const isDisabled = false;
             const tabLabels: Record<Tab, string> = {
               image: 'Image',
@@ -2091,8 +2102,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
             );
           })}
         </div>
-        {/* Scene Source toggle */}
-        {activeScene && (
+        {/* Scene Source toggle — hidden for narration_images (always image) */}
+        {activeScene && currentProject?.mode !== 'narration_images' && (
           <div className="flex items-center gap-2 flex-shrink-0 ml-1 pl-3 border-l border-gray-700">
             <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Source:</span>
             <div className="flex gap-0.5 p-0.5 bg-gray-800 rounded">
@@ -2923,8 +2934,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <span className="text-xs text-gray-500 ml-auto">(better for lip-sync testing)</span>
               </label>
 
-              {/* Lipsync Toggle */}
-              <div className="space-y-1">
+              {/* Lipsync Toggle — hidden for narration_images */}
+              {currentProject?.mode !== 'narration_images' && <div className="space-y-1">
                 <label className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer text-sm text-gray-300 transition-colors">
                   <input
                     type="checkbox"
@@ -2947,7 +2958,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                     <span className="text-[10px] text-gray-600 ml-auto">(isolate voice for cleaner sync)</span>
                   </label>
                 )}
-              </div>
+              </div>}
 
               <div>
                 <div className="flex items-center gap-2 mb-1">

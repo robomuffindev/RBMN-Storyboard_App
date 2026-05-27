@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, Music, Loader, CheckCircle, AlertCircle, Play, Pause, Mic, Drum, Guitar, Waves, FileText, Sparkles, Scissors, MessageSquare } from 'lucide-react';
-import { analyzeAudio, uploadAsset, getSections, getLyrics, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes } from '@/api/client';
+import { analyzeAudio, uploadAsset, getSections, getLyrics, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt } from '@/api/client';
 import { useAppStore } from '@/store';
 
 interface AudioSetupProps {
@@ -82,6 +82,7 @@ function cleanLyricsForWhisper(text: string): string {
 
 export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const srtInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const queryClient = useQueryClient();
   const { assets, scenes } = useAppStore();
@@ -92,6 +93,7 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
   const [initialText, setInitialText] = useState('');
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [isResplitting, setIsResplitting] = useState(false);
+  const [isUploadingSrt, setIsUploadingSrt] = useState(false);
 
   // Determine label based on project mode
   const isNarration = projectMode === 'narration_images' || projectMode === 'narration_video';
@@ -433,6 +435,41 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
             {isResplitting ? <Loader size={14} className="animate-spin" /> : <Scissors size={14} />}
             {isResplitting ? 'Re-Splitting...' : 'Re-Split Scene Audio'}
           </button>
+        )}
+
+        {/* Upload SRT — narration modes only */}
+        {isNarration && (
+          <>
+            <button
+              onClick={() => srtInputRef.current?.click()}
+              disabled={isUploadingSrt}
+              className="w-full py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 bg-indigo-700 hover:bg-indigo-600 text-white disabled:opacity-50"
+            >
+              {isUploadingSrt ? <Loader size={14} className="animate-spin" /> : <MessageSquare size={14} />}
+              {isUploadingSrt ? 'Uploading SRT...' : 'Upload SRT Subtitles'}
+            </button>
+            <input
+              ref={srtInputRef}
+              type="file"
+              accept=".srt"
+              onChange={async (e) => {
+                const file = e.currentTarget.files?.[0];
+                if (!file) return;
+                setIsUploadingSrt(true);
+                try {
+                  await uploadSrt(projectId, file);
+                  queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
+                } catch (err: any) {
+                  const detail = err?.response?.data?.detail || 'Failed to upload SRT';
+                  alert(`Error: ${detail}`);
+                } finally {
+                  setIsUploadingSrt(false);
+                  if (srtInputRef.current) srtInputRef.current.value = '';
+                }
+              }}
+              className="hidden"
+            />
+          </>
         )}
 
         {/* Re-run Whisper button */}

@@ -2,10 +2,13 @@ import { useRef, useState, useMemo, useEffect, useCallback } from 'react';
 import { Image, Film, X, MonitorPlay } from 'lucide-react';
 import { useAppStore } from '@/store';
 import { handleImgError } from '@/utils/brokenImage';
+import type { WordTimestamp } from '@/types';
 
 interface VideoPreviewProps {
   assembledPreviewUrl?: string | null;
   onExitPreview?: () => void;
+  words?: WordTimestamp[];
+  subtitlesEnabled?: boolean;
 }
 
 /**
@@ -20,7 +23,7 @@ interface VideoPreviewProps {
  * This is the same approach used by CapCut, DaVinci web, and most
  * browser-based video editors.
  */
-export default function VideoPreview({ assembledPreviewUrl, onExitPreview }: VideoPreviewProps = {}) {
+export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words, subtitlesEnabled }: VideoPreviewProps = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoARef = useRef<HTMLVideoElement>(null);
   const videoBRef = useRef<HTMLVideoElement>(null);
@@ -464,7 +467,69 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview }: Vid
             <p className="text-xs text-gray-500 mt-2">Generate an image and save it as preview</p>
           </div>
         )}
+
+        {/* ── Subtitle overlay (z-index 4) ── */}
+        {subtitlesEnabled && words && words.length > 0 && (
+          <SubtitleOverlay words={words} playbackPosition={playbackPosition} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Groups words into subtitle lines (~6 words or gap > 0.3s)
+ * and shows the current line at the bottom of the preview.
+ */
+function SubtitleOverlay({ words, playbackPosition }: { words: WordTimestamp[]; playbackPosition: number }) {
+  const lines = useMemo(() => {
+    const result: { text: string; start: number; end: number }[] = [];
+    let currentWords: WordTimestamp[] = [];
+
+    const flushLine = () => {
+      if (currentWords.length === 0) return;
+      result.push({
+        text: currentWords.map(w => w.word).join(' '),
+        start: currentWords[0].start,
+        end: currentWords[currentWords.length - 1].end,
+      });
+      currentWords = [];
+    };
+
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      if (currentWords.length > 0) {
+        const gap = w.start - currentWords[currentWords.length - 1].end;
+        if (gap > 0.3 || currentWords.length >= 6) {
+          flushLine();
+        }
+      }
+      currentWords.push(w);
+    }
+    flushLine();
+    return result;
+  }, [words]);
+
+  const currentLine = useMemo(() => {
+    return lines.find(l => l.start <= playbackPosition && l.end >= playbackPosition) || null;
+  }, [lines, playbackPosition]);
+
+  if (!currentLine) return null;
+
+  return (
+    <div
+      className="absolute bottom-8 left-1/2 -translate-x-1/2 max-w-[80%] text-center pointer-events-none"
+      style={{ zIndex: 4 }}
+    >
+      <span
+        className="inline-block px-3 py-1.5 rounded text-white font-medium text-sm"
+        style={{
+          backgroundColor: 'rgba(0,0,0,0.75)',
+          textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+        }}
+      >
+        {currentLine.text}
+      </span>
     </div>
   );
 }

@@ -12,6 +12,7 @@ from backend.api.workflows import router as workflows_router
 from backend.api.concept import router as concept_router
 from backend.api.batch import router as batch_router
 from backend.api.batch_runs import router as batch_runs_router
+from backend.api.backing_tracks import router as backing_tracks_router
 
 __all__ = [
     "projects_router",
@@ -27,4 +28,5 @@ __all__ = [
     "retrim_all_router",
     "batch_router",
     "batch_runs_router",
+    "backing_tracks_router",
 ]
