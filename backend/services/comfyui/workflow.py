@@ -68,7 +68,7 @@ def _update_power_lora_distilled(workflow: dict, distilled_lora_name: str) -> No
         if not isinstance(node, dict):
             continue
         class_type = node.get("class_type", "")
-        if "PowerLoraLoader" in class_type:
+        if "Power Lora Loader" in class_type or "PowerLoraLoader" in class_type:
             inputs = node.get("inputs", {})
             lora_1 = inputs.get("lora_1")
             if isinstance(lora_1, dict) and "lora" in lora_1:
