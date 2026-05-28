@@ -116,17 +116,19 @@ CRITICAL FORMATTING RULES:
 - Output MUST be a SINGLE PARAGRAPH with NO line breaks, NO bullet points, NO numbered lists.
 - Write as one continuous, flowing block of descriptive prose — like a novelist describing a scene, not a search engine.
 - Front-load the most important elements — Klein pays more attention to what comes first.
-- Lead with the primary subject, then build outward: subject → action/pose → environment → lighting → mood → camera/composition.
+- Front-load the most important visual element — but VARY what that element is. Sometimes lead with the environment, sometimes with action, sometimes with lighting or mood. Do NOT always start the same way.
 
 REFERENCE IMAGE HANDLING (FLUX Klein specific):
 - Klein understands natural language references to input images. Use direct, descriptive references.
-- With 1 reference image: refer to its content directly — "the product in the image", "the person shown", "the subject" — Klein knows what's in the loaded reference.
-- With 2+ reference images: use ordinal language — "the subject from the first image", "the person in the second image", "the environment from the third image".
-- Example with 1 reference: "The subject in the image stands at the edge of a weathered cliff, wind catching the collar of their dark coat, gazing out across a stormy sea under bruised violet clouds..."
-- Example with 2 references: "The subject from the first image sits across from the person in the second image at a dimly lit table, candlelight casting warm shadows across their faces..."
+- With 1 reference image: refer to its content directly — "the person shown in the image", "the figure from the image", "the character in the image" — Klein knows what's in the loaded reference.
+- With 2+ reference images: use ordinal language — "the figure from the first image", "the person in the second image", "the environment from the third image".
+- Example with 1 reference: "Bathed in golden hour light, the figure from the image leans against a weathered stone wall, one hand tracing the crumbling mortar, eyes cast downward with quiet contemplation as autumn leaves drift across rain-slicked cobblestones..."
+- Example with 2 references: "Under the dim glow of paper lanterns, the person from the first image reaches across a cluttered wooden table toward the figure in the second image, their expressions caught between laughter and disbelief, warm amber light pooling in the wrinkles of their matching leather jackets..."
+- CRITICAL: VARY YOUR OPENING every time. Never start multiple prompts with the same phrase. Alternate between leading with setting, action, lighting, mood, or composition. Avoid repetitive openers like "The subject" or "A figure".
 - Describe what each referenced subject is DOING — their pose, action, expression, and interaction with the scene.
 - Include enough visual detail about each referenced subject (clothing, features, body language) to reinforce the reference match.
 - NEVER use code-style tags like "@image1" or "img_ref_1" — always use natural descriptive language.
+- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
 
 PROMPTING BEST PRACTICES:
 - LIGHTING is the single most impactful element — always describe it in detail: direction, color temperature, quality (soft/hard), source.
@@ -173,9 +175,10 @@ CONTINUITY RULES (MOST IMPORTANT):
 - If the context includes a camera action (e.g., "dolly in", "pan right"), describe where the camera ENDS UP, not the movement.
 
 REFERENCE IMAGE HANDLING (FLUX Klein specific):
-- Klein understands natural language references. Use "the subject in the image", "the person from the second image" — direct, descriptive language.
+- Klein understands natural language references. Use "the figure in the image", "the person from the second image", "the character shown in the image" — direct, descriptive language. VARY the reference phrasing; do not always use the same term.
 - The first reference slot in Last Frame mode is the First Frame image itself. Describe the same scene from the first reference image but at its endpoint.
 - Keep all character descriptions identical to how they appear in the First Frame.
+- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
 
 PROMPTING BEST PRACTICES:
 - Be specific about the END POSITION of subjects: "now standing at the right edge of the frame", "having turned to face the camera", "now seen in close-up".
@@ -302,17 +305,19 @@ CRITICAL CONTEXT — TWO-PASS COMPOSITING:
 
 REFERENCE IMAGE HANDLING:
 - Reference Image 1 = the base scene. Describe the environment from this image as the backdrop.
-- Reference Image 2+ = character reference photos. Use Klein's compositional language.
-- For 1 character: "The subject from the second image [action/pose] within the scene from the first image, [describe their position, clothing, expression]"
-- For 2 characters: "The subject from the second image and the person from the third image [interaction] in the scene from the first image"
+- Reference Image 2+ = character reference photos. Use Klein's natural language references.
+- For 1 character: "Amid the rain-soaked alley from the first image, the figure from the second image crouches beside a flickering neon sign, collar turned up against the downpour..."
+- For 2 characters: "Warm lamplight from the first image spills across the table where the person from the second image slides a folded note toward the figure in the third image, both leaning in with conspiratorial grins..."
+- CRITICAL: VARY YOUR OPENING every time. Do NOT always start with "The subject" or "In the scene". Alternate between leading with atmosphere, action, lighting, or environment.
 
 PROMPTING RULES:
-- Start by anchoring to the scene: "In the scene from the first image, ..."
+- Anchor to the base scene naturally — but vary HOW you anchor. Sometimes describe the environment first, sometimes the character's action, sometimes the lighting.
 - Describe what each character is DOING — their pose, action, expression, and where they are positioned
 - Maintain the lighting, atmosphere, and composition from the base scene
 - Front-load the most important elements
 - Keep 40-150 words as a single paragraph
 - NEVER include text, subtitles, captions, or watermarks
+- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
 
 IMPORTANT: Output ONLY the prompt text as a SINGLE PARAGRAPH. No labels, no prefixes, no explanations."""
 
@@ -322,16 +327,17 @@ Your job is to produce a single flowing paragraph that the model can render into
 CRITICAL FORMATTING RULES:
 - Output MUST be a SINGLE PARAGRAPH with NO line breaks, NO bullet points, NO numbered lists.
 - Write as one continuous, flowing block of descriptive prose — like a novelist describing a scene, not a search engine.
-- Front-load the most important elements — Klein pays more attention to what comes first.
-- Lead with the primary subject, then build outward: subject → action/pose → environment → lighting → mood → camera/composition.
+- Front-load the most important visual element — but VARY what that element is. Sometimes lead with the environment, sometimes with action, sometimes with lighting or mood. Do NOT always start the same way.
 
 REFERENCE IMAGE HANDLING (FLUX Klein specific):
 - Klein understands natural language references to input images. Use direct, descriptive references.
-- With 1 reference image: refer to its content directly — "the product in the image", "the person shown", "the subject" — Klein knows what's in the loaded reference.
-- With 2+ reference images: use ordinal language — "the subject from the first image", "the person in the second image", "the environment from the third image".
+- With 1 reference image: refer to its content directly — "the person shown in the image", "the figure from the image", "the character in the image" — Klein knows what's in the loaded reference.
+- With 2+ reference images: use ordinal language — "the figure from the first image", "the person in the second image", "the environment from the third image".
+- CRITICAL: VARY YOUR OPENING every time. Never start multiple prompts with the same phrase. Alternate between leading with setting, action, lighting, mood, or composition.
 - Describe what each referenced subject is DOING — their pose, action, expression, and interaction with the scene.
 - Include enough visual detail about each referenced subject (clothing, features, body language) to reinforce the reference match.
 - NEVER use code-style tags like "@image1" or "img_ref_1" — always use natural descriptive language.
+- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
 
 PROMPTING BEST PRACTICES:
 - LIGHTING is the single most impactful element — always describe it in detail: direction, color temperature, quality (soft/hard), source.

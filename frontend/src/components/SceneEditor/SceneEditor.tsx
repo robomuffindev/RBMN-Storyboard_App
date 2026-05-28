@@ -898,8 +898,19 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetIgnorePrevSceneRef = async (checked: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, ignore_prev_scene_ref: checked };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    try {
+      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+      // Sync React Query cache so refetch-on-focus doesn't overwrite the toggle
+      queryClient.setQueryData(['scenes', currentProject.id], (old: any) => {
+        if (!Array.isArray(old)) return old;
+        return old.map((s: any) =>
+          s.id === activeScene.id ? { ...s, parameters: newParams } : s
+        );
+      });
+    } catch (err) {
+      console.error('Failed to save ignore_prev_scene_ref:', err);
+    }
   };
 
   // Two-pass generation — persisted in scene.parameters.two_pass_enabled

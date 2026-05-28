@@ -2501,10 +2501,12 @@ async def _run_windowed_batch(
             ref_ids = char_asset_ids + extra_ref_ids  # Characters first = Image 1, Image 2
             wf_type = _auto_workflow_type(len(ref_ids))
 
-            # Reset flags — auto-gen starts fresh, user can set these manually later
+            # Reset flags — auto-gen starts fresh, but preserve user's manual
+            # ignore_prev_scene_ref setting (they set it for a reason)
             scene_params = dict(scene.parameters or {})
-            if mode != "missing_images_independent":
-                scene_params["ignore_prev_scene_ref"] = False
+            if mode == "missing_images_independent":
+                scene_params["ignore_prev_scene_ref"] = True
+            # else: preserve existing ignore_prev_scene_ref value
             scene_params["use_prev_scene_last_frame"] = False
             # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
             scene_params["use_story_flow"] = use_story_flow
@@ -3155,9 +3157,10 @@ async def _run_sequential_auto_gen(
                 ref_ids = seq_char_aids + extra_ids
                 wf_type = _auto_workflow_type(len(ref_ids))
 
-                # Reset flags for auto-gen — start fresh
+                # Reset flags for auto-gen — preserve user's manual
+                # ignore_prev_scene_ref setting (they set it for a reason)
                 scene_params = dict(scene.parameters or {})
-                scene_params["ignore_prev_scene_ref"] = False
+                # Preserve existing ignore_prev_scene_ref value
                 scene_params["use_prev_scene_last_frame"] = False
                 # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
                 scene_params["use_story_flow"] = use_story_flow

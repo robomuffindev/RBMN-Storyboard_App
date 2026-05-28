@@ -1078,9 +1078,13 @@ class JobDispatcher:
         except Exception as e:
             logger.debug(f"Could not inject image direction: {e}")
 
-        # Z-Image redirect: when single_image_generator is z_image_turbo and workflow is klein_t2i,
-        # use Z-Image Turbo instead of Klein for text-to-image (no reference images)
-        if workflow_type == "klein_t2i":
+        # ── Z-Image Turbo redirect helper ──────────────────────────────────
+        # Checks single_image_generator setting and redirects T2I jobs to
+        # Z-Image Turbo when applicable. Returns the prepared workflow or None.
+        async def _try_zimage_redirect(
+            _params: dict, _seed: int, _job_id: str | None
+        ):
+            """Attempt Z-Image Turbo redirect for text-to-image (no refs)."""
             try:
                 async with self._session_factory() as zig_session:
                     from backend.database.models import AppSettings as ZigAppSettings
@@ -1088,23 +1092,48 @@ class JobDispatcher:
                     zig_result = await zig_session.execute(zig_stmt)
                     zig_settings = zig_result.scalars().first()
                     if zig_settings and zig_settings.single_image_generator == "z_image_turbo":
-                        workflow_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
-                        prompt_text = params.get("prompt", "")
-                        scene_neg = params.get("negative_prompt", "").strip() if params.get("negative_prompt") else ""
-                        effective_neg = scene_neg if scene_neg else global_negative_prompt
-                        params["effective_negative_prompt"] = effective_neg
-                        params["submitted_image_prompt"] = prompt_text
-                        logger.info(f"[{job.id if job else 'N/A'}] Redirecting klein_t2i to Z-Image Turbo")
+                        wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
+                        p_text = _params.get("prompt", "")
+                        s_neg = _params.get("negative_prompt", "").strip() if _params.get("negative_prompt") else ""
+                        eff_neg = s_neg if s_neg else global_negative_prompt
+                        _params["effective_negative_prompt"] = eff_neg
+                        _params["submitted_image_prompt"] = p_text
+                        logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo (no reference images)")
                         return prepare_zimage_workflow(
-                            workflow_path=workflow_path,
-                            prompt=prompt_text,
-                            width=params.get("width", 1024),
-                            height=params.get("height", 1024),
-                            seed=seed,
-                            negative_prompt=effective_neg,
+                            workflow_path=wf_path,
+                            prompt=p_text,
+                            width=_params.get("width", 1024),
+                            height=_params.get("height", 1024),
+                            seed=_seed,
+                            negative_prompt=eff_neg,
                         )
             except Exception as e:
                 logger.debug(f"Could not check single_image_generator: {e} — using Klein")
+            return None
+
+        # Z-Image redirect: when single_image_generator is z_image_turbo and workflow is klein_t2i,
+        # use Z-Image Turbo instead of Klein for text-to-image (no reference images)
+        if workflow_type == "klein_t2i":
+            zimage_result = await _try_zimage_redirect(params, seed, job.id if job else None)
+            if zimage_result is not None:
+                return zimage_result
+
+        # Log when Z-Image is the user's preference but refs force Klein
+        if workflow_type in ("klein_1ref", "klein_2ref", "klein_3ref", "klein_4ref"):
+            try:
+                async with self._session_factory() as zig_session2:
+                    from backend.database.models import AppSettings as ZigAppSettings2
+                    zig_stmt2 = sfw_select(ZigAppSettings2).where(ZigAppSettings2.id == 1)
+                    zig_result2 = await zig_session2.execute(zig_stmt2)
+                    zig_settings2 = zig_result2.scalars().first()
+                    if zig_settings2 and zig_settings2.single_image_generator == "z_image_turbo":
+                        logger.info(
+                            f"[{job.id if job else 'N/A'}] Z-Image Turbo is preferred but "
+                            f"{workflow_type} has character references — using Klein "
+                            f"(Z-Image Turbo does not support reference images)"
+                        )
+            except Exception:
+                pass
 
         # Klein image workflows
         klein_map = {
@@ -1130,6 +1159,14 @@ class JobDispatcher:
                     f"Workflow mismatch: requested {workflow_type} but only resolved "
                     f"{actual_ref_count} ref images — falling back to {effective_workflow}"
                 )
+                # If all refs failed to resolve and we fell back to T2I,
+                # re-check Z-Image Turbo redirect since we no longer need refs
+                if effective_workflow == "klein_t2i":
+                    zimage_fallback = await _try_zimage_redirect(
+                        params, seed, job.id if job else None
+                    )
+                    if zimage_fallback is not None:
+                        return zimage_fallback
             workflow_path = str(workflows_dir / klein_map[effective_workflow])
             prompt_text = params.get("prompt", "")
             # Build effective negative prompt: scene-level overrides global, otherwise use global
