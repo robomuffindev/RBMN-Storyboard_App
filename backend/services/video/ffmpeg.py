@@ -1846,6 +1846,7 @@ def generate_ass_subtitles(
         "outline_width": 2,
         "alignment": 2,                  # bottom center
         "margin_v": 30,
+        "bold": False,
     }
     if style_opts:
         opts.update(style_opts)
@@ -1916,7 +1917,7 @@ def generate_ass_subtitles(
         f"Style: Default,{opts['font_name']},{opts['font_size']},"
         f"{opts['primary_color']},&H000000FF,"
         f"{opts['outline_color']},&H00000000,"
-        f"0,0,0,0,100,100,0,0,1,{opts['outline_width']},0,"
+        f"{-1 if opts['bold'] else 0},0,0,0,100,100,0,0,1,{opts['outline_width']},0,"
         f"{opts['alignment']},10,10,{opts['margin_v']},1\n"
         "\n"
         "[Events]\n"
@@ -2057,6 +2058,14 @@ def mix_audio_tracks(
     narration_path: str,
     backing_tracks: List[Dict[str, Any]],
     output_path: str,
+    *,
+    loop_backing: bool = False,
+    total_duration: float = 0.0,
+    narration_volume: float = 1.0,
+    backing_volume: float = 1.0,
+    main_fade_in: float = 0.0,
+    main_fade_out: float = 0.0,
+    normalize_backing: bool = False,
 ) -> str:
     """Mix narration audio with backing tracks using FFmpeg complex filter.
 
@@ -2072,6 +2081,17 @@ def mix_audio_tracks(
             - fade_in_sec (float): fade-in duration in seconds
             - fade_out_sec (float): fade-out duration in seconds
         output_path: Output mixed audio path.
+        loop_backing: If True, loop the entire backing track sequence until
+            total_duration is reached.
+        total_duration: Total timeline duration in seconds (used for looping).
+        narration_volume: Master narration volume multiplier (0.0–1.0).
+        backing_volume: Master backing track volume multiplier (0.0–1.0).
+        main_fade_in: Fade-in duration (seconds) applied to the very first
+            backing track instance in the mix.
+        main_fade_out: Fade-out duration (seconds) applied to the very last
+            backing track instance in the mix.
+        normalize_backing: If True, apply loudnorm to each backing track for
+            consistent loudness across tracks.
 
     Returns:
         The output_path.
@@ -2093,20 +2113,69 @@ def mix_audio_tracks(
 
     logger.info(
         f"Mixing {len(backing_tracks)} backing track(s) with narration: "
-        f"{narration_path}"
+        f"{narration_path} | loop={loop_backing}, narr_vol={narration_volume}, "
+        f"back_vol={backing_volume}, main_fade_in={main_fade_in}, "
+        f"main_fade_out={main_fade_out}, normalize={normalize_backing}"
     )
 
-    # Build inputs: [0] = narration, [1..N] = backing tracks
+    # ── If looping, expand the backing track list to fill total_duration ──
+    effective_tracks = list(backing_tracks)
+    if loop_backing and total_duration > 0 and effective_tracks:
+        # Compute total duration of one pass of the backing sequence
+        seq_end = max(
+            float(bt.get("end_time", 0)) for bt in effective_tracks
+        )
+        if seq_end > 0 and seq_end < total_duration:
+            iterations = int(total_duration / seq_end) + 1
+            logger.info(
+                f"Loop backing: sequence duration={seq_end:.2f}s, "
+                f"total={total_duration:.2f}s → {iterations} iterations"
+            )
+            looped: list[Dict[str, Any]] = []
+            for loop_i in range(iterations):
+                offset = loop_i * seq_end
+                for bt in backing_tracks:
+                    shifted = dict(bt)
+                    shifted["start_time"] = float(bt.get("start_time", 0)) + offset
+                    shifted["end_time"] = float(bt.get("end_time", 0)) + offset
+                    # Skip tracks that start beyond total duration
+                    if shifted["start_time"] >= total_duration:
+                        continue
+                    # Clamp end_time to total_duration
+                    if shifted["end_time"] > total_duration:
+                        shifted["end_time"] = total_duration
+                    looped.append(shifted)
+            effective_tracks = looped
+            logger.info(f"Expanded to {len(effective_tracks)} track instances after loop")
+
+    # Build inputs: [0] = narration, [1..N] = backing tracks (deduplicated paths)
+    # Multiple loop iterations reuse the same input files, so we deduplicate
+    unique_paths: list[str] = []
+    path_to_input_idx: Dict[str, int] = {}
+    for bt in effective_tracks:
+        p = bt["path"]
+        if p not in path_to_input_idx:
+            path_to_input_idx[p] = len(unique_paths) + 1  # +1 because [0] is narration
+            unique_paths.append(p)
+
     inputs = ["-i", narration_path]
-    for bt in backing_tracks:
-        inputs.extend(["-i", bt["path"]])
+    for p in unique_paths:
+        inputs.extend(["-i", p])
 
     # Build filter graph
     filter_parts: list[str] = []
-    mix_inputs: list[str] = ["[0:a]"]  # narration is always input 0
 
-    for idx, bt in enumerate(backing_tracks, start=1):
+    # Narration master volume
+    if narration_volume < 1.0:
+        filter_parts.append(f"[0:a]volume={narration_volume:.4f}[narr]")
+        mix_inputs: list[str] = ["[narr]"]
+    else:
+        mix_inputs = ["[0:a]"]
+
+    total_bt_count = len(effective_tracks)
+    for idx, bt in enumerate(effective_tracks):
         label = f"bt{idx}"
+        input_idx = path_to_input_idx[bt["path"]]
         trim_start = float(bt.get("trim_start", 0))
         trim_end = float(bt.get("trim_end", 0))
         start_time = float(bt.get("start_time", 0))
@@ -2125,27 +2194,51 @@ def mix_audio_tracks(
             chain.append(atrim)
             chain.append("asetpts=PTS-STARTPTS")
 
-        # Volume adjustment
+        # Per-track volume adjustment (dB from inline slider)
         if volume_db != 0:
             chain.append(f"volume={volume_db}dB")
 
-        # Fade in
+        # Master backing volume multiplier
+        if backing_volume < 1.0:
+            chain.append(f"volume={backing_volume:.4f}")
+
+        # Normalize backing track loudness (EBU R128)
+        if normalize_backing:
+            chain.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+
+        # Per-track fade in
         if fade_in > 0:
             chain.append(f"afade=t=in:d={fade_in}")
 
-        # Fade out
+        # Per-track fade out — compute proper start time from track duration
         if fade_out > 0:
-            # Need the track duration to compute fade start
-            # Use a large value for st — FFmpeg clamps to actual duration
-            chain.append(f"afade=t=out:st=99999:d={fade_out}")
+            track_dur = float(bt.get("end_time", 0)) - float(bt.get("start_time", 0))
+            if track_dur > fade_out:
+                fade_out_start = track_dur - fade_out
+                chain.append(f"afade=t=out:st={fade_out_start:.4f}:d={fade_out}")
+            else:
+                chain.append(f"afade=t=out:st=0:d={fade_out}")
+
+        # Main fade in — applied to the very first backing track only
+        if main_fade_in > 0 and idx == 0:
+            chain.append(f"afade=t=in:d={main_fade_in}")
+
+        # Main fade out — applied to the very last backing track only
+        if main_fade_out > 0 and idx == total_bt_count - 1:
+            track_dur = float(bt.get("end_time", 0)) - float(bt.get("start_time", 0))
+            if track_dur > main_fade_out:
+                fade_out_start = track_dur - main_fade_out
+                chain.append(f"afade=t=out:st={fade_out_start:.4f}:d={main_fade_out}")
+            else:
+                chain.append(f"afade=t=out:st=0:d={main_fade_out}")
 
         # Delay to position in timeline
         if start_time > 0:
-            delay_ms = int(start_time * 1000)
+            delay_ms = int(round(start_time * 1000))
             chain.append(f"adelay={delay_ms}|{delay_ms}")
 
         chain_str = ",".join(chain) if chain else "anull"
-        filter_parts.append(f"[{idx}:a]{chain_str}[{label}]")
+        filter_parts.append(f"[{input_idx}:a]{chain_str}[{label}]")
         mix_inputs.append(f"[{label}]")
 
     # Combine all inputs with amix

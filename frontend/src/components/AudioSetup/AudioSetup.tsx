@@ -1,7 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, Music, Loader, CheckCircle, AlertCircle, Play, Pause, Mic, Drum, Guitar, Waves, FileText, Sparkles, Scissors, MessageSquare } from 'lucide-react';
-import { analyzeAudio, uploadAsset, getSections, getLyrics, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt } from '@/api/client';
+import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt } from '@/api/client';
 import { useAppStore } from '@/store';
 
 interface AudioSetupProps {
@@ -129,6 +129,54 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
       setInitialText(lyricsData.initial_text);
     }
   }, [lyricsData?.initial_text]);
+
+  // Debounced auto-save for script/lyrics text (1.5s after last change)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedRef = useRef<string>('');
+  const pendingTextRef = useRef<string>('');
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+
+  // Track what was loaded from server so we don't save on initial populate
+  useEffect(() => {
+    if (lyricsData?.initial_text) {
+      lastSavedRef.current = lyricsData.initial_text;
+      pendingTextRef.current = lyricsData.initial_text;
+    }
+  }, [lyricsData?.initial_text]);
+
+  const doSave = useCallback(async (text: string) => {
+    if (text !== lastSavedRef.current) {
+      setSaveStatus('saving');
+      try {
+        await saveLyricsText(projectId, text);
+        lastSavedRef.current = text;
+        queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
+        setSaveStatus('saved');
+        setTimeout(() => setSaveStatus('idle'), 2000);
+      } catch (err) {
+        console.error('Auto-save lyrics failed:', err);
+        setSaveStatus('idle');
+      }
+    }
+  }, [projectId, queryClient]);
+
+  const debouncedSave = useCallback((text: string) => {
+    pendingTextRef.current = text;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => doSave(text), 1500);
+  }, [doSave]);
+
+  // Flush pending save on unmount (tab switch, navigation)
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      // Fire-and-forget save of any unsaved text
+      const pending = pendingTextRef.current;
+      if (pending && pending !== lastSavedRef.current) {
+        saveLyricsText(projectId, pending).catch(() => {});
+      }
+    };
+  }, [projectId]);
 
   // Upload-only mutation — just saves the file as an asset, no analysis
   const uploadMutation = useMutation({
@@ -294,16 +342,40 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
           </p>
           <textarea
             value={initialText}
-            onChange={(e) => setInitialText(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setInitialText(val);
+              debouncedSave(val);
+            }}
+            onPaste={(e) => {
+              // Let React handle the paste via onChange — just ensure we
+              // trigger an immediate save after a short delay for paste events
+              setTimeout(() => {
+                const el = e.target as HTMLTextAreaElement;
+                debouncedSave(el.value);
+              }, 50);
+            }}
             placeholder={textPlaceholder}
-            className="w-full h-32 px-3 py-2 bg-gray-900 border border-gray-700 rounded text-xs text-gray-200 resize-y focus:outline-none focus:border-blue-500 placeholder-gray-600"
+            className="w-full h-32 px-3 py-2 bg-gray-900 border border-gray-700 rounded text-xs text-gray-200 resize-y focus:outline-none focus:border-blue-500 placeholder-gray-600 whitespace-pre-wrap"
             disabled={isAnalyzing}
           />
-          {initialText.trim() && (
-            <p className="text-xs text-gray-500 mt-1">
-              {initialText.split('\n').filter(l => /^\[.+\]$/.test(l.trim())).length} tags found — non-section tags will be stripped before processing
-            </p>
-          )}
+          <div className="flex items-center justify-between mt-1">
+            {initialText.trim() ? (
+              <p className="text-xs text-gray-500">
+                {initialText.split('\n').filter(l => l.trim()).length} lines, {initialText.split('\n').filter(l => /^\[.+\]$/.test(l.trim())).length} tags — non-section tags will be stripped before processing
+              </p>
+            ) : <span />}
+            {saveStatus === 'saving' && (
+              <span className="text-xs text-yellow-400 flex items-center gap-1">
+                <Loader size={10} className="animate-spin" /> Saving...
+              </span>
+            )}
+            {saveStatus === 'saved' && (
+              <span className="text-xs text-green-400 flex items-center gap-1">
+                <CheckCircle size={10} /> Saved
+              </span>
+            )}
+          </div>
           {lyricsData?.text && !initialText && (
             <button
               onClick={() => setInitialText(lyricsData.text)}
@@ -457,8 +529,22 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
                 if (!file) return;
                 setIsUploadingSrt(true);
                 try {
-                  await uploadSrt(projectId, file);
-                  queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
+                  const srtResp = await uploadSrt(projectId, file);
+                  // Use the response data directly to populate lyrics cache
+                  // This avoids race conditions with refetch returning stale data
+                  const srtData = srtResp.data as any;
+                  if (srtData?.words && Array.isArray(srtData.words)) {
+                    // Normalize word keys (backend returns start_time/end_time)
+                    srtData.words = srtData.words.map((w: any) => ({
+                      word: String(w?.word || ''),
+                      start: Number(w?.start ?? w?.start_time ?? 0) || 0,
+                      end: Number(w?.end ?? w?.end_time ?? 0) || 0,
+                      score: w?.score,
+                      block: w?.block,
+                    }));
+                  }
+                  queryClient.setQueryData(['lyrics', projectId], srtData);
+                  console.debug(`[SRT Upload] Set lyrics cache: ${srtData?.words?.length} words, ${srtData?.srt_blocks?.length} srt_blocks`);
                 } catch (err: any) {
                   const detail = err?.response?.data?.detail || 'Failed to upload SRT';
                   alert(`Error: ${detail}`);

@@ -2060,8 +2060,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           {(['image', 'video', 'movement', 'transitions', 'stems', 'lyrics', 'tools', 'prompt'] as Tab[]).filter((tab) => {
             const mode = currentProject?.mode;
             if (mode === 'narration_images') {
-              // Hide video, transitions, stems tabs
-              return !['video', 'transitions', 'stems'].includes(tab);
+              // Hide video and stems tabs — keep transitions (crossfades) and movement (Ken Burns)
+              return !['video', 'stems'].includes(tab);
             }
             if (mode === 'narration_video') {
               // Hide stems tab (no stem separation for narration)
@@ -2855,6 +2855,42 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <p className="text-[10px] text-gray-500 mt-2">
                   Framerate is set globally in Settings (current: {videoFramerate} fps)
                 </p>
+              </div>
+
+              {/* GGUF Model Override — per-scene model selection */}
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <label className="block text-sm font-medium mb-1">
+                      LTX Model (GGUF)
+                      {!activeScene?.parameters?.ltx_model_gguf && (
+                        <span className="text-xs text-gray-500 ml-1.5">(using global: {appSettings?.ltx_model_gguf || 'Q8_0'})</span>
+                      )}
+                    </label>
+                    <select
+                      value={activeScene?.parameters?.ltx_model_gguf || ''}
+                      onChange={(e) => {
+                        if (!activeScene || !currentProject) return;
+                        const val = e.target.value || undefined;
+                        const newParams = { ...activeScene.parameters, ltx_model_gguf: val };
+                        if (!val) delete newParams.ltx_model_gguf;
+                        updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                        useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                      }}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                    >
+                      <option value="">Global Default</option>
+                      <option value="ltx-2.3-22b-dev-Q8_0.gguf">Q8_0 (22B, highest quality)</option>
+                      <option value="ltx-2.3-22b-dev-Q6_K.gguf">Q6_K (22B, balanced)</option>
+                      <option value="ltx-2.3-22b-dev-Q5_K_S.gguf">Q5_K_S (22B, fastest / low VRAM)</option>
+                    </select>
+                  </div>
+                </div>
+                {activeScene?.parameters?.ltx_model_gguf && (
+                  <p className="text-[10px] text-amber-400/70">
+                    Scene override active — this scene will use {activeScene.parameters.ltx_model_gguf.replace('ltx-2.3-22b-dev-', '').replace('.gguf', '')} instead of the global setting
+                  </p>
+                )}
               </div>
 
               {/* Resolution — project default or scene override (same toggle as Image tab) */}

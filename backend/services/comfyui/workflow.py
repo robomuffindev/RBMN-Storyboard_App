@@ -6,6 +6,7 @@ Provides utilities for loading, finding nodes, and mutating workflow configurati
 
 import json
 import logging
+import math
 import os
 from typing import Optional, Tuple, Any, List
 
@@ -353,7 +354,11 @@ def prepare_ltx_workflow(
     # Set audio and timing
     if audio_path:
         set_node_input(workflow, "Load Audio", "audio", audio_path)
-    set_node_input(workflow, "Audio - Video Duration", "value", duration)
+    # Audio - Video Duration is an INTConstant node — ComfyUI silently
+    # truncates float values.  Use math.ceil so the generated video is
+    # always at least as long as the scene; normalize_clip's max_duration
+    # trims the excess back to the exact frame boundary.
+    set_node_input(workflow, "Audio - Video Duration", "value", math.ceil(duration))
     set_node_input(workflow, "Framerate", "value", framerate)
 
     # Set seed
@@ -458,8 +463,8 @@ def prepare_v2v_extend_workflow(
     set_node_input(workflow, "WIDTH", "value", width)
     set_node_input(workflow, "HEIGHT", "value", height)
 
-    # Set timing
-    set_node_input(workflow, "Audio - Video Duration", "value", duration)
+    # Set timing — ceil to avoid INT truncation (see prepare_ltx_workflow comment)
+    set_node_input(workflow, "Audio - Video Duration", "value", math.ceil(duration))
     set_node_input(workflow, "Framerate", "value", framerate)
 
     # Set seeds (both passes)
@@ -600,8 +605,8 @@ def prepare_v2v_pass1_workflow(
     # Set text prompt
     set_node_input(workflow, "CLIP Text Encode (Prompt)", "text", prompt)
 
-    # Set timing
-    set_node_input(workflow, "Audio - Video Duration", "value", duration)
+    # Set timing — ceil to avoid INT truncation (see prepare_ltx_workflow comment)
+    set_node_input(workflow, "Audio - Video Duration", "value", math.ceil(duration))
     set_node_input(workflow, "Framerate", "value", framerate)
 
     # Set seed
@@ -723,8 +728,8 @@ def prepare_v2v_pass2_workflow(
     # Set text prompt
     set_node_input(workflow, "CLIP Text Encode (Prompt)", "text", prompt)
 
-    # Set timing
-    set_node_input(workflow, "Audio - Video Duration", "value", duration)
+    # Set timing — ceil to avoid INT truncation (see prepare_ltx_workflow comment)
+    set_node_input(workflow, "Audio - Video Duration", "value", math.ceil(duration))
     set_node_input(workflow, "Framerate", "value", framerate)
 
     # Set seed for Pass 2 sampler
@@ -869,8 +874,8 @@ def prepare_transition_workflow(
     set_node_input(workflow, "WIDTH", "value", width)
     set_node_input(workflow, "HEIGHT", "value", height)
 
-    # Set timing
-    set_node_input(workflow, "Audio - Video Duration", "value", duration)
+    # Set timing — ceil to avoid INT truncation (see prepare_ltx_workflow comment)
+    set_node_input(workflow, "Audio - Video Duration", "value", math.ceil(duration))
     set_node_input(workflow, "Framerate", "value", framerate)
 
     # Set seeds
@@ -1404,8 +1409,9 @@ def prepare_sequencer_workflow(
     set_node_input(workflow, "WIDTH", "value", width)
     set_node_input(workflow, "HEIGHT", "value", height)
 
-    # Set duration and framerate
-    set_node_input(workflow, "Audio - Video Duration", "value", int(duration))
+    # Set duration and framerate — ceil to avoid INT truncation
+    # (see prepare_ltx_workflow comment for full explanation)
+    set_node_input(workflow, "Audio - Video Duration", "value", math.ceil(duration))
     set_node_input(workflow, "Framerate", "value", framerate)
 
     # Set seed

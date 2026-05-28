@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus } from '@/api/client';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp } from 'lucide-react';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
 import Timeline from '@/components/Timeline/Timeline';
@@ -15,6 +15,10 @@ import ConceptPanel from '@/components/ConceptPanel/ConceptPanel';
 import VideoFlowPanel from '@/components/VideoFlowPanel/VideoFlowPanel';
 import AutoGenStatusBar from '@/components/BatchMode/AutoGenStatusBar';
 import BackingTrackTimeline from '@/components/BackingTrackTimeline/BackingTrackTimeline';
+import AssetGeneratorModal from '@/components/AssetGenerator/AssetGeneratorModal';
+import ErrorBoundary from '@/components/ErrorBoundary';
+import { useBackingTrackPlayer } from '@/hooks/useBackingTrackPlayer';
+import type { BackingTrackData } from '@/hooks/useBackingTrackPlayer';
 
 const EMPTY_ARRAY: never[] = [];
 
@@ -25,11 +29,13 @@ export default function AppLayout() {
   const [selectedPanel, setSelectedPanel] = useState<'audio' | 'scenes' | 'assets' | 'concept' | 'flow'>('audio');
   const [exportOpen, setExportOpen] = useState(false);
   const [autoGenOpen, setAutoGenOpen] = useState(false);
+  const [assetGenOpen, setAssetGenOpen] = useState(false);
   const [editorCollapsed, setEditorCollapsed] = useState(false);
   const [previewRendering, setPreviewRendering] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const previewPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [timelineHeight, setTimelineHeight] = useState(256); // default h-64 = 256px
+  const [activeTimeline, setActiveTimeline] = useState<'scenes' | 'backing'>('scenes');
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const [renameModalOpen, setRenameModalOpen] = useState(false);
@@ -124,12 +130,139 @@ export default function AppLayout() {
   const { data: lyricsData } = useQuery({
     queryKey: ['lyrics', id],
     queryFn: async () => {
-      const resp = await getLyrics(id!);
-      return resp.data;
+      try {
+        const resp = await getLyrics(id!);
+        // Backend returns start_time/end_time but frontend WordTimestamp uses start/end
+        // Normalize here so SubtitleOverlay and all consumers get the right fields
+        const data = resp.data as any;
+        if (data?.words && Array.isArray(data.words)) {
+          data.words = data.words.map((w: any) => ({
+            word: String(w?.word || ''),
+            start: Number(w?.start ?? w?.start_time ?? 0) || 0,
+            end: Number(w?.end ?? w?.end_time ?? 0) || 0,
+            score: w?.score,
+            block: w?.block,  // SRT block index for proper subtitle grouping
+          }));
+          // Log srt_blocks if present
+          if (data.srt_blocks && Array.isArray(data.srt_blocks) && data.srt_blocks.length > 0) {
+            console.debug(`[Lyrics] ${data.srt_blocks.length} SRT blocks. First: "${data.srt_blocks[0]?.text}" [${data.srt_blocks[0]?.start}-${data.srt_blocks[0]?.end}]`);
+          }
+          console.debug(`[Lyrics] Loaded ${data.words.length} words. First 3:`, data.words.slice(0, 3));
+        } else {
+          console.warn('[Lyrics] No words in lyrics response:', data);
+          if (data) data.words = [];
+        }
+        return data;
+      } catch (e) {
+        console.error('[Lyrics] Failed to load lyrics:', e);
+        return { text: '', words: [], initial_text: '', srt_blocks: [] };
+      }
     },
     enabled: !!id && isNarrationProject,
   });
   const subtitleWords = lyricsData?.words ?? [];
+  const srtBlocks = lyricsData?.srt_blocks ?? [];
+
+  // Backing tracks mini-preview data (lightweight query for the inactive strip)
+  const { data: backingTracksRaw } = useQuery({
+    queryKey: ['backingTracks', id],
+    queryFn: () => getBackingTracks(id!),
+    enabled: !!id && isNarrationProject,
+  });
+  const backingTracksForMini: any[] = backingTracksRaw?.data || [];
+
+  // ── Backing track browser playback via Web Audio API ──
+  // Map raw API data to the shape expected by the player hook
+  const backingTrackPlayerData: BackingTrackData[] = useMemo(() => (backingTracksForMini || []).map((t: any) => ({
+    id: String(t.id),
+    rel_path: String(t.rel_path || ''),
+    start_time: Number(t.start_time) || 0,
+    end_time: Number(t.end_time) || 0,
+    trim_start: Number(t.trim_start) || 0,
+    trim_end: Number(t.trim_end) || 0,
+    volume_db: Number(t.volume_db) || 0,
+    fade_in_sec: Number(t.fade_in_sec) || 0,
+    fade_out_sec: Number(t.fade_out_sec) || 0,
+  })), [backingTracksForMini]);
+  useBackingTrackPlayer(isNarrationProject ? backingTrackPlayerData : EMPTY_ARRAY, id || '');
+
+  // Subtitle preview settings — persisted to project.settings
+  const [previewSubEnabled, setPreviewSubEnabled] = useState(false);
+  const [previewSubFont, setPreviewSubFont] = useState('Arial');
+  const [previewSubSize, setPreviewSubSize] = useState(24);
+  const [previewSubColor, setPreviewSubColor] = useState('#FFFFFF');
+  const [previewSubPosition, setPreviewSubPosition] = useState('bottom');
+  const [previewSubOutline, setPreviewSubOutline] = useState(2);
+  const [previewSubBold, setPreviewSubBold] = useState(false);
+  const [subSettingsOpen, setSubSettingsOpen] = useState(false);
+  const [subSettingsDirty, setSubSettingsDirty] = useState(false);
+  const [subSettingsSaved, setSubSettingsSaved] = useState(false);
+
+  // Load subtitle settings from project.settings when project loads
+  // Track whether we've initialized from this project to avoid overwriting user edits on every refetch
+  const subSettingsInitRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (project?.settings && project?.id && subSettingsInitRef.current !== project.id) {
+      subSettingsInitRef.current = project.id;
+      const s = project.settings;
+      if (s.subtitle_enabled !== undefined) setPreviewSubEnabled(s.subtitle_enabled);
+      if (s.subtitle_font) setPreviewSubFont(s.subtitle_font);
+      if (s.subtitle_size !== undefined) setPreviewSubSize(s.subtitle_size);
+      if (s.subtitle_color) setPreviewSubColor(s.subtitle_color);
+      if (s.subtitle_position) setPreviewSubPosition(s.subtitle_position);
+      if (s.subtitle_outline !== undefined) setPreviewSubOutline(s.subtitle_outline);
+      if (s.subtitle_bold !== undefined) setPreviewSubBold(s.subtitle_bold);
+    }
+  }, [project?.id, project?.settings]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Save subtitle settings to project.settings with debounce
+  // Use a ref to always access the latest settings without stale closures
+  const latestSettingsRef = useRef<Record<string, any>>(project?.settings || {});
+  useEffect(() => { latestSettingsRef.current = project?.settings || {}; }, [project?.settings]);
+
+  const subSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveSubtitleSettings = useCallback((updates: Record<string, any>) => {
+    if (!id) return;
+    if (subSaveTimer.current) clearTimeout(subSaveTimer.current);
+    subSaveTimer.current = setTimeout(async () => {
+      try {
+        const merged = {
+          ...latestSettingsRef.current,
+          ...updates,
+        };
+        await updateProject(id, { settings: merged });
+        // Update the ref immediately so subsequent saves don't use stale data
+        latestSettingsRef.current = merged;
+        // Invalidate the project query so React Query cache stays fresh
+        queryClient.invalidateQueries({ queryKey: ['project', id] });
+      } catch (e) {
+        // Silently fail — settings are non-critical
+      }
+    }, 500);
+  }, [id, queryClient]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Initialize Zustand store with saved mixer volumes from project settings.
+  // This ensures playback hooks (WaveSurfer + Web Audio) use the correct volumes
+  // even if BackingTrackTimeline hasn't mounted yet (e.g. user is on Scene tab).
+  useEffect(() => {
+    if (project?.settings) {
+      const s = project.settings;
+      const nv = s.narration_volume ?? 1.0;
+      const bv = s.backing_volume ?? 1.0;
+      useAppStore.getState().setNarrationVolume(nv);
+      useAppStore.getState().setBackingMasterVolume(bv);
+    }
+  }, [project?.id, project?.settings]);
+
+  // Memoize subtitle style to prevent unnecessary VideoPreview re-renders
+  const memoizedSubtitleStyle = useMemo(() => previewSubEnabled ? {
+    font: previewSubFont,
+    size: previewSubSize,
+    color: previewSubColor,
+    position: previewSubPosition,
+    outline: previewSubOutline,
+    bold: previewSubBold,
+  } : undefined, [previewSubEnabled, previewSubFont, previewSubSize, previewSubColor, previewSubPosition, previewSubOutline, previewSubBold]);
 
   const stableScenes = scenes ?? EMPTY_ARRAY;
   const stableSections = sections ?? EMPTY_ARRAY;
@@ -391,6 +524,16 @@ export default function AppLayout() {
     setAssets(stableAssets as any[]);
   }, [stableAssets, setAssets]);
 
+  // Auto-select scene 1 when scenes load and none is active
+  useEffect(() => {
+    const store = useAppStore.getState();
+    if (stableScenes.length > 0 && !store.activeScene) {
+      // Sort by scene_index to get the first scene
+      const sorted = [...stableScenes].sort((a: any, b: any) => (a.scene_index ?? 0) - (b.scene_index ?? 0));
+      store.setActiveScene(sorted[0] as Scene);
+    }
+  }, [stableScenes]);
+
   // Close tools menu on click outside
   useEffect(() => {
     if (!toolsMenuOpen) return;
@@ -571,6 +714,14 @@ export default function AppLayout() {
           )}
 
           <button
+            onClick={() => setAssetGenOpen(true)}
+            className="px-3 md:px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+          >
+            <Sparkles size={18} />
+            <span className="hidden sm:inline">Asset Generator</span>
+          </button>
+
+          <button
             onClick={() => setExportOpen(true)}
             className="px-3 md:px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
           >
@@ -706,7 +857,7 @@ export default function AppLayout() {
               Assets
             </button>
           </div>
-          {/* Row 2: Concept / Video Flow */}
+          {/* Row 2: Concept / Story Flow (narration) or Video Flow (music) */}
           <div className="flex gap-1 px-2 pb-2 pt-1 border-b border-gray-800">
             <button
               onClick={() => setSelectedPanel('concept')}
@@ -728,7 +879,7 @@ export default function AppLayout() {
               }`}
             >
               <GitBranch size={12} />
-              Video Flow
+              {isNarrationProject ? 'Story Flow' : 'Video Flow'}
             </button>
           </div>
 
@@ -755,13 +906,181 @@ export default function AppLayout() {
         <div className={`app-center-panel flex-1 flex flex-col overflow-hidden gap-4 ${mobilePanel !== 'editor' ? 'mobile-hidden' : ''}`}>
           {/* Preview — visible only when editor is collapsed */}
           {editorCollapsed && (
-            <div className="flex-1 min-h-0 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <VideoPreview
-                assembledPreviewUrl={previewUrl}
-                onExitPreview={() => setPreviewUrl(null)}
-                words={isNarrationProject ? subtitleWords : undefined}
-                subtitlesEnabled={isNarrationProject}
-              />
+            <div className="flex-1 min-h-0 flex flex-col bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+              <div className="flex-1 min-h-0">
+                <ErrorBoundary>
+                  <VideoPreview
+                    assembledPreviewUrl={previewUrl}
+                    onExitPreview={() => setPreviewUrl(null)}
+                    words={isNarrationProject ? subtitleWords : undefined}
+                    srtBlocks={isNarrationProject ? srtBlocks : undefined}
+                    subtitlesEnabled={isNarrationProject && previewSubEnabled}
+                    subtitleStyle={memoizedSubtitleStyle}
+                  />
+                </ErrorBoundary>
+              </div>
+
+              {/* Subtitle settings bar — narration projects only */}
+              {isNarrationProject && (
+                <div className="flex-shrink-0 border-t border-gray-800">
+                  <div className="flex items-center gap-2 px-3 py-1.5">
+                    <button
+                      onClick={() => {
+                        const next = !previewSubEnabled;
+                        setPreviewSubEnabled(next);
+                        saveSubtitleSettings({ subtitle_enabled: next });
+                      }}
+                      className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium transition-colors ${previewSubEnabled ? 'bg-blue-600/30 text-blue-300 border border-blue-500/50' : 'bg-gray-800 text-gray-400 border border-gray-700 hover:text-gray-300'}`}
+                      title="Toggle subtitle preview"
+                    >
+                      <Captions size={14} />
+                      Subtitles
+                    </button>
+
+                    {previewSubEnabled && subtitleWords.length === 0 && (
+                      <span className="text-[10px] text-yellow-400 ml-1">
+                        No word timestamps found —
+                        <button
+                          onClick={async () => {
+                            if (!id) return;
+                            try {
+                              await rerunWhisper(id);
+                              queryClient.invalidateQueries({ queryKey: ['lyrics', id] });
+                            } catch (e) {
+                              console.error('Whisper failed:', e);
+                            }
+                          }}
+                          className="underline hover:text-yellow-200 ml-1"
+                        >
+                          Run Whisper
+                        </button>
+                        {' '}or upload an SRT
+                      </span>
+                    )}
+
+                    {previewSubEnabled && subtitleWords.length > 0 && (
+                      <>
+                        <button
+                          onClick={() => setSubSettingsOpen(!subSettingsOpen)}
+                          className="flex items-center gap-1 px-2 py-1 rounded text-xs text-gray-400 hover:text-gray-200 bg-gray-800 border border-gray-700 transition-colors"
+                        >
+                          Style
+                          {subSettingsOpen ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+                        </button>
+
+                        <span className="text-[10px] text-gray-500 ml-auto">
+                          {previewSubFont} {previewSubSize}px | {previewSubPosition}
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Expanded subtitle style settings */}
+                  {previewSubEnabled && subSettingsOpen && (
+                    <div className="px-3 pb-2 space-y-2 border-t border-gray-800/50">
+                      <div className="grid grid-cols-6 gap-2 pt-2">
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-0.5">Font</label>
+                          <select
+                            value={previewSubFont}
+                            onChange={(e) => { setPreviewSubFont(e.target.value); setSubSettingsDirty(true); }}
+                            className="w-full px-1.5 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100"
+                          >
+                            <option value="Arial">Arial</option>
+                            <option value="Helvetica">Helvetica</option>
+                            <option value="Times New Roman">Times New Roman</option>
+                            <option value="Courier New">Courier New</option>
+                            <option value="Impact">Impact</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-0.5">Size</label>
+                          <input
+                            type="number"
+                            value={previewSubSize}
+                            min={12} max={72}
+                            onChange={(e) => { const v = parseInt(e.target.value) || 24; setPreviewSubSize(v); setSubSettingsDirty(true); }}
+                            className="w-full px-1.5 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-0.5">Color</label>
+                          <input
+                            type="color"
+                            value={previewSubColor}
+                            onChange={(e) => { setPreviewSubColor(e.target.value); setSubSettingsDirty(true); }}
+                            className="w-full h-[26px] bg-gray-800 border border-gray-700 rounded cursor-pointer"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-0.5">Position</label>
+                          <select
+                            value={previewSubPosition}
+                            onChange={(e) => { setPreviewSubPosition(e.target.value); setSubSettingsDirty(true); }}
+                            className="w-full px-1.5 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100"
+                          >
+                            <option value="bottom">Bottom</option>
+                            <option value="top">Top</option>
+                            <option value="center">Center</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-0.5">Outline</label>
+                          <input
+                            type="number"
+                            value={previewSubOutline}
+                            min={0} max={8}
+                            onChange={(e) => { const v = parseInt(e.target.value) || 0; setPreviewSubOutline(v); setSubSettingsDirty(true); }}
+                            className="w-full px-1.5 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-0.5">Bold</label>
+                          <button
+                            onClick={() => { setPreviewSubBold(b => !b); setSubSettingsDirty(true); }}
+                            className={`w-full px-1.5 py-1 rounded text-xs font-bold transition-colors ${
+                              previewSubBold
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-gray-800 border border-gray-700 text-gray-400'
+                            }`}
+                          >
+                            B
+                          </button>
+                        </div>
+                      </div>
+                      {/* Save button */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <button
+                          onClick={() => {
+                            saveSubtitleSettings({
+                              subtitle_font: previewSubFont,
+                              subtitle_size: previewSubSize,
+                              subtitle_color: previewSubColor,
+                              subtitle_position: previewSubPosition,
+                              subtitle_outline: previewSubOutline,
+                              subtitle_bold: previewSubBold,
+                            });
+                            setSubSettingsDirty(false);
+                            setSubSettingsSaved(true);
+                            setTimeout(() => setSubSettingsSaved(false), 2000);
+                          }}
+                          disabled={!subSettingsDirty}
+                          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                            subSettingsDirty
+                              ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                              : 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                          }`}
+                        >
+                          Save
+                        </button>
+                        {subSettingsSaved && (
+                          <span className="text-[10px] text-green-400 animate-pulse">Saved!</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -790,14 +1109,105 @@ export default function AppLayout() {
         >
           <GripHorizontal size={14} className="text-gray-600 group-hover:text-gray-400" />
         </div>
-        <div className="flex-1 overflow-hidden">
+
+        {/* Tab bar — only show when backing tracks are available */}
+        {project && project.mode !== 'music_video' && id && (
+          <div className="flex items-center gap-0 border-b border-gray-800 flex-shrink-0">
+            <button
+              onClick={() => setActiveTimeline('scenes')}
+              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium transition-colors border-b-2 ${
+                activeTimeline === 'scenes'
+                  ? 'text-blue-400 border-blue-400 bg-gray-800/50'
+                  : 'text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/30'
+              }`}
+            >
+              <Layers size={11} />
+              Scene Timeline
+            </button>
+            <button
+              onClick={() => setActiveTimeline('backing')}
+              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium transition-colors border-b-2 ${
+                activeTimeline === 'backing'
+                  ? 'text-purple-400 border-purple-400 bg-gray-800/50'
+                  : 'text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/30'
+              }`}
+            >
+              <Music size={11} />
+              Backing Tracks
+            </button>
+          </div>
+        )}
+
+        {/* Both timelines stay mounted (to preserve WaveSurfer playback state); CSS hides the inactive one */}
+        <div className={`flex-1 overflow-hidden ${activeTimeline !== 'scenes' && project && project.mode !== 'music_video' && id ? 'hidden' : ''}`}>
           <Timeline onSplitScene={handleSplitScene} onBoundaryDrag={handleBoundaryDrag} onDeleteScene={handleDeleteScene} />
         </div>
         {project && project.mode !== 'music_video' && id && (
-          <BackingTrackTimeline
-            projectId={id}
-            totalDuration={stableScenes.length > 0 ? Math.max(...stableScenes.map((s: any) => s.end_time || 0)) : 0}
-          />
+          <div className={`flex-1 overflow-hidden ${activeTimeline !== 'backing' ? 'hidden' : ''}`}>
+            <BackingTrackTimeline
+              projectId={id}
+              totalDuration={stableScenes.length > 0 ? Math.max(...stableScenes.map((s: any) => s.end_time || 0)) : 0}
+              expanded
+            />
+          </div>
+        )}
+
+        {/* Mini-preview strip of the INACTIVE timeline */}
+        {project && project.mode !== 'music_video' && id && (
+          <div
+            onClick={() => setActiveTimeline(activeTimeline === 'scenes' ? 'backing' : 'scenes')}
+            className={`flex-shrink-0 h-6 border-t cursor-pointer transition-colors flex items-center gap-2 px-3 ${
+              activeTimeline === 'scenes'
+                ? 'border-purple-800/50 bg-purple-950/30 hover:bg-purple-900/40'
+                : 'border-blue-800/50 bg-blue-950/30 hover:bg-blue-900/40'
+            }`}
+            title={activeTimeline === 'scenes' ? 'Click to switch to Backing Tracks' : 'Click to switch to Scene Timeline'}
+          >
+            {activeTimeline === 'scenes' ? (
+              <>
+                <Music size={9} className="text-purple-500 flex-shrink-0" />
+                <span className="text-[9px] text-purple-500/80 flex-shrink-0">Backing</span>
+                {/* Mini backing track bars */}
+                <div className="flex-1 relative h-3 bg-gray-800/60 rounded overflow-hidden">
+                  {(() => {
+                    const maxT = stableScenes.length > 0 ? Math.max(...stableScenes.map((s: any) => s.end_time || 0)) : 1;
+                    return (backingTracksForMini || []).map((t: any) => (
+                      <div
+                        key={t.id}
+                        className="absolute top-0 h-full bg-purple-600/50 rounded-sm"
+                        style={{
+                          left: `${(t.start_time / Math.max(maxT, 1)) * 100}%`,
+                          width: `${Math.max(((t.end_time - t.start_time) / Math.max(maxT, 1)) * 100, 0.5)}%`,
+                        }}
+                      />
+                    ));
+                  })()}
+                </div>
+              </>
+            ) : (
+              <>
+                <Layers size={9} className="text-blue-500 flex-shrink-0" />
+                <span className="text-[9px] text-blue-500/80 flex-shrink-0">Scenes</span>
+                {/* Mini scene bars */}
+                <div className="flex-1 relative h-3 bg-gray-800/60 rounded overflow-hidden">
+                  {stableScenes.map((s: any, i: number) => {
+                    const maxT = stableScenes.length > 0 ? Math.max(...stableScenes.map((sc: any) => sc.end_time || 0)) : 1;
+                    const colors = ['bg-blue-600/50', 'bg-cyan-600/50', 'bg-teal-600/50', 'bg-indigo-600/50'];
+                    return (
+                      <div
+                        key={s.id}
+                        className={`absolute top-0 h-full ${colors[i % colors.length]} rounded-sm`}
+                        style={{
+                          left: `${((s.start_time || 0) / Math.max(maxT, 1)) * 100}%`,
+                          width: `${Math.max((((s.end_time || 0) - (s.start_time || 0)) / Math.max(maxT, 1)) * 100, 0.5)}%`,
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
         )}
       </div>
 
@@ -818,6 +1228,9 @@ export default function AppLayout() {
         autoGenSceneName={autoGenSceneName}
         autoGenBatchRunId={autoGenBatchRunId}
       />}
+
+      {/* Asset Generator Modal */}
+      {assetGenOpen && <AssetGeneratorModal projectId={id!} onClose={() => setAssetGenOpen(false)} />}
 
       {/* Auto-gen Status Bar */}
       {autoGenStatus !== 'idle' && !autoGenDismissed && (
@@ -981,15 +1394,26 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [transitionType, setTransitionType] = useState('crossfade');  // default from AppSettings
   const [transitionDuration, setTransitionDuration] = useState(0.5);
   const [colorCorrection, setColorCorrection] = useState(false);
+  // Ken Burns settings (initialized from project.settings)
+  const [randomKenBurns, setRandomKenBurns] = useState(projSettings.random_ken_burns || false);
+  const [kenBurnsAllowedEffects, setKenBurnsAllowedEffects] = useState<string[]>(projSettings.ken_burns_allowed_effects || []);
   // Narration-only settings
   const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
-  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
-  const [subtitleFont, setSubtitleFont] = useState('Arial');
-  const [subtitleSize, setSubtitleSize] = useState(24);
-  const [subtitleColor, setSubtitleColor] = useState('#FFFFFF');
-  const [subtitlePosition, setSubtitlePosition] = useState('bottom');
-  const [subtitleOutline, setSubtitleOutline] = useState(2);
-  const [normalizeAudio, setNormalizeAudio] = useState(false);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(projSettings.subtitle_enabled ?? false);
+  const [subtitleFont, setSubtitleFont] = useState(projSettings.subtitle_font || 'Arial');
+  const [subtitleSize, setSubtitleSize] = useState(projSettings.subtitle_size || 24);
+  const [subtitleColor, setSubtitleColor] = useState(projSettings.subtitle_color || '#FFFFFF');
+  const [subtitlePosition, setSubtitlePosition] = useState(projSettings.subtitle_position || 'bottom');
+  const [subtitleOutline, setSubtitleOutline] = useState(projSettings.subtitle_outline ?? 2);
+  const [subtitleBold, setSubtitleBold] = useState(projSettings.subtitle_bold ?? false);
+  const [normalizeAudio, setNormalizeAudio] = useState(projSettings.normalize_audio ?? false);
+  // Backing track mix settings — synced from project.settings (set on timeline)
+  const [backingTrackLoop, setBackingTrackLoop] = useState(projSettings.backing_track_loop ?? false);
+  const [narrationVolume, setNarrationVolume] = useState(projSettings.narration_volume ?? 1.0);
+  const [backingMasterVolume, setBackingMasterVolume] = useState(projSettings.backing_volume ?? 1.0);
+  const [backingMainFadeIn, setBackingMainFadeIn] = useState(projSettings.backing_main_fade_in ?? 0.0);
+  const [backingMainFadeOut, setBackingMainFadeOut] = useState(projSettings.backing_main_fade_out ?? 0.0);
+  const [normalizeBacking, setNormalizeBacking] = useState(projSettings.normalize_backing ?? false);
   const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed'>('config');
   const [progressPercent, setProgressPercent] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
@@ -1011,6 +1435,8 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
         transition_type: transitionType,
         transition_duration: transitionDuration,
         color_match_clips: colorCorrection,
+        random_ken_burns: randomKenBurns,
+        ken_burns_allowed_effects: kenBurnsAllowedEffects.length > 0 ? kenBurnsAllowedEffects : null,
         ...(isNarration ? {
           subtitles_enabled: subtitlesEnabled,
           subtitle_font: subtitleFont,
@@ -1018,7 +1444,14 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
           subtitle_color: subtitleColor,
           subtitle_position: subtitlePosition,
           subtitle_outline: subtitleOutline,
+          subtitle_bold: subtitleBold,
           normalize_audio: normalizeAudio,
+          backing_track_loop: backingTrackLoop,
+          narration_volume: narrationVolume,
+          backing_volume: backingMasterVolume,
+          backing_main_fade_in: backingMainFadeIn,
+          backing_main_fade_out: backingMainFadeOut,
+          normalize_backing: normalizeBacking,
         } : {}),
       });
     },
@@ -1072,15 +1505,15 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-md p-6">
-        <h2 className="text-2xl font-bold mb-6">
+      <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-md p-6 max-h-[85vh] flex flex-col">
+        <h2 className="text-2xl font-bold mb-6 flex-shrink-0">
           {phase === 'done' ? 'Export Complete' : phase === 'failed' ? 'Export Failed' : 'Export Video'}
         </h2>
 
         {/* Config phase — show settings */}
         {phase === 'config' && (
-          <>
-            <div className="space-y-4 mb-6">
+          <div className="flex flex-col min-h-0 flex-1">
+            <div className="space-y-4 mb-6 overflow-y-auto pr-1 min-h-0 flex-1">
               <div>
                 <label className="block text-sm font-medium mb-2">Format</label>
                 <select
@@ -1179,6 +1612,72 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                 </label>
               </div>
 
+              {/* Ken Burns — useful for narration_images but available for all modes */}
+              <div className="border-t border-gray-700 pt-3 mt-2">
+                <div className="flex items-center gap-3 mb-2">
+                  <input
+                    type="checkbox"
+                    id="exportRandomKenBurns"
+                    checked={randomKenBurns}
+                    onChange={(e) => setRandomKenBurns(e.target.checked)}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
+                  />
+                  <label htmlFor="exportRandomKenBurns" className="text-sm font-medium">
+                    Randomize Ken Burns Effects
+                  </label>
+                </div>
+                {randomKenBurns && (
+                  <div className="ml-7 space-y-1 max-h-48 overflow-y-auto">
+                    <p className="text-xs text-gray-500 mb-1">Only use these effects:</p>
+                    {[
+                      { value: 'zoom_in_center', label: 'Zoom In (Center)' },
+                      { value: 'zoom_out_center', label: 'Zoom Out (Center)' },
+                      { value: 'zoom_in_top_left', label: 'Zoom In (Top Left)' },
+                      { value: 'zoom_in_top_right', label: 'Zoom In (Top Right)' },
+                      { value: 'zoom_in_bottom_left', label: 'Zoom In (Bottom Left)' },
+                      { value: 'zoom_in_bottom_right', label: 'Zoom In (Bottom Right)' },
+                      { value: 'pan_left', label: 'Pan Left' },
+                      { value: 'pan_right', label: 'Pan Right' },
+                      { value: 'pan_up', label: 'Pan Up' },
+                      { value: 'pan_down', label: 'Pan Down' },
+                      { value: 'pan_left_to_right', label: 'Pan Left to Right' },
+                      { value: 'pan_right_to_left', label: 'Pan Right to Left' },
+                      { value: 'zoom_in_pan_left', label: 'Zoom In + Pan Left' },
+                      { value: 'zoom_in_pan_right', label: 'Zoom In + Pan Right' },
+                      { value: 'zoom_out_pan_left', label: 'Zoom Out + Pan Left' },
+                      { value: 'zoom_out_pan_right', label: 'Zoom Out + Pan Right' },
+                    ].map(({ value, label }) => (
+                      <label key={value} className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={kenBurnsAllowedEffects.length === 0 || kenBurnsAllowedEffects.includes(value)}
+                          onChange={(e) => {
+                            let next: string[];
+                            const allEffects = ['zoom_in_center','zoom_out_center','zoom_in_top_left','zoom_in_top_right','zoom_in_bottom_left','zoom_in_bottom_right','pan_left','pan_right','pan_up','pan_down','pan_left_to_right','pan_right_to_left','zoom_in_pan_left','zoom_in_pan_right','zoom_out_pan_left','zoom_out_pan_right'];
+                            if (kenBurnsAllowedEffects.length === 0) {
+                              next = e.target.checked ? allEffects : allEffects.filter(v => v !== value);
+                            } else {
+                              next = e.target.checked
+                                ? [...kenBurnsAllowedEffects, value]
+                                : kenBurnsAllowedEffects.filter(v => v !== value);
+                            }
+                            if (next.length >= 16) next = [];
+                            setKenBurnsAllowedEffects(next);
+                          }}
+                          className="rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500"
+                        />
+                        <span className="text-xs text-gray-300">{label}</span>
+                      </label>
+                    ))}
+                    <p className="text-[10px] text-gray-500 mt-1">
+                      {kenBurnsAllowedEffects.length === 0
+                        ? 'All 16 effects enabled.'
+                        : `${kenBurnsAllowedEffects.length} of 16 effects enabled.`}
+                    </p>
+                  </div>
+                )}
+              </div>
+
               {/* Narration-only: Subtitle & Normalize controls */}
               {isNarration && (
                 <>
@@ -1258,6 +1757,19 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                               className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
                             />
                           </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Bold</label>
+                            <button
+                              onClick={() => setSubtitleBold((b: boolean) => !b)}
+                              className={`w-full px-2 py-1.5 rounded text-sm font-bold transition-colors ${
+                                subtitleBold
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-gray-800 border border-gray-700 text-gray-400'
+                              }`}
+                            >
+                              B
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1275,11 +1787,104 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                       Normalize Audio (loudness normalization)
                     </label>
                   </div>
+
+                  {/* Backing Track Mix Settings */}
+                  <div className="border-t border-gray-700 pt-3 mt-2">
+                    <div className="text-sm font-medium mb-2">Backing Track Mix</div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          id="exportBackingLoop"
+                          checked={backingTrackLoop}
+                          onChange={(e) => setBackingTrackLoop(e.target.checked)}
+                          className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
+                        />
+                        <label htmlFor="exportBackingLoop" className="text-xs text-gray-300">
+                          Repeat backing tracks until video ends
+                        </label>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          id="exportNormBacking"
+                          checked={normalizeBacking}
+                          onChange={(e) => setNormalizeBacking(e.target.checked)}
+                          className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-purple-500 focus:ring-purple-500"
+                        />
+                        <label htmlFor="exportNormBacking" className="text-xs text-gray-300">
+                          Normalize backing track loudness
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Narration Volume</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={narrationVolume}
+                              onChange={(e) => setNarrationVolume(parseFloat(e.target.value))}
+                              className="flex-1 h-1 accent-blue-500"
+                            />
+                            <span className="text-[10px] text-gray-500 w-8">{Math.round(narrationVolume * 100)}%</span>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Backing Volume</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={backingMasterVolume}
+                              onChange={(e) => setBackingMasterVolume(parseFloat(e.target.value))}
+                              className="flex-1 h-1 accent-purple-500"
+                            />
+                            <span className="text-[10px] text-gray-500 w-8">{Math.round(backingMasterVolume * 100)}%</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Main Fade In (s)</label>
+                          <input
+                            type="number"
+                            step={0.5}
+                            min={0}
+                            max={30}
+                            value={backingMainFadeIn}
+                            onChange={(e) => setBackingMainFadeIn(parseFloat(e.target.value) || 0)}
+                            className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Main Fade Out (s)</label>
+                          <input
+                            type="number"
+                            step={0.5}
+                            min={0}
+                            max={30}
+                            value={backingMainFadeOut}
+                            onChange={(e) => setBackingMainFadeOut(parseFloat(e.target.value) || 0)}
+                            className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </>
               )}
             </div>
 
-            <div className="flex gap-4">
+            <div className="flex gap-4 flex-shrink-0 pt-4 border-t border-gray-800">
               <button
                 onClick={onClose}
                 className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded font-medium transition-colors"
@@ -1293,7 +1898,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                 Export
               </button>
             </div>
-          </>
+          </div>
         )}
 
         {/* Exporting phase — show progress */}
@@ -1402,7 +2007,7 @@ const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string
     value: 'enhanced_all',
     label: 'Full Pipeline (All Scenes)',
     description:
-      'Generate video flow, LLM-enhance prompts, then queue first frames, last frames, and videos for every scene.',
+      'Generate story/video flow, LLM-enhance prompts, then queue first frames, last frames, and videos for every scene.',
   },
   {
     value: 'enhanced_missing',
@@ -1436,6 +2041,8 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   autoGenBatchRunId: string | null;
 }) {
   const navigate = useNavigate();
+  const currentProject = useAppStore((s) => s.currentProject);
+  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
   const [mode, setMode] = useState<AutoGenMode>('enhanced_all');
   const [isStarting, setIsStarting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -1489,11 +2096,11 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
     try {
       // For enhanced_all mode, generate video flow first
       if (mode === 'enhanced_all') {
-        setStatusMsg('Generating video flow ideas...');
+        setStatusMsg(isNarration ? 'Generating story flow ideas...' : 'Generating video flow ideas...');
         try {
           await generateVideoFlow(projectId);
         } catch (e) {
-          console.warn('Video flow generation failed, continuing with existing flow data:', e);
+          console.warn('Story/video flow generation failed, continuing with existing flow data:', e);
         }
       }
 
@@ -1745,7 +2352,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
                     className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
                   <div>
                     <span className="text-sm text-gray-200">Use Story Flow</span>
-                    <p className="text-xs text-gray-500">Incorporate video flow ideas into prompt generation</p>
+                    <p className="text-xs text-gray-500">Incorporate {isNarration ? 'story' : 'video'} flow ideas into prompt generation</p>
                   </div>
                 </label>
 

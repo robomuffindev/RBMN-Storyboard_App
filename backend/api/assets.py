@@ -12,7 +12,7 @@ from sqlmodel import select
 
 from backend.config import settings
 from backend.database import get_session
-from backend.database.models import Asset, AssetType, Project
+from backend.database.models import Asset, AssetType, Project, Scene
 from backend.utils.file_utils import sha256_file, content_addressed_path
 
 logger = logging.getLogger(__name__)
@@ -572,4 +572,183 @@ async def update_asset(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update asset",
+        )
+
+
+@router.get(
+    "/generated",
+    response_model=list[AssetResponse],
+    summary="List generated assets",
+)
+async def list_generated_assets(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> list[AssetResponse]:
+    """List all generated image and video assets, newest first.
+
+    Returns assets with type generated_image or generated_video that were
+    created by the Asset Generator (standalone generation outside of scenes).
+
+    Args:
+        project_id: UUID of the project.
+        session: Database session.
+
+    Returns:
+        List of generated assets, newest first.
+
+    Raises:
+        HTTPException: If project not found.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        stmt = (
+            select(Asset)
+            .where(
+                Asset.project_id == project_id,
+                Asset.asset_type.in_([AssetType.GENERATED_IMAGE, AssetType.GENERATED_VIDEO]),
+            )
+            .order_by(Asset.created_at.desc())
+        )
+        result = await session.execute(stmt)
+        assets = result.scalars().all()
+
+        return [AssetResponse.model_validate(asset) for asset in assets]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing generated assets for project {project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list generated assets",
+        )
+
+
+class AssignAssetToSceneRequest(BaseModel):
+    """Request model for assigning an asset to a scene."""
+
+    asset_id: UUID
+    target: str  # "first_frame", "last_frame", or "video"
+
+
+@router.post(
+    "/assign-to-scene/{scene_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Assign asset to scene",
+)
+async def assign_asset_to_scene(
+    project_id: UUID,
+    scene_id: UUID,
+    req: AssignAssetToSceneRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Assign a generated asset to a scene as its chosen image or video.
+
+    Copies the asset file to the scene's version history directory and sets
+    it as the chosen first_frame, last_frame, or video for the scene.
+
+    Args:
+        project_id: UUID of the project.
+        scene_id: UUID of the scene.
+        req: Assignment request with asset_id and target.
+        session: Database session.
+
+    Returns:
+        Dict with success status and the new path.
+
+    Raises:
+        HTTPException: If project, scene, or asset not found, or invalid target.
+    """
+    import shutil
+    from pathlib import Path
+
+    try:
+        await _get_project_or_404(project_id, session)
+
+        # Validate scene
+        scene = await session.get(Scene, scene_id)
+        if not scene or scene.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Scene {scene_id} not found",
+            )
+
+        # Validate asset
+        asset = await session.get(Asset, req.asset_id)
+        if not asset or asset.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Asset {req.asset_id} not found",
+            )
+
+        if req.target not in ("first_frame", "last_frame", "video"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid target: {req.target}. Must be 'first_frame', 'last_frame', or 'video'.",
+            )
+
+        # Resolve asset file path
+        project_path = settings.project_dir / str(project_id)
+        pid_str = str(project_id)
+        if asset.rel_path.startswith(pid_str + "/") or asset.rel_path.startswith(pid_str + "\\"):
+            source_path = settings.project_dir / asset.rel_path
+        else:
+            source_path = project_path / asset.rel_path
+
+        if not source_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Asset file not found on disk",
+            )
+
+        # Determine destination directory based on target
+        scene_order = scene.order_index
+        scene_dir = project_path / "scenes" / f"scene_{scene_order:03d}"
+
+        if req.target in ("first_frame", "last_frame"):
+            dest_dir = scene_dir / "images"
+        else:
+            dest_dir = scene_dir / "video"
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy file to scene directory
+        dest_filename = f"assigned_{req.target}_{asset.filename}"
+        dest_path = dest_dir / dest_filename
+        shutil.copy2(str(source_path), str(dest_path))
+
+        # Compute relative path from project directory
+        rel_dest = str(dest_path.relative_to(project_path))
+
+        # Update scene parameters with the chosen path
+        scene_params = dict(scene.parameters or {})
+        if req.target == "first_frame":
+            scene_params["chosen_image_path"] = rel_dest
+        elif req.target == "last_frame":
+            scene_params["chosen_last_frame_path"] = rel_dest
+        elif req.target == "video":
+            scene_params["chosen_video_path"] = rel_dest
+
+        scene.parameters = scene_params
+        await session.commit()
+
+        logger.info(
+            f"Assigned asset {req.asset_id} to scene {scene_id} as {req.target} "
+            f"(path: {rel_dest})"
+        )
+
+        return {
+            "success": True,
+            "target": req.target,
+            "path": rel_dest,
+            "scene_id": str(scene_id),
+            "asset_id": str(req.asset_id),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assigning asset to scene: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to assign asset to scene",
         )

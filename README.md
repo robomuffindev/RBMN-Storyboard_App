@@ -70,7 +70,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **V2V Extending** — Image-based conditioning from previous scene's last frame for seamless scene-to-scene transitions
 - **AI Transition Clips** — LTX Transition LoRA generates short transition videos between scenes
 - **Lipsync Audio Boost** — Per-scene lipsync toggle boosts Director audio_guidance from base level to 0.7+ for mouth-to-audio sync. Optional vocal stem isolation filters non-vocal audio before sending to generator
-- **GPU Hardware Acceleration** — Auto-detects GPU encoders (NVIDIA NVENC, AMD AMF/VAAPI, Intel QSV) for FFmpeg and CUDA for Demucs. Enable/disable toggle and re-detect button in Settings with live status cards showing detected hardware for both FFmpeg and Demucs
+- **GPU Hardware Acceleration** — Auto-detects GPU encoders (NVIDIA NVENC, AMD AMF/VAAPI, Intel QSV) for FFmpeg and CUDA/ROCm for Demucs stem separation. Enable/disable toggle and re-detect button in Settings with live status cards. Note: Demucs GPU requires NVIDIA CUDA or AMD ROCm (Linux only) — AMD on Windows falls back to CPU
 - **Color Correction** — Automatic per-channel RGB color matching with skip thresholds to avoid unnecessary re-encodes
 - **RunPod Integration** — Optional serverless GPU pod management with auto-spindown
 - **Real-time Progress** — SSE pub/sub broadcaster streams progress from ComfyUI to all connected frontends
@@ -194,9 +194,9 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 | Frontend | React 18, TypeScript, Vite, TailwindCSS, Zustand, wavesurfer.js |
 | Backend | FastAPI, SQLModel, aiosqlite, Pydantic v2 |
 | AI Generation | ComfyUI (remote), FLUX.2 Klein 9B (images), LTX 2.3 (video) |
-| Audio | Demucs (stems, GPU via PyTorch CUDA), Whisper (3 backends), librosa (sections) |
+| Audio | Demucs (stems, GPU via PyTorch CUDA/ROCm), Whisper (3 backends), librosa (sections) |
 | Video Assembly | FFmpeg (GPU-accelerated via NVENC/AMF/VAAPI/QSV) |
-| LLM | OpenAI (GPT-4o through GPT-5.5), Anthropic Claude (3.5 Sonnet through Opus 4.7), Google Gemini |
+| LLM | OpenAI (GPT-4o through GPT-5.5), Anthropic Claude (3.5 Sonnet through Opus 4.7), Google Gemini, Ollama (local models with multi-server round-robin) |
 
 ## Prerequisites
 
@@ -204,7 +204,7 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 - **Node.js 18+** and **npm** — For building the React frontend
 - **FFmpeg** — On system PATH. Auto-detects GPU encoders (NVENC, AMF, QSV)
 - **At least one remote ComfyUI server** — With the models and nodes listed above installed
-- **At least one LLM API key** (recommended) — OpenAI, Anthropic, or Gemini for prompt enhancement
+- **At least one LLM provider** (recommended) — OpenAI, Anthropic, Gemini API key, or Ollama running locally/on LAN for prompt enhancement
 
 ## Installation
 
@@ -219,8 +219,11 @@ python -m venv venv
 source venv/bin/activate  # Linux/macOS
 # venv\Scripts\activate   # Windows
 
-# Optional: CUDA PyTorch for faster Demucs stem separation
+# Optional: CUDA PyTorch for faster Demucs stem separation (NVIDIA GPUs)
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+# For AMD GPUs on Linux (ROCm):
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
+# Note: AMD GPUs on Windows do not support PyTorch GPU — Demucs will use CPU
 
 pip install -e ".[dev]"
 
@@ -265,6 +268,8 @@ fix-pytorch-cuda.bat
 
 This auto-detects your GPU and CUDA version, uninstalls the CPU-only PyTorch, and reinstalls the correct CUDA build. New installs from `install.bat` will warn you if this is needed.
 
+**AMD GPU users:** FFmpeg acceleration (AMF encoder/decoder) works on Windows and is auto-detected. However, PyTorch GPU (used by Demucs and local Whisper) requires ROCm which is Linux-only. On Windows with AMD, Demucs and local Whisper will run on CPU — this is fine since stem separation and transcription are one-time operations per project.
+
 ## Typical Workflow
 
 1. **Create a project** — Choose Music Video, Narration (Moving Images), or Narration (Video) mode
@@ -305,6 +310,10 @@ See `.env.example` for the full list. Key variables:
 ## Version
 
 Current version: **1.4.0** — See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Special Thanks
+
+**PagingMrHerman** — For tireless testing, bug hunting, and deep-diving into ComfyUI internals to track down issues like the INTConstant duration truncation bug. This project wouldn't be where it is without the testing.
 
 ## Support
 

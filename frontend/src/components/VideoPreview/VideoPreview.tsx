@@ -2,13 +2,24 @@ import { useRef, useState, useMemo, useEffect, useCallback } from 'react';
 import { Image, Film, X, MonitorPlay } from 'lucide-react';
 import { useAppStore } from '@/store';
 import { handleImgError } from '@/utils/brokenImage';
-import type { WordTimestamp } from '@/types';
+import type { WordTimestamp, SrtBlock } from '@/types';
+
+export interface SubtitleStyle {
+  font?: string;
+  size?: number;
+  color?: string;
+  position?: string;
+  outline?: number;
+  bold?: boolean;
+}
 
 interface VideoPreviewProps {
   assembledPreviewUrl?: string | null;
   onExitPreview?: () => void;
   words?: WordTimestamp[];
+  srtBlocks?: SrtBlock[];
   subtitlesEnabled?: boolean;
+  subtitleStyle?: SubtitleStyle;
 }
 
 /**
@@ -23,7 +34,14 @@ interface VideoPreviewProps {
  * This is the same approach used by CapCut, DaVinci web, and most
  * browser-based video editors.
  */
-export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words, subtitlesEnabled }: VideoPreviewProps = {}) {
+export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words, srtBlocks, subtitlesEnabled, subtitleStyle }: VideoPreviewProps = {}) {
+  // Debug: log subtitle state on mount and when key props change
+  useEffect(() => {
+    if (subtitlesEnabled) {
+      console.debug(`[VideoPreview] Subtitles enabled. words=${words?.length ?? 0}, first word:`, words?.[0]);
+    }
+  }, [subtitlesEnabled, words?.length]);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoARef = useRef<HTMLVideoElement>(null);
   const videoBRef = useRef<HTMLVideoElement>(null);
@@ -469,8 +487,21 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
         )}
 
         {/* ── Subtitle overlay (z-index 4) ── */}
-        {subtitlesEnabled && words && words.length > 0 && (
-          <SubtitleOverlay words={words} playbackPosition={playbackPosition} />
+        {subtitlesEnabled && ((srtBlocks && srtBlocks.length > 0) || (words && words.length > 0)) && (
+          <SubtitleOverlay words={words} srtBlocks={srtBlocks} style={subtitleStyle} />
+        )}
+        {subtitlesEnabled && (!words || words.length === 0) && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 max-w-[80%] text-center pointer-events-none" style={{ zIndex: 4 }}>
+            <span className="inline-block px-3 py-1.5 rounded text-xs text-yellow-400 bg-black/75">
+              Subtitles enabled — no word timestamps loaded. Run Whisper or upload SRT.
+            </span>
+          </div>
+        )}
+        {/* Debug: always-visible position indicator when subtitles enabled with words */}
+        {subtitlesEnabled && ((srtBlocks && srtBlocks.length > 0) || (words && words.length > 0)) && (
+          <div className="absolute top-4 right-4 text-[10px] text-gray-500 bg-black/40 px-2 py-1 rounded pointer-events-none" style={{ zIndex: 5 }}>
+            SUB: {srtBlocks && srtBlocks.length > 0 ? `${srtBlocks.length} blocks` : `${words?.length || 0}w`} | pos: {playbackPosition.toFixed(1)}s
+          </div>
         )}
       </div>
     </div>
@@ -478,54 +509,134 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
 }
 
 /**
- * Groups words into subtitle lines (~6 words or gap > 0.3s)
- * and shows the current line at the bottom of the preview.
+ * Shows subtitles at the bottom of the preview.
+ * Uses pre-built SRT blocks from the backend when available (simple time-range match).
+ * Falls back to word-level grouping (~6 words) for Whisper-sourced words.
  */
-function SubtitleOverlay({ words, playbackPosition }: { words: WordTimestamp[]; playbackPosition: number }) {
+function SubtitleOverlay({ words, srtBlocks, style }: { words?: WordTimestamp[]; srtBlocks?: SrtBlock[]; style?: SubtitleStyle }) {
+  const playbackPosition = useAppStore((s) => s.playbackPosition);
+
   const lines = useMemo(() => {
-    const result: { text: string; start: number; end: number }[] = [];
-    let currentWords: WordTimestamp[] = [];
-
-    const flushLine = () => {
-      if (currentWords.length === 0) return;
-      result.push({
-        text: currentWords.map(w => w.word).join(' '),
-        start: currentWords[0].start,
-        end: currentWords[currentWords.length - 1].end,
-      });
-      currentWords = [];
-    };
-
-    for (let i = 0; i < words.length; i++) {
-      const w = words[i];
-      if (currentWords.length > 0) {
-        const gap = w.start - currentWords[currentWords.length - 1].end;
-        if (gap > 0.3 || currentWords.length >= 6) {
-          flushLine();
+    try {
+      // Priority 1: Use pre-built SRT blocks from the backend — already grouped correctly
+      if (srtBlocks && Array.isArray(srtBlocks) && srtBlocks.length > 0) {
+        const result = srtBlocks.map(b => ({
+          text: String(b.text || ''),
+          start: Number(b.start) || 0,
+          end: Number(b.end) || 0,
+        })).filter(b => b.text.trim());
+        if (result.length > 0) {
+          console.debug(`[SubtitleOverlay] Using ${result.length} SRT blocks directly. First: "${result[0].text}" [${result[0].start.toFixed(2)}-${result[0].end.toFixed(2)}s]`);
         }
+        return result;
       }
-      currentWords.push(w);
+
+      // Priority 2: Fall back to word-level grouping for Whisper words
+      if (!words || !Array.isArray(words) || words.length === 0) return [];
+
+      const result: { text: string; start: number; end: number }[] = [];
+      let currentWords: WordTimestamp[] = [];
+
+      const flushLine = () => {
+        if (currentWords.length === 0) return;
+        const startVal = Number(currentWords[0]?.start) || 0;
+        const endVal = Number(currentWords[currentWords.length - 1]?.end) || 0;
+        result.push({
+          text: currentWords.map(w => String(w?.word || '')).join(' '),
+          start: startVal,
+          end: endVal,
+        });
+        currentWords = [];
+      };
+
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        if (!w) continue;
+        if (currentWords.length > 0) {
+          const prevEnd = Number(currentWords[currentWords.length - 1]?.end) || 0;
+          const curStart = Number(w?.start) || 0;
+          const gap = curStart - prevEnd;
+          if (gap > 0.3 || currentWords.length >= 6) {
+            flushLine();
+          }
+        }
+        currentWords.push(w);
+      }
+      flushLine();
+
+      if (result.length > 0) {
+        console.debug(`[SubtitleOverlay] ${result.length} lines (word groups). First: "${result[0].text}" [${result[0].start.toFixed(2)}-${result[0].end.toFixed(2)}s]`);
+      }
+      return result;
+    } catch (e) {
+      console.error('[SubtitleOverlay] Error building subtitle lines:', e);
+      return [];
     }
-    flushLine();
-    return result;
-  }, [words]);
+  }, [srtBlocks, words]);
 
   const currentLine = useMemo(() => {
-    return lines.find(l => l.start <= playbackPosition && l.end >= playbackPosition) || null;
+    if (!lines || lines.length === 0) return null;
+    // Find the line whose time range contains the playback position
+    const exact = lines.find(l => l.start <= playbackPosition && l.end >= playbackPosition);
+    if (exact) return exact;
+
+    // Fallback 1: if we're within 0.5s before the next line starts, show it early
+    const upcoming = lines.find(l => l.start > playbackPosition && l.start - playbackPosition <= 0.5);
+    if (upcoming) return upcoming;
+
+    // Fallback 2: show the most recently passed line for up to 1s after it ends
+    // This keeps subtitles visible in gaps between lines
+    const recent = [...lines]
+      .filter(l => l.end < playbackPosition && playbackPosition - l.end <= 1.0)
+      .sort((a, b) => b.end - a.end);
+    if (recent.length > 0) return recent[0];
+
+    // Fallback 3: if playback is before the first line, show nothing
+    // If playback is after all lines, show the last line briefly
+    if (lines.length > 0 && playbackPosition > 0) {
+      const last = lines[lines.length - 1];
+      if (playbackPosition >= last.start && playbackPosition <= last.end + 2.0) {
+        return last;
+      }
+    }
+
+    return null;
   }, [lines, playbackPosition]);
 
   if (!currentLine) return null;
 
+  const font = style?.font || 'Arial';
+  const size = style?.size || 24;
+  const color = style?.color || '#FFFFFF';
+  const position = style?.position || 'bottom';
+  const outline = style?.outline ?? 2;
+  const bold = style?.bold ?? false;
+
+  // Scale font size relative to the preview container (base 24 ≈ 14px in preview)
+  const scaledSize = Math.max(10, Math.round(size * 0.6));
+
+  const positionClasses = position === 'top'
+    ? 'absolute top-8 left-1/2 -translate-x-1/2'
+    : position === 'center'
+    ? 'absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2'
+    : 'absolute bottom-8 left-1/2 -translate-x-1/2';
+
   return (
     <div
-      className="absolute bottom-8 left-1/2 -translate-x-1/2 max-w-[80%] text-center pointer-events-none"
+      className={`${positionClasses} max-w-[80%] text-center pointer-events-none`}
       style={{ zIndex: 4 }}
     >
       <span
-        className="inline-block px-3 py-1.5 rounded text-white font-medium text-sm"
+        className="inline-block px-3 py-1.5 rounded font-medium"
         style={{
+          fontFamily: font,
+          fontSize: `${scaledSize}px`,
+          fontWeight: bold ? 'bold' : 'normal',
+          color: color,
           backgroundColor: 'rgba(0,0,0,0.75)',
-          textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+          textShadow: outline > 0
+            ? `${outline}px ${outline}px 0 #000, -${outline}px -${outline}px 0 #000, ${outline}px -${outline}px 0 #000, -${outline}px ${outline}px 0 #000`
+            : 'none',
         }}
       >
         {currentLine.text}

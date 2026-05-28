@@ -1206,6 +1206,18 @@ class JobDispatcher:
                 director_stitch = False
                 director_auto_image_desc = True
                 video_neg_prompt = ""
+
+                # Check for per-scene GGUF override first
+                scene_gguf_override = params.get("ltx_model_gguf") or None
+                if not scene_gguf_override and job.scene_id:
+                    try:
+                        async with self._session_factory() as _sc_sess:
+                            _sc = await _sc_sess.get(Scene, job.scene_id)
+                            if _sc and _sc.parameters:
+                                scene_gguf_override = _sc.parameters.get("ltx_model_gguf") or None
+                    except Exception:
+                        pass
+
                 try:
                     async with self._session_factory() as seq_session:
                         from backend.database.models import AppSettings as SeqAppSettings
@@ -1215,7 +1227,7 @@ class JobDispatcher:
                         if seq_settings:
                             if seq_settings.use_distilled_lora:
                                 distilled_lora_name = seq_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
-                            ltx_model_gguf_override = seq_settings.ltx_model_gguf if hasattr(seq_settings, 'ltx_model_gguf') else None
+                            ltx_model_gguf_override = scene_gguf_override or (seq_settings.ltx_model_gguf if hasattr(seq_settings, 'ltx_model_gguf') else None)
                             # LTXDirector settings
                             director_guide_strength = seq_settings.director_guide_strength if seq_settings.director_guide_strength is not None else 0.5
                             director_audio_guidance = seq_settings.director_audio_guidance if seq_settings.director_audio_guidance is not None else 0.001
@@ -1224,7 +1236,8 @@ class JobDispatcher:
                             video_neg_prompt = (seq_settings.global_video_negative_prompt or "").strip()
                 except Exception as e:
                     logger.debug(f"Could not read sequencer settings: {e}")
-                    ltx_model_gguf_override = None
+                    # Preserve per-scene override even if global settings read fails
+                    ltx_model_gguf_override = scene_gguf_override
 
                 effective_last_frame_seq = last_frame if workflow_type == "ltx_seq_fflf" else None
 
@@ -1236,6 +1249,9 @@ class JobDispatcher:
                     if scene_prompt:
                         # Take first 200 chars as a concise description of what's in the image
                         image_desc = scene_prompt[:200].strip()
+
+                if scene_gguf_override:
+                    logger.info(f"Sequencer per-scene GGUF override: {scene_gguf_override}")
 
                 # Lipsync override: boost audio_guidance when lipsync is enabled for this scene
                 lipsync_enabled = params.get("lipsync_enabled", False)
@@ -1265,10 +1281,23 @@ class JobDispatcher:
                 )
 
             # Read video_tail, ltx_model_gguf, and distilled LoRA from AppSettings
+            # Per-scene GGUF override takes priority over global setting
             from sqlmodel import select
             video_tail = 0
             ltx_model_gguf = None
             distilled_lora_name = None
+
+            # Check per-scene GGUF override
+            scene_gguf = params.get("ltx_model_gguf") or None
+            if not scene_gguf and job.scene_id:
+                try:
+                    async with self._session_factory() as _sc_sess2:
+                        _sc2 = await _sc_sess2.get(Scene, job.scene_id)
+                        if _sc2 and _sc2.parameters:
+                            scene_gguf = _sc2.parameters.get("ltx_model_gguf") or None
+                except Exception:
+                    pass
+
             async with self._session_factory() as session:
                 try:
                     from backend.database.models import AppSettings as DBAppSettings
@@ -1277,7 +1306,7 @@ class JobDispatcher:
                     db_settings = result.scalars().first()
                     if db_settings:
                         video_tail = db_settings.video_tail or 0
-                        ltx_model_gguf = db_settings.ltx_model_gguf or None
+                        ltx_model_gguf = scene_gguf or (db_settings.ltx_model_gguf or None)
                         if db_settings.use_distilled_lora:
                             distilled_lora_name = db_settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
                 except Exception as e:
@@ -1290,6 +1319,9 @@ class JobDispatcher:
             # with the previous scene's last frame as image input, so no
             # multi-frame overlap zone exists.
             v2v_overlap_compensation = 0.0
+
+            if scene_gguf:
+                logger.info(f"Per-scene GGUF override: {scene_gguf} (global would be {db_settings.ltx_model_gguf if db_settings else 'N/A'})")
 
             logger.info(
                 f"LTX workflow build: workflow_type={workflow_type}, "

@@ -5,6 +5,7 @@ Enhance user prompts using various LLM providers (OpenAI, Anthropic, Gemini).
 """
 
 import glob as glob_mod
+import itertools
 import json
 import logging
 import os
@@ -13,6 +14,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── Ollama Round-Robin Counter ─────────────────────────────────────
+# Module-level counter for distributing requests across multiple
+# Ollama servers. Thread-safe via itertools.count (atomic increment).
+_ollama_rr_counter = itertools.count()
 
 # ── LLM Debug Logger (shared with timeline.py) ──────────────────────
 _ENHANCE_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs" / "llm_debug"
@@ -588,7 +594,9 @@ class PromptEnhancer:
         if prompt_guidance and prompt_guidance.strip():
             system_prompt += f"\n\nADDITIONAL PROMPT RULES AND GUIDANCE FROM USER:\n{prompt_guidance.strip()}"
 
-        if provider == "openai":
+        if provider == "ollama":
+            result = PromptEnhancer._enhance_ollama(prompt, context, api_key, model, system_prompt)
+        elif provider == "openai":
             result = PromptEnhancer._enhance_openai(prompt, context, api_key, model, system_prompt)
         elif provider == "anthropic":
             result = PromptEnhancer._enhance_anthropic(prompt, context, api_key, model, system_prompt)
@@ -661,6 +669,140 @@ class PromptEnhancer:
             logger.error(f"OpenAI enhancement failed: {e}")
             _write_enhance_log("openai", model or "?", prompt or "", context, "", "", str(e))
             raise RuntimeError(f"OpenAI API error: {e}")
+
+    @staticmethod
+    def _enhance_ollama(
+        prompt: str,
+        context: Optional[str],
+        api_key: str,  # Contains Ollama URL(s) (passed via resolve_llm_config)
+        model: str,
+        system_prompt: str = IMAGE_SYSTEM_PROMPT,
+    ) -> str:
+        """Enhance using a local Ollama server via OpenAI-compatible API.
+
+        Ollama models (especially smaller ones like qwen3:14b) need more
+        explicit, structured instructions than cloud models. We:
+        1. Use the OpenAI SDK pointed at Ollama's /v1/ endpoint
+        2. Wrap the system prompt with extra formatting guardrails
+        3. Provide a very explicit user message with step-by-step structure
+        4. Use lower temperature for more reliable output
+
+        The ``api_key`` parameter carries one of:
+        - A single URL string (e.g. ``"http://localhost:11434"``)
+        - A JSON-encoded list of URLs for multi-server round-robin
+
+        resolve_llm_config() provides this value.
+        """
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("OpenAI SDK not installed. Install with: pip install openai")
+
+        # Parse URL(s) from the api_key slot
+        raw = api_key or "http://localhost:11434"
+        if raw.startswith("["):
+            # JSON-encoded list of URLs
+            try:
+                urls = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                urls = [raw]
+        else:
+            urls = [raw]
+
+        # Round-robin: pick the next server in the pool
+        idx = next(_ollama_rr_counter) % len(urls)
+        base_url = urls[idx].rstrip("/")
+        ollama_api_url = f"{base_url}/v1"
+        logger.info(f"Ollama round-robin → server {idx + 1}/{len(urls)}: {base_url}")
+
+        try:
+            # Ollama's OpenAI-compatible endpoint needs a dummy API key
+            client = OpenAI(
+                api_key="ollama",
+                base_url=ollama_api_url,
+                timeout=600.0,
+            )
+
+            # Build a more explicit, structured system prompt for local models.
+            # Smaller models need very clear instructions about what NOT to do.
+            ollama_system_prompt = f"""{system_prompt}
+
+CRITICAL RULES FOR YOUR RESPONSE (FOLLOW EXACTLY):
+1. Output ONLY the enhanced prompt text — nothing else.
+2. Do NOT start with "Enhanced prompt:", "Here is", "Sure!", "Okay", or any prefix.
+3. Do NOT add explanations, notes, or commentary before or after the prompt.
+4. Do NOT use bullet points, numbered lists, or markdown formatting.
+5. Do NOT wrap your output in quotes.
+6. Write as ONE continuous paragraph of flowing descriptive prose.
+7. If thinking step by step, do your reasoning silently — output ONLY the final prompt.
+8. Your entire response should be usable as-is for image/video generation."""
+
+            # Build a very structured user message for local models
+            if prompt and prompt.strip():
+                user_parts = [
+                    "TASK: Enhance the following prompt for AI image/video generation.",
+                    f"ORIGINAL PROMPT: {prompt}",
+                ]
+            else:
+                user_parts = [
+                    "TASK: Create a new AI image/video generation prompt from the context below.",
+                    "There is no original prompt — generate one entirely from the context.",
+                ]
+
+            if context:
+                user_parts.append(f"CONTEXT (use this for creative direction):\n{context}")
+
+            user_parts.append(
+                "REMEMBER: Output ONLY the prompt text as a single paragraph. "
+                "No prefixes, no explanations, no markdown, no quotes. Just the prompt."
+            )
+
+            user_message = "\n\n".join(user_parts)
+
+            effective_model = model or "qwen3:14b"
+            response = client.chat.completions.create(
+                model=effective_model,
+                messages=[
+                    {"role": "system", "content": ollama_system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                max_tokens=800,
+                temperature=0.6,  # Lower than cloud — local models drift more at higher temps
+            )
+
+            raw_content = response.choices[0].message.content or ""
+
+            # Extra cleanup for local models that tend to add thinking blocks
+            # or chain-of-thought before the actual output
+            cleaned = raw_content.strip()
+
+            # Strip <think>...</think> blocks that qwen3 models produce
+            import re
+            cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+
+            # Strip common local-model prefixes
+            for prefix in [
+                "Here is the enhanced prompt:",
+                "Here's the enhanced prompt:",
+                "Enhanced prompt:",
+                "Sure! Here",
+                "Sure,",
+                "Okay,",
+                "Here you go:",
+            ]:
+                if cleaned.lower().startswith(prefix.lower()):
+                    cleaned = cleaned[len(prefix):].strip()
+                    break
+
+            enhanced = _clean_enhanced_prompt(cleaned)
+            logger.info(f"Enhanced prompt via Ollama ({effective_model}, {len(enhanced)} chars)")
+            _write_enhance_log("ollama", effective_model, prompt, context, raw_content, enhanced)
+            return enhanced
+
+        except Exception as e:
+            logger.error(f"Ollama enhancement failed: {e}")
+            _write_enhance_log("ollama", model or "?", prompt or "", context, "", "", str(e))
+            raise RuntimeError(f"Ollama API error: {e}")
 
     @staticmethod
     def _enhance_anthropic(

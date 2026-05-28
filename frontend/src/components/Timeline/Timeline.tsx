@@ -24,6 +24,7 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
     playbackPosition, isPlaying, setPlaybackPosition, togglePlay,
     activeScene, scenes, currentProject,
     scenesLocked, setScenesLocked,
+    narrationVolume,
   } = useAppStore();
 
   const formatTime = (seconds: number) => {
@@ -349,15 +350,21 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
           {/* Zoom */}
           <div className="flex items-center gap-1 ml-2">
             <button
-              onClick={() => setZoom(Math.max(zoom - 0.25, 0.5))}
+              onClick={() => {
+                const step = zoom > 4 ? 1 : zoom > 2 ? 0.5 : 0.25;
+                setZoom(Math.max(+(zoom - step).toFixed(2), 0.5));
+              }}
               className="p-1 text-gray-400 hover:text-white transition-colors"
               title="Zoom out"
             >
               <ZoomOut size={16} />
             </button>
-            <span className="text-xs text-gray-500 w-8 text-center">{Math.round(zoom * 100)}%</span>
+            <span className="text-xs text-gray-500 w-10 text-center">{Math.round(zoom * 100)}%</span>
             <button
-              onClick={() => setZoom(Math.min(zoom + 0.25, 4))}
+              onClick={() => {
+                const step = zoom >= 4 ? 1 : zoom >= 2 ? 0.5 : 0.25;
+                setZoom(Math.min(+(zoom + step).toFixed(2), 16));
+              }}
               className="p-1 text-gray-400 hover:text-white transition-colors"
               title="Zoom in"
             >
@@ -367,53 +374,61 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
         </div>
       </div>
 
-      {/* Time Ruler — click or drag to seek */}
-      <TimeRuler
-        duration={effectiveDuration}
-        zoom={zoom}
-        playbackPosition={playbackPosition}
-        onSeek={setPlaybackPosition}
-      />
+      {/* Scrollable zoom container — wraps ruler + waveform so they scroll together */}
+      <div className="flex-1 flex flex-col overflow-x-auto overflow-y-hidden min-h-0">
+        <div style={{ width: `${zoom * 100}%`, minWidth: '100%' }} className="flex flex-col h-full">
 
-      {/* Waveform + Overlay */}
-      <div
-        className="flex-1 relative bg-gray-950 rounded-b border border-t-0 border-gray-800 overflow-hidden min-h-0"
-      >
-        {/* Waveform Layer */}
-        <div className="absolute inset-0">
-          <WaveformDisplay
+          {/* Time Ruler — click or drag to seek */}
+          <TimeRuler
+            duration={effectiveDuration}
             zoom={zoom}
-            duration={duration}
-            setDuration={setDuration}
             playbackPosition={playbackPosition}
-            setPlaybackPosition={setPlaybackPosition}
-            isPlaying={isPlaying}
+            onSeek={setPlaybackPosition}
           />
-        </div>
 
-        {/* Section/Scene Overlay Layer */}
-        <TimelineOverlay
-          items={timelineItems}
-          duration={effectiveDuration}
-          activeItemId={activeItemId}
-          onItemClick={(item) => {
-            const store = useAppStore.getState();
-            const scene = scenes.find(s => s.id === item.id);
-            if (scene) store.setActiveScene(scene);
-          }}
-          onSeek={(time) => setPlaybackPosition(time)}
-          onBoundaryDrag={onBoundaryDrag}
-        />
-
-        {/* Playhead */}
-        {effectiveDuration > 0 && (
+          {/* Waveform + Overlay */}
           <div
-            className="absolute top-0 bottom-0 w-px bg-white z-30 pointer-events-none"
-            style={{ left: `${(playbackPosition / effectiveDuration) * 100}%` }}
+            className="flex-1 relative bg-gray-950 rounded-b border border-t-0 border-gray-800 overflow-hidden min-h-0"
           >
-            <div className="absolute -top-0.5 -left-1.5 w-3 h-2 bg-white" style={{ clipPath: 'polygon(0 0, 100% 0, 50% 100%)' }} />
+            {/* Waveform Layer */}
+            <div className="absolute inset-0">
+              <WaveformDisplay
+                zoom={zoom}
+                duration={duration}
+                setDuration={setDuration}
+                playbackPosition={playbackPosition}
+                setPlaybackPosition={setPlaybackPosition}
+                isPlaying={isPlaying}
+                volume={narrationVolume}
+              />
+            </div>
+
+            {/* Section/Scene Overlay Layer */}
+            <TimelineOverlay
+              items={timelineItems}
+              duration={effectiveDuration}
+              activeItemId={activeItemId}
+              onItemClick={(item) => {
+                const store = useAppStore.getState();
+                const scene = scenes.find(s => s.id === item.id);
+                if (scene) store.setActiveScene(scene);
+              }}
+              onSeek={(time) => setPlaybackPosition(time)}
+              onBoundaryDrag={onBoundaryDrag}
+            />
+
+            {/* Playhead */}
+            {effectiveDuration > 0 && (
+              <div
+                className="absolute top-0 bottom-0 w-px bg-white z-30 pointer-events-none"
+                style={{ left: `${(playbackPosition / effectiveDuration) * 100}%` }}
+              >
+                <div className="absolute -top-0.5 -left-1.5 w-3 h-2 bg-white" style={{ clipPath: 'polygon(0 0, 100% 0, 50% 100%)' }} />
+              </div>
+            )}
           </div>
-        )}
+
+        </div>
       </div>
 
       {/* Auto Gen Modal */}
@@ -455,6 +470,10 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [minimized, setMinimized] = useState(false);
+  // Ken Burns settings (from project.settings)
+  const projSettings = currentProject?.settings || {} as Record<string, any>;
+  const [randomKenBurns, setRandomKenBurns] = useState(projSettings.random_ken_burns || false);
+  const [kenBurnsAllowedEffects, setKenBurnsAllowedEffects] = useState<string[]>(projSettings.ken_burns_allowed_effects || []);
 
   const isRunning = status?.status === 'running';
   const isDone = status?.status === 'done';
@@ -516,6 +535,14 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
 
   const handleStart = useCallback(async (mode: string) => {
     try {
+      // Persist Ken Burns settings to project.settings before starting auto-gen
+      // so the export pipeline picks them up from project.settings
+      const mergedSettings = {
+        ...(currentProject?.settings || {}),
+        random_ken_burns: randomKenBurns,
+        ken_burns_allowed_effects: kenBurnsAllowedEffects.length > 0 ? kenBurnsAllowedEffects : [],
+      };
+      await updateProject(projectId, { settings: mergedSettings });
       const res = await startSequentialAutoGen(projectId, mode, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow, lipsyncEnabled, vocalsOnlyForLipsync);
       setStatus(res.data);
       startPolling();
@@ -527,7 +554,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
         error: err?.response?.data?.detail || 'Failed to start',
       });
     }
-  }, [projectId, startPolling, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow, lipsyncEnabled, vocalsOnlyForLipsync]);
+  }, [projectId, startPolling, overrideFullSet, vocalsOnlyAudio, skipAudioMux, twoPass, useStoryFlow, lipsyncEnabled, vocalsOnlyForLipsync, currentProject, randomKenBurns, kenBurnsAllowedEffects]);
 
   const handleCancel = useCallback(async () => {
     try {
@@ -740,7 +767,7 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
                 Use Story Flow
               </div>
               <div style={{ color: '#888', fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
-                Include the Video Flow storyboard direction in LLM enhance prompts for each scene.
+                Include the {currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video' ? 'Story Flow' : 'Video Flow'} storyboard direction in LLM enhance prompts for each scene.
                 Sets the per-scene &quot;Use Story Flow&quot; flag so you can toggle it individually after.
               </div>
             </div>
@@ -806,6 +833,86 @@ function AutoGenModal({ projectId, onClose }: { projectId: string; onClose: () =
         {/* Live preview toggle — only show when not running */}
         {!isRunning && !isDone && !isFailed && !isCancelled && (
           <LivePreviewToggle />
+        )}
+
+        {/* Ken Burns settings — only show when not running, most useful for narration_images */}
+        {!isRunning && !isDone && !isFailed && !isCancelled && (
+          <div style={{ marginBottom: 8 }}>
+            <label
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                padding: '10px 12px', borderRadius: 8,
+                background: randomKenBurns ? 'rgba(168, 85, 247, 0.15)' : 'rgba(255,255,255,0.04)',
+                border: randomKenBurns ? '1px solid rgba(168, 85, 247, 0.4)' : '1px solid rgba(255,255,255,0.08)',
+                transition: 'all 0.2s',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={randomKenBurns}
+                onChange={(e) => setRandomKenBurns(e.target.checked)}
+                style={{ accentColor: '#a855f7', width: 16, height: 16, cursor: 'pointer' }}
+              />
+              <div>
+                <div style={{ color: randomKenBurns ? '#a855f7' : '#ccc', fontSize: 13, fontWeight: 600 }}>
+                  Randomize Ken Burns Effects
+                </div>
+                <div style={{ color: '#888', fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
+                  Apply random Ken Burns (pan/zoom) movement to image-based scenes during export assembly.
+                </div>
+              </div>
+            </label>
+            {randomKenBurns && (
+              <div style={{ marginLeft: 24, marginTop: 6, maxHeight: 200, overflowY: 'auto', padding: '6px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                <div style={{ color: '#888', fontSize: 10, marginBottom: 6 }}>Only use these effects:</div>
+                {[
+                  { value: 'zoom_in_center', label: 'Zoom In (Center)' },
+                  { value: 'zoom_out_center', label: 'Zoom Out (Center)' },
+                  { value: 'zoom_in_top_left', label: 'Zoom In (Top Left)' },
+                  { value: 'zoom_in_top_right', label: 'Zoom In (Top Right)' },
+                  { value: 'zoom_in_bottom_left', label: 'Zoom In (Bottom Left)' },
+                  { value: 'zoom_in_bottom_right', label: 'Zoom In (Bottom Right)' },
+                  { value: 'pan_left', label: 'Pan Left' },
+                  { value: 'pan_right', label: 'Pan Right' },
+                  { value: 'pan_up', label: 'Pan Up' },
+                  { value: 'pan_down', label: 'Pan Down' },
+                  { value: 'pan_left_to_right', label: 'Pan Left to Right' },
+                  { value: 'pan_right_to_left', label: 'Pan Right to Left' },
+                  { value: 'zoom_in_pan_left', label: 'Zoom In + Pan Left' },
+                  { value: 'zoom_in_pan_right', label: 'Zoom In + Pan Right' },
+                  { value: 'zoom_out_pan_left', label: 'Zoom Out + Pan Left' },
+                  { value: 'zoom_out_pan_right', label: 'Zoom Out + Pan Right' },
+                ].map(({ value, label }) => (
+                  <label key={value} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', marginBottom: 3 }}>
+                    <input
+                      type="checkbox"
+                      checked={kenBurnsAllowedEffects.length === 0 || kenBurnsAllowedEffects.includes(value)}
+                      onChange={(e) => {
+                        let next: string[];
+                        const allEffects = ['zoom_in_center','zoom_out_center','zoom_in_top_left','zoom_in_top_right','zoom_in_bottom_left','zoom_in_bottom_right','pan_left','pan_right','pan_up','pan_down','pan_left_to_right','pan_right_to_left','zoom_in_pan_left','zoom_in_pan_right','zoom_out_pan_left','zoom_out_pan_right'];
+                        if (kenBurnsAllowedEffects.length === 0) {
+                          next = e.target.checked ? allEffects : allEffects.filter(v => v !== value);
+                        } else {
+                          next = e.target.checked
+                            ? [...kenBurnsAllowedEffects, value]
+                            : kenBurnsAllowedEffects.filter(v => v !== value);
+                        }
+                        if (next.length >= 16) next = [];
+                        setKenBurnsAllowedEffects(next);
+                      }}
+                      style={{ accentColor: '#60a5fa', width: 13, height: 13, cursor: 'pointer' }}
+                    />
+                    <span style={{ color: '#ccc', fontSize: 11 }}>{label}</span>
+                  </label>
+                ))}
+                <div style={{ color: '#666', fontSize: 10, marginTop: 4 }}>
+                  {kenBurnsAllowedEffects.length === 0
+                    ? 'All 16 effects enabled.'
+                    : `${kenBurnsAllowedEffects.length} of 16 effects enabled.`}
+                </div>
+              </div>
+            )}
+          </div>
         )}
 
         {/* Mode buttons — only show when not running */}

@@ -30,6 +30,10 @@ interface AppState {
   selectedSectionId: string | null;
   scenesLocked: boolean;
 
+  // Live mixer volumes (0-1 linear, synced from mixer UI for real-time playback control)
+  narrationVolume: number;
+  backingMasterVolume: number;
+
   // Batch preview PIP
   lastCompletedAsset: LastCompletedAsset | null;
   batchPreviewVisible: boolean;
@@ -49,6 +53,10 @@ interface AppState {
   setViewMode: (mode: 'sections' | 'scenes') => void;
   setSelectedSectionId: (id: string | null) => void;
   setScenesLocked: (locked: boolean) => void;
+
+  // Live mixer
+  setNarrationVolume: (vol: number) => void;
+  setBackingMasterVolume: (vol: number) => void;
 
   // Batch preview
   setLastCompletedAsset: (asset: LastCompletedAsset | null) => void;
@@ -86,6 +94,8 @@ export const useAppStore = create<AppState>((set) => ({
   viewMode: 'scenes',
   selectedSectionId: null,
   scenesLocked: false,
+  narrationVolume: 1.0,
+  backingMasterVolume: 1.0,
   lastCompletedAsset: null,
   batchPreviewVisible: false,
   batchPreviewEnabled: false,
@@ -104,6 +114,8 @@ export const useAppStore = create<AppState>((set) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
   setSelectedSectionId: (id) => set({ selectedSectionId: id }),
   setScenesLocked: (locked) => set({ scenesLocked: locked }),
+  setNarrationVolume: (vol) => set({ narrationVolume: vol }),
+  setBackingMasterVolume: (vol) => set({ backingMasterVolume: vol }),
   setLastCompletedAsset: (asset) => set((state) => ({
     lastCompletedAsset: asset,
     batchPreviewVisible: asset !== null && state.batchPreviewEnabled,

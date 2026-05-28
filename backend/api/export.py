@@ -1,6 +1,7 @@
 """Final video export endpoints for RBMN Storyboard App."""
 import asyncio
 import logging
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
@@ -17,6 +18,15 @@ from backend.database import get_session
 from backend.database.models import Project, Job, JobType, JobStatus, Scene, Asset, AssetType, AppSettings, Lyrics
 
 logger = logging.getLogger(__name__)
+
+ALL_KEN_BURNS_EFFECTS = [
+    "zoom_in_center", "zoom_out_center",
+    "zoom_in_top_left", "zoom_in_top_right", "zoom_in_bottom_left", "zoom_in_bottom_right",
+    "pan_left", "pan_right", "pan_up", "pan_down",
+    "pan_left_to_right", "pan_right_to_left",
+    "zoom_in_pan_left", "zoom_in_pan_right", "zoom_out_pan_left", "zoom_out_pan_right",
+]
+
 router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["export"])
 
 
@@ -45,6 +55,16 @@ class ExportRequest(BaseModel):
     subtitle_outline: int = 2
     # Audio normalization
     normalize_audio: bool = False
+    # Backing track mixer overrides (None = use project.settings defaults)
+    backing_track_loop: Optional[bool] = None
+    narration_volume: Optional[float] = None
+    backing_volume: Optional[float] = None
+    backing_main_fade_in: Optional[float] = None
+    backing_main_fade_out: Optional[float] = None
+    normalize_backing: Optional[bool] = None
+    # Ken Burns override (None = use project.settings defaults)
+    random_ken_burns: Optional[bool] = None
+    ken_burns_allowed_effects: Optional[List[str]] = None
 
 
 class ExportProgressResponse(BaseModel):
@@ -97,6 +117,8 @@ async def _build_scene_dicts(
     session: AsyncSession,
     project_id: UUID,
     lfff_trim_enabled: bool = True,
+    override_random_kb: Optional[bool] = None,
+    override_kb_allowed: Optional[List[str]] = None,
 ) -> tuple[List[Dict[str, Any]], str]:
     """Build scene dicts and find master audio for assembly.
 
@@ -132,6 +154,13 @@ async def _build_scene_dicts(
     # chosen_*_path values already include the project ID prefix
     # (e.g., "bb4075ed-.../generated/file.mp4"), so resolve from base project_dir
     base_dir = app_settings.project_dir
+
+    # Random Ken Burns settings — request overrides take priority over project.settings
+    project = await session.get(Project, project_id)
+    proj_settings = project.settings or {} if project else {}
+    random_kb = override_random_kb if override_random_kb is not None else proj_settings.get("random_ken_burns", False)
+    kb_allowed_raw = override_kb_allowed if override_kb_allowed is not None else proj_settings.get("ken_burns_allowed_effects", [])
+    kb_pool = kb_allowed_raw if kb_allowed_raw else ALL_KEN_BURNS_EFFECTS
 
     # Build scene list for assembly — only include scenes that have content
     scene_dicts: List[Dict[str, Any]] = []
@@ -268,11 +297,20 @@ async def _build_scene_dicts(
             # Determine movement effect from image_movement parameters
             movement = sc_params.get("image_movement") or {}
             effect = movement.get("effect", "none") if movement else "none"
+            # Random Ken Burns: pick a random effect if enabled and no manual effect set
+            movement_dict = {}
+            if effect and effect != "none":
+                movement_dict = movement  # user's manual choice — preserve fully
+            elif random_kb:
+                chosen = random.choice(kb_pool)
+                movement_dict = {"effect": chosen, "intensity": random.randint(30, 70), "easing": "ease_in_out"}
+                effect = chosen
             scene_dicts.append({
                 "image_path": resolved_image,
                 "duration": sc.end_time - sc.start_time,
                 "scene_source_type": "image",
                 "effect": effect if effect != "none" else "zoom_in_center",
+                "image_movement": movement_dict,
                 "transition_clip_path": transition_clip_resolved,
             })
         elif resolved_video:
@@ -289,11 +327,20 @@ async def _build_scene_dicts(
             # Last resort: source_type not explicitly set and only image exists
             movement = sc_params.get("image_movement") or {}
             effect = movement.get("effect", "none") if movement else "none"
+            # Random Ken Burns: pick a random effect if enabled and no manual effect set
+            movement_dict = {}
+            if effect and effect != "none":
+                movement_dict = movement  # user's manual choice — preserve fully
+            elif random_kb:
+                chosen = random.choice(kb_pool)
+                movement_dict = {"effect": chosen, "intensity": random.randint(30, 70), "easing": "ease_in_out"}
+                effect = chosen
             scene_dicts.append({
                 "image_path": resolved_image,
                 "duration": sc.end_time - sc.start_time,
                 "scene_source_type": "image",
                 "effect": effect if effect != "none" else "zoom_in_center",
+                "image_movement": movement_dict,
                 "transition_clip_path": transition_clip_resolved,
             })
         # else: scene has no content yet — skip it
@@ -437,7 +484,11 @@ async def export_project(
                     _export_progress[pid_s]["percent"] = 5
 
                     lfff_trim = await _read_lfff_trim_setting(bg_session)
-                    scene_dicts, master_audio = await _build_scene_dicts(bg_session, pid, lfff_trim_enabled=lfff_trim)
+                    scene_dicts, master_audio = await _build_scene_dicts(
+                        bg_session, pid, lfff_trim_enabled=lfff_trim,
+                        override_random_kb=export_params.get("random_ken_burns"),
+                        override_kb_allowed=export_params.get("ken_burns_allowed_effects"),
+                    )
                     transition_type, transition_dur, color_match = await _read_transition_settings(bg_session)
 
                     # Apply per-export overrides if provided in request
@@ -520,17 +571,40 @@ async def export_project(
                                     "green": "&H0000FF00",
                                     "red": "&H000000FF",
                                 }
+
+                                def _hex_to_ass(hex_color: str) -> str:
+                                    """Convert CSS hex color (#RRGGBB) to ASS color (&H00BBGGRR)."""
+                                    h = hex_color.lstrip("#")
+                                    if len(h) == 6:
+                                        r, g, b = h[0:2], h[2:4], h[4:6]
+                                        return f"&H00{b.upper()}{g.upper()}{r.upper()}"
+                                    return "&H00FFFFFF"
+
+                                raw_color = export_params.get("subtitle_color", "white")
+                                if raw_color.startswith("#"):
+                                    ass_color = _hex_to_ass(raw_color)
+                                else:
+                                    ass_color = color_map_narr.get(raw_color, "&H00FFFFFF")
+
                                 narr_subtitle_style = {
                                     "font_name": export_params.get("subtitle_font", "Arial"),
                                     "font_size": export_params.get("subtitle_size", 24),
-                                    "primary_color": color_map_narr.get(
-                                        export_params.get("subtitle_color", "white"), "&H00FFFFFF"
-                                    ),
+                                    "primary_color": ass_color,
                                     "outline_width": export_params.get("subtitle_outline", 2),
                                     "alignment": pos_map_narr.get(
                                         export_params.get("subtitle_position", "bottom"), 2
                                     ),
+                                    "bold": export_params.get("subtitle_bold", False),
                                 }
+
+                        # Read backing track mix settings from project.settings
+                        _proj_settings = project.settings or {}
+                        _bt_loop = bool(export_params.get("backing_track_loop", _proj_settings.get("backing_track_loop", False)))
+                        _narr_vol = float(export_params.get("narration_volume", _proj_settings.get("narration_volume", 1.0)))
+                        _back_vol = float(export_params.get("backing_volume", _proj_settings.get("backing_volume", 1.0)))
+                        _main_fi = float(export_params.get("backing_main_fade_in", _proj_settings.get("backing_main_fade_in", 0.0)))
+                        _main_fo = float(export_params.get("backing_main_fade_out", _proj_settings.get("backing_main_fade_out", 0.0)))
+                        _norm_bt = bool(export_params.get("normalize_backing", _proj_settings.get("normalize_backing", False)))
 
                         await asyncio.to_thread(
                             assemble_narration_video,
@@ -545,6 +619,12 @@ async def export_project(
                             subtitle_words=narr_subtitle_words,
                             subtitle_style=narr_subtitle_style,
                             normalize_audio_enabled=bool(export_params.get("normalize_audio")),
+                            loop_backing=_bt_loop,
+                            narration_volume=_narr_vol,
+                            backing_volume=_back_vol,
+                            main_fade_in=_main_fi,
+                            main_fade_out=_main_fo,
+                            normalize_backing=_norm_bt,
                         )
                     else:
                         await asyncio.to_thread(
@@ -596,7 +676,12 @@ async def export_project(
                                 "red": "&H000000FF",
                             }
                             sub_color = export_params.get("subtitle_color", "white")
-                            primary_color = color_map.get(sub_color, "&H00FFFFFF")
+                            if sub_color.startswith("#"):
+                                # Convert CSS hex (#RRGGBB) to ASS (&H00BBGGRR)
+                                h = sub_color.lstrip("#")
+                                primary_color = f"&H00{h[4:6].upper()}{h[2:4].upper()}{h[0:2].upper()}" if len(h) == 6 else "&H00FFFFFF"
+                            else:
+                                primary_color = color_map.get(sub_color, "&H00FFFFFF")
 
                             style_opts = {
                                 "font_name": export_params.get("subtitle_font", "Arial"),
@@ -723,6 +808,14 @@ async def export_project(
                 "subtitle_position": req.subtitle_position,
                 "subtitle_outline": req.subtitle_outline,
                 "normalize_audio": req.normalize_audio,
+                "backing_track_loop": req.backing_track_loop,
+                "narration_volume": req.narration_volume,
+                "backing_volume": req.backing_volume,
+                "backing_main_fade_in": req.backing_main_fade_in,
+                "backing_main_fade_out": req.backing_main_fade_out,
+                "normalize_backing": req.normalize_backing,
+                "random_ken_burns": req.random_ken_burns,
+                "ken_burns_allowed_effects": req.ken_burns_allowed_effects,
             })
         )
 

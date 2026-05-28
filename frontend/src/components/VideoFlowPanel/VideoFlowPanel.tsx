@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Save, Sparkles } from 'lucide-react';
 import { getVideoFlow, generateVideoFlow, updateSceneFlow, getScenes } from '@/api/client';
 import { useAppStore } from '@/store';
+import FlowGenerationStatus from './FlowGenerationStatus';
 
 interface FlowIdea {
   scene_id: string;
@@ -16,8 +17,10 @@ interface VideoFlowPanelProps {
 export default function VideoFlowPanel({ projectId }: VideoFlowPanelProps) {
   const [ideas, setIdeas] = useState<FlowIdea[]>([]);
   const [editedIds, setEditedIds] = useState<Set<string>>(new Set());
-  const { scenes, setActiveScene } = useAppStore();
+  const [showFlowStatus, setShowFlowStatus] = useState(false);
+  const { scenes, setActiveScene, currentProject } = useAppStore();
   const queryClient = useQueryClient();
+  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
 
   // Fetch existing flow
   const { data: flowData, isLoading } = useQuery({
@@ -108,7 +111,7 @@ export default function VideoFlowPanel({ projectId }: VideoFlowPanelProps) {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="p-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
-        <span className="text-xs font-medium text-gray-300">Video Flow</span>
+        <span className="text-xs font-medium text-gray-300">{isNarration ? 'Story Flow' : 'Video Flow'}</span>
         {editedIds.size > 0 && (
           <button
             onClick={saveAllEdited}
@@ -124,7 +127,7 @@ export default function VideoFlowPanel({ projectId }: VideoFlowPanelProps) {
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {/* Generate Flow button */}
         <button
-          onClick={() => generateMutation.mutate()}
+          onClick={() => { setShowFlowStatus(true); generateMutation.mutate(); }}
           disabled={generateMutation.isPending || scenes.length === 0}
           className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium text-white transition-colors disabled:opacity-50"
         >
@@ -137,9 +140,10 @@ export default function VideoFlowPanel({ projectId }: VideoFlowPanelProps) {
           }
         </button>
 
+        {/* Inline hint while generating */}
         {generateMutation.isPending && (
-          <div className="text-center text-xs text-gray-400 py-2">
-            Using LLM to create a cohesive storyboard across {scenes.length} scenes...
+          <div className="text-center text-xs text-gray-400 py-1">
+            Check the status window for progress...
           </div>
         )}
 
@@ -218,6 +222,16 @@ export default function VideoFlowPanel({ projectId }: VideoFlowPanelProps) {
           </div>
         )}
       </div>
+
+      {/* Floating status window for flow generation progress */}
+      {showFlowStatus && (
+        <FlowGenerationStatus
+          projectId={projectId}
+          isGenerating={generateMutation.isPending}
+          isNarration={isNarration}
+          onDismiss={() => setShowFlowStatus(false)}
+        />
+      )}
     </div>
   );
 }

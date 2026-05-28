@@ -284,6 +284,19 @@ async def init_db() -> None:
         except Exception:
             pass  # Column already exists
 
+        # Add Ollama (local LLM) columns to app_settings if missing
+        for col_sql in [
+            "ALTER TABLE app_settings ADD COLUMN ollama_base_url VARCHAR DEFAULT NULL",
+            "ALTER TABLE app_settings ADD COLUMN ollama_urls JSON DEFAULT NULL",
+            "ALTER TABLE app_settings ADD COLUMN ollama_model VARCHAR DEFAULT NULL",
+            "ALTER TABLE app_settings ADD COLUMN ollama_available_models JSON DEFAULT NULL",
+        ]:
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration: {col_sql.split('ADD COLUMN ')[1].split(' ')[0]} added to app_settings")
+            except Exception:
+                pass  # Column already exists
+
         # Create batch_runs table if it doesn't exist
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS batch_runs (

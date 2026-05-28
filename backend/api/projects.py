@@ -44,6 +44,7 @@ class ProjectResponse(BaseModel):
     mode: ProjectMode
     created_at: datetime
     updated_at: datetime
+    settings: Optional[dict] = None
     scenes_count: int = 0
     assets_count: int = 0
 
@@ -100,6 +101,7 @@ async def create_project(
             mode=project.mode,
             created_at=project.created_at,
             updated_at=project.updated_at,
+            settings=project.settings,
             scenes_count=0,
             assets_count=0,
         )
@@ -147,6 +149,7 @@ async def list_projects(
                     mode=project.mode,
                     created_at=project.created_at,
                     updated_at=project.updated_at,
+                    settings=project.settings,
                     scenes_count=scenes_count,
                     assets_count=assets_count,
                 )
@@ -205,6 +208,7 @@ async def get_project(
             mode=project.mode,
             created_at=project.created_at,
             updated_at=project.updated_at,
+            settings=project.settings,
             scenes_count=scenes_count,
             assets_count=assets_count,
         )
@@ -274,6 +278,7 @@ async def update_project(
             mode=project.mode,
             created_at=project.created_at,
             updated_at=project.updated_at,
+            settings=project.settings,
             scenes_count=scenes_count,
             assets_count=assets_count,
         )
@@ -404,6 +409,7 @@ async def duplicate_project(
             mode=new_project.mode,
             created_at=new_project.created_at,
             updated_at=new_project.updated_at,
+            settings=new_project.settings,
             scenes_count=0,
             assets_count=0,
         )

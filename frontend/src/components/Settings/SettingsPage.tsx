@@ -8,6 +8,7 @@ import {
   testComfyUI,
   testWhisper,
   testLLM,
+  testOllamaSingle,
   getWorkflowConfigs,
   deleteWorkflow,
   introspectWorkflow,
@@ -23,8 +24,9 @@ import {
   changeProjectDir,
   getGpuStatus,
   redetectGpu,
+  refreshOllamaModels,
 } from '@/api/client';
-import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle, Cpu, Monitor } from 'lucide-react';
+import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle, Cpu, Monitor, Zap } from 'lucide-react';
 import type { AppSettings, SystemPromptOverrideEntry, RunPodPodConfig, RunPodPodStatus, GpuStatus } from '@/types/index';
 
 export default function SettingsPage() {
@@ -74,6 +76,10 @@ export default function SettingsPage() {
     runpod_idle_timeout: 30,
     runpod_pods: [],
     gpu_acceleration_enabled: true,
+    ollama_base_url: '',
+    ollama_urls: [],
+    ollama_model: '',
+    ollama_available_models: [],
   });
   const [customImageModel, setCustomImageModel] = useState('');
   // GPU status state
@@ -103,6 +109,11 @@ export default function SettingsPage() {
   const [projectDirChanged, setProjectDirChanged] = useState(false);
   const [showMoveDialog, setShowMoveDialog] = useState(false);
   const [projectDirStatus, setProjectDirStatus] = useState<{ type: 'success' | 'error' | 'loading'; message: string } | null>(null);
+  // Ollama state
+  const [newOllamaUrl, setNewOllamaUrl] = useState('');
+  const [ollamaRefreshing, setOllamaRefreshing] = useState(false);
+  const [ollamaRefreshMsg, setOllamaRefreshMsg] = useState<string | null>(null);
+  const [ollamaServerTests, setOllamaServerTests] = useState<Record<string, 'testing' | 'ok' | 'fail'>>({});
 
   const { data: savedSettings } = useQuery({
     queryKey: ['settings'],
@@ -158,6 +169,10 @@ export default function SettingsPage() {
         runpod_idle_timeout: savedSettings.runpod_idle_timeout || 30,
         runpod_pods: savedSettings.runpod_pods || [],
         gpu_acceleration_enabled: savedSettings.gpu_acceleration_enabled ?? true,
+        ollama_base_url: savedSettings.ollama_base_url || '',
+        ollama_urls: savedSettings.ollama_urls || [],
+        ollama_model: savedSettings.ollama_model || '',
+        ollama_available_models: savedSettings.ollama_available_models || [],
       });
       // Initialize project directory input
       setProjectDirInput(savedSettings.project_dir || '');
@@ -347,6 +362,12 @@ export default function SettingsPage() {
 
   const testLLMMutation = useMutation({
     mutationFn: async (provider: string) => {
+      if (provider === 'ollama') {
+        // Ollama doesn't use api_key — just needs URLs configured
+        if ((settings.ollama_urls || []).length === 0) return false;
+        const response = await testLLM({ provider: 'ollama', api_key: '', model: settings.ollama_model || '' });
+        return response.data.success;
+      }
       const apiKey = settings[`${provider}_api_key` as keyof AppSettings] as string | undefined;
       const model = settings[`${provider}_model` as keyof AppSettings] as string | undefined;
       if (!apiKey || !model) return false;
@@ -1724,6 +1745,194 @@ export default function SettingsPage() {
                 </button>
               </div>
             </div>
+
+            {/* Ollama (Local LLM) — Multi-Server Pool */}
+            <div className={`p-4 rounded border ${settings.default_llm_provider === 'ollama' ? 'bg-gray-800 border-blue-500' : 'bg-gray-800 border-gray-700'}`}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-medium">Ollama (Local)</h3>
+                <button
+                  onClick={() => setSettings((prev) => ({ ...prev, default_llm_provider: prev.default_llm_provider === 'ollama' ? '' : 'ollama' }))}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-colors ${
+                    settings.default_llm_provider === 'ollama'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200'
+                  }`}
+                >
+                  {settings.default_llm_provider === 'ollama' && <Check size={12} />}
+                  {settings.default_llm_provider === 'ollama' ? 'Default' : 'Set as Default'}
+                </button>
+              </div>
+              <div className="space-y-3">
+                {/* Server URL list */}
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Servers {(settings.ollama_urls || []).length > 0 && <span className="text-gray-400 font-normal">({(settings.ollama_urls || []).length} server{(settings.ollama_urls || []).length !== 1 ? 's' : ''} — round-robin)</span>}
+                  </label>
+                  <div className="space-y-2 mb-2">
+                    {(settings.ollama_urls || []).map((url, index) => (
+                      <div key={index} className="flex gap-2 items-center">
+                        <input
+                          type="text"
+                          value={url}
+                          readOnly
+                          className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-300 text-sm"
+                        />
+                        <button
+                          onClick={async () => {
+                            setOllamaServerTests((prev) => ({ ...prev, [url]: 'testing' }));
+                            try {
+                              const res = await testOllamaSingle(url);
+                              setOllamaServerTests((prev) => ({ ...prev, [url]: res.data.success ? 'ok' : 'fail' }));
+                            } catch {
+                              setOllamaServerTests((prev) => ({ ...prev, [url]: 'fail' }));
+                            }
+                          }}
+                          className="p-2 hover:bg-gray-700 rounded transition-colors"
+                          title="Test this server"
+                          disabled={ollamaServerTests[url] === 'testing'}
+                        >
+                          {ollamaServerTests[url] === 'testing' ? (
+                            <Loader size={14} className="animate-spin text-gray-400" />
+                          ) : ollamaServerTests[url] === 'ok' ? (
+                            <Check size={14} className="text-green-500" />
+                          ) : ollamaServerTests[url] === 'fail' ? (
+                            <X size={14} className="text-red-500" />
+                          ) : (
+                            <Zap size={14} className="text-gray-400" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSettings((prev) => ({
+                              ...prev,
+                              ollama_urls: (prev.ollama_urls || []).filter((_, i) => i !== index),
+                              // Keep legacy field in sync with first URL
+                              ollama_base_url: (prev.ollama_urls || []).filter((_, i) => i !== index)[0] || '',
+                            }));
+                            // Clear test state for removed URL
+                            setOllamaServerTests((prev) => {
+                              const next = { ...prev };
+                              delete next[url];
+                              return next;
+                            });
+                          }}
+                          className="p-2 text-red-400 hover:text-red-300 hover:bg-gray-700 rounded transition-colors"
+                          title="Remove server"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="url"
+                      value={newOllamaUrl}
+                      onChange={(e) => setNewOllamaUrl(e.target.value)}
+                      placeholder="http://localhost:11434"
+                      className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newOllamaUrl.trim()) {
+                          setSettings((prev) => ({
+                            ...prev,
+                            ollama_urls: [...(prev.ollama_urls || []), newOllamaUrl.trim()],
+                            ollama_base_url: (prev.ollama_urls || []).length === 0 ? newOllamaUrl.trim() : prev.ollama_base_url,
+                          }));
+                          setNewOllamaUrl('');
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        if (newOllamaUrl.trim()) {
+                          setSettings((prev) => ({
+                            ...prev,
+                            ollama_urls: [...(prev.ollama_urls || []), newOllamaUrl.trim()],
+                            ollama_base_url: (prev.ollama_urls || []).length === 0 ? newOllamaUrl.trim() : prev.ollama_base_url,
+                          }));
+                          setNewOllamaUrl('');
+                        }
+                      }}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors"
+                    >
+                      Add Server
+                    </button>
+                  </div>
+                </div>
+                {/* Model selector */}
+                <div>
+                  <label className="block text-sm font-medium mb-2">Model</label>
+                  <div className="flex gap-2">
+                    <select
+                      value={settings.ollama_model || ''}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, ollama_model: e.target.value }))}
+                      className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                    >
+                      <option value="">Select a model</option>
+                      {(settings.ollama_available_models || []).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={async () => {
+                        setOllamaRefreshing(true);
+                        setOllamaRefreshMsg(null);
+                        try {
+                          const res = await refreshOllamaModels();
+                          const data = res.data;
+                          if (data.success) {
+                            setSettings((prev) => ({ ...prev, ollama_available_models: data.models }));
+                            setOllamaRefreshMsg(`${data.models.length} models found`);
+                          } else {
+                            setOllamaRefreshMsg(data.message || 'Failed');
+                          }
+                        } catch (err: any) {
+                          setOllamaRefreshMsg(err?.response?.data?.message || 'Connection failed');
+                        } finally {
+                          setOllamaRefreshing(false);
+                        }
+                      }}
+                      className="px-3 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm transition-colors flex items-center gap-1"
+                      disabled={ollamaRefreshing || (settings.ollama_urls || []).length === 0}
+                      title="Refresh available models from all Ollama servers"
+                    >
+                      <RefreshCw size={14} className={ollamaRefreshing ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                  {ollamaRefreshMsg && (
+                    <p className="text-xs mt-1 text-gray-400">{ollamaRefreshMsg}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => testLLMMutation.mutate('ollama')}
+                  className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                  disabled={testLLMMutation.isPending || (settings.ollama_urls || []).length === 0}
+                >
+                  {testLLMMutation.isPending && testLLMMutation.variables === 'ollama' ? (
+                    <>
+                      <Loader size={14} className="animate-spin" />
+                      Testing...
+                    </>
+                  ) : testResults['ollama'] === true ? (
+                    <>
+                      <Check size={14} className="text-green-500" />
+                      Connected
+                    </>
+                  ) : testResults['ollama'] === false ? (
+                    <>
+                      <X size={14} className="text-red-500" />
+                      Failed
+                    </>
+                  ) : (
+                    'Test Connection'
+                  )}
+                </button>
+                <p className="text-xs text-gray-500">
+                  Free local LLM with round-robin dispatch across multiple servers.
+                  Recommended: qwen3:14b for 12-16GB VRAM. Prompts are optimized for smaller models.
+                </p>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -2141,6 +2350,11 @@ export default function SettingsPage() {
                     <span className="text-gray-400">GPU Name:</span>
                     <span>{gpuStatus.demucs.gpu_name || 'None detected'}</span>
                   </div>
+                  {!gpuStatus.demucs.using_gpu && (
+                    <p className="text-xs text-gray-500 mt-2">
+                      GPU acceleration requires NVIDIA CUDA or AMD ROCm (Linux only).
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

@@ -139,14 +139,11 @@ export const useJobEvents = () => {
                   ? scene.parameters?.chosen_video_path
                   : scene.parameters?.chosen_image_path;
 
-                // Build asset URL — find asset ID from result or construct file URL
-                let assetUrl: string | null = null;
-                if (job?.result?.asset_ids?.length) {
-                  assetUrl = `/api/projects/${projectId}/assets/${job.result.asset_ids[0]}/file`;
-                } else if (assetPath) {
-                  // Fallback: use the file serving endpoint
-                  assetUrl = `/api/files/${projectId}/${assetPath}`;
-                }
+                // Build asset URL from chosen path (already includes project ID
+                // in the relative path, e.g. "{project_id}/generated/image.png")
+                const assetUrl: string | null = assetPath
+                  ? `/api/files/${assetPath}`
+                  : null;
 
                 const elapsed = job?.started_at
                   ? Date.now() - new Date(job.started_at).getTime()

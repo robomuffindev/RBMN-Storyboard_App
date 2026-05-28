@@ -380,6 +380,11 @@ class AppSettings(SQLModel, table=True):
     global_video_negative_prompt: Optional[str] = Field(default=None)
     # GPU acceleration — when False, forces CPU encoding/decoding even if GPU is detected
     gpu_acceleration_enabled: bool = Field(default=True)
+    # Ollama integration — local LLM inference (multi-server pool)
+    ollama_base_url: Optional[str] = Field(default=None)  # legacy single URL, migrated to ollama_urls
+    ollama_urls: Optional[list] = Field(default=None, sa_column=Column(JSON))  # list of server URLs
+    ollama_model: Optional[str] = Field(default=None)  # e.g. "qwen3:14b"
+    ollama_available_models: Optional[list] = Field(default=None, sa_column=Column(JSON))  # cached model list
 
 
 class BatchRunStatus(StrEnum):

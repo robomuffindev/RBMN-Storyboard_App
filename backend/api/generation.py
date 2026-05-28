@@ -635,6 +635,167 @@ async def batch_generate(
         )
 
 
+# ── Standalone Asset Generation ──────────────────────────────────────
+
+
+class GenerateAssetRequest(BaseModel):
+    """Request model for standalone asset generation (outside of scene context)."""
+
+    asset_type: str  # "image" or "video"
+    prompt: str
+    negative_prompt: str = ""
+    width: int = 1024
+    height: int = 576
+    seed: Optional[int] = None
+    # Image-specific
+    workflow_type: Optional[str] = None  # klein_t2i, klein_1ref, etc., zimage_t2i
+    reference_asset_ids: list[UUID] = []
+    two_pass: bool = False
+    # Video-specific
+    duration: float = 10.0
+    framerate: int = 24
+    first_frame_asset_id: Optional[UUID] = None
+    last_frame_asset_id: Optional[UUID] = None
+    audio_asset_id: Optional[UUID] = None
+    video_workflow_type: Optional[str] = None  # ltx_fflf, ltx_i2v, seq_fflf, seq_i2v
+    skip_audio_mux: bool = False
+
+
+class AssignAssetRequest(BaseModel):
+    """Request model for assigning a generated asset to a scene."""
+
+    asset_id: UUID
+    target: str  # "first_frame", "last_frame", or "video"
+
+
+@router.post(
+    "/asset",
+    response_model=GenerationJobResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate standalone asset",
+)
+async def generate_asset(
+    project_id: UUID,
+    req: GenerateAssetRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> GenerationJobResponse:
+    """Generate a standalone image or video asset outside of a scene context.
+
+    The result is saved as an Asset record (generated_image or generated_video)
+    rather than being attached to a scene version. Assets can later be assigned
+    to scenes via the assign-asset endpoint.
+
+    Args:
+        project_id: UUID of the project.
+        req: Asset generation request.
+        request: FastAPI request (for job queue access).
+        session: Database session.
+
+    Returns:
+        Job record with job_id for tracking.
+
+    Raises:
+        HTTPException: If project not found or invalid asset_type.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        if req.asset_type not in ("image", "video"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid asset_type: {req.asset_type}. Must be 'image' or 'video'.",
+            )
+
+        # Resolve seed — no scene context, so use explicit or global only
+        resolved_seed = req.seed
+        if resolved_seed is None:
+            project = await session.get(Project, project_id)
+            if project and project.settings:
+                if project.settings.get("global_seed_enabled"):
+                    global_seed = project.settings.get("global_seed", 0)
+                    if global_seed:
+                        resolved_seed = global_seed
+
+        if req.asset_type == "image":
+            # Image generation — follows generate_image() pattern
+            job = Job(
+                project_id=project_id,
+                scene_id=None,  # Standalone — no scene
+                job_type=JobType.IMAGE,
+                status=JobStatus.PENDING,
+                parameters={
+                    "workflow_type": req.workflow_type,
+                    "prompt": req.prompt,
+                    "width": req.width,
+                    "height": req.height,
+                    "seed": resolved_seed,
+                    "reference_asset_ids": [str(aid) for aid in req.reference_asset_ids],
+                    "negative_prompt": req.negative_prompt,
+                    "two_pass": req.two_pass,
+                    "standalone_asset": True,  # Signal to dispatcher to save as Asset
+                    "scene_name": "Asset Generator",
+                },
+            )
+
+            if req.two_pass:
+                job.parameters["two_pass_phase"] = "base"
+                job.parameters["two_pass_character_ref_ids"] = [
+                    str(aid) for aid in req.reference_asset_ids
+                ]
+                job.parameters["two_pass_original_workflow"] = req.workflow_type
+                job.parameters["workflow_type"] = "klein_t2i"
+                job.parameters["reference_asset_ids"] = []
+
+        else:
+            # Video generation — follows generate_video() pattern
+            job = Job(
+                project_id=project_id,
+                scene_id=None,  # Standalone — no scene
+                job_type=JobType.VIDEO,
+                status=JobStatus.PENDING,
+                parameters={
+                    "workflow_type": req.video_workflow_type,
+                    "prompt": req.prompt,
+                    "width": req.width,
+                    "height": req.height,
+                    "duration": req.duration,
+                    "framerate": req.framerate,
+                    "seed": resolved_seed,
+                    "first_frame_asset_id": str(req.first_frame_asset_id) if req.first_frame_asset_id else None,
+                    "last_frame_asset_id": str(req.last_frame_asset_id) if req.last_frame_asset_id else None,
+                    "audio_asset_id": str(req.audio_asset_id) if req.audio_asset_id else None,
+                    "skip_audio_mux": req.skip_audio_mux,
+                    "negative_prompt": req.negative_prompt,
+                    "standalone_asset": True,  # Signal to dispatcher to save as Asset
+                    "scene_name": "Asset Generator",
+                },
+            )
+
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+
+        logger.info(
+            f"Created standalone {req.asset_type} generation job {job.id} "
+            f"for project {project_id} (seed={resolved_seed})"
+        )
+
+        # Notify the dispatcher that a new job is available
+        job_queue: JobQueue = request.app.state.job_queue
+        job_queue.notify()
+
+        return GenerationJobResponse.model_validate(job)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating standalone asset: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate standalone asset",
+        )
+
+
 # ── Auto Generate ────────────────────────────────────────────────────
 
 
@@ -890,38 +1051,98 @@ async def _ensure_video_flow(
         "of visual direction — depict what they describe. Return a JSON array of strings."
     )
 
-    from backend.api.concept import _call_llm, _try_repair_truncated_json_array
+    from backend.api.concept import _call_llm, _parse_flow_json_array
 
-    flow_max_tokens = max(2000, len(scenes) * 150 + 500)
+    # Determine batch size — Ollama local models need small batches
+    if llm_provider == "ollama":
+        batch_size = 5
+    elif len(scenes) > 20:
+        batch_size = 10
+    else:
+        batch_size = len(scenes)
 
-    try:
-        raw_text = await asyncio.to_thread(
-            _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, user_prompt,
-            max_tokens=flow_max_tokens,
-        )
-    except Exception as e:
-        logger.warning(f"Auto-flow: LLM call failed: {e}")
-        return False
+    ideas_list: list[str] = []
 
-    # Parse JSON array
-    import json as json_mod
-    try:
-        cleaned = raw_text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
+    if batch_size >= len(scenes):
+        # Single-shot
+        flow_max_tokens = max(2000, len(scenes) * 150 + 500)
+        try:
+            raw_text = await asyncio.to_thread(
+                _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, user_prompt,
+                max_tokens=flow_max_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"Auto-flow: LLM call failed: {e}")
+            return False
+        ideas_list = _parse_flow_json_array(raw_text, len(scenes))
+    else:
+        # Concurrent batched — run multiple batches in parallel across servers
+        total_batches = (len(scenes) + batch_size - 1) // batch_size
 
-        ideas_list = json_mod.loads(cleaned)
-        if not isinstance(ideas_list, list):
-            raise ValueError("Expected a JSON array")
-    except (json_mod.JSONDecodeError, ValueError):
-        repaired = _try_repair_truncated_json_array(cleaned)
-        if repaired is not None:
-            ideas_list = repaired
+        # Truncated lyrics summary shared across batches
+        lyrics_summary = ""
+        if full_lyrics:
+            words = full_lyrics.split()
+            lyrics_summary = " ".join(words[:200]) + ("..." if len(words) > 200 else "")
+
+        # Build all batch prompts upfront
+        batch_prompts: list[tuple[int, int, str, int]] = []
+        for batch_idx in range(0, len(scenes), batch_size):
+            batch_scenes = scenes[batch_idx:batch_idx + batch_size]
+            batch_scene_list = "\n".join(scene_lines[batch_idx:batch_idx + batch_size])
+            bp = (
+                f"Video Concept: {concept_text or '(not set)'}\n"
+                f"Visual Style: {style_text or '(not set)'}\n"
+                f"Characters: {char_block}\n"
+            )
+            if lyrics_summary:
+                bp += f"\nNarrative/Lyrics Summary:\n{lyrics_summary}\n"
+            bp += (
+                f"\nScenes {batch_idx + 1}–{batch_idx + len(batch_scenes)} "
+                f"(of {len(scenes)} total):\n{batch_scene_list}\n\n"
+                f"Generate a storyboard idea for each of these {len(batch_scenes)} scenes. "
+                f"Return a JSON array of {len(batch_scenes)} strings."
+            )
+            batch_prompts.append((batch_idx, len(batch_scenes), bp, max(1200, len(batch_scenes) * 150 + 300)))
+
+        # Determine concurrency from Ollama server count
+        if llm_provider == "ollama" and llm_api_key:
+            import json as _jc
+            try:
+                num_servers = len(_jc.loads(llm_api_key)) if llm_api_key.startswith("[") else 1
+            except Exception:
+                num_servers = 1
+            concurrency = max(num_servers, 1)
         else:
-            ideas_list = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
+            concurrency = 3
+
+        logger.info(f"Auto-flow: {total_batches} batches of {batch_size}, {concurrency} concurrent ({len(scenes)} scenes)")
+
+        sem = asyncio.Semaphore(concurrency)
+        batch_results: dict[int, list[str]] = {}
+
+        async def _run_batch(b_idx: int, b_count: int, b_prompt: str, b_max_tokens: int) -> None:
+            async with sem:
+                try:
+                    raw_text = await asyncio.to_thread(
+                        _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, b_prompt,
+                        max_tokens=b_max_tokens,
+                    )
+                    ideas = _parse_flow_json_array(raw_text, b_count)
+                except Exception as e:
+                    logger.warning(f"Auto-flow batch {b_idx // batch_size + 1} failed: {e}")
+                    ideas = [""] * b_count
+                while len(ideas) < b_count:
+                    ideas.append("")
+                batch_results[b_idx] = ideas[:b_count]
+
+        await asyncio.gather(*[
+            _run_batch(b_idx, b_count, b_prompt, b_max_tokens)
+            for b_idx, b_count, b_prompt, b_max_tokens in batch_prompts
+        ])
+
+        for b_idx, b_count, _, _ in batch_prompts:
+            ideas_list.extend(batch_results.get(b_idx, [""] * b_count))
 
     # Save flow ideas to scenes
     for i, scene in enumerate(scenes):
@@ -1138,6 +1359,17 @@ async def _build_video_enhance_context(
             f"compelling video motion that depicts the lyrical content): {flow_idea}"
         )
 
+    # Camera action for this scene
+    camera_action = scene.parameters.get("camera_action", "")
+    if camera_action and camera_action != "none":
+        if camera_action == "custom":
+            custom_cam = scene.parameters.get("custom_camera_action", "")
+            if custom_cam:
+                parts.append(f"Requested camera movement: {custom_cam}")
+        else:
+            cam_label = camera_action.replace("_", " ").title()
+            parts.append(f"Requested camera movement: {cam_label}")
+
     # Visual continuity from previous scene (skip if ignore_prev_scene_ref is set)
     use_prev_lf = scene.parameters.get("use_prev_scene_last_frame", False)
     ignore_prev_ref = scene.parameters.get("ignore_prev_scene_ref", False)
@@ -1153,6 +1385,23 @@ async def _build_video_enhance_context(
                 f"CONTINUITY: The starting frame of this video is the ending frame of the previous scene. "
                 f'Previous scene described: "{prev_prompt}". The video should visually continue from that context.'
             )
+
+        # Camera direction continuity — prevent jarring direction changes at V2V cuts.
+        # When scene B starts from scene A's last frame, a sudden direction reversal
+        # (e.g., A pans left → B pans right) creates an abrupt, unnatural cut.
+        prev_camera = prev_scene.parameters.get("camera_action", "")
+        if prev_camera and prev_camera != "none":
+            if prev_camera == "custom":
+                prev_cam_label = prev_scene.parameters.get("custom_camera_action", "")
+            else:
+                prev_cam_label = prev_camera.replace("_", " ").title()
+            if prev_cam_label:
+                parts.append(
+                    f"CAMERA CONTINUITY: The previous scene's camera was moving with: {prev_cam_label}. "
+                    f"Since this scene starts from that scene's final frame, avoid abrupt direction changes. "
+                    f"Prefer continuing in a similar direction, smoothly transitioning to a new direction, "
+                    f"or settling to a static shot — never immediately reverse the motion."
+                )
 
     # Lipsync awareness — guide LLM to emphasize facial/mouth movement
     lipsync_on = scene.parameters.get("lipsync_enabled", False)

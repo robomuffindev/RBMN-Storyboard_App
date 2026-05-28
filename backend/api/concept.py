@@ -1,6 +1,7 @@
 """Concept and Video Flow endpoints for RBMN Storyboard App."""
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 from uuid import UUID
 
@@ -14,6 +15,10 @@ from backend.database.models import Project, Scene, AppSettings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects/{project_id}/concept", tags=["concept"])
+
+# ── In-memory flow generation progress tracking ────────────────────────
+# Key: str(project_id) → progress dict
+_flow_progress: dict[str, dict] = {}
 
 
 # ── Request / response models ────────────────────────────────────────
@@ -40,6 +45,8 @@ class ConceptData(BaseModel):
     global_seed: int = 0
     use_transition_lora: bool = False
     transition_lora_strength: float = 1.0
+    random_ken_burns: bool = False
+    ken_burns_allowed_effects: list[str] = []  # empty = all effects allowed
 
 
 class SceneFlowIdea(BaseModel):
@@ -52,6 +59,17 @@ class VideoFlowResponse(BaseModel):
     """Response after generating or fetching video flow."""
     ideas: list[SceneFlowIdea]
     scene_count: int = 0  # actual DB scene count for frontend display
+
+
+class FlowProgressResponse(BaseModel):
+    """Response for flow generation progress polling."""
+    status: str = "idle"  # 'idle', 'running', 'done', 'failed'
+    total_scenes: int = 0
+    total_batches: int = 0
+    completed_batches: int = 0
+    current_message: Optional[str] = None
+    error: Optional[str] = None
+    started_at: Optional[float] = None  # epoch seconds
 
 
 class GenerateCharacterRequest(BaseModel):
@@ -98,6 +116,8 @@ async def get_concept(
         global_seed=s.get("global_seed", 0),
         use_transition_lora=s.get("use_transition_lora", False),
         transition_lora_strength=s.get("transition_lora_strength", 1.0),
+        random_ken_burns=s.get("random_ken_burns", False),
+        ken_burns_allowed_effects=s.get("ken_burns_allowed_effects", []),
     )
 
 
@@ -123,6 +143,8 @@ async def save_concept(
     settings["global_seed"] = req.global_seed
     settings["use_transition_lora"] = req.use_transition_lora
     settings["transition_lora_strength"] = req.transition_lora_strength
+    settings["random_ken_burns"] = req.random_ken_burns
+    settings["ken_burns_allowed_effects"] = req.ken_burns_allowed_effects
     project.settings = settings
     await session.commit()
     await session.refresh(project)
@@ -529,6 +551,16 @@ async def get_video_flow(
     return VideoFlowResponse(ideas=ideas, scene_count=len(scenes))
 
 
+@router.get("/flow/progress", response_model=FlowProgressResponse, summary="Poll flow generation progress")
+async def get_flow_progress(project_id: UUID) -> FlowProgressResponse:
+    """Return the current progress of flow generation for this project."""
+    key = str(project_id)
+    prog = _flow_progress.get(key)
+    if not prog:
+        return FlowProgressResponse(status="idle")
+    return FlowProgressResponse(**prog)
+
+
 @router.post("/flow/generate", response_model=VideoFlowResponse, summary="Generate video flow via LLM")
 async def generate_video_flow(
     project_id: UUID,
@@ -536,36 +568,77 @@ async def generate_video_flow(
 ) -> VideoFlowResponse:
     """Use an LLM to generate a cohesive scene-by-scene storyboard flow
     based on the project concept, style, characters, lyrics, and existing scenes."""
-    from backend.database.models import Lyrics as LyricsModel
-    from backend.api.generation import _get_scene_lyrics
-
     project = await _get_project(project_id, session)
-
-    # Gather concept info
-    s = project.settings or {}
-    concept_text = s.get("concept_text", "")
-    style_text = s.get("style_text", "")
-    characters = s.get("characters", [])
 
     # Gather scenes
     stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
     result = await session.execute(stmt)
     scenes = result.scalars().all()
 
-    # Gather lyrics (word-level timestamps for per-scene filtering)
+    if not scenes:
+        raise HTTPException(status_code=400, detail="No scenes found. Create scenes first.")
+
+    # Initialize progress tracking
+    pid = str(project_id)
+    _flow_progress[pid] = {
+        "status": "running",
+        "total_scenes": len(scenes),
+        "total_batches": 1,
+        "completed_batches": 0,
+        "current_message": f"Preparing flow generation for {len(scenes)} scenes...",
+        "error": None,
+        "started_at": time.time(),
+    }
+
+    try:
+        result = await _generate_flow_inner(
+            project_id, project, scenes, session, pid
+        )
+        _flow_progress[pid]["status"] = "done"
+        _flow_progress[pid]["completed_batches"] = _flow_progress[pid]["total_batches"]
+        # Count how many scenes actually got filled
+        filled = sum(1 for idea in result.ideas if idea.flow_idea and idea.flow_idea.strip())
+        if filled == len(scenes):
+            _flow_progress[pid]["current_message"] = f"Completed — all {len(scenes)} scenes filled"
+        else:
+            _flow_progress[pid]["current_message"] = (
+                f"Completed — {filled}/{len(scenes)} scenes filled"
+            )
+        return result
+    except Exception as e:
+        _flow_progress[pid]["status"] = "failed"
+        _flow_progress[pid]["error"] = str(e)
+        _flow_progress[pid]["current_message"] = f"Failed: {e}"
+        raise
+
+
+async def _generate_flow_inner(
+    project_id: UUID,
+    project: Any,
+    scenes: list,
+    session: AsyncSession,
+    pid: str,
+) -> "VideoFlowResponse":
+    """Inner flow generation logic with progress updates."""
+    from backend.database.models import Lyrics as LyricsModel
+    from backend.api.generation import _get_scene_lyrics
+
+    # Re-gather concept info (already loaded in caller but keep encapsulated)
+    s = project.settings or {}
+    concept_text = s.get("concept_text", "")
+    style_text = s.get("style_text", "")
+    characters = s.get("characters", [])
+
+    # Gather lyrics
     lyrics_stmt = select(LyricsModel).where(LyricsModel.project_id == project_id)
     lyrics_result = await session.execute(lyrics_stmt)
     lyrics_record = lyrics_result.scalars().first()
     lyrics_words = lyrics_record.words if lyrics_record else []
-    # Also get the full lyrics text for overall context
     full_lyrics = ""
     if lyrics_record:
         full_lyrics = (getattr(lyrics_record, "initial_text", "") or "").strip()
         if not full_lyrics:
             full_lyrics = (lyrics_record.full_text or "").strip()
-
-    if not scenes:
-        raise HTTPException(status_code=400, detail="No scenes found. Create scenes first.")
 
     # Build LLM prompt
     char_block = ""
@@ -612,6 +685,11 @@ async def generate_video_flow(
         "- Vary the TIME OF DAY: dawn → morning → midday → golden hour → dusk → night\n"
         "- Vary the ATMOSPHERE: sunny → overcast → neon-lit → foggy → rainy → warm indoor glow\n"
         "- Vary the CAMERA: wide establishing → close-up → overhead → low angle → tracking\n"
+        "CAMERA DIRECTION CONTINUITY: When adjacent scenes share a visual transition (e.g., scene B "
+        "starts from scene A's final frame), avoid abrupt direction reversals. If scene A ends with a "
+        "leftward pan, scene B should NOT immediately pan right — instead, continue the motion, settle "
+        "to a static shot, or smoothly transition to a new direction. Direction changes between scenes "
+        "should feel intentional, not jarring.\n"
         "Even if the song concept is about one journey through one area, find DIFFERENT specific spots "
         "within that area. A 'neighborhood walk' should visit: the park entrance, a shop interior, "
         "a rooftop view, a crosswalk, a cafe patio — NOT the same street 10 times.\n\n"
@@ -648,54 +726,227 @@ async def generate_video_flow(
     from backend.api.settings import resolve_llm_config
     provider, api_key, model = resolve_llm_config(app_settings)
 
-    # Calculate token budget: ~150 tokens per scene (100 words + JSON overhead)
-    # Minimum 2000, scale up for larger scene counts
-    flow_max_tokens = max(2000, len(scenes) * 150 + 500)
-    logger.info(f"Generating video flow for {len(scenes)} scenes (max_tokens={flow_max_tokens})")
+    # Determine batch size based on provider and scene count.
+    # Ollama local models have smaller context windows (4K-8K), so we process
+    # scenes in small batches to avoid context overflow. Cloud providers can
+    # handle more scenes at once but still benefit from batching on large projects.
+    if provider == "ollama":
+        batch_size = 5  # ~1500 tokens per batch (system + 5 scenes + output)
+    elif len(scenes) > 20:
+        batch_size = 10  # Even cloud models can struggle with 40+ scenes
+    else:
+        batch_size = len(scenes)  # Small projects: send all at once
 
-    # Call LLM
-    try:
-        raw_text = await asyncio.to_thread(
-            _call_llm, provider, api_key, model, system_prompt, user_prompt,
-            max_tokens=flow_max_tokens,
-        )
-    except Exception as e:
-        logger.error(f"LLM flow generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"LLM call failed: {e}")
+    ideas_list: list[str] = []
 
-    # Parse JSON array from response
-    import json
-    try:
-        # Strip markdown code fences if present
-        cleaned = raw_text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
+    if batch_size >= len(scenes):
+        # Single-shot: send all scenes in one call
+        _flow_progress[pid].update({
+            "total_batches": 1,
+            "completed_batches": 0,
+            "current_message": f"Sending {len(scenes)} scenes to {provider} ({model})...",
+        })
+        flow_max_tokens = max(2000, len(scenes) * 150 + 500)
+        logger.info(f"Generating video flow for {len(scenes)} scenes in single call (max_tokens={flow_max_tokens})")
+        try:
+            raw_text = await asyncio.to_thread(
+                _call_llm, provider, api_key, model, system_prompt, user_prompt,
+                max_tokens=flow_max_tokens,
+            )
+        except Exception as e:
+            logger.error(f"LLM flow generation failed: {e}")
+            raise HTTPException(status_code=500, detail=f"LLM call failed: {e}")
+        ideas_list = _parse_flow_json_array(raw_text, len(scenes))
+        _flow_progress[pid]["completed_batches"] = 1
+    else:
+        # Batched + concurrent: process scenes in groups, running multiple
+        # batches in parallel across all available Ollama servers (or cloud).
+        # Each batch gets concept/style/characters + truncated lyrics summary +
+        # its own per-scene lyrics. No sequential dependency between batches —
+        # per-scene lyrics provide the primary creative direction.
+        total_batches = (len(scenes) + batch_size - 1) // batch_size
 
-        ideas_list = json.loads(cleaned)
-        if not isinstance(ideas_list, list):
-            raise ValueError("Expected a JSON array")
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Failed to parse LLM response as JSON array: {e}\nRaw: {raw_text[:500]}")
-        # Try to repair truncated JSON: if response was cut off mid-array,
-        # find the last complete string element and parse what we can
-        repaired = _try_repair_truncated_json_array(cleaned)
-        if repaired is not None:
-            ideas_list = repaired
-            logger.info(f"Repaired truncated JSON: got {len(ideas_list)} of {len(scenes)} ideas")
+        _flow_progress[pid].update({
+            "total_batches": total_batches,
+            "completed_batches": 0,
+            "current_message": f"Processing {total_batches} batches of {batch_size} scenes ({provider})...",
+        })
+
+        # Build truncated lyrics summary once (shared across all batches)
+        lyrics_summary = ""
+        if full_lyrics:
+            words = full_lyrics.split()
+            if len(words) > 200:
+                lyrics_summary = " ".join(words[:200]) + "..."
+            else:
+                lyrics_summary = full_lyrics
+
+        # Build all batch prompts upfront
+        batch_prompts: list[tuple[int, int, str, int]] = []  # (batch_idx, count, prompt, max_tokens)
+        for batch_idx in range(0, len(scenes), batch_size):
+            batch_scenes = scenes[batch_idx:batch_idx + batch_size]
+            batch_scene_lines = scene_lines[batch_idx:batch_idx + batch_size]
+            batch_scene_list = "\n".join(batch_scene_lines)
+
+            batch_user_prompt = (
+                f"Video Concept: {concept_text or '(not set)'}\n"
+                f"Visual Style: {style_text or '(not set)'}\n"
+                f"Characters: {char_block}\n"
+            )
+            if lyrics_summary:
+                batch_user_prompt += f"\nNarrative/Lyrics Summary (for overall arc):\n{lyrics_summary}\n"
+
+            batch_user_prompt += (
+                f"\nScenes {batch_idx + 1}–{batch_idx + len(batch_scenes)} "
+                f"(of {len(scenes)} total, with per-scene lyrics):\n{batch_scene_list}\n\n"
+                f"Generate a storyboard idea for each of these {len(batch_scenes)} scenes. "
+                f"The lyrics for each scene are your PRIMARY source of visual direction. "
+                f"Return a JSON array of {len(batch_scenes)} strings."
+            )
+            batch_max_tokens = max(1200, len(batch_scenes) * 150 + 300)
+            batch_prompts.append((batch_idx, len(batch_scenes), batch_user_prompt, batch_max_tokens))
+
+        # Determine concurrency: number of Ollama servers, or sensible default
+        if provider == "ollama" and api_key:
+            import json as _jc
+            try:
+                if api_key.startswith("["):
+                    num_servers = len(_jc.loads(api_key))
+                else:
+                    num_servers = 1
+            except Exception:
+                num_servers = 1
+            concurrency = max(num_servers, 1)
         else:
-            # Final fallback: split by double newline
-            ideas_list = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
+            concurrency = 3  # Cloud providers can handle parallel calls
 
-    if len(ideas_list) < len(scenes):
-        logger.warning(
-            f"LLM returned {len(ideas_list)} ideas for {len(scenes)} scenes — "
-            f"some scenes will have empty flow ideas"
+        logger.info(
+            f"Generating video flow: {total_batches} batches of {batch_size}, "
+            f"{concurrency} concurrent (provider={provider}, {len(scenes)} scenes)"
         )
+
+        # Run batches concurrently with a semaphore to limit parallelism
+        sem = asyncio.Semaphore(concurrency)
+        batch_results: dict[int, list[str]] = {}  # batch_idx -> ideas
+
+        async def _run_batch(b_idx: int, b_count: int, b_prompt: str, b_max_tokens: int) -> None:
+            b_num = b_idx // batch_size + 1
+            async with sem:
+                logger.info(f"  Batch {b_num}/{total_batches}: scenes {b_idx + 1}–{b_idx + b_count}")
+                try:
+                    raw_text = await asyncio.to_thread(
+                        _call_llm, provider, api_key, model, system_prompt, b_prompt,
+                        max_tokens=b_max_tokens,
+                    )
+                    ideas = _parse_flow_json_array(raw_text, b_count)
+                except Exception as e:
+                    logger.warning(f"  Batch {b_num} failed: {e} — filling with empty ideas")
+                    ideas = [""] * b_count
+
+                # Pad/trim to exact count
+                while len(ideas) < b_count:
+                    ideas.append("")
+                ideas = ideas[:b_count]
+                batch_results[b_idx] = ideas
+                # Update progress
+                _flow_progress[pid]["completed_batches"] = len(batch_results)
+                _flow_progress[pid]["current_message"] = (
+                    f"Batch {len(batch_results)}/{total_batches} complete "
+                    f"(scenes {b_idx + 1}–{b_idx + b_count})"
+                )
+                logger.info(f"  Batch {b_num}: got {len(ideas)} ideas")
+
+        # Launch all batches concurrently (semaphore limits actual parallelism)
+        await asyncio.gather(*[
+            _run_batch(b_idx, b_count, b_prompt, b_max_tokens)
+            for b_idx, b_count, b_prompt, b_max_tokens in batch_prompts
+        ])
+
+        # Reassemble results in scene order
+        for b_idx, b_count, _, _ in batch_prompts:
+            ideas_list.extend(batch_results.get(b_idx, [""] * b_count))
+
+    # Pad to scene count if needed
+    while len(ideas_list) < len(scenes):
+        ideas_list.append("")
+
+    # ── Retry pass: re-generate any empty ideas individually ──────────
+    empty_indices = [i for i, idea in enumerate(ideas_list) if not idea or not idea.strip()]
+    if empty_indices:
+        logger.warning(
+            f"Flow generation: {len(empty_indices)} empty ideas detected — "
+            f"retrying individually (scenes: {[i+1 for i in empty_indices]})"
+        )
+        _flow_progress[pid]["current_message"] = (
+            f"Retrying {len(empty_indices)} empty scenes individually..."
+        )
+
+        retry_system = (
+            "You are a creative director for AI-generated music videos and narration videos. "
+            "Given scene details, generate ONE visual storyboard idea under 100 words describing "
+            "the specific location, camera movement, action, mood, and composition. "
+            "Return ONLY the idea text — no JSON, no labels, no explanation."
+        )
+
+        async def _retry_single(idx: int) -> None:
+            sc = scenes[idx]
+            sc_lyrics = ""
+            if lyrics_words:
+                sc_lyrics = _get_scene_lyrics(sc, lyrics_words)
+            retry_prompt = (
+                f"Concept: {concept_text or '(not set)'}\n"
+                f"Style: {style_text or '(not set)'}\n"
+                f"Scene {idx + 1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)\n"
+            )
+            if sc_lyrics:
+                retry_prompt += f"Lyrics: \"{sc_lyrics}\"\n"
+            retry_prompt += "\nGenerate one vivid storyboard idea for this scene."
+
+            try:
+                raw = await asyncio.to_thread(
+                    _call_llm, provider, api_key, model, retry_system, retry_prompt,
+                    max_tokens=300,
+                )
+                text = raw.strip().strip('"').strip("'")
+                if text:
+                    ideas_list[idx] = text
+                    logger.info(f"  Retry scene {idx + 1}: OK ({len(text)} chars)")
+                else:
+                    logger.warning(f"  Retry scene {idx + 1}: still empty")
+            except Exception as e:
+                logger.warning(f"  Retry scene {idx + 1} failed: {e}")
+
+        # Determine retry concurrency from provider (use all Ollama servers)
+        _retry_conc = 2
+        if provider == "ollama" and api_key:
+            import json as _rjc
+            try:
+                if api_key.startswith("["):
+                    _retry_conc = max(len(_rjc.loads(api_key)), 1)
+            except Exception:
+                pass
+        retry_sem = asyncio.Semaphore(_retry_conc)
+
+        async def _retry_with_sem(idx: int) -> None:
+            async with retry_sem:
+                await _retry_single(idx)
+
+        await asyncio.gather(*[_retry_with_sem(i) for i in empty_indices])
+
+        still_empty = sum(1 for i in empty_indices if not ideas_list[i] or not ideas_list[i].strip())
+        if still_empty:
+            logger.warning(f"Flow generation: {still_empty} scenes still empty after retry")
+            _flow_progress[pid]["current_message"] = (
+                f"Completed with {still_empty} empty scene(s) — edit manually"
+            )
+        else:
+            logger.info(f"Flow generation: all {len(empty_indices)} retries succeeded")
 
     # Save to scene parameters and build response
+    filled_count = sum(1 for idea in ideas_list if idea and idea.strip())
+    _flow_progress[pid]["current_message"] = (
+        f"Saving {filled_count}/{len(scenes)} flow ideas to scenes..."
+    )
     ideas: list[SceneFlowIdea] = []
     for i, scene in enumerate(scenes):
         idea_text = ideas_list[i] if i < len(ideas_list) else ""
@@ -944,6 +1195,32 @@ async def set_character_active_image(
 # ── LLM helpers ───────────────────────────────────────────────────────
 
 
+def _parse_flow_json_array(raw_text: str, expected_count: int) -> list[str]:
+    """Parse an LLM response as a JSON array of strings, with fallback repair."""
+    import json
+
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned.rsplit("```", 1)[0]
+    cleaned = cleaned.strip()
+
+    try:
+        ideas_list = json.loads(cleaned)
+        if not isinstance(ideas_list, list):
+            raise ValueError("Expected a JSON array")
+        return [str(item) for item in ideas_list]
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Failed to parse flow JSON: {e}\nRaw: {raw_text[:500]}")
+        repaired = _try_repair_truncated_json_array(cleaned)
+        if repaired is not None:
+            logger.info(f"Repaired truncated JSON: got {len(repaired)} of {expected_count} ideas")
+            return repaired
+        # Final fallback: split by double newline
+        return [p.strip() for p in raw_text.split("\n\n") if p.strip()]
+
+
 def _try_repair_truncated_json_array(text: str) -> list[str] | None:
     """Attempt to recover a JSON array of strings that was truncated mid-stream.
 
@@ -998,9 +1275,16 @@ def _call_llm(
             model.startswith(p)
             for p in ("gpt-4.1", "gpt-5", "chatgpt", "o1", "o3", "o4")
         )
+        # Reasoning models (GPT-5.x, o-series) spend output tokens on
+        # internal thinking BEFORE producing visible content.  Boost the
+        # budget so the caller's intended output size still fits after
+        # the model's chain-of-thought overhead.
+        _is_reasoning = any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4"))
+        effective_max = max(max_tokens * 3, 8192) if _is_reasoning else max_tokens
+
         extra_params: dict = {}
         if _new_style:
-            extra_params["max_completion_tokens"] = max_tokens
+            extra_params["max_completion_tokens"] = effective_max
             # These models only accept temperature=1 (the default)
         else:
             extra_params["max_tokens"] = max_tokens
@@ -1013,7 +1297,18 @@ def _call_llm(
             ],
             **extra_params,
         )
-        return response.choices[0].message.content
+        choice = response.choices[0]
+        content = choice.message.content
+        # Guard against None/empty content — can happen with reasoning models,
+        # content filters, or when finish_reason is not 'stop'
+        if not content or not content.strip():
+            reason = getattr(choice, "finish_reason", "unknown")
+            refusal = getattr(choice.message, "refusal", None)
+            detail = f"Empty response from {model} (finish_reason={reason})"
+            if refusal:
+                detail += f", refusal={refusal}"
+            raise ValueError(detail)
+        return content
 
     elif provider == "anthropic":
         from anthropic import Anthropic
@@ -1024,7 +1319,10 @@ def _call_llm(
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return response.content[0].text
+        content = response.content[0].text if response.content else ""
+        if not content or not content.strip():
+            raise ValueError(f"Empty response from {model} (stop_reason={response.stop_reason})")
+        return content
 
     elif provider == "gemini":
         import google.generativeai as genai
@@ -1040,6 +1338,90 @@ def _call_llm(
                 temperature=0.8,
             ),
         )
-        return response.text
+        content = response.text
+        if not content or not content.strip():
+            raise ValueError(f"Empty response from {model}")
+        return content
+
+    elif provider == "ollama":
+        import json as _json
+        import threading
+        from openai import OpenAI
+
+        # Parse URL(s) from the api_key slot (resolve_llm_config packs them here)
+        raw = api_key or "http://localhost:11434"
+        if raw.startswith("["):
+            try:
+                urls = _json.loads(raw)
+            except (_json.JSONDecodeError, TypeError):
+                urls = [raw]
+        else:
+            urls = [raw]
+
+        # Per-server semaphores: dispatch to whichever server is free first.
+        # This replaces the old blind round-robin which could queue work behind
+        # a slow server while a fast server sits idle.
+        if not hasattr(_call_llm, "_ollama_sems"):
+            _call_llm._ollama_sems = {}  # type: ignore[attr-defined]
+        sems: dict[str, threading.Semaphore] = _call_llm._ollama_sems  # type: ignore[attr-defined]
+        for u in urls:
+            if u not in sems:
+                sems[u] = threading.Semaphore(1)
+
+        # Try non-blocking acquire on each server (round-robin start to be fair)
+        if not hasattr(_call_llm, "_ollama_start"):
+            _call_llm._ollama_start = 0  # type: ignore[attr-defined]
+        start: int = _call_llm._ollama_start % len(urls)  # type: ignore[attr-defined]
+        _call_llm._ollama_start = start + 1  # type: ignore[attr-defined]
+
+        chosen_url = None
+        for i in range(len(urls)):
+            candidate = urls[(start + i) % len(urls)]
+            if sems[candidate].acquire(blocking=False):
+                chosen_url = candidate
+                break
+
+        # If no server was free, block on the next in rotation
+        if chosen_url is None:
+            chosen_url = urls[start % len(urls)]
+            sems[chosen_url].acquire()
+
+        base_url = chosen_url.rstrip("/")
+        idx = urls.index(chosen_url)
+        logger.info(f"_call_llm Ollama → server {idx + 1}/{len(urls)}: {base_url}")
+
+        try:
+            client = OpenAI(
+                api_key="ollama",
+                base_url=f"{base_url}/v1",
+                timeout=600.0,
+            )
+
+            effective_model = model or "qwen3:14b"
+            # Ollama local models need shorter, more structured instructions
+            ollama_system = (
+                f"{system_prompt}\n\n"
+                "CRITICAL RULES:\n"
+                "1. Output ONLY the requested content — no prefixes, explanations, or commentary.\n"
+                "2. If asked for JSON, return ONLY valid JSON — no markdown fences.\n"
+                "3. If thinking step by step, do your reasoning silently — output ONLY the final result."
+            )
+
+            response = client.chat.completions.create(
+                model=effective_model,
+                messages=[
+                    {"role": "system", "content": ollama_system},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.6,
+            )
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                raise ValueError(f"Empty response from Ollama model {effective_model}")
+            return content
+        finally:
+            # Always release the server semaphore so the next caller can use it
+            sems[chosen_url].release()
 
     raise ValueError(f"Unknown provider: {provider}")

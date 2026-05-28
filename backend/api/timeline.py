@@ -130,6 +130,15 @@ class WordTimestamp(BaseModel):
     word: str
     start_time: float
     end_time: float
+    block: Optional[int] = None  # SRT block index for preserving original subtitle grouping
+
+
+class SrtBlock(BaseModel):
+    """A single SRT subtitle line with its time range."""
+
+    text: str
+    start: float
+    end: float
 
 
 class LyricsResponse(BaseModel):
@@ -137,6 +146,7 @@ class LyricsResponse(BaseModel):
 
     text: str
     words: list[WordTimestamp]
+    srt_blocks: list[SrtBlock] = []  # Pre-built subtitle lines from SRT
     initial_text: str = ""  # User-provided lyrics/script input
 
 
@@ -816,17 +826,55 @@ async def get_lyrics(
         lyrics_result = await session.execute(lyrics_stmt)
         lyrics_record = lyrics_result.scalars().first()
 
+        def _build_srt_blocks(raw_words: list[dict]) -> list[SrtBlock]:
+            """Build pre-grouped subtitle lines from words that have block indices."""
+            blocks_map: dict[int, list[dict]] = {}
+            for w in raw_words:
+                b = w.get("block")
+                if b is None:
+                    continue
+                blocks_map.setdefault(b, []).append(w)
+            if not blocks_map:
+                return []
+            result = []
+            for block_idx in sorted(blocks_map.keys()):
+                bw = blocks_map[block_idx]
+                text = " ".join(w.get("word", "") for w in bw)
+                start = min(w.get("start", 0.0) for w in bw)
+                end = max(w.get("end", 0.0) for w in bw)
+                if text.strip():
+                    result.append(SrtBlock(text=text.strip(), start=start, end=end))
+            return result
+
         if lyrics_record:
+            raw_words = lyrics_record.words or []
+            blocks_count = sum(1 for w in raw_words if w.get("block") is not None)
+            logger.debug(
+                f"get_lyrics({project_id}): {len(raw_words)} words from DB, "
+                f"{blocks_count} with block field"
+            )
+            if raw_words:
+                logger.debug(f"  First word keys: {list(raw_words[0].keys())}")
             words = [
                 WordTimestamp(
                     word=w.get("word", ""),
                     start_time=w.get("start", 0.0),
                     end_time=w.get("end", 0.0),
+                    block=w.get("block"),
                 )
-                for w in (lyrics_record.words or [])
+                for w in raw_words
             ]
+            srt_blocks = _build_srt_blocks(raw_words)
+            logger.debug(
+                f"get_lyrics({project_id}): built {len(srt_blocks)} srt_blocks"
+            )
+            if srt_blocks:
+                logger.debug(
+                    f"  First block: \"{srt_blocks[0].text}\" "
+                    f"[{srt_blocks[0].start:.3f}-{srt_blocks[0].end:.3f}]"
+                )
             initial = getattr(lyrics_record, "initial_text", "") or ""
-            return LyricsResponse(text=lyrics_record.full_text, words=words, initial_text=initial)
+            return LyricsResponse(text=lyrics_record.full_text, words=words, srt_blocks=srt_blocks, initial_text=initial)
 
         # Fall back to cached lyrics JSON file
         project_path = settings.project_dir / str(project_id)
@@ -835,15 +883,18 @@ async def get_lyrics(
         if lyrics_cache_path.exists():
             with open(lyrics_cache_path, "r") as f:
                 lyrics_data = json.load(f)
+                raw_words = lyrics_data.get("words", [])
                 words = [
                     WordTimestamp(
                         word=w.get("word", ""),
                         start_time=w.get("start", 0.0),
                         end_time=w.get("end", 0.0),
+                        block=w.get("block"),
                     )
-                    for w in lyrics_data.get("words", [])
+                    for w in raw_words
                 ]
-                return LyricsResponse(text=lyrics_data.get("text", ""), words=words)
+                srt_blocks = _build_srt_blocks(raw_words)
+                return LyricsResponse(text=lyrics_data.get("text", ""), words=words, srt_blocks=srt_blocks)
 
         # Return empty response if no lyrics found
         return LyricsResponse(text="", words=[])
@@ -854,6 +905,73 @@ async def get_lyrics(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get lyrics",
+        )
+
+
+class SaveInitialTextRequest(BaseModel):
+    """Request body for saving user-provided lyrics/script text."""
+    initial_text: str = ""
+
+
+@router.put(
+    "/lyrics/text",
+    response_model=LyricsResponse,
+    summary="Save user-provided lyrics/script text",
+)
+async def save_lyrics_text(
+    project_id: UUID,
+    body: SaveInitialTextRequest,
+    session: AsyncSession = Depends(get_session),
+) -> LyricsResponse:
+    """Save (or create) the user-provided lyrics/script text.
+
+    This endpoint is called by the frontend auto-save mechanism when the user
+    types or pastes into the script/lyrics textarea. It preserves newlines and
+    paragraph structure exactly as provided.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
+        lyrics_result = await session.execute(lyrics_stmt)
+        lyrics_record = lyrics_result.scalars().first()
+
+        if lyrics_record:
+            lyrics_record.initial_text = body.initial_text
+        else:
+            # Create a new lyrics record with just the initial_text
+            lyrics_record = Lyrics(
+                project_id=project_id,
+                full_text="",
+                initial_text=body.initial_text,
+                words=[],
+                language="en",
+            )
+            session.add(lyrics_record)
+
+        await session.commit()
+        await session.refresh(lyrics_record)
+
+        words = [
+            WordTimestamp(
+                word=w.get("word", ""),
+                start_time=w.get("start", 0.0),
+                end_time=w.get("end", 0.0),
+            )
+            for w in (lyrics_record.words or [])
+        ]
+        return LyricsResponse(
+            text=lyrics_record.full_text,
+            words=words,
+            initial_text=lyrics_record.initial_text or "",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving lyrics text for project {project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save lyrics text",
         )
 
 
@@ -2125,6 +2243,197 @@ def _get_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
     return resolve_llm_config(app_settings)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# NARRATION DP SEGMENTATION
+# ═══════════════════════════════════════════════════════════════════════
+# For narration projects, scene boundaries can be computed mathematically
+# using dynamic programming — no LLM needed.  This is essentially the
+# Knuth-Plass line-breaking algorithm applied to time segmentation.
+#
+# Inputs:  phrase boundaries with timestamps, min/max scene duration
+# Output:  optimal partition into scenes that respects constraints and
+#          prefers natural break points (long pauses, paragraph gaps)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _dp_segment_narration(
+    phrase_groups: list[list[dict]],
+    total_duration: float,
+    min_dur: float,
+    max_dur: float,
+    user_lyrics: str = "",
+) -> list[dict]:
+    """Compute optimal scene boundaries for narration using dynamic programming.
+
+    Each phrase_group is an indivisible unit (one sentence/line from the script).
+    The DP finds the partition into scenes that minimizes a cost function
+    balancing: duration targets, pause-awareness, and evenness.
+
+    Returns list of dicts: [{name, start_time, end_time, lyrics}, ...]
+    """
+    if not phrase_groups:
+        return [{"name": "Scene 1", "start_time": 0.0, "end_time": total_duration}]
+
+    n = len(phrase_groups)
+
+    # ── Build boundary times and gap sizes ──────────────────────────────
+    # boundary[i] = the time BEFORE phrase_group[i] starts
+    # boundary[n] = total_duration (end of last phrase or total audio)
+    boundaries: list[float] = []
+    gaps: list[float] = []  # gap[i] = silence gap before phrase i
+
+    for i, pg in enumerate(phrase_groups):
+        if not pg:
+            boundaries.append(boundaries[-1] if boundaries else 0.0)
+            gaps.append(0.0)
+            continue
+        start = pg[0].get("start", 0.0)
+        if i == 0:
+            # Cut point before first phrase
+            boundaries.append(max(0.0, start - 0.3) if start > 0.3 else 0.0)
+            gaps.append(start)  # gap from 0 to first word
+        else:
+            prev_end = phrase_groups[i - 1][-1].get("end", 0.0) if phrase_groups[i - 1] else 0.0
+            gap = start - prev_end
+            # Place boundary in the gap (same logic as cut point builder)
+            if gap > 0.6:
+                boundaries.append(round(start - 0.3, 2))
+            else:
+                boundaries.append(round((prev_end + start) / 2.0, 2))
+            gaps.append(max(0.0, gap))
+
+    # Final boundary = end of audio
+    boundaries.append(round(total_duration, 3))
+
+    # ── Detect paragraph breaks from user lyrics ────────────────────────
+    # A blank line in the script = paragraph break → strong preference for cut
+    paragraph_breaks: set[int] = set()
+    if user_lyrics:
+        lyrics_lines = user_lyrics.splitlines()
+        phrase_idx = 0
+        for li, line in enumerate(lyrics_lines):
+            if not line.strip():
+                # Blank line → the next non-blank line starts a new paragraph
+                paragraph_breaks.add(phrase_idx)
+            elif phrase_idx < n:
+                phrase_idx += 1
+
+    # ── Ideal duration for even scene sizing ────────────────────────────
+    ideal_dur = (min_dur + max_dur) / 2.0
+
+    # ── DP: dp[i] = min cost to segment phrases [0..i) ─────────────────
+    # We try every valid split: scene from phrase j to phrase i
+    # where the duration boundaries[i] - boundaries[j] is in [min_dur, max_dur]
+    INF = float("inf")
+    dp = [INF] * (n + 1)
+    dp[0] = 0.0
+    parent = [-1] * (n + 1)  # for backtracking
+
+    for i in range(1, n + 1):
+        for j in range(i - 1, -1, -1):
+            dur = boundaries[i] - boundaries[j]
+            if dur < min_dur and i < n:
+                # Too short — keep extending (unless it's the last possible scene)
+                continue
+            if dur > max_dur:
+                # Too long — no point going further back
+                break
+
+            # Cost function:
+            # 1) Duration deviation from ideal (quadratic for stronger penalty)
+            cost = ((dur - ideal_dur) / ideal_dur) ** 2
+
+            # 2) Pause bonus: prefer cuts at long pauses (natural break points)
+            #    Gap at boundary j = gap before phrase j
+            if j > 0 and j < n:
+                gap_at_cut = gaps[j]
+                # Longer pauses → lower cost (bonus up to -0.5 for 2s+ gaps)
+                pause_bonus = min(gap_at_cut / 4.0, 0.5)
+                cost -= pause_bonus
+
+            # 3) Paragraph break bonus: strongly prefer cutting at paragraph starts
+            if j in paragraph_breaks:
+                cost -= 1.0  # strong bonus
+
+            total = dp[j] + cost
+            if total < dp[i]:
+                dp[i] = total
+                parent[i] = j
+
+    # ── Backtrack to find optimal boundaries ────────────────────────────
+    if dp[n] == INF:
+        # Fallback: no valid partition found (constraints too tight).
+        # Relax by allowing any split and use greedy approach.
+        logger.warning(
+            f"[NarrationDP] No valid DP solution found with min={min_dur}, "
+            f"max={max_dur}. Falling back to greedy segmentation."
+        )
+        scenes = []
+        pos = 0.0
+        scene_num = 1
+        while pos < total_duration - 0.5:
+            end = min(pos + ideal_dur, total_duration)
+            scenes.append({
+                "name": f"Scene {scene_num}",
+                "start_time": round(pos, 2),
+                "end_time": round(end, 2),
+            })
+            pos = end
+            scene_num += 1
+        return scenes
+
+    # Walk parent pointers back from n to 0
+    cuts = []
+    idx = n
+    while idx > 0:
+        cuts.append(idx)
+        idx = parent[idx]
+    cuts.reverse()
+
+    # ── Build scene list ────────────────────────────────────────────────
+    def _get_phrase_text(pg: list[dict]) -> str:
+        return " ".join(
+            (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
+            for w in pg
+        ).strip()
+
+    scenes = []
+    prev_cut = 0
+    for si, cut_idx in enumerate(cuts):
+        start_t = boundaries[prev_cut]
+        end_t = boundaries[cut_idx]
+        # Collect lyrics text for this scene
+        scene_phrases = phrase_groups[prev_cut:cut_idx]
+        lyrics_text = " ".join(_get_phrase_text(pg) for pg in scene_phrases if pg).strip()
+        # Auto-name from first few words
+        first_words = lyrics_text[:50].strip()
+        if len(lyrics_text) > 50:
+            first_words = first_words.rsplit(" ", 1)[0] + "..."
+        name = f"Scene {si + 1}"
+        if first_words:
+            name = f"Scene {si + 1} - {first_words}"
+
+        scenes.append({
+            "name": name,
+            "start_time": round(start_t, 2),
+            "end_time": round(end_t, 2),
+            "lyrics": lyrics_text,
+        })
+        prev_cut = cut_idx
+
+    logger.info(
+        f"[NarrationDP] Segmented {n} phrases into {len(scenes)} scenes "
+        f"(min={min_dur}s, max={max_dur}s, ideal={ideal_dur:.1f}s)"
+    )
+    for i, s in enumerate(scenes):
+        logger.info(
+            f"[NarrationDP]   Scene {i + 1}: [{s['start_time']:.2f}–{s['end_time']:.2f}s] "
+            f"dur={s['end_time'] - s['start_time']:.1f}s "
+            f"'{s['name'][:60]}'"
+        )
+
+    return scenes
+
+
 @router.post(
     "/suggest-timeline",
     response_model=SuggestTimelineResponse,
@@ -2310,6 +2619,7 @@ async def suggest_timeline(
             letter = chr(ord('A') + (len(valid_cuts) % 26))
             valid_cuts.append({
                 "time": cut_time,
+                "gap": gap,
                 "label": f"CUT_{letter}: {cut_time:.2f}s — between phrases (gap={gap:.1f}s)",
                 "after_phrase": _get_phrase_text(pg_cur)[:60],
                 "before_phrase": _get_phrase_text(pg_next)[:60],
@@ -2432,7 +2742,81 @@ async def suggest_timeline(
             f"from {len(section_times)} section boundaries"
         )
 
-    # ── Build lyrics block for LLM ──────────────────────────────────────
+    # ── NARRATION MODE: use DP segmentation instead of LLM ────────────
+    # For narration projects, we have continuous speech with known word
+    # timestamps.  Scene boundaries can be computed mathematically using
+    # dynamic programming (Knuth-Plass style optimal segmentation).
+    # This is instant, deterministic, and handles 600+ phrases easily.
+    # Long pauses between phrases are used as natural break points.
+
+    from backend.database.models import ProjectMode
+    is_narration = project.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO)
+
+    if is_narration and word_timestamps and phrase_groups:
+        logger.info(
+            f"[SuggestTimeline] Narration mode detected — using DP segmentation "
+            f"({len(phrase_groups)} phrases, min={min_dur}s, max={max_dur}s)"
+        )
+        dp_scenes = _dp_segment_narration(
+            phrase_groups=phrase_groups,
+            total_duration=total_duration,
+            min_dur=min_dur,
+            max_dur=max_dur,
+            user_lyrics=user_lyrics,
+        )
+
+        # ── Apply the DP scenes (same post-processing as LLM path) ──────
+        # Delete existing scenes
+        existing_scenes_stmt = (
+            select(Scene)
+            .where(Scene.project_id == project_id)
+            .order_by(Scene.scene_index)
+        )
+        existing_scenes = (await session.execute(existing_scenes_stmt)).scalars().all()
+        for sc in existing_scenes:
+            await session.delete(sc)
+        await session.flush()
+
+        # Create new scenes from DP output
+        created_scenes = []
+        for i, sd in enumerate(dp_scenes):
+            new_scene = Scene(
+                project_id=project_id,
+                name=sd["name"],
+                start_time=sd["start_time"],
+                end_time=sd["end_time"],
+                scene_index=i,
+                parameters={"lyrics": sd.get("lyrics", "")},
+            )
+            session.add(new_scene)
+            created_scenes.append(new_scene)
+        await session.flush()
+
+        # Slice audio segments
+        await _auto_slice_scene_audio(project_id, session)
+
+        scene_responses = [
+            SceneResponse(
+                id=sc.id,
+                project_id=sc.project_id,
+                name=sc.name,
+                start_time=sc.start_time,
+                end_time=sc.end_time,
+                scene_index=sc.scene_index,
+                prompt=sc.prompt or "",
+                negative_prompt=sc.negative_prompt or "",
+                parameters=sc.parameters or {},
+            )
+            for sc in created_scenes
+        ]
+
+        return SuggestTimelineResponse(
+            scenes=scene_responses,
+            message=f"Created {len(created_scenes)} scenes using optimal segmentation "
+                    f"(DP algorithm, {len(phrase_groups)} phrases analyzed)",
+        )
+
+    # ── Build lyrics block for LLM (music mode) ───────────────────────
 
     lyrics_block = ""
     if user_lyrics:
@@ -2450,15 +2834,74 @@ async def suggest_timeline(
             lyrics_block += f"  [{p_start:.2f}s – {p_end:.2f}s] {p_text}\n"
         lyrics_block += "\n"
 
-    # Show the valid cut points — these are the ONLY allowed boundary times
+    # Show the valid cut points — these are the ONLY allowed boundary times.
+    # Use compact single-line format to keep prompt size manageable for
+    # reasoning models that consume output tokens on internal thinking.
+    #
+    # IMPORTANT: The LLM only needs to pick ~15-30 scene boundaries, so
+    # showing 600 cut points is overwhelming and wastes tokens.  We thin
+    # to a target of ~80-100 "best" cut points using quality scoring:
+    #   - Section / instrumental boundaries always kept (structural)
+    #   - Remaining cuts scored by gap size (bigger gap = better cut)
+    #   - Top N kept to hit target, ensuring even time distribution
+    TARGET_DISPLAY_CUTS = 100  # sweet spot: 3-4x typical scene count
+
     if valid_cuts:
+        display_cuts = valid_cuts
+        if len(valid_cuts) > TARGET_DISPLAY_CUTS:
+            # Separate structural cuts (always kept) from phrase cuts (scored)
+            structural: list[dict] = []
+            phrase_cuts: list[dict] = []
+            for vc in valid_cuts:
+                if "CUT_SEC" in vc["label"] or "CUT_INST" in vc["label"]:
+                    structural.append(vc)
+                else:
+                    phrase_cuts.append(vc)
+
+            # How many phrase cuts we can keep after reserving structural slots
+            budget = max(TARGET_DISPLAY_CUTS - len(structural), 20)
+
+            if len(phrase_cuts) > budget:
+                # Score each phrase cut by gap size (bigger gap = cleaner break)
+                # Also boost cuts near section boundaries (within 3s)
+                section_times = set()
+                if sections:
+                    for s in sections:
+                        section_times.add(round(s.start_time, 1))
+                        section_times.add(round(s.end_time, 1))
+
+                def _score(vc: dict) -> float:
+                    gap = vc.get("gap", 0.3)
+                    score = gap  # base score = gap size in seconds
+                    # Bonus for cuts near section boundaries
+                    t = vc["time"]
+                    if any(abs(t - st) < 3.0 for st in section_times):
+                        score += 2.0
+                    return score
+
+                # Sort by score descending, take top `budget`
+                scored = sorted(phrase_cuts, key=_score, reverse=True)
+                kept = scored[:budget]
+                # Re-sort by time for display
+                kept.sort(key=lambda vc: vc["time"])
+                phrase_cuts = kept
+
+            display_cuts = sorted(
+                structural + phrase_cuts,
+                key=lambda vc: vc["time"],
+            )
+            logger.info(
+                f"[SuggestTimeline] Thinned cut points from {len(valid_cuts)} "
+                f"to {len(display_cuts)} (structural={len(structural)}, "
+                f"phrase={len(phrase_cuts)}, target={TARGET_DISPLAY_CUTS})"
+            )
+
         lyrics_block += "═══ VALID CUT POINTS ═══\n"
         lyrics_block += "You MUST use ONLY these exact times for scene boundaries (start_time / end_time).\n"
-        lyrics_block += "Each cut point sits between two complete phrases. Using any other time WILL split a phrase.\n\n"
-        for vc in valid_cuts:
-            lyrics_block += f"  {vc['label']}\n"
-            lyrics_block += f"    ends: \"{vc['after_phrase']}\"\n"
-            lyrics_block += f"    next: \"{vc['before_phrase']}\"\n"
+        lyrics_block += "Each cut sits between two complete phrases. Using any other time WILL split a phrase.\n\n"
+        for vc in display_cuts:
+            # Compact single-line: time | after_phrase → before_phrase
+            lyrics_block += f"  {vc['time']:.2f}s | \"{vc['after_phrase']}\" → \"{vc['before_phrase']}\"\n"
         lyrics_block += "\n"
     elif not word_timestamps:
         lyrics_block += "No word timestamps available.\n"
@@ -2534,14 +2977,33 @@ async def suggest_timeline(
 
     logger.info(f"[SuggestTimeline] Calling LLM ({provider}/{model}) with {len(valid_cuts)} valid cut points")
 
-    try:
-        raw_text = await asyncio.to_thread(
-            _call_llm, provider, api_key, model, system_prompt, user_prompt,
-            max_tokens=4000,
-        )
-    except Exception as e:
-        logger.error(f"LLM call failed for suggest-timeline: {e}")
-        raise HTTPException(status_code=500, detail=f"LLM call failed: {e}")
+    # Reasoning models (GPT-5.x, o-series) use max_completion_tokens for BOTH
+    # internal thinking AND visible output.  With hundreds of cut points the
+    # model can exhaust a modest budget on reasoning alone and return nothing.
+    # Give a generous budget so the thinking + JSON output both fit.
+    _is_reasoning_model = any(
+        model.startswith(p)
+        for p in ("gpt-5", "o1", "o3", "o4")
+    )
+    llm_max_tokens = 16384 if _is_reasoning_model else 4000
+
+    # Retry once on transient empty responses
+    raw_text = ""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw_text = await asyncio.to_thread(
+                _call_llm, provider, api_key, model, system_prompt, user_prompt,
+                max_tokens=llm_max_tokens,
+            )
+            break  # success
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                logger.warning(f"LLM call attempt 1 failed for suggest-timeline: {e} — retrying")
+            else:
+                logger.error(f"LLM call failed for suggest-timeline after 2 attempts: {e}")
+                raise HTTPException(status_code=500, detail=f"LLM call failed: {e}")
 
     # ── Parse LLM response ───────────────────────────────────────────────
 
@@ -3385,17 +3847,21 @@ async def slice_audio_for_single_scene(
 
 @router.post(
     "/upload-srt",
+    response_model=LyricsResponse,
     summary="Upload SRT file to set narration word timestamps",
 )
 async def upload_srt(
     project_id: UUID,
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
-) -> dict:
+) -> LyricsResponse:
     """Upload an SRT subtitle file and parse it into word-level timestamps.
 
     The SRT is parsed using AudioAnalyzer._parse_srt_to_words() and the
     resulting words are saved as the project's Lyrics record (upsert).
+
+    Returns a full LyricsResponse including pre-built srt_blocks so the
+    frontend can immediately use the data without a separate refetch.
 
     Args:
         project_id: UUID of the project.
@@ -3403,11 +3869,13 @@ async def upload_srt(
         session: Database session.
 
     Returns:
-        Dictionary with word_count and full_text.
+        LyricsResponse with words and srt_blocks.
 
     Raises:
         HTTPException: If project not found, file is not .srt, or parsing fails.
     """
+    from sqlalchemy.orm.attributes import flag_modified
+
     try:
         await _get_project_or_404(project_id, session)
 
@@ -3418,9 +3886,21 @@ async def upload_srt(
                 detail="File must be an .srt subtitle file",
             )
 
-        # Read file content
+        # Read file content — try UTF-8 BOM first, then plain UTF-8
         content = await file.read()
-        srt_text = content.decode("utf-8")
+        srt_text = ""
+        for enc in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                srt_text = content.decode(enc)
+                logger.info(f"SRT file decoded as {enc} ({len(srt_text)} chars)")
+                break
+            except UnicodeDecodeError:
+                continue
+        if not srt_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not decode SRT file — unsupported encoding",
+            )
 
         # Parse SRT into word-level timestamps
         words = AudioAnalyzer._parse_srt_to_words(srt_text)
@@ -3429,6 +3909,14 @@ async def upload_srt(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No words could be parsed from the SRT file",
             )
+
+        # Verify block fields are present
+        blocks_with_field = sum(1 for w in words if "block" in w)
+        unique_blocks = len(set(w.get("block") for w in words if "block" in w))
+        logger.info(
+            f"SRT parsed: {len(words)} words, {blocks_with_field} with block field, "
+            f"{unique_blocks} unique blocks"
+        )
 
         # Reconstruct full text from parsed words
         full_text = " ".join(w["word"] for w in words)
@@ -3441,6 +3929,9 @@ async def upload_srt(
         if existing_lyrics:
             existing_lyrics.full_text = full_text
             existing_lyrics.words = words
+            # Force SQLAlchemy to detect JSON column change
+            flag_modified(existing_lyrics, "words")
+            flag_modified(existing_lyrics, "full_text")
         else:
             lyrics_record = Lyrics(
                 project_id=project_id,
@@ -3452,17 +3943,71 @@ async def upload_srt(
         await session.commit()
         logger.info(
             f"SRT upload for project {project_id}: {len(words)} words, "
-            f"{len(full_text)} chars"
+            f"{len(full_text)} chars, {unique_blocks} SRT blocks committed to DB"
         )
 
-        return {
-            "word_count": len(words),
-            "full_text": full_text,
-        }
+        # Verify the data was persisted by re-reading from DB
+        verify_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
+        verify_result = await session.execute(verify_stmt)
+        verify_record = verify_result.scalars().first()
+        if verify_record:
+            stored_words = verify_record.words or []
+            stored_blocks = sum(1 for w in stored_words if w.get("block") is not None)
+            logger.info(
+                f"SRT upload verification: {len(stored_words)} words in DB, "
+                f"{stored_blocks} with block field"
+            )
+            if stored_blocks == 0 and unique_blocks > 0:
+                logger.error(
+                    "CRITICAL: block fields were lost during DB save! "
+                    "SQLAlchemy may have failed to persist the JSON change."
+                )
+
+        # Build the full response with srt_blocks
+        def _build_srt_blocks_local(raw_words: list[dict]) -> list[SrtBlock]:
+            blocks_map: dict[int, list[dict]] = {}
+            for w in raw_words:
+                b = w.get("block")
+                if b is None:
+                    continue
+                blocks_map.setdefault(b, []).append(w)
+            if not blocks_map:
+                return []
+            result = []
+            for block_idx in sorted(blocks_map.keys()):
+                bw = blocks_map[block_idx]
+                text = " ".join(w.get("word", "") for w in bw)
+                start = min(w.get("start", 0.0) for w in bw)
+                end = max(w.get("end", 0.0) for w in bw)
+                if text.strip():
+                    result.append(SrtBlock(text=text.strip(), start=start, end=end))
+            return result
+
+        srt_blocks = _build_srt_blocks_local(words)
+        word_models = [
+            WordTimestamp(
+                word=w.get("word", ""),
+                start_time=w.get("start", 0.0),
+                end_time=w.get("end", 0.0),
+                block=w.get("block"),
+            )
+            for w in words
+        ]
+
+        logger.info(
+            f"SRT upload response: {len(word_models)} words, {len(srt_blocks)} srt_blocks"
+        )
+
+        return LyricsResponse(
+            text=full_text,
+            words=word_models,
+            srt_blocks=srt_blocks,
+            initial_text=getattr(existing_lyrics, "initial_text", "") if existing_lyrics else "",
+        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error uploading SRT for project {project_id}: {e}")
+        logger.error(f"Error uploading SRT for project {project_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process SRT file: {str(e)}",

@@ -249,6 +249,12 @@ export const updateSection = (projectId: string, sectionId: string, data: Partia
 export const getLyrics = (projectId: string) =>
   api.get<{ text: string; words: any[]; language: string; initial_text: string }>(`/projects/${projectId}/timeline/lyrics`);
 
+export const saveLyricsText = (projectId: string, initialText: string) =>
+  api.put<{ text: string; words: any[]; language: string; initial_text: string }>(
+    `/projects/${projectId}/timeline/lyrics/text`,
+    { initial_text: initialText }
+  );
+
 export const rerunWhisper = (projectId: string) =>
   api.post<{ text: string; words: any[] }>(`/projects/${projectId}/timeline/rerun-whisper`, {}, { timeout: 0 });
 
@@ -308,6 +314,12 @@ export const testWhisper = () =>
 
 export const testLLM = (data: { provider: string; api_key: string; model: string }) =>
   api.post<{ success: boolean; message: string }>('/settings/test-llm', data);
+
+export const refreshOllamaModels = (baseUrl?: string) =>
+  api.post<{ success: boolean; models: string[]; message: string }>('/settings/ollama/models', { base_url: baseUrl });
+
+export const testOllamaSingle = (url: string) =>
+  api.post<{ success: boolean; message: string }>('/settings/ollama/test-single', { url });
 
 export const exportSettings = () =>
   api.get('/settings/export', { responseType: 'json' });
@@ -375,6 +387,8 @@ export const getConcept = (projectId: string) =>
     global_seed: number;
     use_transition_lora: boolean;
     transition_lora_strength: number;
+    random_ken_burns: boolean;
+    ken_burns_allowed_effects: string[];
   }>(
     `/projects/${projectId}/concept`
   );
@@ -393,6 +407,8 @@ export const saveConcept = (projectId: string, data: {
   global_seed?: number;
   use_transition_lora?: boolean;
   transition_lora_strength?: number;
+  random_ken_burns?: boolean;
+  ken_burns_allowed_effects?: string[];
 }) =>
   api.put(`/projects/${projectId}/concept`, data);
 
@@ -423,6 +439,17 @@ export const generateVideoFlow = (projectId: string) =>
   api.post<{ ideas: Array<{ scene_id: string; flow_idea: string }> }>(
     `/projects/${projectId}/concept/flow/generate`
   );
+
+export const getFlowProgress = (projectId: string) =>
+  api.get<{
+    status: string;
+    total_scenes: number;
+    total_batches: number;
+    completed_batches: number;
+    current_message: string | null;
+    error: string | null;
+    started_at: number | null;
+  }>(`/projects/${projectId}/concept/flow/progress`);
 
 export const updateSceneFlow = (projectId: string, sceneId: string, flowIdea: string) =>
   api.put(`/projects/${projectId}/concept/flow/${sceneId}`, { scene_id: sceneId, flow_idea: flowIdea });
@@ -531,6 +558,15 @@ export const exportVideo = (projectId: string, data: {
   transition_type?: string;
   transition_duration?: number;
   color_match_clips?: boolean;
+  random_ken_burns?: boolean | null;
+  ken_burns_allowed_effects?: string[] | null;
+  subtitles_enabled?: boolean;
+  subtitle_font?: string;
+  subtitle_size?: number;
+  subtitle_color?: string;
+  subtitle_position?: string;
+  subtitle_outline?: number;
+  normalize_audio?: boolean;
 }) =>
   api.post<{ job_id: string }>(`/projects/${projectId}/export`, data);
 
@@ -641,5 +677,15 @@ export const updateBackingTrack = (projectId: string, trackId: string, data: any
 
 export const deleteBackingTrack = (projectId: string, trackId: string) =>
   api.delete(`/projects/${projectId}/backing-tracks/${trackId}`);
+
+// ===== Asset Generator =====
+export const generateAsset = (projectId: string, data: any) =>
+  api.post(`/projects/${projectId}/generate/asset`, data);
+
+export const listGeneratedAssets = (projectId: string) =>
+  api.get(`/projects/${projectId}/assets/generated`);
+
+export const assignAssetToScene = (projectId: string, sceneId: string, data: { asset_id: string; target: string }) =>
+  api.post(`/projects/${projectId}/scenes/${sceneId}/assign-asset`, data);
 
 export default api;

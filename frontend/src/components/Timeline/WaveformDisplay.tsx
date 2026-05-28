@@ -11,6 +11,7 @@ interface WaveformDisplayProps {
   playbackPosition: number;
   setPlaybackPosition: (position: number) => void;
   isPlaying: boolean;
+  volume?: number; // 0-1 linear, controls narration playback volume
 }
 
 export default function WaveformDisplay({
@@ -20,6 +21,7 @@ export default function WaveformDisplay({
   playbackPosition,
   setPlaybackPosition,
   isPlaying,
+  volume = 1.0,
 }: WaveformDisplayProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
@@ -119,11 +121,21 @@ export default function WaveformDisplay({
     }
   }, [currentProject?.id, audioUrl, setDuration, handleTimeUpdate, setPlaybackPosition]);
 
-  // Handle zoom — only when audio is loaded
+  // Zoom is handled by the parent container width scaling.
+  // Wavesurfer's ResizeObserver auto-re-renders when its container resizes.
+  // We trigger a manual re-render on zoom change as a fallback.
   useEffect(() => {
     if (wavesurferRef.current && isReadyRef.current) {
       try {
-        wavesurferRef.current.zoom(zoom * 50);
+        // Force wavesurfer to re-measure its container after zoom change
+        const wrapper = wavesurferRef.current.getWrapper();
+        if (wrapper) {
+          // Trigger resize by briefly toggling display (wavesurfer picks it up)
+          wrapper.style.display = 'none';
+          // eslint-disable-next-line no-unused-expressions
+          wrapper.offsetHeight; // force reflow
+          wrapper.style.display = '';
+        }
       } catch {
         // wavesurfer may throw if not ready
       }
@@ -137,8 +149,8 @@ export default function WaveformDisplay({
     if (wavesurferRef.current && isReadyRef.current && duration > 0) {
       try {
         const currentWsTime = wavesurferRef.current.getCurrentTime();
-        // Only seek if the difference is meaningful (> 0.5s) to avoid jitter
-        if (Math.abs(currentWsTime - playbackPosition) > 0.5) {
+        // Only seek if the difference is meaningful (> 0.1s) to avoid jitter
+        if (Math.abs(currentWsTime - playbackPosition) > 0.1) {
           wavesurferRef.current.seekTo(playbackPosition / duration);
         }
       } catch {
@@ -146,6 +158,17 @@ export default function WaveformDisplay({
       }
     }
   }, [playbackPosition, duration]);
+
+  // Apply narration volume changes in real-time
+  useEffect(() => {
+    if (wavesurferRef.current && isReadyRef.current) {
+      try {
+        wavesurferRef.current.setVolume(volume);
+      } catch {
+        // ignore volume errors
+      }
+    }
+  }, [volume]);
 
   // Handle play/pause — only when audio is loaded
   useEffect(() => {

@@ -91,6 +91,11 @@ class SettingsResponse(BaseModel):
     director_auto_image_desc: bool = True
     global_video_negative_prompt: Optional[str] = None
     gpu_acceleration_enabled: bool = True
+    # Ollama (local LLM) — multi-server pool
+    ollama_base_url: Optional[str] = None  # legacy single URL
+    ollama_urls: Optional[list[str]] = None  # multi-server pool
+    ollama_model: Optional[str] = None
+    ollama_available_models: Optional[list[str]] = None
 
     class Config:
         from_attributes = True
@@ -145,6 +150,10 @@ class SettingsUpdate(BaseModel):
     director_auto_image_desc: Optional[bool] = None
     global_video_negative_prompt: Optional[str] = None
     gpu_acceleration_enabled: Optional[bool] = None
+    # Ollama (local LLM) — multi-server pool
+    ollama_base_url: Optional[str] = None  # legacy single URL
+    ollama_urls: Optional[list[str]] = None  # multi-server pool
+    ollama_model: Optional[str] = None
 
 
 class ChangeProjectDirRequest(BaseModel):
@@ -171,6 +180,11 @@ class TestLLMRequest(BaseModel):
     provider: str
     api_key: Optional[str] = None
     model: Optional[str] = None
+
+
+class OllamaRefreshRequest(BaseModel):
+    """Request model for refreshing Ollama models list."""
+    base_url: Optional[str] = None  # Override URL for testing before save
 
 
 class TestConnectionResponse(BaseModel):
@@ -325,7 +339,26 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         director_auto_image_desc=settings.director_auto_image_desc if settings.director_auto_image_desc is not None else True,
         global_video_negative_prompt=settings.global_video_negative_prompt,
         gpu_acceleration_enabled=settings.gpu_acceleration_enabled if settings.gpu_acceleration_enabled is not None else True,
+        ollama_base_url=settings.ollama_base_url,
+        ollama_urls=settings.ollama_urls or [],
+        ollama_model=settings.ollama_model,
+        ollama_available_models=settings.ollama_available_models,
     )
+
+
+def _get_ollama_urls(app_settings: AppSettings) -> list[str]:
+    """Get the list of Ollama server URLs from settings.
+
+    Prefers the multi-server ``ollama_urls`` list; falls back to the
+    legacy single ``ollama_base_url`` field for backward compat.
+    """
+    urls = app_settings.ollama_urls
+    if urls and isinstance(urls, list) and len(urls) > 0:
+        return [u.rstrip("/") for u in urls if u and u.strip()]
+    # Legacy single-URL fallback
+    if app_settings.ollama_base_url:
+        return [app_settings.ollama_base_url.rstrip("/")]
+    return []
 
 
 def resolve_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
@@ -334,12 +367,30 @@ def resolve_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
     Uses the default_llm_provider if set and has a valid API key;
     otherwise falls back to the first available provider.
 
+    For Ollama the ``api_key`` slot carries a JSON-encoded list of
+    server URLs (or a single URL string for backward compat) because
+    Ollama needs no API key and ``_enhance_ollama()`` round-robins
+    across the pool.
+
     Returns:
         Tuple of (provider, api_key, model).
 
     Raises:
         HTTPException: If no LLM API key is configured.
     """
+    import json as _json
+
+    default = app_settings.default_llm_provider
+
+    ollama_urls = _get_ollama_urls(app_settings)
+
+    if default == "ollama":
+        if ollama_urls:
+            # Encode the URL list into the api_key slot
+            url_payload = _json.dumps(ollama_urls) if len(ollama_urls) > 1 else ollama_urls[0]
+            return "ollama", url_payload, app_settings.ollama_model or "qwen3:14b"
+        # Ollama selected but no URL — fall through to cloud providers
+
     # Map of provider -> (key, model, default_model)
     providers = {
         "openai": (app_settings.openai_api_key, app_settings.openai_model, "gpt-4o"),
@@ -348,13 +399,16 @@ def resolve_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
     }
 
     # If a default is set and has a valid key, use it
-    default = app_settings.default_llm_provider
     if default and default in providers:
         key, model, fallback_model = providers[default]
         if key:
             return default, key, model or fallback_model
 
-    # Fallback: first available provider
+    # Fallback: first available provider (try Ollama first if configured)
+    if ollama_urls:
+        url_payload = _json.dumps(ollama_urls) if len(ollama_urls) > 1 else ollama_urls[0]
+        return "ollama", url_payload, app_settings.ollama_model or "qwen3:14b"
+
     for provider, (key, model, fallback_model) in providers.items():
         if key:
             return provider, key, model or fallback_model
@@ -502,6 +556,13 @@ async def update_settings(
             settings.global_video_negative_prompt = req.global_video_negative_prompt or None
         if req.gpu_acceleration_enabled is not None:
             settings.gpu_acceleration_enabled = req.gpu_acceleration_enabled
+        # Ollama settings
+        if req.ollama_base_url is not None:
+            settings.ollama_base_url = req.ollama_base_url.rstrip("/") if req.ollama_base_url else None
+        if req.ollama_urls is not None:
+            settings.ollama_urls = [u.rstrip("/") for u in req.ollama_urls if u and u.strip()]
+        if req.ollama_model is not None:
+            settings.ollama_model = req.ollama_model or None
 
         await session.commit()
         await session.refresh(settings)
@@ -897,6 +958,50 @@ async def test_llm(
         provider = req.provider.lower()
 
         # Use DB-stored key (frontend sends masked keys, so ignore those)
+        if provider == "ollama":
+            # Ollama doesn't need an API key — just base URLs
+            urls = _get_ollama_urls(settings)
+            if not urls:
+                return TestConnectionResponse(
+                    success=False,
+                    message="No Ollama URL configured",
+                )
+            import httpx
+            try:
+                ok_urls: list[str] = []
+                fail_urls: list[str] = []
+                all_models: set[str] = set()
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    for url in urls:
+                        try:
+                            resp = await client.get(f"{url}/api/tags")
+                            resp.raise_for_status()
+                            data = resp.json()
+                            models = [m.get("name", "") for m in data.get("models", [])]
+                            all_models.update(models)
+                            ok_urls.append(url)
+                        except Exception:
+                            fail_urls.append(url)
+                if ok_urls:
+                    msg = f"Connected to {len(ok_urls)}/{len(urls)} Ollama server(s) ({len(all_models)} models)"
+                    if fail_urls:
+                        msg += f" — {len(fail_urls)} unreachable"
+                    return TestConnectionResponse(
+                        success=True,
+                        message=msg,
+                        details={"models": sorted(all_models), "urls": ok_urls, "failed": fail_urls},
+                    )
+                else:
+                    return TestConnectionResponse(
+                        success=False,
+                        message=f"All {len(urls)} Ollama server(s) unreachable",
+                    )
+            except Exception as e:
+                return TestConnectionResponse(
+                    success=False,
+                    message=f"Failed to connect to Ollama: {str(e)}",
+                )
+
         if provider == "openai":
             api_key = settings.openai_api_key
             model = settings.openai_model or "gpt-4o"
@@ -973,6 +1078,109 @@ async def test_llm(
         )
 
 
+# ── Ollama Endpoints ────────────────────────────────────────────────
+
+
+class OllamaTestSingleRequest(BaseModel):
+    """Request to test a single Ollama server URL."""
+    url: str
+
+
+@router.post(
+    "/ollama/test-single",
+    response_model=TestConnectionResponse,
+    summary="Test a single Ollama server",
+)
+async def test_ollama_single(req: OllamaTestSingleRequest) -> TestConnectionResponse:
+    """Test connectivity to a single Ollama server by calling /api/tags."""
+    import httpx
+
+    url = req.url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{url}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+            models = [m.get("name", "") for m in data.get("models", [])]
+            return TestConnectionResponse(
+                success=True,
+                message=f"Connected — {len(models)} model(s) available",
+                details={"models": models},
+            )
+    except Exception as e:
+        return TestConnectionResponse(
+            success=False,
+            message=f"Failed to connect: {str(e)}",
+        )
+
+
+@router.post(
+    "/ollama/models",
+    summary="Refresh available Ollama models",
+)
+async def refresh_ollama_models(
+    req: OllamaRefreshRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Fetch the list of available models from an Ollama server.
+
+    Calls Ollama's /api/tags endpoint and stores the result in settings.
+
+    Args:
+        req: Optional base_url override for testing before saving.
+        session: Database session.
+
+    Returns:
+        Dictionary with success status and list of model names.
+    """
+    settings = await _get_or_create_settings(session)
+
+    # If a specific base_url override is given (e.g. testing before save),
+    # scan just that URL. Otherwise scan all configured URLs.
+    if req.base_url:
+        urls = [req.base_url.rstrip("/")]
+    else:
+        urls = _get_ollama_urls(settings)
+
+    if not urls:
+        return {"success": False, "models": [], "message": "No Ollama URL configured"}
+
+    try:
+        import httpx
+
+        all_models: set[str] = set()
+        ok_count = 0
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for url in urls:
+                try:
+                    resp = await client.get(f"{url}/api/tags")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    for m in data.get("models", []):
+                        name = m.get("name", "")
+                        if name:
+                            all_models.add(name)
+                    ok_count += 1
+                except Exception as url_err:
+                    logger.warning(f"Failed to fetch Ollama models from {url}: {url_err}")
+
+        models = sorted(all_models)
+
+        # Persist to DB
+        settings.ollama_available_models = models
+        await session.commit()
+
+        if ok_count == 0:
+            return {"success": False, "models": [], "message": f"All {len(urls)} server(s) unreachable"}
+
+        msg = f"{len(models)} models from {ok_count}/{len(urls)} server(s)"
+        logger.info(f"Refreshed Ollama models: {msg}")
+        return {"success": True, "models": models, "message": msg}
+    except Exception as e:
+        logger.error(f"Failed to fetch Ollama models: {e}")
+        return {"success": False, "models": [], "message": f"Failed to connect: {str(e)}"}
+
+
 # ── Settings Export / Import ────────────────────────────────────────
 
 
@@ -1001,23 +1209,43 @@ class SettingsExportData(BaseModel):
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
+    video_fps: int = 24
     video_max_duration: int = 15
     video_min_duration: int = 5
     video_tail: int = 0
     color_correction_enabled: bool = True
     restrict_explicit_content: bool = False
-    export_transition_type: str = "crossfade"
+    global_negative_prompt: Optional[str] = None
+    # Export / transition settings
+    export_transition_type: str = "none"
     export_transition_duration: float = 0.5
-    export_color_match_clips: bool = True
+    export_color_match_clips: bool = False
+    export_lfff_trim_enabled: bool = True
+    # Prompt overrides & guidance
     image_system_prompt_overrides: Optional[dict] = None
     video_system_prompt_overrides: Optional[dict] = None
+    image_prompt_guidance: Optional[dict] = None
+    video_prompt_guidance: Optional[dict] = None
     # RunPod
     runpod_enabled: bool = False
     runpod_api_key: Optional[str] = None
     runpod_idle_timeout: int = 30
     runpod_pods: Optional[list[dict]] = None
-    # Network access
+    # Network access & app port
     network_access: bool = False
+    app_port: int = 8899
+    # LTXDirector video generation settings
+    director_guide_strength: float = 0.5
+    director_audio_guidance: float = 0.001
+    director_stitch: bool = False
+    director_auto_image_desc: bool = True
+    global_video_negative_prompt: Optional[str] = None
+    # GPU acceleration
+    gpu_acceleration_enabled: bool = True
+    # Ollama (local LLM)
+    ollama_base_url: Optional[str] = None
+    ollama_urls: Optional[list[str]] = None
+    ollama_model: Optional[str] = None
 
 
 @router.get(
@@ -1038,12 +1266,12 @@ async def export_settings(
         payload = SettingsExportData(
             exported_at=datetime.now(timezone.utc).isoformat(),
             comfyui_urls=settings.comfyui_urls or [],
-        comfyui_server_caps=settings.comfyui_server_caps,
+            comfyui_server_caps=settings.comfyui_server_caps,
             whisper_mode=settings.whisper_mode or "local",
             whisper_remote_url=settings.whisper_remote_url,
             whisper_comfyui_url=settings.whisper_comfyui_url,
             whisper_model=settings.whisper_model or "large-v2",
-        whisper_language=settings.whisper_language or "English",
+            whisper_language=settings.whisper_language or "English",
             openai_api_key=settings.openai_api_key,
             openai_model=settings.openai_model,
             anthropic_api_key=settings.anthropic_api_key,
@@ -1057,21 +1285,38 @@ async def export_settings(
             use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
             distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
             default_llm_provider=settings.default_llm_provider,
+            video_fps=settings.video_fps or 24,
             video_max_duration=settings.video_max_duration or 15,
+            video_min_duration=settings.video_min_duration or 5,
             video_tail=settings.video_tail or 0,
-            color_correction_enabled=settings.color_correction_enabled if settings.color_correction_enabled is not None else True,
+            color_correction_enabled=settings.color_correction_enabled if settings.color_correction_enabled is not None else False,
             restrict_explicit_content=settings.restrict_explicit_content or False,
-            export_transition_type=settings.export_transition_type or "crossfade",
+            global_negative_prompt=settings.global_negative_prompt,
+            export_transition_type=settings.export_transition_type or "none",
             export_transition_duration=settings.export_transition_duration if settings.export_transition_duration is not None else 0.5,
-            export_color_match_clips=settings.export_color_match_clips if settings.export_color_match_clips is not None else True,
+            export_color_match_clips=settings.export_color_match_clips if settings.export_color_match_clips is not None else False,
+            export_lfff_trim_enabled=settings.export_lfff_trim_enabled if settings.export_lfff_trim_enabled is not None else True,
             image_system_prompt_overrides=settings.image_system_prompt_overrides,
             video_system_prompt_overrides=settings.video_system_prompt_overrides,
+            image_prompt_guidance=settings.image_prompt_guidance,
+            video_prompt_guidance=settings.video_prompt_guidance,
             runpod_enabled=settings.runpod_enabled or False,
             runpod_api_key=settings.runpod_api_key,
             runpod_idle_timeout=settings.runpod_idle_timeout or 30,
             runpod_pods=settings.runpod_pods,
             network_access=settings.network_access or False,
             app_port=settings.app_port or 8899,
+            # LTXDirector
+            director_guide_strength=settings.director_guide_strength if settings.director_guide_strength is not None else 0.5,
+            director_audio_guidance=settings.director_audio_guidance if settings.director_audio_guidance is not None else 0.001,
+            director_stitch=settings.director_stitch or False,
+            director_auto_image_desc=settings.director_auto_image_desc if settings.director_auto_image_desc is not None else True,
+            global_video_negative_prompt=settings.global_video_negative_prompt,
+            gpu_acceleration_enabled=settings.gpu_acceleration_enabled if settings.gpu_acceleration_enabled is not None else True,
+            # Ollama
+            ollama_base_url=settings.ollama_base_url,
+            ollama_urls=settings.ollama_urls,
+            ollama_model=settings.ollama_model,
         )
 
         # Build filename with date stamp
@@ -1206,6 +1451,41 @@ async def import_settings(
             settings.network_access = data["network_access"]
         if "app_port" in data:
             settings.app_port = max(1024, min(65535, int(data["app_port"])))
+        # Video FPS
+        if "video_fps" in data:
+            settings.video_fps = data["video_fps"]
+        # Global negative prompt
+        if "global_negative_prompt" in data:
+            settings.global_negative_prompt = data["global_negative_prompt"]
+        # Export extras
+        if "export_lfff_trim_enabled" in data:
+            settings.export_lfff_trim_enabled = data["export_lfff_trim_enabled"]
+        # Prompt guidance
+        if "image_prompt_guidance" in data:
+            settings.image_prompt_guidance = data["image_prompt_guidance"]
+        if "video_prompt_guidance" in data:
+            settings.video_prompt_guidance = data["video_prompt_guidance"]
+        # LTXDirector
+        if "director_guide_strength" in data:
+            settings.director_guide_strength = data["director_guide_strength"]
+        if "director_audio_guidance" in data:
+            settings.director_audio_guidance = data["director_audio_guidance"]
+        if "director_stitch" in data:
+            settings.director_stitch = data["director_stitch"]
+        if "director_auto_image_desc" in data:
+            settings.director_auto_image_desc = data["director_auto_image_desc"]
+        if "global_video_negative_prompt" in data:
+            settings.global_video_negative_prompt = data["global_video_negative_prompt"]
+        # GPU acceleration
+        if "gpu_acceleration_enabled" in data:
+            settings.gpu_acceleration_enabled = data["gpu_acceleration_enabled"]
+        # Ollama (local LLM)
+        if "ollama_base_url" in data:
+            settings.ollama_base_url = data["ollama_base_url"]
+        if "ollama_urls" in data:
+            settings.ollama_urls = data["ollama_urls"]
+        if "ollama_model" in data:
+            settings.ollama_model = data["ollama_model"]
 
         await session.commit()
         await session.refresh(settings)

@@ -5,6 +5,7 @@ import { Plus, Trash2, Save, Zap, User, ImageIcon, Monitor, Pencil, Music, Spark
 import { getConcept, saveConcept, uploadAsset, getLyrics, baseOnLyrics, autogenerateCharacters } from '@/api/client';
 import { handleImgError } from '@/utils/brokenImage';
 import CharacterCreatorModal from './CharacterCreatorModal';
+import { useAppStore } from '@/store';
 
 interface Character {
   name: string;
@@ -63,10 +64,16 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [globalSeed, setGlobalSeed] = useState(0);
   const [useTransitionLora, setUseTransitionLora] = useState(false);
   const [transitionLoraStrength, setTransitionLoraStrength] = useState(1.0);
+  const [randomKenBurns, setRandomKenBurns] = useState(false);
+  const [kenBurnsAllowedEffects, setKenBurnsAllowedEffects] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
   const queryClient = useQueryClient();
+
+  const currentProject = useAppStore((s) => s.currentProject);
+  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
+  const isNarrationImages = currentProject?.mode === 'narration_images';
 
   // Fetch concept data
   const { data: conceptData } = useQuery({
@@ -129,6 +136,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_seed: globalSeed,
         use_transition_lora: useTransitionLora,
         transition_lora_strength: transitionLoraStrength,
+        random_ken_burns: randomKenBurns,
+        ken_burns_allowed_effects: kenBurnsAllowedEffects,
       });
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
@@ -166,6 +175,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setGlobalSeed(conceptData.global_seed || 0);
       setUseTransitionLora(conceptData.use_transition_lora || false);
       setTransitionLoraStrength(conceptData.transition_lora_strength ?? 1.0);
+      setRandomKenBurns(conceptData.random_ken_burns || false);
+      setKenBurnsAllowedEffects(conceptData.ken_burns_allowed_effects || []);
       setDirty(false);
     }
   }, [conceptData]);
@@ -187,6 +198,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_seed: globalSeed,
         use_transition_lora: useTransitionLora,
         transition_lora_strength: transitionLoraStrength,
+        random_ken_burns: randomKenBurns,
+        ken_burns_allowed_effects: kenBurnsAllowedEffects,
       });
     },
     onSuccess: () => {
@@ -236,6 +249,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_seed: globalSeed,
         use_transition_lora: useTransitionLora,
         transition_lora_strength: transitionLoraStrength,
+        random_ken_burns: randomKenBurns,
+        ken_burns_allowed_effects: kenBurnsAllowedEffects,
       }).then(() => queryClient.invalidateQueries({ queryKey: ['concept', projectId] }));
     } else {
       // Editing existing character
@@ -256,9 +271,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_seed: globalSeed,
         use_transition_lora: useTransitionLora,
         transition_lora_strength: transitionLoraStrength,
+        random_ken_burns: randomKenBurns,
+        ken_burns_allowed_effects: kenBurnsAllowedEffects,
       }).then(() => queryClient.invalidateQueries({ queryKey: ['concept', projectId] }));
     }
-  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, projectId, queryClient]);
+  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, projectId, queryClient]);
 
   const handleImageUpload = async (index: number, file: File) => {
     try {
@@ -276,7 +293,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="p-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
-        <span className="text-xs font-medium text-gray-300">Video Concept</span>
+        <span className="text-xs font-medium text-gray-300">{isNarration ? 'Narration Concept' : 'Video Concept'}</span>
         <button
           onClick={() => saveMutation.mutate()}
           disabled={!dirty || saveMutation.isPending}
@@ -296,14 +313,14 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         <div>
           <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400 mb-1">
             <Music size={12} />
-            Song Title
+            {isNarration ? 'Project Title' : 'Song Title'}
             <span className="text-gray-600 font-normal">(optional)</span>
           </label>
           <input
             type="text"
             value={songTitle}
             onChange={(e) => { setSongTitle(e.target.value); markDirty(); }}
-            placeholder="Enter song or video title..."
+            placeholder={isNarration ? 'Enter narration project title...' : 'Enter song or video title...'}
             className="w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500"
           />
         </div>
@@ -320,33 +337,33 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
             }`}
             title={
               (!whisperLyrics && !userProvidedLyrics)
-                ? 'No lyrics available — add lyrics on the Audio tab or process audio first'
-                : 'Use lyrics to generate missing concept fields via LLM'
+                ? `No ${isNarration ? 'script' : 'lyrics'} available — add ${isNarration ? 'your script' : 'lyrics'} on the Audio tab or process audio first`
+                : `Use ${isNarration ? 'script' : 'lyrics'} to generate missing concept fields via LLM`
             }
           >
             <Sparkles size={14} />
-            {baseOnLyricsMutation.isPending ? 'Generating...' : 'Base on Lyrics'}
+            {baseOnLyricsMutation.isPending ? 'Generating...' : isNarration ? 'Base on Script' : 'Base on Lyrics'}
           </button>
           {baseOnLyricsMutation.isError && (
             <p className="text-[10px] text-red-400 mt-1">
-              {(baseOnLyricsMutation.error as any)?.response?.data?.detail || 'Failed to generate from lyrics'}
+              {(baseOnLyricsMutation.error as any)?.response?.data?.detail || `Failed to generate from ${isNarration ? 'script' : 'lyrics'}`}
             </p>
           )}
           <p className="text-[10px] text-gray-600 mt-1">
             {(!whisperLyrics && !userProvidedLyrics)
-              ? 'No lyrics detected yet. Process audio on the Audio tab first.'
-              : `Uses ${userProvidedLyrics ? 'user-provided' : 'Whisper-detected'} lyrics to fill empty fields above/below.`
+              ? `No ${isNarration ? 'script' : 'lyrics'} detected yet. ${isNarration ? 'Add your script on the Audio tab first.' : 'Process audio on the Audio tab first.'}`
+              : `Uses ${userProvidedLyrics ? 'user-provided' : 'Whisper-detected'} ${isNarration ? 'script' : 'lyrics'} to fill empty fields above/below.`
             }
           </p>
         </div>
 
         {/* Overall Concept */}
         <div>
-          <label className="block text-xs font-medium text-gray-400 mb-1">Overall Concept</label>
+          <label className="block text-xs font-medium text-gray-400 mb-1">{isNarration ? 'Narration Concept' : 'Overall Concept'}</label>
           <textarea
             value={conceptText}
             onChange={(e) => { setConceptText(e.target.value); markDirty(); }}
-            placeholder="Describe the overall concept for this video..."
+            placeholder={isNarration ? 'Describe the visual theme and mood for this narration...' : 'Describe the overall concept for this video...'}
             className="w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-20 resize-none"
           />
         </div>
@@ -564,6 +581,83 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           )}
         </div>
 
+        {/* Random Ken Burns Effects (narration_images only) */}
+        {isNarrationImages && (
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="checkbox"
+                id="random_ken_burns"
+                checked={randomKenBurns}
+                onChange={(e) => { setRandomKenBurns(e.target.checked); markDirty(); }}
+                className="rounded border-gray-700 text-purple-500 focus:ring-purple-500"
+              />
+              <label htmlFor="random_ken_burns" className="text-xs font-medium text-gray-400">
+                Randomize Ken Burns Effects
+              </label>
+            </div>
+            {randomKenBurns && (
+              <div className="ml-5 space-y-1.5">
+                <label className="block text-[10px] text-gray-500 mb-1.5">Only Use These Ken Burns Effects</label>
+                {[
+                  { value: 'zoom_in_center', label: 'Zoom In (Center)' },
+                  { value: 'zoom_out_center', label: 'Zoom Out (Center)' },
+                  { value: 'zoom_in_top_left', label: 'Zoom In (Top Left)' },
+                  { value: 'zoom_in_top_right', label: 'Zoom In (Top Right)' },
+                  { value: 'zoom_in_bottom_left', label: 'Zoom In (Bottom Left)' },
+                  { value: 'zoom_in_bottom_right', label: 'Zoom In (Bottom Right)' },
+                  { value: 'pan_left', label: 'Pan Left' },
+                  { value: 'pan_right', label: 'Pan Right' },
+                  { value: 'pan_up', label: 'Pan Up' },
+                  { value: 'pan_down', label: 'Pan Down' },
+                  { value: 'pan_left_to_right', label: 'Pan Left to Right' },
+                  { value: 'pan_right_to_left', label: 'Pan Right to Left' },
+                  { value: 'zoom_in_pan_left', label: 'Zoom In + Pan Left' },
+                  { value: 'zoom_in_pan_right', label: 'Zoom In + Pan Right' },
+                  { value: 'zoom_out_pan_left', label: 'Zoom Out + Pan Left' },
+                  { value: 'zoom_out_pan_right', label: 'Zoom Out + Pan Right' },
+                ].map(({ value, label }) => (
+                  <label key={value} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={kenBurnsAllowedEffects.length === 0 || kenBurnsAllowedEffects.includes(value)}
+                      onChange={(e) => {
+                        let next: string[];
+                        if (kenBurnsAllowedEffects.length === 0) {
+                          // First click: switching from "all" to explicit selection — select all EXCEPT this one
+                          const allEffects = ['zoom_in_center','zoom_out_center','zoom_in_top_left','zoom_in_top_right','zoom_in_bottom_left','zoom_in_bottom_right','pan_left','pan_right','pan_up','pan_down','pan_left_to_right','pan_right_to_left','zoom_in_pan_left','zoom_in_pan_right','zoom_out_pan_left','zoom_out_pan_right'];
+                          if (e.target.checked) {
+                            next = allEffects;
+                          } else {
+                            next = allEffects.filter(v => v !== value);
+                          }
+                        } else {
+                          if (e.target.checked) {
+                            next = [...kenBurnsAllowedEffects, value];
+                          } else {
+                            next = kenBurnsAllowedEffects.filter(v => v !== value);
+                          }
+                        }
+                        // If all are selected, clear to [] (meaning "all")
+                        if (next.length >= 16) next = [];
+                        setKenBurnsAllowedEffects(next);
+                        markDirty();
+                      }}
+                      className="rounded border-gray-700 text-blue-500 focus:ring-blue-500"
+                    />
+                    <span className="text-[11px] text-gray-300">{label}</span>
+                  </label>
+                ))}
+                <p className="text-[10px] text-gray-600 mt-2">
+                  {kenBurnsAllowedEffects.length === 0
+                    ? 'All effects enabled — uncheck any to limit the selection.'
+                    : `${kenBurnsAllowedEffects.length} of 16 effects enabled.`}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Autogenerate Characters */}
         <div>
           <button
@@ -625,6 +719,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                     global_seed: globalSeed,
                     use_transition_lora: useTransitionLora,
                     transition_lora_strength: transitionLoraStrength,
+                    random_ken_burns: randomKenBurns,
+                    ken_burns_allowed_effects: kenBurnsAllowedEffects,
                   }).then(() => {
                     queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
                     setCreatorOpen({ index: newIndex, character: newChar });

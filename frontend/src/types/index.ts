@@ -74,6 +74,13 @@ export interface WordTimestamp {
   start: number;
   end: number;
   score?: number;
+  block?: number;  // SRT block index — groups words into original subtitle lines
+}
+
+export interface SrtBlock {
+  text: string;
+  start: number;
+  end: number;
 }
 
 export interface Asset {
@@ -211,6 +218,11 @@ export interface AppSettings {
   global_video_negative_prompt?: string;
   // GPU acceleration
   gpu_acceleration_enabled?: boolean;
+  // Ollama (local LLM)
+  ollama_base_url?: string;
+  ollama_urls?: string[];
+  ollama_model?: string;
+  ollama_available_models?: string[];
 }
 
 export interface GpuStatus {

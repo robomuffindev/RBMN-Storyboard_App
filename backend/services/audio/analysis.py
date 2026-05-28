@@ -1032,6 +1032,10 @@ class AudioAnalyzer:
         """
         import re
 
+        # Normalize line endings — Windows SRT files use \r\n which breaks
+        # the regex that expects \n for block delimiters.
+        srt_text = srt_text.replace('\r\n', '\n').replace('\r', '\n')
+
         words = []
 
         # Match SRT blocks: index, timecodes, text
@@ -1098,7 +1102,7 @@ class AudioAnalyzer:
                 f"(removed {len(matches) - len(deduped_matches)} consecutive duplicates)"
             )
 
-        for _index, start_str, end_str, text in deduped_matches:
+        for block_idx, (_index, start_str, end_str, text) in enumerate(deduped_matches):
             start_sec = srt_time_to_seconds(start_str)
             end_sec = srt_time_to_seconds(end_str)
 
@@ -1118,6 +1122,7 @@ class AudioAnalyzer:
                     "start": round(word_start, 3),
                     "end": round(word_end, 3),
                     "confidence": 1.0,  # SRT doesn't include confidence
+                    "block": block_idx,  # Preserve original SRT block grouping
                 })
 
         return words

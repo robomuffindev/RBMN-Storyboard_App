@@ -163,6 +163,29 @@ def assemble_music_video(
                            skip_first_frame=skip_ff,
                            max_duration=duration, crf=intermediate_crf)
 
+            # ── Safety-net duration pad ─────────────────────────────
+            # V2V trim-A can shorten a scene's video below its scene
+            # duration (overlap removal + boundary shift).  If the clip
+            # is shorter than the requested duration, freeze-frame pad
+            # the tail so the assembled timeline never loses time.
+            try:
+                _clip_info = get_media_info(str(clip_path))
+                _clip_dur = _clip_info.get("duration", 0)
+                _shortfall = duration - _clip_dur
+                if _shortfall > (1.0 / fps):  # more than 1 frame short
+                    logger.warning(
+                        f"Scene {i} video clip is {_shortfall:.3f}s shorter "
+                        f"than target ({_clip_dur:.3f}s vs {duration:.3f}s) "
+                        f"— padding tail to fill"
+                    )
+                    _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
+                    pad_video_end(str(clip_path), str(_dur_pad_path),
+                                  _shortfall, crf=intermediate_crf)
+                    temp_files.append(str(clip_path))  # old clip → cleanup
+                    clip_path = _dur_pad_path
+            except Exception as _e:
+                logger.warning(f"Scene {i} duration-pad check failed: {_e}")
+
         else:
             # Use the still image with optional movement effect
             image_path = scene.get("image_path")
@@ -173,6 +196,24 @@ def assemble_music_video(
                     clip_path = output_dir / f"clip_{i:03d}.mp4"
                     normalize_clip(video_path, str(clip_path), width, height, fps,
                                    max_duration=duration, crf=intermediate_crf)
+
+                    # Safety-net duration pad (same as video-source path)
+                    try:
+                        _clip_info = get_media_info(str(clip_path))
+                        _clip_dur = _clip_info.get("duration", 0)
+                        _shortfall = duration - _clip_dur
+                        if _shortfall > (1.0 / fps):
+                            logger.warning(
+                                f"Scene {i} fallback clip is {_shortfall:.3f}s "
+                                f"shorter than target — padding tail"
+                            )
+                            _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
+                            pad_video_end(str(clip_path), str(_dur_pad_path),
+                                          _shortfall, crf=intermediate_crf)
+                            temp_files.append(str(clip_path))
+                            clip_path = _dur_pad_path
+                    except Exception as _e:
+                        logger.warning(f"Scene {i} duration-pad check failed: {_e}")
                 else:
                     logger.warning(f"Scene {i} has no image_path or video_path, skipping")
                     continue
@@ -505,6 +546,12 @@ def assemble_narration_video(
     subtitle_words: Optional[List[Dict[str, Any]]] = None,
     subtitle_style: Optional[Dict[str, Any]] = None,
     normalize_audio_enabled: bool = False,
+    loop_backing: bool = False,
+    narration_volume: float = 1.0,
+    backing_volume: float = 1.0,
+    main_fade_in: float = 0.0,
+    main_fade_out: float = 0.0,
+    normalize_backing: bool = False,
 ) -> None:
     """
     Assemble narration video from scenes with full feature parity to music video.
@@ -614,6 +661,24 @@ def assemble_narration_video(
             normalize_clip(video_path, str(clip_path), width, height, fps,
                            skip_first_frame=skip_ff,
                            max_duration=duration, crf=intermediate_crf)
+
+            # Safety-net duration pad (narration video path)
+            try:
+                _clip_info = get_media_info(str(clip_path))
+                _clip_dur = _clip_info.get("duration", 0)
+                _shortfall = duration - _clip_dur
+                if _shortfall > (1.0 / fps):
+                    logger.warning(
+                        f"Scene {i} narration clip is {_shortfall:.3f}s "
+                        f"shorter than target — padding tail"
+                    )
+                    _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
+                    pad_video_end(str(clip_path), str(_dur_pad_path),
+                                  _shortfall, crf=intermediate_crf)
+                    temp_files.append(str(clip_path))
+                    clip_path = _dur_pad_path
+            except Exception as _e:
+                logger.warning(f"Scene {i} duration-pad check failed: {_e}")
         else:
             # Use the still image with optional movement effect
             image_path = scene.get("image_path")
@@ -624,6 +689,24 @@ def assemble_narration_video(
                     clip_path = output_dir / f"clip_{i:03d}.mp4"
                     normalize_clip(video_path, str(clip_path), width, height, fps,
                                    max_duration=duration, crf=intermediate_crf)
+
+                    # Safety-net duration pad (narration fallback path)
+                    try:
+                        _clip_info = get_media_info(str(clip_path))
+                        _clip_dur = _clip_info.get("duration", 0)
+                        _shortfall = duration - _clip_dur
+                        if _shortfall > (1.0 / fps):
+                            logger.warning(
+                                f"Scene {i} narration fallback clip is "
+                                f"{_shortfall:.3f}s shorter — padding tail"
+                            )
+                            _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
+                            pad_video_end(str(clip_path), str(_dur_pad_path),
+                                          _shortfall, crf=intermediate_crf)
+                            temp_files.append(str(clip_path))
+                            clip_path = _dur_pad_path
+                    except Exception as _e:
+                        logger.warning(f"Scene {i} duration-pad check failed: {_e}")
                 else:
                     logger.warning(f"Scene {i} has no image_path or video_path, skipping")
                     continue
@@ -912,9 +995,24 @@ def assemble_narration_video(
     if backing_tracks:
         report("Mixing backing tracks...", 82)
         logger.info(f"Mixing {len(backing_tracks)} backing track(s) with narration")
-        from .ffmpeg import mix_audio_tracks
+        from .ffmpeg import mix_audio_tracks, get_media_info
+        # Compute total timeline duration for loop feature
+        _total_dur = 0.0
+        try:
+            _total_dur = get_media_info(narration_audio_path).get("duration", 0.0)
+        except Exception:
+            pass
         mixed_audio_path = str(output_dir / "mixed_audio.wav")
-        mix_audio_tracks(narration_audio_path, backing_tracks, mixed_audio_path)
+        mix_audio_tracks(
+            narration_audio_path, backing_tracks, mixed_audio_path,
+            loop_backing=loop_backing,
+            total_duration=_total_dur,
+            narration_volume=narration_volume,
+            backing_volume=backing_volume,
+            main_fade_in=main_fade_in,
+            main_fade_out=main_fade_out,
+            normalize_backing=normalize_backing,
+        )
         temp_files.append(mixed_audio_path)
         audio_path = mixed_audio_path
 
