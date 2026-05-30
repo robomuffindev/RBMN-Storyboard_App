@@ -13,6 +13,7 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, Column
+from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -77,7 +78,7 @@ class Project(SQLModel, table=True):
     mode: ProjectMode = Field(default=ProjectMode.MUSIC_VIDEO)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    settings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    settings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     schema_version: int = Field(default=1)
 
     # Relationships
@@ -110,9 +111,9 @@ class Scene(SQLModel, table=True):
     end_time: float
     prompt: str
     negative_prompt: str = Field(default="")
-    parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     workflow_snapshot: dict[str, Any] = Field(
-        default_factory=dict, sa_column=Column(JSON)
+        default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON))
     )
 
     # Relationships
@@ -160,7 +161,7 @@ class Asset(SQLModel, table=True):
     width: Optional[int] = None
     height: Optional[int] = None
     file_size: int
-    meta: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    meta: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
@@ -182,7 +183,7 @@ class TimelinePosition(SQLModel, table=True):
     start_sec: float
     end_sec: float
     gain_db: float = Field(default=0.0)
-    effects: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    effects: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
 
     # Relationships
     scene: Scene = Relationship(back_populates="timeline_positions")
@@ -215,9 +216,9 @@ class GenerationHistory(SQLModel, table=True):
     scene_id: Optional[UUID] = Field(foreign_key="scenes.id", default=None)
     job_type: JobType
     prompt_id: str
-    workflow_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    workflow_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     status: str
-    parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     output_path: Optional[str] = None
     error_message: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -241,8 +242,8 @@ class Job(SQLModel, table=True):
     priority: int = Field(default=0)
     worker_url: Optional[str] = None
     prompt_id: Optional[str] = None
-    parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
-    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     error: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
@@ -264,7 +265,7 @@ class Lyrics(SQLModel, table=True):
     full_text: str = Field(default="")
     initial_text: str = Field(default="")  # User-provided lyrics/script input
     words: list[dict[str, Any]] = Field(
-        default_factory=list, sa_column=Column(JSON)
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
     )  # List of {word, start, end} dicts
     language: str = Field(default="en")
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -300,10 +301,10 @@ class AppSettings(SQLModel, table=True):
 
     id: int = Field(primary_key=True, default=1)
     comfyui_urls: list[str] = Field(
-        default_factory=list, sa_column=Column(JSON)
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
     )
     # Per-server capability overrides: {url: {image: bool, video: bool}}
-    comfyui_server_caps: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    comfyui_server_caps: Optional[dict] = Field(default=None, sa_column=Column(MutableDict.as_mutable(JSON)))
     whisper_mode: str = Field(default="local")  # "local", "remote", "comfyui"
     whisper_remote_url: Optional[str] = None
     whisper_comfyui_url: Optional[str] = None  # ComfyUI server URL for Whisper workflow
@@ -329,18 +330,18 @@ class AppSettings(SQLModel, table=True):
     # System prompt overrides — stored as JSON dicts keyed by model name
     # e.g. {"flux2_klein_dev_9b": {"text": "...", "enabled": true}}
     image_system_prompt_overrides: Optional[dict] = Field(
-        default=None, sa_column=Column(JSON)
+        default=None, sa_column=Column(MutableDict.as_mutable(JSON))
     )
     video_system_prompt_overrides: Optional[dict] = Field(
-        default=None, sa_column=Column(JSON)
+        default=None, sa_column=Column(MutableDict.as_mutable(JSON))
     )
     # Per-model prompt guidance — stored as JSON dicts keyed by model name
     # e.g. {"flux2_klein_dev_9b": "Always use detailed descriptions..."}
     image_prompt_guidance: Optional[dict] = Field(
-        default=None, sa_column=Column(JSON)
+        default=None, sa_column=Column(MutableDict.as_mutable(JSON))
     )
     video_prompt_guidance: Optional[dict] = Field(
-        default=None, sa_column=Column(JSON)
+        default=None, sa_column=Column(MutableDict.as_mutable(JSON))
     )
     # Global video FPS
     video_fps: int = Field(default=24)
@@ -359,7 +360,7 @@ class AppSettings(SQLModel, table=True):
     runpod_api_key: Optional[str] = None
     runpod_idle_timeout: int = Field(default=30)  # minutes before auto-spindown
     # Pod configs: list of {pod_id, label, service_type, gpu_type_id, template_id, ...}
-    runpod_pods: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    runpod_pods: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))
     # Export transition settings
     export_transition_type: str = Field(default="none")  # none, crossfade, dissolve
     export_transition_duration: float = Field(default=0.5)  # seconds
@@ -380,11 +381,14 @@ class AppSettings(SQLModel, table=True):
     global_video_negative_prompt: Optional[str] = Field(default=None)
     # GPU acceleration — when False, forces CPU encoding/decoding even if GPU is detected
     gpu_acceleration_enabled: bool = Field(default=True)
+    # FFmpeg threading — 0 = auto-detect from CPU cores, higher = more threads
+    ffmpeg_threads: int = Field(default=0)
+    ffmpeg_filter_threads: int = Field(default=4)
     # Ollama integration — local LLM inference (multi-server pool)
     ollama_base_url: Optional[str] = Field(default=None)  # legacy single URL, migrated to ollama_urls
-    ollama_urls: Optional[list] = Field(default=None, sa_column=Column(JSON))  # list of server URLs
+    ollama_urls: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # list of server URLs
     ollama_model: Optional[str] = Field(default=None)  # e.g. "qwen3:14b"
-    ollama_available_models: Optional[list] = Field(default=None, sa_column=Column(JSON))  # cached model list
+    ollama_available_models: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # cached model list
 
 
 class BatchRunStatus(StrEnum):
@@ -423,10 +427,10 @@ class BatchRun(SQLModel, table=True):
     current_step: Optional[str] = None
 
     # Per-scene results: { scene_id: { status: "done"|"failed"|"skipped"|"pending", error?: str, asset_url?: str } }
-    scene_results: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    scene_results: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
 
     # Error log: list of { scene_id, scene_name, error, timestamp }
-    error_log: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    error_log: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(MutableList.as_mutable(JSON)))
 
     # Timing
     started_at: Optional[datetime] = None
@@ -434,7 +438,7 @@ class BatchRun(SQLModel, table=True):
     elapsed_ms: int = Field(default=0)
 
     # Settings snapshot — everything needed to resume
-    run_settings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    run_settings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     # Stores: override_full_set, vocals_only_audio, skip_audio_mux, two_pass,
     #         use_story_flow, lipsync_enabled, vocals_only_for_lipsync
 
@@ -443,7 +447,7 @@ class BatchRun(SQLModel, table=True):
     last_asset_scene_name: Optional[str] = None
 
     # Live activity log: list of { step, scene_name?, timestamp, asset_url? }
-    step_log: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    step_log: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(MutableList.as_mutable(JSON)))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -483,9 +487,9 @@ class WorkflowConfig(SQLModel, table=True):
     description: str = Field(default="")
     is_default: bool = Field(default=False, index=True)
     server_url: Optional[str] = None  # null = available to all servers, set = per-server only
-    workflow_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    workflow_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
     field_mappings: list[dict[str, Any]] = Field(
-        default_factory=list, sa_column=Column(JSON)
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
     )  # list of WorkflowFieldMapping dicts
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

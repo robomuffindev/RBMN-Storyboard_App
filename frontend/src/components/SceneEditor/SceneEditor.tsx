@@ -185,6 +185,11 @@ function ImageLightbox({
       >
         <span style={{ fontSize: '14px', color: '#9ca3af' }}>
           {index + 1} / {versions.length}
+          {version?.parameters?.seed != null && (
+            <span style={{ marginLeft: '12px', color: '#a78bfa', fontFamily: 'monospace', fontSize: '13px' }}>
+              Seed: {version.parameters.seed}
+            </span>
+          )}
           {version?.completed_at && (
             <span style={{ marginLeft: '12px', color: '#6b7280' }}>
               {new Date(version.completed_at).toLocaleString()}
@@ -228,6 +233,7 @@ function ImageLightbox({
 // ─── Camera Action Presets ─────────────────────────────────────────────
 const CAMERA_ACTIONS = [
   { value: 'none', label: 'None' },
+  // ── Camera Movement ──
   { value: 'pan_left', label: 'Pan Left' },
   { value: 'pan_right', label: 'Pan Right' },
   { value: 'tilt_up', label: 'Tilt Up' },
@@ -236,20 +242,39 @@ const CAMERA_ACTIONS = [
   { value: 'dolly_out', label: 'Dolly Out (Pull Out)' },
   { value: 'zoom_in', label: 'Zoom In' },
   { value: 'zoom_out', label: 'Zoom Out' },
+  { value: 'dolly_zoom', label: 'Dolly Zoom (Vertigo / Hitchcock)' },
+  { value: 'crash_zoom', label: 'Crash Zoom (Snap Zoom)' },
   { value: 'tracking_shot', label: 'Tracking Shot' },
   { value: 'crane_up', label: 'Crane Up (Boom Up)' },
   { value: 'crane_down', label: 'Crane Down (Boom Down)' },
+  { value: 'pedestal_up', label: 'Pedestal Up' },
+  { value: 'pedestal_down', label: 'Pedestal Down' },
   { value: 'orbit', label: 'Orbit / Arc Shot' },
+  { value: 'roll', label: 'Roll (Barrel Roll)' },
   { value: 'steadicam', label: 'Steadicam / Gimbal' },
-  { value: 'handheld', label: 'Handheld' },
-  { value: 'whip_pan', label: 'Whip Pan' },
+  { value: 'handheld', label: 'Handheld (Shaky Cam)' },
+  { value: 'whip_pan', label: 'Whip Pan (Swish Pan)' },
   { value: 'dutch_angle', label: 'Dutch Angle / Tilt' },
   { value: 'rack_focus', label: 'Rack Focus' },
   { value: 'slow_push', label: 'Slow Push In' },
   { value: 'slow_pull', label: 'Slow Pull Out' },
   { value: 'parallax', label: 'Parallax' },
-  { value: 'flyover', label: 'Flyover / Aerial' },
+  { value: 'flyover', label: 'Flyover / Aerial / Drone' },
   { value: 'static', label: 'Static (Locked Off)' },
+  // ── Shot Size / Framing ──
+  { value: 'extreme_wide', label: 'Extreme Wide Shot (EWS)' },
+  { value: 'wide_shot', label: 'Wide Shot (Full Body)' },
+  { value: 'medium_shot', label: 'Medium Shot (Waist Up)' },
+  { value: 'medium_closeup', label: 'Medium Close-Up (Chest Up)' },
+  { value: 'closeup', label: 'Close-Up (Face)' },
+  { value: 'extreme_closeup', label: 'Extreme Close-Up (Detail)' },
+  // ── Camera Angle ──
+  { value: 'low_angle', label: 'Low Angle (Hero Shot)' },
+  { value: 'high_angle', label: 'High Angle (Looking Down)' },
+  { value: 'birds_eye', label: "Bird's Eye (Top-Down)" },
+  { value: 'pov', label: 'POV (Point of View)' },
+  { value: 'over_shoulder', label: 'Over the Shoulder (OTS)' },
+  { value: 'profile', label: 'Profile / Side Angle' },
   { value: 'custom', label: 'Custom...' },
 ];
 
@@ -817,8 +842,10 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   // Active prompt for current sub-tab
   const activePrompt = frameSubTab === 'first' ? prompt : lastFramePrompt;
   const setActivePrompt = frameSubTab === 'first' ? setPrompt : setLastFramePrompt;
-  const activeNegPrompt = frameSubTab === 'first' ? negativePrompt : lastFrameNegPrompt;
-  const setActiveNegPrompt = frameSubTab === 'first' ? setNegativePrompt : setLastFrameNegPrompt;
+  // Negative prompt variables kept for data model compatibility but UI is disabled
+  // (no current image workflow supports negative prompts)
+  // const activeNegPrompt = frameSubTab === 'first' ? negativePrompt : lastFrameNegPrompt;
+  // const setActiveNegPrompt = frameSubTab === 'first' ? setNegativePrompt : setLastFrameNegPrompt;
 
   // Video mode
   const videoMode = activeScene?.parameters?.video_mode || 'single';
@@ -1815,7 +1842,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
     if (!searchText.trim()) return activeRefs;
 
-    const maxRefs = frameSubTab === 'first' ? 4 : 3;
+    const maxRefs = frameSubTab === 'first' ? 5 : 4;
     const maxCharRefs = 2; // Klein works best with 1-2 character references
     const currentCharIndices = [...activeRefs.characterIndices];
     let changed = false;
@@ -2322,13 +2349,71 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 />
               </div>
 
+              {/* Color Override */}
               <div>
-                <label className="block text-sm font-medium mb-2">Negative Prompt</label>
+                <label className="block text-sm font-medium mb-2">
+                  Color Override
+                  <span className="text-[10px] text-gray-500 ml-2 font-normal">
+                    Forces color palette on LLM + model
+                  </span>
+                </label>
+                <select
+                  value={activeScene?.parameters?.color_override || currentProject?.settings?.global_color_override || 'full_color'}
+                  onChange={async (e) => {
+                    if (!activeScene || !currentProject) return;
+                    const newParams: Record<string, any> = { ...activeScene.parameters, color_override: e.target.value };
+                    // Clear custom palette if switching away from custom
+                    if (e.target.value !== 'custom') {
+                      delete newParams.custom_color_palette;
+                    }
+                    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                >
+                  <option value="full_color">Full Color (Default)</option>
+                  <option value="black_and_white">Black & White / Noir</option>
+                  <option value="high_contrast_bw">High Contrast B&W</option>
+                  <option value="sepia">Sepia Tone</option>
+                  <option value="monochrome_blue">Monochrome Blue</option>
+                  <option value="monochrome_red">Monochrome Red</option>
+                  <option value="desaturated">Desaturated / Muted</option>
+                  <option value="vintage_film">Vintage Film</option>
+                  <option value="neon_cyberpunk">Neon Cyberpunk</option>
+                  <option value="custom">Custom Palette...</option>
+                </select>
+                {(activeScene?.parameters?.color_override === 'custom') && (
+                  <textarea
+                    value={activeScene?.parameters?.custom_color_palette || ''}
+                    onChange={async (e) => {
+                      if (!activeScene || !currentProject) return;
+                      const newParams = { ...activeScene.parameters, custom_color_palette: e.target.value };
+                      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+                      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                    }}
+                    placeholder="Describe your color palette (e.g., 'only shades of green and gold', 'pastel pink and baby blue')"
+                    className="w-full mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-16 text-sm"
+                  />
+                )}
+                {activeScene?.parameters?.color_override && activeScene.parameters.color_override !== 'full_color' && (
+                  <p className="text-[10px] text-amber-400 mt-1">
+                    ⚠ Color override active — LLM prompts and model will enforce this palette
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-gray-500">
+                  Negative Prompt
+                  <span className="text-[10px] text-gray-600 ml-2 font-normal">
+                    Not supported by Klein / Z-Image workflows
+                  </span>
+                </label>
                 <textarea
-                  value={activeNegPrompt}
-                  onChange={(e) => setActiveNegPrompt(e.target.value)}
-                  placeholder="Things to avoid in the image..."
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-16"
+                  value=""
+                  disabled
+                  placeholder="Current image workflows do not support negative prompts"
+                  className="w-full px-3 py-2 bg-gray-800/40 border border-gray-700/50 rounded text-gray-500 placeholder-gray-600 cursor-not-allowed h-16 opacity-50"
                 />
               </div>
 
@@ -2611,6 +2696,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                     {ver && (
                       <div className="text-[10px] text-gray-500 text-center">
                         {ver.status === 'completed' ? 'Completed' : ver.status}
+                        {ver?.parameters?.seed != null && (
+                          <> · <span className="text-purple-400 font-mono">Seed: {ver.parameters.seed}</span></>
+                        )}
                         {ver.completed_at && (<> · {new Date(ver.completed_at).toLocaleString()}</>)}
                       </div>
                     )}
@@ -3182,6 +3270,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                     {ver && (
                       <div className="text-[10px] text-gray-500 text-center">
                         {ver.status === 'completed' ? 'Completed' : ver.status}
+                        {ver?.parameters?.seed != null && (
+                          <> · <span className="text-purple-400 font-mono">Seed: {ver.parameters.seed}</span></>
+                        )}
                         {ver.completed_at && (<> · {new Date(ver.completed_at).toLocaleString()}</>)}
                       </div>
                     )}

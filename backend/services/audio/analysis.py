@@ -157,7 +157,7 @@ class AudioAnalyzer:
                 except RuntimeError as e:
                     logger.warning(f"ComfyUI Whisper failed for {label} ({e}), falling back to local")
                     try:
-                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model)
+                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model, whisper_language=whisper_language)
                     except RuntimeError as e2:
                         logger.warning(f"Local WhisperX also unavailable — skipping transcription: {e2}")
                         return []
@@ -167,13 +167,13 @@ class AudioAnalyzer:
                 except RuntimeError as e:
                     logger.warning(f"Remote Whisper failed for {label} ({e}), falling back to local")
                     try:
-                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model)
+                        return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model, whisper_language=whisper_language)
                     except RuntimeError as e2:
                         logger.warning(f"Local WhisperX also unavailable — skipping transcription: {e2}")
                         return []
             else:
                 try:
-                    return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model)
+                    return self.transcribe_local(audio_for_whisper, initial_text=initial_text, whisper_model=whisper_model, whisper_language=whisper_language)
                 except RuntimeError as e:
                     logger.warning(f"Local WhisperX not available — skipping transcription: {e}")
                     return []
@@ -342,7 +342,7 @@ class AudioAnalyzer:
         except Exception as e:
             raise RuntimeError(f"Stem separation error: {e}")
 
-    def transcribe_local(self, audio_path: str, initial_text: Optional[str] = None, whisper_model: str = "base") -> List[Dict[str, Any]]:
+    def transcribe_local(self, audio_path: str, initial_text: Optional[str] = None, whisper_model: str = "base", whisper_language: str = "English") -> List[Dict[str, Any]]:
         """
         Transcribe audio using local WhisperX.
 
@@ -400,19 +400,30 @@ class AudioAnalyzer:
                 asr_options["initial_prompt"] = initial_text
                 logger.info("Using provided text as Whisper initial_prompt")
 
+            # Map language name to ISO code for WhisperX
+            _LANG_MAP = {
+                "English": "en", "Spanish": "es", "French": "fr", "German": "de",
+                "Italian": "it", "Portuguese": "pt", "Japanese": "ja", "Korean": "ko",
+                "Chinese": "zh", "Russian": "ru", "Arabic": "ar", "Hindi": "hi",
+                "Dutch": "nl", "Swedish": "sv", "Norwegian": "no", "Danish": "da",
+                "Finnish": "fi", "Polish": "pl", "Turkish": "tr", "Czech": "cs",
+            }
+            lang_code = _LANG_MAP.get(whisper_language, whisper_language.lower()[:2])
+            logger.info(f"Whisper language: {whisper_language} → {lang_code}")
+
             # Load model with ASR options
             logger.info(f"Loading WhisperX model: {whisper_model}")
             model = whisperx.load_model(
-                whisper_model, device=device, language="en",
+                whisper_model, device=device, language=lang_code,
                 compute_type=compute_type, asr_options=asr_options,
             )
 
             # Transcribe with VAD
             audio = whisperx.load_audio(str(audio_path))
-            result = model.transcribe(audio, language="en")
+            result = model.transcribe(audio, language=lang_code)
 
             # Align words
-            model_a, metadata = whisperx.load_align_model(language_code="en", device=device)
+            model_a, metadata = whisperx.load_align_model(language_code=lang_code, device=device)
             result = whisperx.align(
                 result["segments"],
                 model_a,

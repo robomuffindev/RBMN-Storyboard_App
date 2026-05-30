@@ -2,27 +2,643 @@
 Video Assembly Pipeline
 
 Final video assembly: clip normalization, concatenation, and audio muxing.
+
+Performance optimizations (v1.6.0):
+- Single-pass FFmpeg filter graphs: normalize+pad+fade+color in ONE call per clip
+  (was 3-5 separate decode→encode cycles per scene)
+- Parallel clip processing: ThreadPoolExecutor for independent clip rendering
+- Stream-copy concat: -f concat -c copy when no transitions (no re-encode)
+- Threading flags: -threads 0 -filter_threads 4 for all FFmpeg calls
+- Pre-computed transition compensation: padding folded into single-pass
+- Tmpfs intermediate files: /dev/shm on Linux for RAM-backed I/O
 """
 
 import logging
+import os
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 
 from .ffmpeg import (
     normalize_clip,
     concat_clips,
+    concat_clips_copy,
     mux_audio,
-    apply_kenburns,
-    crossfade,
     apply_transition,
-    apply_fade_in,
-    apply_fade_out,
     get_media_info,
     pad_video_end,
+    process_clip_single_pass,
+    process_image_single_pass,
+    mix_audio_tracks,
+    normalize_audio,
+    generate_ass_subtitles,
+    burn_subtitles,
 )
 from .color_correction import match_adjacent_clips
 
 logger = logging.getLogger(__name__)
+
+# Maximum parallel FFmpeg workers.  Each FFmpeg process can use multiple
+# CPU cores (via -threads 0), so too many workers starve each other.
+# 4 is a safe default that keeps GPU encoders fed without thrashing.
+_MAX_PARALLEL_CLIPS = int(os.environ.get("RBMN_PARALLEL_CLIPS", "4"))
+
+# Minimum free space (bytes) required on tmpfs before we'll use it.
+# 512 MB — a 20-scene export with CRF 14 intermediates can easily use 200+ MB.
+_TMPFS_MIN_FREE = int(os.environ.get("RBMN_TMPFS_MIN_FREE", str(512 * 1024 * 1024)))
+
+
+def _get_tmpfs_dir(fallback: Path, label: str = "rbmn_export") -> Path:
+    """Pick the best directory for intermediate files.
+
+    On Linux, /dev/shm is a tmpfs mount backed by RAM — reads and writes
+    are dramatically faster than spinning disk or even SSD.  We use it
+    when available and when there's enough free space; otherwise we fall
+    back to the output directory (``fallback``).
+
+    The env var ``RBMN_TMPFS_DIR`` overrides auto-detection (useful for
+    custom ramdisks on Windows/macOS).
+
+    Returns a per-export subdirectory (created, caller must clean up).
+    """
+    override = os.environ.get("RBMN_TMPFS_DIR", "")
+    candidates: list[str] = []
+    if override:
+        candidates.append(override)
+    else:
+        # /dev/shm is the standard Linux tmpfs
+        candidates.append("/dev/shm")
+
+    for candidate in candidates:
+        cpath = Path(candidate)
+        if not cpath.is_dir():
+            continue
+        try:
+            stat = os.statvfs(str(cpath))
+            free = stat.f_bavail * stat.f_frsize
+            if free < _TMPFS_MIN_FREE:
+                logger.info(
+                    f"tmpfs {candidate}: only {free / (1024*1024):.0f} MB free "
+                    f"(need {_TMPFS_MIN_FREE / (1024*1024):.0f} MB), skipping"
+                )
+                continue
+        except (OSError, AttributeError):
+            # os.statvfs not available on Windows; skip candidate
+            continue
+
+        tmpdir = cpath / f"{label}_{os.getpid()}"
+        try:
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            # Quick write test
+            test_file = tmpdir / ".write_test"
+            test_file.write_text("ok")
+            test_file.unlink()
+            logger.info(
+                f"Using tmpfs for intermediates: {tmpdir} "
+                f"({free / (1024*1024):.0f} MB free)"
+            )
+            return tmpdir
+        except OSError as e:
+            logger.warning(f"tmpfs {candidate} write test failed: {e}")
+            continue
+
+    # Fallback: use a subdirectory of the output folder
+    fallback_dir = fallback / "_tmp"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    return fallback_dir
+
+
+def _cleanup_tmpfs_dir(tmpdir: Path, output_dir: Path) -> None:
+    """Remove the tmpfs working directory if it's outside the output tree.
+
+    If tmpdir is a subdirectory of output_dir (the fallback case), we
+    still remove it since it's our own _tmp folder.
+    """
+    try:
+        if tmpdir.exists():
+            shutil.rmtree(str(tmpdir), ignore_errors=True)
+    except Exception as e:
+        logger.warning(f"tmpfs cleanup failed for {tmpdir}: {e}")
+
+
+def _build_clip_task(
+    scene: dict,
+    scene_idx: int,
+    work_dir: Path,
+    width: int,
+    height: int,
+    fps: int,
+    crf: int,
+    pad_seconds: float,
+) -> Optional[dict]:
+    """Build a clip task descriptor for a single scene.
+
+    Args:
+        work_dir: Directory for intermediate clip files.  May be a tmpfs
+                  mount (RAM-backed) for faster I/O.
+
+    Returns a dict with all info needed to render the clip, or None if
+    the scene has no content (should be skipped).
+    """
+    source_type = scene.get("scene_source_type", "image")
+    duration = scene.get("duration", 5.0)
+    clip_path = str(work_dir / f"clip_{scene_idx:03d}.mp4")
+
+    # Extract fade parameters
+    transition_in = scene.get("transition_in")
+    transition_out = scene.get("transition_out")
+    fade_in_type = None
+    fade_in_dur = 0.5
+    fade_out_type = None
+    fade_out_dur = 0.5
+    if transition_in and transition_in.get("type") in ("fade_from_black", "fade_from_white"):
+        fade_in_type = transition_in["type"]
+        fade_in_dur = transition_in.get("duration", 0.5)
+    if transition_out and transition_out.get("type") in ("fade_to_black", "fade_to_white"):
+        fade_out_type = transition_out["type"]
+        fade_out_dur = transition_out.get("duration", 0.5)
+
+    common = {
+        "scene_idx": scene_idx,
+        "clip_path": clip_path,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "crf": crf,
+        "duration": duration,
+        "pad_seconds": pad_seconds,
+        "fade_in_type": fade_in_type,
+        "fade_in_dur": fade_in_dur,
+        "fade_out_type": fade_out_type,
+        "fade_out_dur": fade_out_dur,
+    }
+
+    if source_type == "video":
+        video_path = scene.get("video_path")
+        if not video_path:
+            return None
+        common["type"] = "video"
+        common["input_path"] = video_path
+        common["skip_first_frame"] = bool(scene.get("trim_first_frame", False))
+        return common
+    else:
+        image_path = scene.get("image_path")
+        if image_path:
+            # Image source with Ken Burns
+            movement = scene.get("image_movement", {})
+            if movement and movement.get("effect"):
+                effect = movement["effect"]
+                intensity = movement.get("intensity", 50)
+                easing = movement.get("easing", "ease_in_out")
+            else:
+                effect = scene.get("effect", "zoom_in_center")
+                intensity = 50
+                easing = "ease_in_out"
+            if not effect or effect == "none":
+                effect = "zoom_in_center"
+                intensity = 0
+
+            common["type"] = "image"
+            common["input_path"] = image_path
+            common["effect"] = effect
+            common["intensity"] = intensity
+            common["easing"] = easing
+            return common
+        else:
+            # Fallback to video_path
+            video_path = scene.get("video_path")
+            if not video_path:
+                return None
+            common["type"] = "video"
+            common["input_path"] = video_path
+            common["skip_first_frame"] = False
+            return common
+
+
+def _execute_clip_task(task: dict) -> dict:
+    """Execute a single clip rendering task. Thread-safe (FFmpeg subprocess).
+
+    Returns the task dict with 'result_path' set to the final clip path.
+    """
+    clip_path = task["clip_path"]
+
+    # Skip if clip already exists AND is valid (resume support)
+    if Path(clip_path).exists() and Path(clip_path).stat().st_size > 0:
+        try:
+            info = get_media_info(clip_path)
+            if info.get("duration", 0) > 0:
+                logger.info(f"Reusing existing clip: {clip_path}")
+                task["result_path"] = clip_path
+                task["extra_temp_files"] = []
+                return task
+            else:
+                logger.warning(f"Existing clip has zero duration, re-rendering: {clip_path}")
+                Path(clip_path).unlink()
+        except Exception:
+            logger.warning(f"Existing clip is corrupt (no moov atom?), re-rendering: {clip_path}")
+            Path(clip_path).unlink(missing_ok=True)
+
+    extra_temps: list[str] = []
+
+    if task["type"] == "video":
+        process_clip_single_pass(
+            task["input_path"], clip_path,
+            task["width"], task["height"],
+            fps=task["fps"],
+            skip_first_frame=task.get("skip_first_frame", False),
+            max_duration=task["duration"],
+            crf=task["crf"],
+            pad_seconds=task["pad_seconds"],
+            fade_in_type=task["fade_in_type"],
+            fade_in_duration=task["fade_in_dur"],
+            fade_out_type=task["fade_out_type"],
+            fade_out_duration=task["fade_out_dur"],
+        )
+    else:
+        # image type
+        process_image_single_pass(
+            task["input_path"], clip_path,
+            task["duration"],
+            task["width"], task["height"],
+            effect=task["effect"],
+            intensity=task["intensity"],
+            easing=task["easing"],
+            fps=task["fps"],
+            crf=task["crf"],
+            pad_seconds=task["pad_seconds"],
+            fade_in_type=task["fade_in_type"],
+            fade_in_duration=task["fade_in_dur"],
+            fade_out_type=task["fade_out_type"],
+            fade_out_duration=task["fade_out_dur"],
+        )
+
+    # Safety-net duration pad
+    final_path = clip_path
+    try:
+        _clip_info = get_media_info(clip_path)
+        _clip_dur = _clip_info.get("duration", 0)
+        _target = task["duration"] + task["pad_seconds"]
+        _shortfall = _target - _clip_dur
+        if _shortfall > (1.0 / task["fps"]):
+            logger.warning(
+                f"Scene {task['scene_idx']} clip is {_shortfall:.3f}s shorter "
+                f"than target — re-padding"
+            )
+            dur_pad_path = str(Path(clip_path).parent / f"clip_{task['scene_idx']:03d}_durpad.mp4")
+            pad_video_end(clip_path, dur_pad_path, _shortfall, crf=task["crf"])
+            extra_temps.append(clip_path)
+            final_path = dur_pad_path
+    except Exception as e:
+        logger.warning(f"Scene {task['scene_idx']} duration check failed: {e}")
+
+    task["result_path"] = final_path
+    task["extra_temp_files"] = extra_temps
+    return task
+
+
+def _process_clips_parallel(
+    tasks: list[dict],
+    report: Optional[Callable] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    total_scenes: int = 0,
+    base_percent: int = 0,
+    percent_range: int = 60,
+) -> tuple[list[str], list[int], list[str]]:
+    """Process clip tasks in parallel using ThreadPoolExecutor.
+
+    FFmpeg subprocesses release the GIL, so ThreadPoolExecutor gives true
+    parallelism without the overhead of ProcessPoolExecutor serialization.
+
+    Args:
+        tasks: List of clip task dicts from _build_clip_task
+        report: Progress callback
+        cancel_check: Cancellation check
+        total_scenes: Total scene count for progress calculation
+        base_percent: Starting progress percentage
+        percent_range: Progress range allocated to clip processing
+
+    Returns:
+        (scene_clips, clip_scene_indices, temp_files) — ordered by scene index
+    """
+    if not tasks:
+        return [], [], []
+
+    scene_clips: list[str] = []
+    clip_scene_indices: list[int] = []
+    temp_files: list[str] = []
+
+    # For small numbers of clips, sequential is fine (less overhead)
+    max_workers = min(_MAX_PARALLEL_CLIPS, len(tasks))
+    if max_workers <= 1:
+        max_workers = 1
+
+    logger.info(f"Processing {len(tasks)} clips with {max_workers} parallel workers")
+
+    completed = 0
+    total = len(tasks)
+
+    if max_workers == 1:
+        # Sequential path — simpler, preserves order naturally
+        for task in tasks:
+            if cancel_check and cancel_check():
+                raise RuntimeError("Export cancelled by user")
+
+            pct = base_percent + int((completed / max(total_scenes, total)) * percent_range)
+            if report:
+                report(f"Rendering clip {completed + 1}/{total}...", pct)
+
+            result = _execute_clip_task(task)
+            scene_clips.append(result["result_path"])
+            clip_scene_indices.append(result["scene_idx"])
+            temp_files.append(result["result_path"])
+            temp_files.extend(result.get("extra_temp_files", []))
+            completed += 1
+    else:
+        # Parallel path — submit all tasks, collect in order
+        # We use a dict to maintain original order since futures complete
+        # in arbitrary order
+        future_to_task: dict = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for task in tasks:
+                if cancel_check and cancel_check():
+                    raise RuntimeError("Export cancelled by user")
+                future = executor.submit(_execute_clip_task, task)
+                future_to_task[future] = task
+
+            # Collect results as they complete (for progress reporting)
+            results_by_idx: dict[int, dict] = {}
+            for future in as_completed(future_to_task):
+                if cancel_check and cancel_check():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise RuntimeError("Export cancelled by user")
+
+                result = future.result()  # raises if task failed
+                results_by_idx[result["scene_idx"]] = result
+                completed += 1
+
+                pct = base_percent + int((completed / max(total_scenes, total)) * percent_range)
+                if report:
+                    report(f"Rendered {completed}/{total} clips...", pct)
+
+        # Reconstruct in original scene order
+        for task in tasks:
+            idx = task["scene_idx"]
+            result = results_by_idx[idx]
+            scene_clips.append(result["result_path"])
+            clip_scene_indices.append(idx)
+            temp_files.append(result["result_path"])
+            temp_files.extend(result.get("extra_temp_files", []))
+
+    return scene_clips, clip_scene_indices, temp_files
+
+
+def _chunked_transition_merge(
+    scene_clips: list[str],
+    clip_scene_indices: list[int],
+    scenes: list[dict],
+    xfade_types_set: set,
+    default_transition: str,
+    default_transition_duration: float,
+    use_default_xfade: bool,
+    has_xfade: bool,
+    ai_transition_clips: dict[int, str],
+    output_dir: Path,
+    fps: int,
+    intermediate_crf: int,
+    final_crf: int,
+    chunk_size: int = 0,
+    chunk_callback: Optional[Callable] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    report: Optional[Callable] = None,
+    report_base_percent: int = 70,
+    report_range: int = 18,
+    chunk_output_dir: Optional[Path] = None,
+) -> tuple[Path, list[str], list[str]]:
+    """Merge clips with transitions, optionally in chunks.
+
+    Args:
+        output_dir: Working directory for merge intermediates (may be tmpfs).
+        chunk_output_dir: Durable directory for chunk files that survive cleanup.
+            If None, falls back to output_dir.
+
+    Returns (final_merged_path, chunk_file_paths, temp_files_created).
+    """
+    # Chunk files must survive tmpfs cleanup for export recovery/gallery
+    _chunk_dir = chunk_output_dir or output_dir
+    temp_files: list[str] = []
+    chunk_file_paths: list[str] = []
+
+    def _do_report(step: str, percent: int) -> None:
+        if report:
+            report(step, percent)
+
+    def _resolve_transition(ci_out: int, ci_in: int) -> tuple[Optional[str], float]:
+        """Resolve transition type and duration for boundary between clip ci_out and ci_in."""
+        si_in = clip_scene_indices[ci_in]
+        si_prev = clip_scene_indices[ci_out]
+        scene_in = scenes[si_in]
+        scene_prev = scenes[si_prev]
+
+        t_in = scene_in.get("transition_in", {}) or {}
+        t_out_prev = scene_prev.get("transition_out", {}) or {}
+
+        t_type = None
+        t_dur = 0.5
+        if t_in.get("type") in xfade_types_set:
+            t_type = t_in["type"]
+            t_dur = t_in.get("duration", 0.5)
+        elif t_out_prev.get("type") in xfade_types_set:
+            t_type = t_out_prev["type"]
+            t_dur = t_out_prev.get("duration", 0.5)
+
+        if not t_type and use_default_xfade:
+            t_type = default_transition
+            t_dur = default_transition_duration
+
+        return t_type, t_dur
+
+    def _sequential_merge(clips: list[str], clip_indices: list[int],
+                          ai_clips: dict[int, str], label: str = "",
+                          progress_offset: int = 0, progress_range: int = 18) -> str:
+        """Merge a list of clips sequentially with transitions. Returns path to merged result."""
+        if len(clips) == 1:
+            return clips[0]
+
+        total_transitions = len(clips) - 1
+        merged = clips[0]
+        for idx in range(1, len(clips)):
+            ci_global = clip_indices[idx]
+            ci_prev_global = clip_indices[idx - 1]
+
+            t_percent = progress_offset + int((idx / total_transitions) * progress_range)
+            _do_report(f"Applying transition {label}{idx}/{total_transitions}...", t_percent)
+
+            # Check for AI transition clip at this boundary
+            ai_clip = ai_clips.get(ci_prev_global)
+            if ai_clip:
+                cat_path = output_dir / f"cat_ai_{ci_global:03d}.mp4"
+                concat_clips([merged, ai_clip, clips[idx]], str(cat_path), fps=fps,
+                             crf=intermediate_crf)
+                temp_files.append(str(cat_path))
+                merged = str(cat_path)
+                logger.info(f"Inserted AI transition clip at boundary {ci_prev_global}→{ci_global}")
+                continue
+
+            t_type, t_dur = _resolve_transition(ci_prev_global, ci_global)
+
+            if t_type:
+                xfade_path = output_dir / f"xfade_{ci_global:03d}.mp4"
+                apply_transition(merged, clips[idx], str(xfade_path), t_type, t_dur,
+                                 crf=intermediate_crf)
+                temp_files.append(str(xfade_path))
+                merged = str(xfade_path)
+            else:
+                cat_path = output_dir / f"cat_{ci_global:03d}.mp4"
+                concat_clips([merged, clips[idx]], str(cat_path), fps=fps,
+                             crf=intermediate_crf)
+                temp_files.append(str(cat_path))
+                merged = str(cat_path)
+
+        return merged
+
+    # Decide whether to use chunked or sequential merge
+    use_chunking = chunk_size > 0 and len(scene_clips) > chunk_size
+
+    if not use_chunking:
+        # Legacy path: sequential merge of all clips (or simple concat)
+        if (has_xfade or ai_transition_clips) and len(scene_clips) > 1:
+            _do_report("Applying transitions...", report_base_percent)
+            if use_default_xfade:
+                logger.info(
+                    "Applying default %s transition (%.1fs) between %d clips",
+                    default_transition, default_transition_duration, len(scene_clips),
+                )
+            # Map local indices to global clip indices for AI clip lookup
+            merged_path = _sequential_merge(
+                scene_clips, list(range(len(scene_clips))),
+                ai_transition_clips, progress_offset=report_base_percent,
+                progress_range=report_range,
+            )
+            return Path(merged_path), chunk_file_paths, temp_files
+        else:
+            _do_report("Concatenating clips (stream copy)...", report_base_percent + 5)
+            concat_path = output_dir / "concatenated.mp4"
+            # Use stream-copy concat (no re-encode) when clips are uniform.
+            # Falls back to filter concat automatically if format mismatch.
+            concat_clips_copy(scene_clips, str(concat_path), fps=fps, crf=intermediate_crf)
+            temp_files.append(str(concat_path))
+            return concat_path, chunk_file_paths, temp_files
+
+    # ── Chunked merge path ──
+    logger.info(
+        f"Chunked transition merge: {len(scene_clips)} clips in chunks of {chunk_size}"
+    )
+
+    # Split clips into chunk groups
+    chunks: list[list[int]] = []  # each entry is a list of local clip indices
+    for start in range(0, len(scene_clips), chunk_size):
+        end = min(start + chunk_size, len(scene_clips))
+        chunks.append(list(range(start, end)))
+
+    total_chunks = len(chunks)
+    logger.info(f"Split into {total_chunks} chunks")
+
+    # Phase 1: Merge within each chunk
+    chunk_results: list[str] = []
+    phase1_range = int(report_range * 0.7)  # 70% of progress for phase 1
+    phase2_range = report_range - phase1_range  # 30% for phase 2
+
+    for chunk_idx, chunk_clip_indices in enumerate(chunks):
+        if cancel_check and cancel_check():
+            raise RuntimeError("Export cancelled by user")
+
+        chunk_clips = [scene_clips[ci] for ci in chunk_clip_indices]
+
+        # Build AI transition clips dict for this chunk (keyed by global clip index)
+        chunk_ai_clips: dict[int, str] = {}
+        for ci in chunk_clip_indices[:-1]:  # boundaries within this chunk
+            if ci in ai_transition_clips:
+                chunk_ai_clips[ci] = ai_transition_clips[ci]
+
+        per_chunk_range = max(1, phase1_range // total_chunks)
+        chunk_progress_offset = report_base_percent + (chunk_idx * per_chunk_range)
+
+        if len(chunk_clips) == 1:
+            chunk_result = chunk_clips[0]
+        else:
+            chunk_result = _sequential_merge(
+                chunk_clips, chunk_clip_indices, chunk_ai_clips,
+                label=f"chunk {chunk_idx + 1}/{total_chunks} ",
+                progress_offset=chunk_progress_offset,
+                progress_range=per_chunk_range,
+            )
+
+        # Save chunk to durable dir (survives tmpfs cleanup for recovery/gallery)
+        chunk_out_path = _chunk_dir / f"chunk_{chunk_idx:03d}.mp4"
+        if chunk_result != str(chunk_out_path):
+            shutil.copy2(chunk_result, str(chunk_out_path))
+        chunk_results.append(str(chunk_out_path))
+        chunk_file_paths.append(str(chunk_out_path))
+
+        first_scene = clip_scene_indices[chunk_clip_indices[0]]
+        last_scene = clip_scene_indices[chunk_clip_indices[-1]]
+        logger.info(
+            f"Chunk {chunk_idx} complete: scenes {first_scene}-{last_scene} → {chunk_out_path}"
+        )
+
+        if chunk_callback:
+            try:
+                chunk_callback(chunk_idx, str(chunk_out_path), first_scene, last_scene)
+            except Exception as _e:
+                logger.warning(f"chunk_callback error: {_e}")
+
+    # Phase 2: Merge chunks together with boundary transitions
+    if cancel_check and cancel_check():
+        raise RuntimeError("Export cancelled by user")
+
+    if len(chunk_results) == 1:
+        return Path(chunk_results[0]), chunk_file_paths, temp_files
+
+    logger.info(f"Merging {len(chunk_results)} chunks with boundary transitions")
+    _do_report("Merging chunks...", report_base_percent + phase1_range)
+
+    merged = chunk_results[0]
+    for ci in range(1, len(chunk_results)):
+        t_percent = report_base_percent + phase1_range + int((ci / (len(chunk_results) - 1)) * phase2_range)
+        _do_report(f"Merging chunk {ci + 1}/{len(chunk_results)}...", t_percent)
+
+        # Boundary: last clip of previous chunk → first clip of current chunk
+        prev_chunk_last_clip_idx = chunks[ci - 1][-1]
+        curr_chunk_first_clip_idx = chunks[ci][0]
+
+        # Check for AI transition clip at this boundary
+        ai_clip = ai_transition_clips.get(prev_chunk_last_clip_idx)
+        if ai_clip:
+            cat_path = output_dir / f"chunkmerge_ai_{ci:03d}.mp4"
+            concat_clips([merged, ai_clip, chunk_results[ci]], str(cat_path), fps=fps,
+                         crf=intermediate_crf)
+            temp_files.append(str(cat_path))
+            merged = str(cat_path)
+            logger.info(f"Inserted AI transition at chunk boundary {ci - 1}→{ci}")
+            continue
+
+        t_type, t_dur = _resolve_transition(prev_chunk_last_clip_idx, curr_chunk_first_clip_idx)
+
+        if t_type:
+            xfade_path = output_dir / f"chunkmerge_xfade_{ci:03d}.mp4"
+            apply_transition(merged, chunk_results[ci], str(xfade_path), t_type, t_dur,
+                             crf=intermediate_crf)
+            temp_files.append(str(xfade_path))
+            merged = str(xfade_path)
+        else:
+            cat_path = output_dir / f"chunkmerge_cat_{ci:03d}.mp4"
+            concat_clips([merged, chunk_results[ci]], str(cat_path), fps=fps,
+                         crf=intermediate_crf)
+            temp_files.append(str(cat_path))
+            merged = str(cat_path)
+
+    return Path(merged), chunk_file_paths, temp_files
 
 
 def assemble_music_video(
@@ -37,6 +653,9 @@ def assemble_music_video(
     color_match_clips: bool = True,
     progress_callback: Optional[Callable[[str, int], None]] = None,
     final_crf: int = 18,
+    chunk_size: int = 0,
+    chunk_callback: Optional[Callable[[int, str, int, int], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """
     Assemble music video from scenes.
@@ -116,418 +735,245 @@ def assemble_music_video(
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Acquire a tmpfs-backed working directory for intermediate files.
+    # On Linux with /dev/shm this eliminates disk I/O for temp clips.
+    work_dir = _get_tmpfs_dir(output_dir, label="rbmn_music_export")
     temp_files: list[str] = []
 
-    total_scenes = len(scenes)
-
-    # ── Xfade type set (used for transition detection and compensation) ──
-    xfade_types_set = {"crossfade", "dissolve", "wipe_left", "wipe_right",
-                       "wipe_up", "wipe_down", "slide_left", "slide_right"}
-
-    # ── V2V overlap handling ────────────────────────────────────────
-    # V2V overlap trimming is handled by the dispatcher at generation
-    # time: after scene B's video is generated, the dispatcher compares
-    # B's first frame against A's tail to find the overlap point, then
-    # re-trims A's chosen_video_path so it ends right before the overlap.
-    # By the time we reach assembly, A is already correctly trimmed and
-    # B is used as-is — no pre-step needed here.
-
-    # Step 1: Create a clip for each scene based on its source type
-    # We track which original scene indices produce clips so that
-    # transition compensation and xfade application use the correct
-    # scene data even when some scenes are skipped (no content).
-    # Clip creation takes ~60% of total time
-    scene_clips: list[str] = []
-    clip_scene_indices: list[int] = []  # original scene index per clip
-    for i, scene in enumerate(scenes):
-        source_type = scene.get("scene_source_type", "image")
-        duration = scene.get("duration", 5.0)
-        clip_percent = int((i / total_scenes) * 60)
-        report(f"Rendering clip {i + 1}/{total_scenes}...", clip_percent)
-
-        if source_type == "video":
-            # Use the generated/uploaded video
-            video_path = scene.get("video_path")
-            if not video_path:
-                logger.warning(f"Scene {i} is video source but missing video_path, skipping")
-                continue
-            clip_path = output_dir / f"clip_{i:03d}.mp4"
-            # If this scene re-uses the previous scene's last frame as its
-            # first frame, skip the duplicate opening frame during normalize
-            # to eliminate the stutter at the transition.
-            skip_ff = bool(scene.get("trim_first_frame", False))
-            # V2V overlap is handled by trim-A in the dispatcher: scene A
-            # is trimmed at the MSE match point and scene boundaries are
-            # adjusted, so no skip_head_frames needed here.
-            normalize_clip(video_path, str(clip_path), width, height, fps,
-                           skip_first_frame=skip_ff,
-                           max_duration=duration, crf=intermediate_crf)
-
-            # ── Safety-net duration pad ─────────────────────────────
-            # V2V trim-A can shorten a scene's video below its scene
-            # duration (overlap removal + boundary shift).  If the clip
-            # is shorter than the requested duration, freeze-frame pad
-            # the tail so the assembled timeline never loses time.
+    def _cleanup_temp_files() -> None:
+        """Remove all tracked temp files and colormatch dir, safe to call on any path."""
+        for _f in temp_files:
             try:
-                _clip_info = get_media_info(str(clip_path))
-                _clip_dur = _clip_info.get("duration", 0)
-                _shortfall = duration - _clip_dur
-                if _shortfall > (1.0 / fps):  # more than 1 frame short
-                    logger.warning(
-                        f"Scene {i} video clip is {_shortfall:.3f}s shorter "
-                        f"than target ({_clip_dur:.3f}s vs {duration:.3f}s) "
-                        f"— padding tail to fill"
-                    )
-                    _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
-                    pad_video_end(str(clip_path), str(_dur_pad_path),
-                                  _shortfall, crf=intermediate_crf)
-                    temp_files.append(str(clip_path))  # old clip → cleanup
-                    clip_path = _dur_pad_path
-            except Exception as _e:
-                logger.warning(f"Scene {i} duration-pad check failed: {_e}")
+                Path(_f).unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Clean up tmpfs working directory (removes all intermediates)
+        _cleanup_tmpfs_dir(work_dir, output_dir)
 
-        else:
-            # Use the still image with optional movement effect
-            image_path = scene.get("image_path")
-            if not image_path:
-                # Fall back to video_path if image not set
-                video_path = scene.get("video_path")
-                if video_path:
-                    clip_path = output_dir / f"clip_{i:03d}.mp4"
-                    normalize_clip(video_path, str(clip_path), width, height, fps,
-                                   max_duration=duration, crf=intermediate_crf)
+    try:
+        total_scenes = len(scenes)
 
-                    # Safety-net duration pad (same as video-source path)
-                    try:
-                        _clip_info = get_media_info(str(clip_path))
-                        _clip_dur = _clip_info.get("duration", 0)
-                        _shortfall = duration - _clip_dur
-                        if _shortfall > (1.0 / fps):
-                            logger.warning(
-                                f"Scene {i} fallback clip is {_shortfall:.3f}s "
-                                f"shorter than target — padding tail"
-                            )
-                            _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
-                            pad_video_end(str(clip_path), str(_dur_pad_path),
-                                          _shortfall, crf=intermediate_crf)
-                            temp_files.append(str(clip_path))
-                            clip_path = _dur_pad_path
-                    except Exception as _e:
-                        logger.warning(f"Scene {i} duration-pad check failed: {_e}")
-                else:
-                    logger.warning(f"Scene {i} has no image_path or video_path, skipping")
-                    continue
+        # ── Xfade type set (used for transition detection and compensation) ──
+        xfade_types_set = {"crossfade", "dissolve", "wipe_left", "wipe_right",
+                           "wipe_up", "wipe_down", "slide_left", "slide_right"}
+
+        # ── V2V overlap handling ────────────────────────────────────────
+        # V2V overlap trimming is handled by the dispatcher at generation
+        # time: after scene B's video is generated, the dispatcher compares
+        # B's first frame against A's tail to find the overlap point, then
+        # re-trims A's chosen_video_path so it ends right before the overlap.
+        # By the time we reach assembly, A is already correctly trimmed and
+        # B is used as-is — no pre-step needed here.
+
+        # ── Pre-compute transition compensation padding ─────────────────
+        # Moved BEFORE clip creation so we can include padding in the single-pass
+        # FFmpeg call instead of re-rendering clips after the fact.
+        # First pass: identify which scenes will produce clips (have content)
+        valid_scene_indices: list[int] = []
+        for i, scene in enumerate(scenes):
+            source_type = scene.get("scene_source_type", "image")
+            if source_type == "video":
+                if scene.get("video_path"):
+                    valid_scene_indices.append(i)
             else:
-                clip_path = output_dir / f"clip_{i:03d}.mp4"
-                movement = scene.get("image_movement", {})
-                effect = movement.get("effect", "none") if movement else "none"
+                if scene.get("image_path") or scene.get("video_path"):
+                    valid_scene_indices.append(i)
 
-                if effect and effect != "none":
-                    apply_kenburns(
-                        image_path,
-                        str(clip_path),
-                        duration,
-                        width,
-                        height,
-                        effect=effect,
-                        intensity=movement.get("intensity", 50),
-                        easing=movement.get("easing", "ease_in_out"),
-                        fps=fps,
-                        crf=intermediate_crf,
-                    )
-                else:
-                    # Static image — just create a still video
-                    apply_kenburns(
-                        image_path,
-                        str(clip_path),
-                        duration,
-                        width,
-                        height,
-                        effect="zoom_in_center",
-                        intensity=0,  # no movement
-                        fps=fps,
-                        crf=intermediate_crf,
-                    )
+        num_expected = len(valid_scene_indices)
 
-        temp_files.append(str(clip_path))
+        # Determine if we'll use a default xfade
+        _has_explicit = False
+        for ci in range(num_expected - 1):
+            si_out = valid_scene_indices[ci]
+            si_in = valid_scene_indices[ci + 1]
+            if (scenes[si_out].get("transition_out", {}) or {}).get("type", "none") in xfade_types_set:
+                _has_explicit = True
+                break
+            if (scenes[si_in].get("transition_in", {}) or {}).get("type", "none") in xfade_types_set:
+                _has_explicit = True
+                break
 
-        # Apply fade-in/fade-out for self-contained transitions
-        transition_in = scene.get("transition_in")
-        transition_out = scene.get("transition_out")
-
-        if transition_in and transition_in.get("type") in ("fade_from_black", "fade_from_white"):
-            faded_path = output_dir / f"clip_{i:03d}_fi.mp4"
-            color = "white" if transition_in["type"] == "fade_from_white" else "black"
-            apply_fade_in(str(clip_path), str(faded_path), transition_in.get("duration", 0.5), color)
-            temp_files.append(str(faded_path))
-            clip_path = faded_path
-
-        if transition_out and transition_out.get("type") in ("fade_to_black", "fade_to_white"):
-            faded_path = output_dir / f"clip_{i:03d}_fo.mp4"
-            color = "white" if transition_out["type"] == "fade_to_white" else "black"
-            apply_fade_out(str(clip_path), str(faded_path), transition_out.get("duration", 0.5), color)
-            temp_files.append(str(faded_path))
-            clip_path = faded_path
-
-        scene_clips.append(str(clip_path))
-        clip_scene_indices.append(i)
-
-    if not scene_clips:
-        raise RuntimeError("No clips to concatenate")
-
-    # ── Post-clip transition compensation ────────────────────────────
-    # Now that we know which scenes produced clips, compute transition
-    # durations between *actually adjacent* clips and extend each clip
-    # to compensate for xfade overlap.  Each transition removes exactly
-    # `transition_duration` from the combined length; we split the
-    # overlap: half added to the outgoing clip, half to the incoming.
-
-    num_clips = len(scene_clips)
-
-    # Determine if we'll use a default xfade
-    _has_explicit = False
-    for ci in range(num_clips - 1):
-        si_out = clip_scene_indices[ci]
-        si_in = clip_scene_indices[ci + 1]
-        if (scenes[si_out].get("transition_out", {}) or {}).get("type", "none") in xfade_types_set:
-            _has_explicit = True
-            break
-        if (scenes[si_in].get("transition_in", {}) or {}).get("type", "none") in xfade_types_set:
-            _has_explicit = True
-            break
-
-    _will_use_default = (
-        not _has_explicit
-        and default_transition
-        and default_transition != "none"
-        and default_transition in xfade_types_set
-        and default_transition_duration > 0
-        and num_clips > 1
-    )
-
-    # Build per-clip-boundary transition durations
-    clip_boundary_durations: list[float] = []  # length = num_clips - 1
-    for ci in range(num_clips - 1):
-        si_out = clip_scene_indices[ci]
-        si_in = clip_scene_indices[ci + 1]
-        t_in = scenes[si_in].get("transition_in", {}) or {}
-        t_out = scenes[si_out].get("transition_out", {}) or {}
-
-        t_dur = 0.0
-        if t_in.get("type") in xfade_types_set:
-            t_dur = t_in.get("duration", 0.5)
-        elif t_out.get("type") in xfade_types_set:
-            t_dur = t_out.get("duration", 0.5)
-        elif _will_use_default:
-            t_dur = default_transition_duration
-        clip_boundary_durations.append(t_dur)
-
-    # Compute per-clip padding: each clip absorbs half the overlap from
-    # its left boundary and half from its right boundary.
-    clip_padding: list[float] = [0.0] * num_clips
-    for ci, bd in enumerate(clip_boundary_durations):
-        if bd > 0:
-            clip_padding[ci] += bd / 2.0        # outgoing clip gets half
-            clip_padding[ci + 1] += bd / 2.0     # incoming clip gets half
-
-    total_padding = sum(clip_boundary_durations)
-    if total_padding > 0:
-        logger.info(
-            f"Transition compensation: {len(clip_boundary_durations)} boundaries, "
-            f"{total_padding:.1f}s total overlap to compensate"
+        _will_use_default = (
+            not _has_explicit
+            and default_transition
+            and default_transition != "none"
+            and default_transition in xfade_types_set
+            and default_transition_duration > 0
+            and num_expected > 1
         )
 
-    # Apply padding by re-rendering/extending clips that need it
-    for ci in range(num_clips):
-        pad = clip_padding[ci]
-        if pad <= 0:
-            continue
+        # Build per-clip-boundary transition durations
+        clip_boundary_durations: list[float] = []
+        for ci in range(num_expected - 1):
+            si_out = valid_scene_indices[ci]
+            si_in = valid_scene_indices[ci + 1]
+            t_in = scenes[si_in].get("transition_in", {}) or {}
+            t_out = scenes[si_out].get("transition_out", {}) or {}
 
-        original_clip = scene_clips[ci]
-        si = clip_scene_indices[ci]
-        scene = scenes[si]
-        source_type = scene.get("scene_source_type", "image")
-        image_path = scene.get("image_path")
-
-        # For image-source scenes with a still image, re-render Ken Burns
-        # with extended duration.  For video-source scenes (or image
-        # fallback-to-video), freeze-frame-pad the end.
-        if source_type == "image" and image_path:
-            # Re-render Ken Burns with extended duration
-            duration = scene.get("duration", 5.0)
-            kb_duration = duration + pad
-            movement = scene.get("image_movement", {})
-            effect = movement.get("effect", "none") if movement else "none"
-            padded_path = output_dir / f"clip_{si:03d}_padded.mp4"
-
-            if effect and effect != "none":
-                apply_kenburns(
-                    image_path,
-                    str(padded_path),
-                    kb_duration,
-                    width,
-                    height,
-                    effect=effect,
-                    intensity=movement.get("intensity", 50),
-                    easing=movement.get("easing", "ease_in_out"),
-                    fps=fps,
-                    crf=intermediate_crf,
-                )
-            else:
-                apply_kenburns(
-                    image_path,
-                    str(padded_path),
-                    kb_duration,
-                    width,
-                    height,
-                    effect="zoom_in_center",
-                    intensity=0,
-                    fps=fps,
-                    crf=intermediate_crf,
-                )
-            temp_files.append(str(padded_path))
-            scene_clips[ci] = str(padded_path)
-        else:
-            # Video source — freeze-frame pad the end
-            padded_path = output_dir / f"clip_{si:03d}_padded.mp4"
-            pad_video_end(original_clip, str(padded_path), pad, crf=intermediate_crf)
-            temp_files.append(str(padded_path))
-            scene_clips[ci] = str(padded_path)
-
-    # Step 1a: V2V overlap is handled by trim-A in the dispatcher.
-    # Scene A is trimmed at the MSE match point, and scene boundaries
-    # are adjusted so A/B join seamlessly.  No skip_head_frames or
-    # post-normalize frame matching needed here.
-
-    # Step 1b: Adjacent-clip colour matching (before transitions)
-    if color_match_clips and len(scene_clips) > 1:
-        report("Matching colors between adjacent clips...", 62)
-        logger.info("Applying adjacent-clip colour matching across %d clips", len(scene_clips))
-        cm_dir = str(output_dir / "_colormatch")
-        matched_clips = match_adjacent_clips(scene_clips, cm_dir, crf=intermediate_crf)
-        # Track any new files for cleanup
-        for mc in matched_clips:
-            if mc not in scene_clips and mc not in temp_files:
-                temp_files.append(mc)
-        scene_clips = matched_clips
-
-    # ── Step 1c: Check for AI transition clips ──
-    # If any scene has a transition_clip_path, we'll interleave those clips
-    # between scene clips instead of using xfade for those boundaries.
-    # First, normalize any AI transition clips found.
-    ai_transition_clips: dict[int, str] = {}  # clip_index → normalized transition clip path
-    for ci in range(num_clips - 1):
-        si = clip_scene_indices[ci]
-        t_clip = scenes[si].get("transition_clip_path")
-        if t_clip and Path(t_clip).exists():
-            t_norm_path = output_dir / f"transition_{ci:03d}.mp4"
-            normalize_clip(t_clip, str(t_norm_path), width, height, fps,
-                           crf=intermediate_crf)
-            temp_files.append(str(t_norm_path))
-            ai_transition_clips[ci] = str(t_norm_path)
-            logger.info(f"Normalized AI transition clip for boundary {ci}→{ci+1}")
-
-    if ai_transition_clips:
-        logger.info(f"Found {len(ai_transition_clips)} AI transition clips to interleave")
-
-    # Step 2: Apply inter-scene xfade transitions where specified, then concatenate
-    report("Applying transitions...", 70)
-    # Use clip_scene_indices to look up the correct scene data for each clip
-    has_xfade = _has_explicit or _will_use_default
-    use_default_xfade = _will_use_default
-
-    if use_default_xfade:
-        logger.info(
-            "Applying default %s transition (%.1fs) between %d clips",
-            default_transition, default_transition_duration, len(scene_clips),
-        )
-
-    if (has_xfade or ai_transition_clips) and len(scene_clips) > 1:
-        # Sequential merge: pair-by-pair with xfade or AI transition insert
-        total_transitions = len(scene_clips) - 1
-        merged = scene_clips[0]
-        for ci in range(1, len(scene_clips)):
-            t_percent = 70 + int((ci / total_transitions) * 18)
-            report(f"Applying transition {ci}/{total_transitions}...", t_percent)
-
-            # Check if there's an AI transition clip for this boundary
-            ai_clip = ai_transition_clips.get(ci - 1)
-            if ai_clip:
-                # Insert AI transition clip between scene clips (no xfade needed)
-                cat_path = output_dir / f"cat_ai_{ci:03d}.mp4"
-                concat_clips([merged, ai_clip, scene_clips[ci]], str(cat_path), fps=fps,
-                             crf=intermediate_crf)
-                temp_files.append(str(cat_path))
-                merged = str(cat_path)
-                logger.info(f"Inserted AI transition clip at boundary {ci-1}→{ci}")
-                continue
-
-            si_in = clip_scene_indices[ci]
-            si_prev = clip_scene_indices[ci - 1]
-            scene_in = scenes[si_in]
-            scene_prev = scenes[si_prev]
-
-            t_in = scene_in.get("transition_in", {})
-            t_out_prev = scene_prev.get("transition_out", {})
-
-            t_type = None
-            t_dur = 0.5
-            # Prefer incoming scene's lead-in, fall back to outgoing scene's lead-out
-            if t_in and t_in.get("type") in xfade_types_set:
-                t_type = t_in["type"]
+            t_dur = 0.0
+            if t_in.get("type") in xfade_types_set:
                 t_dur = t_in.get("duration", 0.5)
-            elif t_out_prev and t_out_prev.get("type") in xfade_types_set:
-                t_type = t_out_prev["type"]
-                t_dur = t_out_prev.get("duration", 0.5)
-
-            # Fall back to default transition if no explicit one
-            if not t_type and use_default_xfade:
-                t_type = default_transition
+            elif t_out.get("type") in xfade_types_set:
+                t_dur = t_out.get("duration", 0.5)
+            elif _will_use_default:
                 t_dur = default_transition_duration
+            clip_boundary_durations.append(t_dur)
 
-            if t_type:
-                xfade_path = output_dir / f"xfade_{ci:03d}.mp4"
-                apply_transition(merged, scene_clips[ci], str(xfade_path), t_type, t_dur,
-                                 crf=intermediate_crf)
-                temp_files.append(str(xfade_path))
-                merged = str(xfade_path)
+        # Per-clip padding: each clip absorbs half the overlap from
+        # its left boundary and half from its right boundary.
+        clip_padding: list[float] = [0.0] * num_expected
+        for ci, bd in enumerate(clip_boundary_durations):
+            if bd > 0:
+                clip_padding[ci] += bd / 2.0
+                clip_padding[ci + 1] += bd / 2.0
+
+        total_padding = sum(clip_boundary_durations)
+        if total_padding > 0:
+            logger.info(
+                f"Transition compensation (pre-computed): {len(clip_boundary_durations)} boundaries, "
+                f"{total_padding:.1f}s total overlap to compensate"
+            )
+
+        # Map scene index → padding amount for single-pass processing
+        scene_padding_map: dict[int, float] = {}
+        for ci, si in enumerate(valid_scene_indices):
+            if clip_padding[ci] > 0:
+                scene_padding_map[si] = clip_padding[ci]
+
+        # ── Step 1: Create clips — SINGLE-PASS + PARALLEL pipeline ──────
+        # Each clip is created with ONE FFmpeg call that chains:
+        #   normalize (scale+pad+setsar) + duration pad + fade in + fade out
+        # Clips are independent and processed in parallel (ThreadPoolExecutor).
+        clip_tasks: list[dict] = []
+        for i, scene in enumerate(scenes):
+            task = _build_clip_task(
+                scene, i, work_dir, width, height, fps,
+                intermediate_crf, scene_padding_map.get(i, 0.0),
+            )
+            if task is None:
+                logger.warning(f"Scene {i} has no content, skipping")
+                continue
+            clip_tasks.append(task)
+
+        scene_clips, clip_scene_indices, clip_temp_files = _process_clips_parallel(
+            clip_tasks,
+            report=report,
+            cancel_check=cancel_check,
+            total_scenes=total_scenes,
+            base_percent=0,
+            percent_range=60,
+        )
+        temp_files.extend(clip_temp_files)
+
+        if not scene_clips:
+            raise RuntimeError("No clips to concatenate")
+
+        # Cancel check: between clip creation and color matching
+        if cancel_check and cancel_check():
+            raise RuntimeError("Export cancelled by user")
+
+        num_clips = len(scene_clips)
+
+        # Step 1b: Adjacent-clip colour matching (before transitions)
+        if color_match_clips and len(scene_clips) > 1:
+            report("Matching colors between adjacent clips...", 62)
+            logger.info("Applying adjacent-clip colour matching across %d clips", len(scene_clips))
+            cm_dir = str(work_dir / "_colormatch")
+            matched_clips = match_adjacent_clips(scene_clips, cm_dir, crf=intermediate_crf)
+            # Track any new files for cleanup
+            for mc in matched_clips:
+                if mc not in scene_clips and mc not in temp_files:
+                    temp_files.append(mc)
+            scene_clips = matched_clips
+
+        # ── Step 1c: Check for AI transition clips ──
+        # If any scene has a transition_clip_path, we'll interleave those clips
+        # between scene clips instead of using xfade for those boundaries.
+        # First, normalize any AI transition clips found.
+        ai_transition_clips: dict[int, str] = {}  # clip_index → normalized transition clip path
+        for ci in range(num_clips - 1):
+            si = clip_scene_indices[ci]
+            t_clip = scenes[si].get("transition_clip_path")
+            if t_clip and Path(t_clip).exists():
+                t_norm_path = work_dir / f"transition_{ci:03d}.mp4"
+                normalize_clip(t_clip, str(t_norm_path), width, height, fps,
+                               crf=intermediate_crf)
+                temp_files.append(str(t_norm_path))
+                ai_transition_clips[ci] = str(t_norm_path)
+                logger.info(f"Normalized AI transition clip for boundary {ci}→{ci+1}")
+
+        if ai_transition_clips:
+            logger.info(f"Found {len(ai_transition_clips)} AI transition clips to interleave")
+
+        # Cancel check: between color matching and transition merge
+        if cancel_check and cancel_check():
+            raise RuntimeError("Export cancelled by user")
+
+        # Step 2: Apply inter-scene xfade transitions where specified, then concatenate
+        has_xfade = _has_explicit or _will_use_default
+        use_default_xfade = _will_use_default
+
+        # ── Resume detection: check if a previous merged video exists in work_dir ──
+        _existing_merge = sorted(work_dir.glob("chunkmerge_xfade_*.mp4"))
+        if not _existing_merge:
+            _existing_merge = sorted(work_dir.glob("concatenated.mp4"))
+        if _existing_merge:
+            _merge_candidate = _existing_merge[-1]
+            _merge_info = get_media_info(str(_merge_candidate))
+            _merge_dur = _merge_info.get("duration", 0)
+            if _merge_dur > 10:
+                logger.info(
+                    f"RESUME: Found existing merged video {_merge_candidate.name} "
+                    f"({_merge_dur:.1f}s), skipping clip processing and chunk merge"
+                )
+                report("Resuming from merged video...", 88)
+                concat_path = _merge_candidate
+                chunk_file_paths: list[str] = []
+                merge_temp_files: list[str] = []
             else:
-                # No transition — concat directly
-                cat_path = output_dir / f"cat_{ci:03d}.mp4"
-                concat_clips([merged, scene_clips[ci]], str(cat_path), fps=fps,
-                             crf=intermediate_crf)
-                temp_files.append(str(cat_path))
-                merged = str(cat_path)
+                _existing_merge = []
 
-        concat_path = Path(merged)
+        if not _existing_merge:
+            concat_path, chunk_file_paths, merge_temp_files = _chunked_transition_merge(
+                scene_clips=scene_clips,
+                clip_scene_indices=clip_scene_indices,
+                scenes=scenes,
+                xfade_types_set=xfade_types_set,
+                default_transition=default_transition,
+                default_transition_duration=default_transition_duration,
+                use_default_xfade=use_default_xfade,
+                has_xfade=has_xfade,
+                ai_transition_clips=ai_transition_clips,
+                output_dir=work_dir,
+                fps=fps,
+                intermediate_crf=intermediate_crf,
+                final_crf=final_crf,
+                chunk_size=chunk_size,
+                chunk_callback=chunk_callback,
+                cancel_check=cancel_check,
+                report=report,
+                report_base_percent=70,
+                chunk_output_dir=output_dir,
+                report_range=18,
+            )
+        # Add merge temp files to our cleanup list (but NOT chunk_file_paths)
+        temp_files.extend(merge_temp_files)
+
+        # Step 3: Mux audio
+        report("Muxing audio track...", 90)
+        logger.info(f"Muxing with master audio: {master_audio_path}")
+        mux_audio(str(concat_path), master_audio_path, output_path)
+
+        report("Assembly complete!", 100)
+        logger.info(f"Music video assembled: {output_path}")
+    except BaseException as exc:
+        logger.error(f"Music video assembly failed, cleaning up temp files: {exc}")
+        _cleanup_temp_files()
+        raise
     else:
-        # No xfade transitions — simple concatenation
-        report("Concatenating clips...", 75)
-        concat_path = output_dir / "concatenated.mp4"
-        concat_clips(scene_clips, str(concat_path), fps=fps, crf=final_crf)
-        if str(concat_path) not in temp_files:
-            temp_files.append(str(concat_path))
-
-    # Step 3: Mux audio
-    report("Muxing audio track...", 90)
-    logger.info(f"Muxing with master audio: {master_audio_path}")
-    mux_audio(str(concat_path), master_audio_path, output_path)
-
-    # Cleanup intermediate files
-    report("Cleaning up temporary files...", 97)
-    for f in temp_files:
-        Path(f).unlink(missing_ok=True)
-    # concat_list.txt is no longer created (concat filter used instead of
-    # concat demuxer), but clean up in case an older code path left one.
-    (output_dir / "concat_list.txt").unlink(missing_ok=True)
-    # Clean up colormatch temp directory
-    cm_dir_path = output_dir / "_colormatch"
-    if cm_dir_path.exists():
-        import shutil
-        shutil.rmtree(cm_dir_path, ignore_errors=True)
-
-    report("Assembly complete!", 100)
-    logger.info(f"Music video assembled: {output_path}")
+        # Success path cleanup
+        _cleanup_temp_files()
 
 
 def assemble_narration_video(
@@ -552,6 +998,9 @@ def assemble_narration_video(
     main_fade_in: float = 0.0,
     main_fade_out: float = 0.0,
     normalize_backing: bool = False,
+    chunk_size: int = 0,
+    chunk_callback: Optional[Callable[[int, str, int, int], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """
     Assemble narration video from scenes with full feature parity to music video.
@@ -633,430 +1082,337 @@ def assemble_narration_video(
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Acquire a tmpfs-backed working directory for intermediate files.
+    work_dir = _get_tmpfs_dir(output_dir, label="rbmn_narr_export")
     temp_files: list[str] = []
 
-    total_scenes = len(scenes)
-
-    # ── Xfade type set (used for transition detection and compensation) ──
-    xfade_types_set = {"crossfade", "dissolve", "wipe_left", "wipe_right",
-                       "wipe_up", "wipe_down", "slide_left", "slide_right"}
-
-    # ── Step 1: Create a clip for each scene based on its source type ──
-    scene_clips: list[str] = []
-    clip_scene_indices: list[int] = []
-    for i, scene in enumerate(scenes):
-        source_type = scene.get("scene_source_type", "image")
-        duration = scene.get("duration", 5.0)
-        clip_percent = int((i / total_scenes) * 50)
-        report(f"Rendering clip {i + 1}/{total_scenes}...", clip_percent)
-
-        if source_type == "video":
-            # Use the generated/uploaded video
-            video_path = scene.get("video_path")
-            if not video_path:
-                logger.warning(f"Scene {i} is video source but missing video_path, skipping")
-                continue
-            clip_path = output_dir / f"clip_{i:03d}.mp4"
-            skip_ff = bool(scene.get("trim_first_frame", False))
-            normalize_clip(video_path, str(clip_path), width, height, fps,
-                           skip_first_frame=skip_ff,
-                           max_duration=duration, crf=intermediate_crf)
-
-            # Safety-net duration pad (narration video path)
+    def _cleanup_narration_temp_files() -> None:
+        """Remove all tracked temp files and colormatch dir. Safe on any exit path."""
+        for _f in temp_files:
             try:
-                _clip_info = get_media_info(str(clip_path))
-                _clip_dur = _clip_info.get("duration", 0)
-                _shortfall = duration - _clip_dur
-                if _shortfall > (1.0 / fps):
-                    logger.warning(
-                        f"Scene {i} narration clip is {_shortfall:.3f}s "
-                        f"shorter than target — padding tail"
-                    )
-                    _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
-                    pad_video_end(str(clip_path), str(_dur_pad_path),
-                                  _shortfall, crf=intermediate_crf)
-                    temp_files.append(str(clip_path))
-                    clip_path = _dur_pad_path
-            except Exception as _e:
-                logger.warning(f"Scene {i} duration-pad check failed: {_e}")
-        else:
-            # Use the still image with optional movement effect
-            image_path = scene.get("image_path")
-            if not image_path:
-                # Fall back to video_path if image not set
-                video_path = scene.get("video_path")
-                if video_path:
-                    clip_path = output_dir / f"clip_{i:03d}.mp4"
-                    normalize_clip(video_path, str(clip_path), width, height, fps,
-                                   max_duration=duration, crf=intermediate_crf)
+                Path(_f).unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Clean up tmpfs working directory (removes all intermediates)
+        _cleanup_tmpfs_dir(work_dir, output_dir)
 
-                    # Safety-net duration pad (narration fallback path)
-                    try:
-                        _clip_info = get_media_info(str(clip_path))
-                        _clip_dur = _clip_info.get("duration", 0)
-                        _shortfall = duration - _clip_dur
-                        if _shortfall > (1.0 / fps):
-                            logger.warning(
-                                f"Scene {i} narration fallback clip is "
-                                f"{_shortfall:.3f}s shorter — padding tail"
-                            )
-                            _dur_pad_path = output_dir / f"clip_{i:03d}_durpad.mp4"
-                            pad_video_end(str(clip_path), str(_dur_pad_path),
-                                          _shortfall, crf=intermediate_crf)
-                            temp_files.append(str(clip_path))
-                            clip_path = _dur_pad_path
-                    except Exception as _e:
-                        logger.warning(f"Scene {i} duration-pad check failed: {_e}")
-                else:
-                    logger.warning(f"Scene {i} has no image_path or video_path, skipping")
-                    continue
+    try:
+        total_scenes = len(scenes)
+
+        # ── Xfade type set (used for transition detection and compensation) ──
+        xfade_types_set = {"crossfade", "dissolve", "wipe_left", "wipe_right",
+                           "wipe_up", "wipe_down", "slide_left", "slide_right"}
+
+        # ── Pre-compute transition compensation padding ─────────────────
+        # Moved BEFORE clip creation so padding is included in single-pass FFmpeg call.
+        valid_scene_indices: list[int] = []
+        for i, scene in enumerate(scenes):
+            source_type = scene.get("scene_source_type", "image")
+            if source_type == "video":
+                if scene.get("video_path"):
+                    valid_scene_indices.append(i)
             else:
-                clip_path = output_dir / f"clip_{i:03d}.mp4"
-                # Support both old 'effect' key and new 'image_movement' dict
-                movement = scene.get("image_movement", {})
-                if movement and movement.get("effect"):
-                    effect = movement["effect"]
-                    intensity = movement.get("intensity", 50)
-                    easing = movement.get("easing", "ease_in_out")
-                else:
-                    effect = scene.get("effect", "zoom_in_center")
-                    intensity = 50
-                    easing = "ease_in_out"
+                if scene.get("image_path") or scene.get("video_path"):
+                    valid_scene_indices.append(i)
 
-                if effect and effect != "none":
-                    apply_kenburns(
-                        image_path,
-                        str(clip_path),
-                        duration,
-                        width,
-                        height,
-                        effect=effect,
-                        intensity=intensity,
-                        easing=easing,
-                        fps=fps,
-                        crf=intermediate_crf,
-                    )
-                else:
-                    # Static image — just create a still video
-                    apply_kenburns(
-                        image_path,
-                        str(clip_path),
-                        duration,
-                        width,
-                        height,
-                        effect="zoom_in_center",
-                        intensity=0,  # no movement
-                        fps=fps,
-                        crf=intermediate_crf,
-                    )
+        num_expected = len(valid_scene_indices)
 
-        temp_files.append(str(clip_path))
+        _has_explicit = False
+        for ci in range(num_expected - 1):
+            si_out = valid_scene_indices[ci]
+            si_in = valid_scene_indices[ci + 1]
+            if (scenes[si_out].get("transition_out", {}) or {}).get("type", "none") in xfade_types_set:
+                _has_explicit = True
+                break
+            if (scenes[si_in].get("transition_in", {}) or {}).get("type", "none") in xfade_types_set:
+                _has_explicit = True
+                break
 
-        # Apply fade-in/fade-out for self-contained transitions
-        transition_in = scene.get("transition_in")
-        transition_out = scene.get("transition_out")
-
-        if transition_in and transition_in.get("type") in ("fade_from_black", "fade_from_white"):
-            faded_path = output_dir / f"clip_{i:03d}_fi.mp4"
-            color = "white" if transition_in["type"] == "fade_from_white" else "black"
-            apply_fade_in(str(clip_path), str(faded_path), transition_in.get("duration", 0.5), color)
-            temp_files.append(str(faded_path))
-            clip_path = faded_path
-
-        if transition_out and transition_out.get("type") in ("fade_to_black", "fade_to_white"):
-            faded_path = output_dir / f"clip_{i:03d}_fo.mp4"
-            color = "white" if transition_out["type"] == "fade_to_white" else "black"
-            apply_fade_out(str(clip_path), str(faded_path), transition_out.get("duration", 0.5), color)
-            temp_files.append(str(faded_path))
-            clip_path = faded_path
-
-        scene_clips.append(str(clip_path))
-        clip_scene_indices.append(i)
-
-    if not scene_clips:
-        raise RuntimeError("No clips to concatenate")
-
-    # ── Transition compensation ─────────────────────────────────────
-    num_clips = len(scene_clips)
-
-    _has_explicit = False
-    for ci in range(num_clips - 1):
-        si_out = clip_scene_indices[ci]
-        si_in = clip_scene_indices[ci + 1]
-        if (scenes[si_out].get("transition_out", {}) or {}).get("type", "none") in xfade_types_set:
-            _has_explicit = True
-            break
-        if (scenes[si_in].get("transition_in", {}) or {}).get("type", "none") in xfade_types_set:
-            _has_explicit = True
-            break
-
-    _will_use_default = (
-        not _has_explicit
-        and default_transition
-        and default_transition != "none"
-        and default_transition in xfade_types_set
-        and default_transition_duration > 0
-        and num_clips > 1
-    )
-
-    # Build per-clip-boundary transition durations
-    clip_boundary_durations: list[float] = []
-    for ci in range(num_clips - 1):
-        si_out = clip_scene_indices[ci]
-        si_in = clip_scene_indices[ci + 1]
-        t_in = scenes[si_in].get("transition_in", {}) or {}
-        t_out = scenes[si_out].get("transition_out", {}) or {}
-
-        t_dur = 0.0
-        if t_in.get("type") in xfade_types_set:
-            t_dur = t_in.get("duration", 0.5)
-        elif t_out.get("type") in xfade_types_set:
-            t_dur = t_out.get("duration", 0.5)
-        elif _will_use_default:
-            t_dur = default_transition_duration
-        clip_boundary_durations.append(t_dur)
-
-    # Per-clip padding for overlap compensation
-    clip_padding: list[float] = [0.0] * num_clips
-    for ci, bd in enumerate(clip_boundary_durations):
-        if bd > 0:
-            clip_padding[ci] += bd / 2.0
-            clip_padding[ci + 1] += bd / 2.0
-
-    total_padding = sum(clip_boundary_durations)
-    if total_padding > 0:
-        logger.info(
-            f"Transition compensation: {len(clip_boundary_durations)} boundaries, "
-            f"{total_padding:.1f}s total overlap to compensate"
+        _will_use_default = (
+            not _has_explicit
+            and default_transition
+            and default_transition != "none"
+            and default_transition in xfade_types_set
+            and default_transition_duration > 0
+            and num_expected > 1
         )
 
-    # Apply padding by re-rendering/extending clips that need it
-    for ci in range(num_clips):
-        pad = clip_padding[ci]
-        if pad <= 0:
-            continue
+        clip_boundary_durations: list[float] = []
+        for ci in range(num_expected - 1):
+            si_out = valid_scene_indices[ci]
+            si_in = valid_scene_indices[ci + 1]
+            t_in = scenes[si_in].get("transition_in", {}) or {}
+            t_out = scenes[si_out].get("transition_out", {}) or {}
 
-        original_clip = scene_clips[ci]
-        si = clip_scene_indices[ci]
-        scene = scenes[si]
-        source_type = scene.get("scene_source_type", "image")
-        image_path = scene.get("image_path")
-
-        if source_type == "image" and image_path:
-            duration = scene.get("duration", 5.0)
-            kb_duration = duration + pad
-            movement = scene.get("image_movement", {})
-            if movement and movement.get("effect"):
-                effect = movement["effect"]
-                kb_intensity = movement.get("intensity", 50)
-                kb_easing = movement.get("easing", "ease_in_out")
-            else:
-                effect = scene.get("effect", "zoom_in_center")
-                kb_intensity = 50
-                kb_easing = "ease_in_out"
-            padded_path = output_dir / f"clip_{si:03d}_padded.mp4"
-
-            if effect and effect != "none":
-                apply_kenburns(
-                    image_path,
-                    str(padded_path),
-                    kb_duration,
-                    width,
-                    height,
-                    effect=effect,
-                    intensity=kb_intensity,
-                    easing=kb_easing,
-                    fps=fps,
-                    crf=intermediate_crf,
-                )
-            else:
-                apply_kenburns(
-                    image_path,
-                    str(padded_path),
-                    kb_duration,
-                    width,
-                    height,
-                    effect="zoom_in_center",
-                    intensity=0,
-                    fps=fps,
-                    crf=intermediate_crf,
-                )
-            temp_files.append(str(padded_path))
-            scene_clips[ci] = str(padded_path)
-        else:
-            padded_path = output_dir / f"clip_{si:03d}_padded.mp4"
-            pad_video_end(original_clip, str(padded_path), pad, crf=intermediate_crf)
-            temp_files.append(str(padded_path))
-            scene_clips[ci] = str(padded_path)
-
-    # ── Step 1b: Adjacent-clip colour matching (before transitions) ──
-    if color_match_clips and len(scene_clips) > 1:
-        report("Matching colors between adjacent clips...", 55)
-        logger.info("Applying adjacent-clip colour matching across %d clips", len(scene_clips))
-        cm_dir = str(output_dir / "_colormatch")
-        matched_clips = match_adjacent_clips(scene_clips, cm_dir, crf=intermediate_crf)
-        for mc in matched_clips:
-            if mc not in scene_clips and mc not in temp_files:
-                temp_files.append(mc)
-        scene_clips = matched_clips
-
-    # ── Step 1c: Check for AI transition clips ──
-    ai_transition_clips: dict[int, str] = {}
-    for ci in range(num_clips - 1):
-        si = clip_scene_indices[ci]
-        t_clip = scenes[si].get("transition_clip_path")
-        if t_clip and Path(t_clip).exists():
-            t_norm_path = output_dir / f"transition_{ci:03d}.mp4"
-            normalize_clip(t_clip, str(t_norm_path), width, height, fps,
-                           crf=intermediate_crf)
-            temp_files.append(str(t_norm_path))
-            ai_transition_clips[ci] = str(t_norm_path)
-            logger.info(f"Normalized AI transition clip for boundary {ci}→{ci+1}")
-
-    if ai_transition_clips:
-        logger.info(f"Found {len(ai_transition_clips)} AI transition clips to interleave")
-
-    # ── Step 2: Apply inter-scene xfade transitions, then concatenate ──
-    report("Applying transitions...", 60)
-    has_xfade = _has_explicit or _will_use_default
-    use_default_xfade = _will_use_default
-
-    if use_default_xfade:
-        logger.info(
-            "Applying default %s transition (%.1fs) between %d clips",
-            default_transition, default_transition_duration, len(scene_clips),
-        )
-
-    if (has_xfade or ai_transition_clips) and len(scene_clips) > 1:
-        total_transitions = len(scene_clips) - 1
-        merged = scene_clips[0]
-        for ci in range(1, len(scene_clips)):
-            t_percent = 60 + int((ci / total_transitions) * 18)
-            report(f"Applying transition {ci}/{total_transitions}...", t_percent)
-
-            # Check for AI transition clip at this boundary
-            ai_clip = ai_transition_clips.get(ci - 1)
-            if ai_clip:
-                cat_path = output_dir / f"cat_ai_{ci:03d}.mp4"
-                concat_clips([merged, ai_clip, scene_clips[ci]], str(cat_path), fps=fps,
-                             crf=intermediate_crf)
-                temp_files.append(str(cat_path))
-                merged = str(cat_path)
-                logger.info(f"Inserted AI transition clip at boundary {ci-1}→{ci}")
-                continue
-
-            si_in = clip_scene_indices[ci]
-            si_prev = clip_scene_indices[ci - 1]
-            scene_in = scenes[si_in]
-            scene_prev = scenes[si_prev]
-
-            t_in = scene_in.get("transition_in", {})
-            t_out_prev = scene_prev.get("transition_out", {})
-
-            t_type = None
-            t_dur = 0.5
-            if t_in and t_in.get("type") in xfade_types_set:
-                t_type = t_in["type"]
+            t_dur = 0.0
+            if t_in.get("type") in xfade_types_set:
                 t_dur = t_in.get("duration", 0.5)
-            elif t_out_prev and t_out_prev.get("type") in xfade_types_set:
-                t_type = t_out_prev["type"]
-                t_dur = t_out_prev.get("duration", 0.5)
-
-            if not t_type and use_default_xfade:
-                t_type = default_transition
+            elif t_out.get("type") in xfade_types_set:
+                t_dur = t_out.get("duration", 0.5)
+            elif _will_use_default:
                 t_dur = default_transition_duration
+            clip_boundary_durations.append(t_dur)
 
-            if t_type:
-                xfade_path = output_dir / f"xfade_{ci:03d}.mp4"
-                apply_transition(merged, scene_clips[ci], str(xfade_path), t_type, t_dur,
-                                 crf=intermediate_crf)
-                temp_files.append(str(xfade_path))
-                merged = str(xfade_path)
-            else:
-                cat_path = output_dir / f"cat_{ci:03d}.mp4"
-                concat_clips([merged, scene_clips[ci]], str(cat_path), fps=fps,
-                             crf=intermediate_crf)
-                temp_files.append(str(cat_path))
-                merged = str(cat_path)
+        clip_padding: list[float] = [0.0] * num_expected
+        for ci, bd in enumerate(clip_boundary_durations):
+            if bd > 0:
+                clip_padding[ci] += bd / 2.0
+                clip_padding[ci + 1] += bd / 2.0
 
-        concat_path = Path(merged)
-    else:
-        # No xfade transitions — simple concatenation
-        report("Concatenating clips...", 70)
-        concat_path = output_dir / "concatenated.mp4"
-        concat_clips(scene_clips, str(concat_path), fps=fps, crf=final_crf)
-        if str(concat_path) not in temp_files:
-            temp_files.append(str(concat_path))
+        total_padding = sum(clip_boundary_durations)
+        if total_padding > 0:
+            logger.info(
+                f"Transition compensation (pre-computed): {len(clip_boundary_durations)} boundaries, "
+                f"{total_padding:.1f}s total overlap to compensate"
+            )
 
-    # ── Step 3: Audio preparation ──
-    audio_path = narration_audio_path
+        scene_padding_map: dict[int, float] = {}
+        for ci, si in enumerate(valid_scene_indices):
+            if clip_padding[ci] > 0:
+                scene_padding_map[si] = clip_padding[ci]
 
-    # 3a: Mix narration with backing tracks if provided
-    if backing_tracks:
-        report("Mixing backing tracks...", 82)
-        logger.info(f"Mixing {len(backing_tracks)} backing track(s) with narration")
-        from .ffmpeg import mix_audio_tracks, get_media_info
-        # Compute total timeline duration for loop feature
-        _total_dur = 0.0
-        try:
-            _total_dur = get_media_info(narration_audio_path).get("duration", 0.0)
-        except Exception:
-            pass
-        mixed_audio_path = str(output_dir / "mixed_audio.wav")
-        mix_audio_tracks(
-            narration_audio_path, backing_tracks, mixed_audio_path,
-            loop_backing=loop_backing,
-            total_duration=_total_dur,
-            narration_volume=narration_volume,
-            backing_volume=backing_volume,
-            main_fade_in=main_fade_in,
-            main_fade_out=main_fade_out,
-            normalize_backing=normalize_backing,
+        # ── Step 1: Create clips — SINGLE-PASS + PARALLEL pipeline ──────
+        # Each clip is created with ONE FFmpeg call that chains:
+        #   normalize (scale+pad+setsar) + duration pad + fade in + fade out
+        # Clips are independent and processed in parallel (ThreadPoolExecutor).
+        clip_tasks: list[dict] = []
+        for i, scene in enumerate(scenes):
+            task = _build_clip_task(
+                scene, i, work_dir, width, height, fps,
+                intermediate_crf, scene_padding_map.get(i, 0.0),
+            )
+            if task is None:
+                logger.warning(f"Scene {i} has no content, skipping")
+                continue
+            clip_tasks.append(task)
+
+        scene_clips, clip_scene_indices, clip_temp_files = _process_clips_parallel(
+            clip_tasks,
+            report=report,
+            cancel_check=cancel_check,
+            total_scenes=total_scenes,
+            base_percent=0,
+            percent_range=50,
         )
-        temp_files.append(mixed_audio_path)
-        audio_path = mixed_audio_path
+        temp_files.extend(clip_temp_files)
 
-    # 3b: Normalize audio if enabled
-    if normalize_audio_enabled and audio_path:
-        report("Normalizing audio...", 85)
-        logger.info("Applying audio normalization")
-        from .ffmpeg import normalize_audio
-        norm_audio_path = str(output_dir / "normalized_audio.wav")
-        normalize_audio(audio_path, norm_audio_path)
-        temp_files.append(norm_audio_path)
-        audio_path = norm_audio_path
+        if not scene_clips:
+            raise RuntimeError("No clips to concatenate")
 
-    # ── Step 4: Mux audio ──
-    report("Muxing audio track...", 88)
-    logger.info(f"Muxing with audio: {audio_path}")
-    mux_audio(str(concat_path), audio_path, output_path)
+        if cancel_check and cancel_check():
+            raise RuntimeError("Export cancelled by user")
 
-    # ── Step 5: Subtitle burn-in ──
-    if subtitle_words and subtitle_style:
-        report("Burning subtitles...", 93)
-        logger.info("Burning subtitles into narration video")
-        from .ffmpeg import generate_ass_subtitles, burn_subtitles
+        num_clips = len(scene_clips)
 
-        tmp_ass = str(output_dir / "subtitles.ass")
-        sub_output = str(output_dir / f"sub_{Path(output_path).name}")
-        generate_ass_subtitles(subtitle_words, tmp_ass, subtitle_style)
-        burn_subtitles(output_path, tmp_ass, sub_output)
+        # ── Step 1b: Adjacent-clip colour matching (before transitions) ──
+        if color_match_clips and len(scene_clips) > 1:
+            report("Matching colors between adjacent clips...", 55)
+            logger.info("Applying adjacent-clip colour matching across %d clips", len(scene_clips))
+            cm_dir = str(work_dir / "_colormatch")
+            matched_clips = match_adjacent_clips(scene_clips, cm_dir, crf=intermediate_crf)
+            for mc in matched_clips:
+                if mc not in scene_clips and mc not in temp_files:
+                    temp_files.append(mc)
+            scene_clips = matched_clips
 
-        # Replace original with subtitled version
-        import shutil
-        shutil.move(sub_output, output_path)
-        Path(tmp_ass).unlink(missing_ok=True)
-        logger.info("Subtitles burned into narration video")
+        # ── Step 1c: Check for AI transition clips ──
+        ai_transition_clips: dict[int, str] = {}
+        for ci in range(num_clips - 1):
+            si = clip_scene_indices[ci]
+            t_clip = scenes[si].get("transition_clip_path")
+            if t_clip and Path(t_clip).exists():
+                t_norm_path = work_dir / f"transition_{ci:03d}.mp4"
+                normalize_clip(t_clip, str(t_norm_path), width, height, fps,
+                               crf=intermediate_crf)
+                temp_files.append(str(t_norm_path))
+                ai_transition_clips[ci] = str(t_norm_path)
+                logger.info(f"Normalized AI transition clip for boundary {ci}→{ci+1}")
 
-    # ── Cleanup intermediate files ──
-    report("Cleaning up temporary files...", 97)
-    for f in temp_files:
-        Path(f).unlink(missing_ok=True)
-    (output_dir / "concat_list.txt").unlink(missing_ok=True)
-    cm_dir_path = output_dir / "_colormatch"
-    if cm_dir_path.exists():
-        import shutil
-        shutil.rmtree(cm_dir_path, ignore_errors=True)
+        if ai_transition_clips:
+            logger.info(f"Found {len(ai_transition_clips)} AI transition clips to interleave")
 
-    report("Assembly complete!", 100)
-    logger.info(f"Narration video assembled: {output_path}")
+        # Cancel check: between color matching and transition merge
+        if cancel_check and cancel_check():
+            raise RuntimeError("Export cancelled by user")
+
+        # ── Step 2: Apply inter-scene xfade transitions, then concatenate ──
+        has_xfade = _has_explicit or _will_use_default
+        use_default_xfade = _will_use_default
+
+        # ── Wrap chunk_callback for narration: mux audio into each chunk ──
+        # This lets users preview chunks with audio during long renders.
+        _original_chunk_callback = chunk_callback
+        if chunk_callback and narration_audio_path and Path(narration_audio_path).exists():
+            # Pre-compute cumulative scene start times for chunk audio slicing
+            _cumulative_times: list[float] = []
+            _t = 0.0
+            for _sc in scenes:
+                _cumulative_times.append(_t)
+                _t += _sc.get("duration", 0.0)
+            _total_audio_dur = _t
+
+            def _narration_chunk_callback(chunk_idx: int, chunk_path: str, scene_start: int, scene_end: int):
+                """Mux the corresponding audio segment into the chunk before reporting."""
+                try:
+                    # Find time range for this chunk's scenes
+                    audio_start = _cumulative_times[scene_start] if scene_start < len(_cumulative_times) else 0.0
+                    if scene_end + 1 < len(_cumulative_times):
+                        audio_end = _cumulative_times[scene_end + 1]
+                    else:
+                        audio_end = _total_audio_dur
+                    audio_duration = audio_end - audio_start
+                    if audio_duration <= 0:
+                        logger.warning(f"Chunk {chunk_idx}: audio duration <= 0 ({audio_start:.1f}s-{audio_end:.1f}s), skipping mux")
+                    else:
+                        # Mux audio segment into chunk
+                        chunk_with_audio = chunk_path.replace(".mp4", "_muxed.mp4")
+                        mux_cmd = [
+                            "ffmpeg", "-y",
+                            "-i", chunk_path,
+                            "-ss", str(audio_start),
+                            "-t", str(audio_duration),
+                            "-i", narration_audio_path,
+                            "-c:v", "copy",
+                            "-c:a", "aac", "-b:a", "192k",
+                            "-map", "0:v:0", "-map", "1:a:0",
+                            "-shortest",
+                            chunk_with_audio,
+                        ]
+                        import subprocess
+                        result = subprocess.run(mux_cmd, capture_output=True, timeout=120)
+                        if result.returncode != 0:
+                            logger.warning(f"FFmpeg mux failed for chunk {chunk_idx}: {result.stderr.decode(errors='replace')[:500]}")
+
+                        # Replace original chunk with muxed version
+                        if Path(chunk_with_audio).exists() and Path(chunk_with_audio).stat().st_size > 0:
+                            shutil.move(chunk_with_audio, chunk_path)
+                            logger.info(f"Muxed narration audio ({audio_start:.1f}s-{audio_end:.1f}s) into chunk {chunk_idx}")
+                        else:
+                            logger.warning(f"Audio mux produced empty file for chunk {chunk_idx}, keeping video-only")
+                            Path(chunk_with_audio).unlink(missing_ok=True)
+                except Exception as _mux_err:
+                    logger.warning(f"Failed to mux audio into chunk {chunk_idx}: {_mux_err}")
+                    # Clean up partial file
+                    Path(chunk_path.replace(".mp4", "_muxed.mp4")).unlink(missing_ok=True)
+
+                # Always call original callback
+                if _original_chunk_callback:
+                    _original_chunk_callback(chunk_idx, chunk_path, scene_start, scene_end)
+
+            chunk_callback = _narration_chunk_callback
+
+        # ── Resume detection: check if a previous merged video exists in work_dir ──
+        # If the export failed at the audio mux/subtitle step after the expensive
+        # chunked merge was already complete, we can skip straight to audio prep.
+        _existing_merge = sorted(work_dir.glob("chunkmerge_xfade_*.mp4"))
+        if not _existing_merge:
+            _existing_merge = sorted(work_dir.glob("concatenated.mp4"))
+        if _existing_merge:
+            _merge_candidate = _existing_merge[-1]  # largest index = final merge
+            _merge_info = get_media_info(str(_merge_candidate))
+            _merge_dur = _merge_info.get("duration", 0)
+            if _merge_dur > 10:  # sanity: must be > 10 seconds
+                logger.info(
+                    f"RESUME: Found existing merged video {_merge_candidate.name} "
+                    f"({_merge_dur:.1f}s), skipping clip processing and chunk merge"
+                )
+                report("Resuming from merged video...", 80)
+                concat_path = _merge_candidate
+                chunk_file_paths: list[str] = []
+                merge_temp_files: list[str] = []
+            else:
+                _existing_merge = []  # too short, redo merge
+
+        if not _existing_merge:
+            concat_path, chunk_file_paths, merge_temp_files = _chunked_transition_merge(
+                scene_clips=scene_clips,
+                clip_scene_indices=clip_scene_indices,
+                scenes=scenes,
+                xfade_types_set=xfade_types_set,
+                default_transition=default_transition,
+                default_transition_duration=default_transition_duration,
+                use_default_xfade=use_default_xfade,
+                has_xfade=has_xfade,
+                ai_transition_clips=ai_transition_clips,
+                output_dir=work_dir,
+                fps=fps,
+                intermediate_crf=intermediate_crf,
+                final_crf=final_crf,
+                chunk_size=chunk_size,
+                chunk_callback=chunk_callback,
+                cancel_check=cancel_check,
+                report=report,
+                report_base_percent=60,
+                report_range=18,
+                chunk_output_dir=output_dir,
+            )
+        # Add merge temp files to our cleanup list (but NOT chunk_file_paths)
+        temp_files.extend(merge_temp_files)
+
+        # ── Step 3: Audio preparation ──
+        audio_path = narration_audio_path
+
+        # 3a: Mix narration with backing tracks if provided
+        if backing_tracks:
+            report("Mixing backing tracks...", 82)
+            logger.info(f"Mixing {len(backing_tracks)} backing track(s) with narration")
+            # Compute total timeline duration for loop feature
+            _total_dur = 0.0
+            try:
+                _total_dur = get_media_info(narration_audio_path).get("duration", 0.0)
+            except Exception:
+                pass
+            mixed_audio_path = str(work_dir / "mixed_audio.wav")
+            mix_audio_tracks(
+                narration_audio_path, backing_tracks, mixed_audio_path,
+                loop_backing=loop_backing,
+                total_duration=_total_dur,
+                narration_volume=narration_volume,
+                backing_volume=backing_volume,
+                main_fade_in=main_fade_in,
+                main_fade_out=main_fade_out,
+                normalize_backing=normalize_backing,
+            )
+            temp_files.append(mixed_audio_path)
+            audio_path = mixed_audio_path
+
+        # 3b: Normalize audio if enabled
+        if normalize_audio_enabled and audio_path:
+            report("Normalizing audio...", 85)
+            logger.info("Applying audio normalization")
+            norm_audio_path = str(work_dir / "normalized_audio.wav")
+            normalize_audio(audio_path, norm_audio_path)
+            temp_files.append(norm_audio_path)
+            audio_path = norm_audio_path
+
+        # ── Step 4: Mux audio ──
+        report("Muxing audio track...", 88)
+        logger.info(f"Muxing with audio: {audio_path}")
+        mux_audio(str(concat_path), audio_path, output_path)
+
+        # ── Step 5: Subtitle burn-in ──
+        if subtitle_words and subtitle_style:
+            report("Burning subtitles...", 93)
+            logger.info("Burning subtitles into narration video")
+            tmp_ass = str(work_dir / "subtitles.ass")
+            sub_output = str(work_dir / f"sub_{Path(output_path).name}")
+            generate_ass_subtitles(subtitle_words, tmp_ass, subtitle_style)
+            burn_subtitles(output_path, tmp_ass, sub_output)
+
+            # Replace original with subtitled version
+            shutil.move(sub_output, output_path)
+            Path(tmp_ass).unlink(missing_ok=True)
+            logger.info("Subtitles burned into narration video")
+
+
+        report("Assembly complete!", 100)
+        logger.info(f"Narration video assembled: {output_path}")
+    except BaseException as exc:
+        logger.error(f"Narration video assembly failed, cleaning up temp files: {exc}")
+        _cleanup_narration_temp_files()
+        raise
+    else:
+        # Success path cleanup
+        _cleanup_narration_temp_files()
+

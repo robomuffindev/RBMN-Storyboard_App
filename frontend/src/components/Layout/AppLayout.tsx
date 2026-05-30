@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks } from '@/api/client';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp, Film } from 'lucide-react';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks, listExports, deleteExportFile } from '@/api/client';
+import type { ExportFileInfo } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
 import Timeline from '@/components/Timeline/Timeline';
@@ -28,6 +29,7 @@ export default function AppLayout() {
   const queryClient = useQueryClient();
   const [selectedPanel, setSelectedPanel] = useState<'audio' | 'scenes' | 'assets' | 'concept' | 'flow'>('audio');
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportGalleryOpen, setExportGalleryOpen] = useState(false);
   const [autoGenOpen, setAutoGenOpen] = useState(false);
   const [assetGenOpen, setAssetGenOpen] = useState(false);
   const [editorCollapsed, setEditorCollapsed] = useState(false);
@@ -722,6 +724,15 @@ export default function AppLayout() {
           </button>
 
           <button
+            onClick={() => setExportGalleryOpen(true)}
+            className="px-3 md:px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors flex items-center gap-2"
+            title="View past exports"
+          >
+            <Film size={18} />
+            <span className="hidden sm:inline">Gallery</span>
+          </button>
+
+          <button
             onClick={() => setExportOpen(true)}
             className="px-3 md:px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
           >
@@ -1214,6 +1225,9 @@ export default function AppLayout() {
       {/* Export Modal */}
       {exportOpen && <ExportModal projectId={id!} onClose={() => setExportOpen(false)} />}
 
+      {/* Export Gallery Modal */}
+      {exportGalleryOpen && <ExportGalleryModal projectId={id!} onClose={() => setExportGalleryOpen(false)} />}
+
       {/* Auto Generate Modal */}
       {autoGenOpen && <AutoGenerateModal
         projectId={id!}
@@ -1414,11 +1428,20 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [backingMainFadeIn, setBackingMainFadeIn] = useState(projSettings.backing_main_fade_in ?? 0.0);
   const [backingMainFadeOut, setBackingMainFadeOut] = useState(projSettings.backing_main_fade_out ?? 0.0);
   const [normalizeBacking, setNormalizeBacking] = useState(projSettings.normalize_backing ?? false);
-  const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed'>('config');
+  const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed' | 'cancelled'>('config');
   const [progressPercent, setProgressPercent] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [exportPhase, setExportPhase] = useState<string | null>(null);
+  const [totalChunks, setTotalChunks] = useState(0);
+  const [currentChunk, setCurrentChunk] = useState(0);
+  const [chunks, setChunks] = useState<Array<{ index: number; path: string; download_url: string; scenes: string; size_mb: number }>>([]);
+  const [lightboxChunkUrl, setLightboxChunkUrl] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  // Recovery scan state
+  const [scanResult, setScanResult] = useState<{ recoverable: boolean; clip_count: number; chunk_count: number; total_clips_size_mb: number; total_chunks_size_mb: number; has_manifest: boolean; chunks: Array<{ index: number; download_url: string; scenes: string; size_mb: number }> } | null>(null);
+  const [recovering, setRecovering] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Cleanup polling on unmount
@@ -1427,6 +1450,56 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  // Scan for recoverable export artifacts on modal open
+  useEffect(() => {
+    let cancelled = false;
+    const doScan = async () => {
+      try {
+        const res = await scanExport(projectId);
+        if (!cancelled) setScanResult(res.data as any);
+      } catch {
+        // Ignore — feature just won't show
+      }
+    };
+    doScan();
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  const startPolling = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await getExportStatus(projectId);
+        const data = res.data;
+        setProgressPercent(data.progress_percent);
+        setCurrentStep(data.current_step);
+        if (data.phase) setExportPhase(data.phase);
+        if (data.total_chunks) setTotalChunks(data.total_chunks);
+        if (data.current_chunk) setCurrentChunk(data.current_chunk);
+        if (data.chunks && data.chunks.length > 0) setChunks(data.chunks);
+
+        if (data.status === 'done') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setPhase('done');
+          setDownloadUrl(data.download_url || null);
+        } else if (data.status === 'failed') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setPhase('failed');
+          setExportError(data.error || 'Export failed');
+        } else if (data.status === 'cancelled') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setPhase('cancelled');
+          setCancelling(false);
+        }
+      } catch {
+        // Ignore transient poll errors
+      }
+    }, 1500);
+  };
 
   const exportMutation = useMutation({
     mutationFn: async () => {
@@ -1456,33 +1529,12 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
       });
     },
     onSuccess: () => {
-      // Start polling for progress
       setPhase('exporting');
       setCurrentStep('Starting export...');
       setProgressPercent(0);
-
-      pollRef.current = setInterval(async () => {
-        try {
-          const res = await getExportStatus(projectId);
-          const data = res.data;
-          setProgressPercent(data.progress_percent);
-          setCurrentStep(data.current_step);
-
-          if (data.status === 'done') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            pollRef.current = null;
-            setPhase('done');
-            setDownloadUrl(data.download_url || null);
-          } else if (data.status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            pollRef.current = null;
-            setPhase('failed');
-            setExportError(data.error || 'Export failed');
-          }
-        } catch {
-          // Ignore transient poll errors
-        }
-      }, 1500);
+      setChunks([]);
+      setCancelling(false);
+      startPolling();
     },
     onError: (err: any) => {
       setPhase('failed');
@@ -1494,12 +1546,70 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
     setPhase('exporting');
     setCurrentStep('Initializing...');
     setProgressPercent(0);
+    setChunks([]);
+    setExportPhase(null);
+    setTotalChunks(0);
+    setCurrentChunk(0);
     exportMutation.mutate();
+  };
+
+  const handleCancel = async () => {
+    setCancelling(true);
+    try {
+      await cancelExport(projectId);
+    } catch {
+      setCancelling(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setPhase('exporting');
+    setCurrentStep('Resuming export...');
+    setProgressPercent(0);
+    setExportError(null);
+    setCancelling(false);
+    try {
+      await resumeExport(projectId);
+      startPolling();
+    } catch (err: any) {
+      setPhase('failed');
+      setExportError(err?.response?.data?.detail || err?.message || 'Failed to resume export');
+    }
+  };
+
+  const handleRecover = async () => {
+    setRecovering(true);
+    setPhase('exporting');
+    setCurrentStep('Recovering export from disk...');
+    setProgressPercent(0);
+    setExportError(null);
+    setCancelling(false);
+    // Pre-populate chunks from scan
+    if (scanResult?.chunks) setChunks(scanResult.chunks as any);
+    try {
+      await recoverExport(projectId);
+      startPolling();
+    } catch (err: any) {
+      setPhase('failed');
+      setExportError(err?.response?.data?.detail || err?.message || 'Failed to recover export');
+    } finally {
+      setRecovering(false);
+    }
   };
 
   const handleDownload = () => {
     if (downloadUrl) {
       window.open(downloadUrl, '_blank');
+    }
+  };
+
+  const phaseLabel = (p: string | null): string => {
+    switch (p) {
+      case 'clips': return 'Rendering clips';
+      case 'chunks': return 'Merging chunks';
+      case 'final': return 'Final assembly';
+      case 'post': return 'Post-processing';
+      default: return '';
     }
   };
 
@@ -1532,7 +1642,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                   <input
                     type="number"
                     value={width}
-                    onChange={(e) => setWidth(parseInt(e.target.value))}
+                    onChange={(e) => setWidth(parseInt(e.target.value) || 1280)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -1541,7 +1651,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                   <input
                     type="number"
                     value={height}
-                    onChange={(e) => setHeight(parseInt(e.target.value))}
+                    onChange={(e) => setHeight(parseInt(e.target.value) || 720)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -1552,7 +1662,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                 <input
                   type="number"
                   value={fps}
-                  onChange={(e) => setFps(parseInt(e.target.value))}
+                  onChange={(e) => setFps(parseInt(e.target.value) || 24)}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500"
                 />
               </div>
@@ -1884,6 +1994,31 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
               )}
             </div>
 
+            {/* Recovery banner — shown when recoverable artifacts are found */}
+            {scanResult?.recoverable && (
+              <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-3 mb-3 flex-shrink-0">
+                <div className="flex items-start gap-2">
+                  <svg className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-amber-300">Previous export found on disk</div>
+                    <div className="text-xs text-amber-400/80 mt-1">
+                      {scanResult.clip_count > 0 && <span>{scanResult.clip_count} clips ({scanResult.total_clips_size_mb} MB)</span>}
+                      {scanResult.clip_count > 0 && scanResult.chunk_count > 0 && <span> + </span>}
+                      {scanResult.chunk_count > 0 && <span>{scanResult.chunk_count} chunks ({scanResult.total_chunks_size_mb} MB)</span>}
+                      {scanResult.has_manifest && <span className="ml-1 text-green-400">&bull; manifest found</span>}
+                    </div>
+                    <button
+                      onClick={handleRecover}
+                      disabled={recovering}
+                      className="mt-2 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded text-xs font-medium transition-colors"
+                    >
+                      {recovering ? 'Recovering...' : 'Recover & Resume Export'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-4 flex-shrink-0 pt-4 border-t border-gray-800">
               <button
                 onClick={onClose}
@@ -1910,8 +2045,16 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
-                Exporting...
+                {cancelling ? 'Cancelling...' : 'Exporting...'}
               </div>
+              {exportPhase && (
+                <div className="text-xs text-gray-500 mt-1">{phaseLabel(exportPhase)}</div>
+              )}
+              {totalChunks > 0 && (
+                <div className="text-xs text-gray-500 mt-0.5">
+                  Chunk {currentChunk} / {totalChunks}
+                </div>
+              )}
             </div>
 
             <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
@@ -1924,6 +2067,44 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
             <div className="flex justify-between text-xs text-gray-400">
               <span>{currentStep}</span>
               <span>{progressPercent}%</span>
+            </div>
+
+            {/* Chunk gallery */}
+            {chunks.length > 0 && (
+              <div className="border-t border-gray-700 pt-3 mt-2">
+                <div className="text-xs text-gray-400 mb-2 font-medium">Completed Chunks ({chunks.length})</div>
+                <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                  {chunks.map((c) => (
+                    <div key={c.index} className="bg-gray-800 border border-gray-700 rounded overflow-hidden hover:border-blue-500 transition-colors group">
+                      <div className="relative cursor-pointer" onClick={() => setLightboxChunkUrl(c.download_url)}>
+                        <video src={c.download_url} muted preload="metadata" className="w-full h-20 object-cover bg-gray-900" />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <svg className="w-8 h-8 text-white/90" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                        </div>
+                      </div>
+                      <div className="px-2 py-1.5 flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-medium text-gray-300">Part {c.index + 1}</div>
+                          <div className="text-[10px] text-gray-500">Scenes {c.scenes} · {c.size_mb}MB</div>
+                        </div>
+                        <a href={c.download_url} download onClick={(e) => e.stopPropagation()} className="p-1 text-gray-500 hover:text-green-400 transition-colors" title="Download chunk">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-center pt-2">
+              <button
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="px-4 py-2 bg-red-600/80 hover:bg-red-600 disabled:bg-gray-700 disabled:text-gray-500 rounded font-medium text-sm transition-colors"
+              >
+                {cancelling ? 'Cancelling...' : 'Cancel Export'}
+              </button>
             </div>
           </div>
         )}
@@ -1943,6 +2124,34 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
             <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
               <div className="bg-green-500 h-full w-full" />
             </div>
+
+            {/* Chunk gallery on done */}
+            {chunks.length > 0 && (
+              <div className="border-t border-gray-700 pt-3">
+                <div className="text-xs text-gray-400 mb-2 font-medium">Individual Parts ({chunks.length})</div>
+                <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                  {chunks.map((c) => (
+                    <div key={c.index} className="bg-gray-800 border border-gray-700 rounded overflow-hidden hover:border-green-500 transition-colors group">
+                      <div className="relative cursor-pointer" onClick={() => setLightboxChunkUrl(c.download_url)}>
+                        <video src={c.download_url} muted preload="metadata" className="w-full h-20 object-cover bg-gray-900" />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <svg className="w-8 h-8 text-white/90" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                        </div>
+                      </div>
+                      <div className="px-2 py-1.5 flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-medium text-gray-300">Part {c.index + 1}</div>
+                          <div className="text-[10px] text-gray-500">Scenes {c.scenes} · {c.size_mb}MB</div>
+                        </div>
+                        <a href={c.download_url} download onClick={(e) => e.stopPropagation()} className="p-1 text-gray-500 hover:text-green-400 transition-colors" title="Download chunk">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="flex gap-4">
               <button
@@ -1966,7 +2175,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
           </div>
         )}
 
-        {/* Failed phase — show error */}
+        {/* Failed phase — show error with resume option */}
         {phase === 'failed' && (
           <div className="space-y-4">
             <div className="text-center mb-2">
@@ -1978,7 +2187,35 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
               <p className="text-sm text-red-400">{exportError || 'Export failed'}</p>
             </div>
 
-            <div className="flex gap-4">
+            {/* Chunk gallery on failure */}
+            {chunks.length > 0 && (
+              <div className="border-t border-gray-700 pt-3">
+                <div className="text-xs text-gray-400 mb-2 font-medium">Completed Parts ({chunks.length} before failure)</div>
+                <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                  {chunks.map((c) => (
+                    <div key={c.index} className="bg-gray-800 border border-gray-700 rounded overflow-hidden hover:border-orange-500 transition-colors group">
+                      <div className="relative cursor-pointer" onClick={() => setLightboxChunkUrl(c.download_url)}>
+                        <video src={c.download_url} muted preload="metadata" className="w-full h-20 object-cover bg-gray-900" />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <svg className="w-8 h-8 text-white/90" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                        </div>
+                      </div>
+                      <div className="px-2 py-1.5 flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-medium text-gray-300">Part {c.index + 1}</div>
+                          <div className="text-[10px] text-gray-500">Scenes {c.scenes} · {c.size_mb}MB</div>
+                        </div>
+                        <a href={c.download_url} download onClick={(e) => e.stopPropagation()} className="p-1 text-gray-500 hover:text-green-400 transition-colors" title="Download chunk">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-3">
               <button
                 onClick={onClose}
                 className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded font-medium transition-colors"
@@ -1986,14 +2223,306 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                 Close
               </button>
               <button
-                onClick={() => { setPhase('config'); setExportError(null); }}
+                onClick={handleResume}
+                className="flex-1 px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Resume
+              </button>
+              <button
+                onClick={() => { setPhase('config'); setExportError(null); setChunks([]); }}
                 className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
               >
-                Try Again
+                Restart
               </button>
             </div>
           </div>
         )}
+
+        {/* Cancelled phase */}
+        {phase === 'cancelled' && (
+          <div className="space-y-4">
+            <div className="text-center mb-2">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-yellow-500/20 mb-3">
+                <svg className="w-6 h-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <p className="text-sm text-yellow-400">Export was cancelled</p>
+              {progressPercent > 0 && (
+                <p className="text-xs text-gray-500 mt-1">Stopped at {progressPercent}%</p>
+              )}
+            </div>
+
+            {/* Chunk gallery on cancel */}
+            {chunks.length > 0 && (
+              <div className="border-t border-gray-700 pt-3">
+                <div className="text-xs text-gray-400 mb-2 font-medium">Completed Parts ({chunks.length})</div>
+                <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                  {chunks.map((c) => (
+                    <div key={c.index} className="bg-gray-800 border border-gray-700 rounded overflow-hidden hover:border-yellow-500 transition-colors group">
+                      <div className="relative cursor-pointer" onClick={() => setLightboxChunkUrl(c.download_url)}>
+                        <video src={c.download_url} muted preload="metadata" className="w-full h-20 object-cover bg-gray-900" />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <svg className="w-8 h-8 text-white/90" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                        </div>
+                      </div>
+                      <div className="px-2 py-1.5 flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-medium text-gray-300">Part {c.index + 1}</div>
+                          <div className="text-[10px] text-gray-500">Scenes {c.scenes} · {c.size_mb}MB</div>
+                        </div>
+                        <a href={c.download_url} download onClick={(e) => e.stopPropagation()} className="p-1 text-gray-500 hover:text-green-400 transition-colors" title="Download chunk">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={onClose}
+                className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded font-medium transition-colors"
+              >
+                Close
+              </button>
+              <button
+                onClick={handleResume}
+                className="flex-1 px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Resume
+              </button>
+              <button
+                onClick={() => { setPhase('config'); setExportError(null); setChunks([]); }}
+                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition-colors"
+              >
+                Restart
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Chunk video lightbox with download */}
+      {lightboxChunkUrl && (
+        <div
+          className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60]"
+          onClick={() => setLightboxChunkUrl(null)}
+        >
+          <div
+            className="relative w-full max-w-3xl mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-gray-300 font-medium">Chunk Preview</span>
+              <div className="flex items-center gap-3">
+                <a
+                  href={lightboxChunkUrl}
+                  download
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm font-medium transition-colors"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Download
+                </a>
+                <button
+                  onClick={() => setLightboxChunkUrl(null)}
+                  className="text-gray-400 hover:text-white text-sm font-medium"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <video
+              src={lightboxChunkUrl}
+              controls
+              autoPlay
+              className="w-full rounded-lg shadow-2xl"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function ExportGalleryModal({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+  const [exports, setExports] = useState<ExportFileInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [playingUrl, setPlayingUrl] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const fetchExports = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const res = await listExports(projectId);
+      setExports(res.data);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load exports');
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    fetchExports();
+  }, [fetchExports]);
+
+  const handleDelete = async (filename: string) => {
+    try {
+      setDeleting(filename);
+      await deleteExportFile(projectId, filename);
+      setExports((prev) => prev.filter((e) => e.filename !== filename));
+      setConfirmDelete(null);
+      if (playingUrl?.includes(filename)) setPlayingUrl(null);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete export');
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  const formatDate = (iso: string) => {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) +
+        ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    } catch { return iso; }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-3xl mx-4 max-h-[85vh] flex flex-col shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+          <div className="flex items-center gap-3">
+            <Film size={20} className="text-blue-400" />
+            <h2 className="text-lg font-semibold text-white">Export Gallery</h2>
+            <span className="text-xs text-gray-500">{exports.length} export{exports.length !== 1 ? 's' : ''}</span>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors text-xl leading-none">&times;</button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading ? (
+            <div className="flex items-center justify-center py-16 text-gray-400">
+              <Loader2 className="animate-spin mr-3" size={20} />
+              Loading exports…
+            </div>
+          ) : error ? (
+            <div className="text-center py-16">
+              <p className="text-red-400 mb-3">{error}</p>
+              <button onClick={fetchExports} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors">
+                Retry
+              </button>
+            </div>
+          ) : exports.length === 0 ? (
+            <div className="text-center py-16 text-gray-500">
+              <Film size={40} className="mx-auto mb-3 opacity-40" />
+              <p>No exports yet</p>
+              <p className="text-sm mt-1">Exported videos will appear here</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {exports.map((exp) => (
+                <div
+                  key={exp.filename}
+                  className="bg-gray-800/60 border border-gray-700/50 rounded-lg p-4 hover:border-gray-600 transition-colors"
+                >
+                  <div className="flex items-center justify-between gap-4">
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white truncate" title={exp.filename}>
+                        {exp.filename}
+                      </p>
+                      <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
+                        <span>{exp.size_mb.toFixed(1)} MB</span>
+                        <span className="text-gray-600">•</span>
+                        <span>{formatDate(exp.created_at)}</span>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => setPlayingUrl(playingUrl === exp.download_url ? null : exp.download_url)}
+                        className="p-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white transition-colors"
+                        title="Watch"
+                      >
+                        {playingUrl === exp.download_url ? <Pause size={16} /> : <Play size={16} />}
+                      </button>
+                      <a
+                        href={exp.download_url}
+                        download
+                        className="p-2 bg-green-600 hover:bg-green-700 rounded-lg text-white transition-colors"
+                        title="Download"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <Download size={16} />
+                      </a>
+                      {confirmDelete === exp.filename ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleDelete(exp.filename)}
+                            disabled={deleting === exp.filename}
+                            className="px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs font-medium transition-colors disabled:opacity-50"
+                          >
+                            {deleting === exp.filename ? '…' : 'Yes'}
+                          </button>
+                          <button
+                            onClick={() => setConfirmDelete(null)}
+                            className="px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs font-medium transition-colors"
+                          >
+                            No
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDelete(exp.filename)}
+                          className="p-2 bg-gray-700 hover:bg-red-600 rounded-lg text-gray-300 hover:text-white transition-colors"
+                          title="Delete"
+                        >
+                          <XCircle size={16} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Inline video player */}
+                  {playingUrl === exp.download_url && (
+                    <div className="mt-3">
+                      <video
+                        src={exp.download_url}
+                        controls
+                        autoPlay
+                        className="w-full rounded-lg shadow-lg"
+                        style={{ maxHeight: '400px' }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -2065,14 +2594,29 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const isBackendTerminal = isBackendDone || isBackendFailed || isBackendCancelled;
   const progressPct = autoGenTotal > 0 ? Math.round((autoGenCompleted / autoGenTotal) * 100) : 0;
 
+  // Reset elapsed timer when a new batch run starts
+  useEffect(() => {
+    if (autoGenBatchRunId) {
+      setElapsed(0);
+      setStartTime(Date.now());
+    }
+  }, [autoGenBatchRunId]);
+
+  // Stop the timer and clear startTime when backend reaches a terminal state
+  useEffect(() => {
+    if (isBackendTerminal && startTime) {
+      setStartTime(null);
+    }
+  }, [isBackendTerminal, startTime]);
+
   // Elapsed time timer
   useEffect(() => {
     if (isBackendRunning && !startTime) {
       setStartTime(Date.now());
     }
-    if (isBackendRunning) {
+    if (isBackendRunning && startTime) {
       const timer = setInterval(() => {
-        if (startTime) setElapsed(Math.floor((Date.now() - startTime) / 1000));
+        setElapsed(Math.floor((Date.now() - startTime) / 1000));
       }, 1000);
       return () => clearInterval(timer);
     }
@@ -2123,6 +2667,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
       );
 
       setStatusMsg(null);
+      setElapsed(0);
       setStartTime(Date.now());
       setIsStarting(false);
       onStarted(); // start polling in AppLayout

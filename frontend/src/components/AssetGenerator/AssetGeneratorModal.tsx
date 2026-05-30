@@ -53,7 +53,7 @@ export default function AssetGeneratorModal({ projectId, onClose }: AssetGenerat
   const [imgHeight, setImgHeight] = useState(576);
   const [imgSeed, setImgSeed] = useState('');
   const [imgTwoPass, setImgTwoPass] = useState(false);
-  const [refImages, setRefImages] = useState<(Asset | null)[]>([null, null, null, null]);
+  const [refImages, setRefImages] = useState<(Asset | null)[]>([null, null, null, null, null]);
 
   // Video form state
   const [vidPrompt, setVidPrompt] = useState('');
@@ -526,7 +526,7 @@ function ImageTabContent({
       {model !== 'zimage_turbo' && (
         <div>
           <label className="text-sm font-medium text-gray-300 mb-2 block">
-            Reference Images (optional, up to 4 for Klein)
+            Reference Images (optional, up to 5 for Klein)
           </label>
           <div className="flex gap-3">
             {refImages.map((ref, i) => (

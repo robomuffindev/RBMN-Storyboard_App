@@ -30,6 +30,17 @@ from backend.database.models import (
 )
 from backend.services.jobs.queue import JobQueue
 
+COLOR_OVERRIDE_DESCRIPTIONS: dict[str, str] = {
+    "black_and_white": "STRICT BLACK AND WHITE / NOIR: The entire scene MUST be rendered in grayscale — blacks, whites, and shades of gray ONLY. Absolutely NO color whatsoever. Describe the scene using light, shadow, contrast, and tone. Never mention any hue, saturation, or chromatic color (no red, blue, green, gold, amber, etc.). Think classic film noir.",
+    "high_contrast_bw": "STRICT HIGH-CONTRAST BLACK AND WHITE: The entire scene MUST use only pure black and pure white with minimal gray midtones. Stark, dramatic shadows and bright highlights. Absolutely NO color. Describe the scene using extreme contrast, deep blacks, blown-out whites. Think Sin City or high-contrast street photography.",
+    "sepia": "STRICT SEPIA TONE: The entire scene MUST be rendered in warm sepia/brown tones ONLY — amber, brown, tan, cream, and warm ochre. NO other colors (no blue, green, red, purple, etc.). Describe the scene as if viewed through an antique photograph with warm brown-tinted tones throughout.",
+    "monochrome_blue": "STRICT MONOCHROME BLUE: The entire scene MUST use blue tones ONLY — navy, cobalt, cerulean, ice blue, midnight blue, steel blue. NO other colors (no red, green, yellow, brown, etc.). Think cyanotype photography or moonlit scenes. All elements described in shades of blue.",
+    "monochrome_red": "STRICT MONOCHROME RED: The entire scene MUST use red/crimson tones ONLY — deep red, ruby, scarlet, burgundy, maroon, dark crimson. NO other colors (no blue, green, yellow, etc.). Think darkroom photography or horror-tinged atmosphere. All elements in shades of red.",
+    "desaturated": "DESATURATED / MUTED PALETTE: The entire scene MUST use heavily muted, low-saturation colors. All colors should appear washed out, faded, and subdued — as if the saturation slider was turned to 20%. NO vivid or saturated colors anywhere. Think overcast day, bleached-out tones.",
+    "vintage_film": "VINTAGE FILM LOOK: The entire scene MUST use faded, warm-tinted colors typical of aged film stock — muted yellows, faded oranges, soft browns, desaturated greens. Colors should look sun-bleached and nostalgic. NO modern vivid or neon colors. Think 1970s Kodachrome or Polaroid.",
+    "neon_cyberpunk": "NEON CYBERPUNK PALETTE: The entire scene MUST use vivid neon colors ONLY — electric pink, cyan, neon purple, hot magenta, electric blue, acid green. The scene should glow with synthetic, artificial light. NO natural or muted tones (no brown, beige, olive, etc.). Think Blade Runner, neon-soaked streets.",
+}
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects/{project_id}/generate", tags=["generation"])
 
@@ -39,7 +50,7 @@ class GenerateImageRequest(BaseModel):
     """Request model for image generation."""
 
     scene_id: UUID
-    workflow_type: Optional[str] = None  # klein_1ref, klein_2ref, klein_3ref, klein_4ref, klein_t2i
+    workflow_type: Optional[str] = None  # klein_1ref, klein_2ref, klein_3ref, klein_4ref, klein_5ref, klein_t2i
     workflow_config_id: Optional[UUID] = None  # for custom workflows
     prompt: str
     width: int = 1024
@@ -831,8 +842,8 @@ def _scene_uses_ff_lf(scene: Scene) -> bool:
 
 def _auto_workflow_type(ref_count: int) -> str:
     """Map reference image count to workflow type."""
-    mapping = {0: "klein_t2i", 1: "klein_1ref", 2: "klein_2ref", 3: "klein_3ref", 4: "klein_4ref"}
-    return mapping.get(min(ref_count, 4), "klein_t2i")
+    mapping = {0: "klein_t2i", 1: "klein_1ref", 2: "klein_2ref", 3: "klein_3ref", 4: "klein_4ref", 5: "klein_5ref"}
+    return mapping.get(min(ref_count, 5), "klein_t2i")
 
 
 def _apply_two_pass_to_job_params(
@@ -1192,6 +1203,23 @@ async def _build_auto_enhance_context(
             dir_label = image_direction.replace("_", " ").title()
             parts.append(f"Image direction / art style: {dir_label}")
 
+    # Color override — strict palette enforcement
+    color_override = scene.parameters.get("color_override", "") or project.settings.get("global_color_override", "")
+    if color_override and color_override != "full_color":
+        if color_override == "custom":
+            custom_palette = scene.parameters.get("custom_color_palette", "") or project.settings.get("custom_color_palette", "")
+            if custom_palette:
+                parts.append(
+                    f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {custom_palette}. "
+                    f"You MUST strictly follow this color palette. Do NOT introduce any colors outside this specification. "
+                    f"Every visual element — lighting, materials, clothing, environment — must conform to this palette."
+                )
+        elif color_override in COLOR_OVERRIDE_DESCRIPTIONS:
+            parts.append(
+                f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {COLOR_OVERRIDE_DESCRIPTIONS[color_override]} "
+                f"This is NON-NEGOTIABLE — every visual element described must conform to this color restriction."
+            )
+
     # Characters — Klein uses compositional language for reference images
     characters = project.settings.get("characters", [])
     if characters:
@@ -1332,6 +1360,23 @@ async def _build_video_enhance_context(
             dir_label = image_direction.replace("_", " ").title()
             parts.append(f"Image direction / art style: {dir_label}")
 
+    # Color override — strict palette enforcement
+    color_override = scene.parameters.get("color_override", "") or project.settings.get("global_color_override", "")
+    if color_override and color_override != "full_color":
+        if color_override == "custom":
+            custom_palette = scene.parameters.get("custom_color_palette", "") or project.settings.get("custom_color_palette", "")
+            if custom_palette:
+                parts.append(
+                    f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {custom_palette}. "
+                    f"You MUST strictly follow this color palette. Do NOT introduce any colors outside this specification. "
+                    f"Every visual element — lighting, materials, clothing, environment — must conform to this palette."
+                )
+        elif color_override in COLOR_OVERRIDE_DESCRIPTIONS:
+            parts.append(
+                f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {COLOR_OVERRIDE_DESCRIPTIONS[color_override]} "
+                f"This is NON-NEGOTIABLE — every visual element described must conform to this color restriction."
+            )
+
     characters = project.settings.get("characters", [])
     if characters:
         char_block = ". ".join(
@@ -1373,7 +1418,7 @@ async def _build_video_enhance_context(
     # Visual continuity from previous scene (skip if ignore_prev_scene_ref is set)
     use_prev_lf = scene.parameters.get("use_prev_scene_last_frame", False)
     ignore_prev_ref = scene.parameters.get("ignore_prev_scene_ref", False)
-    if use_prev_lf and prev_scene and not ignore_prev_ref:
+    if prev_scene and not ignore_prev_ref:
         prev_prompt = (
             prev_scene.parameters.get("video_prompt")
             or prev_scene.parameters.get("last_frame_prompt")
@@ -1381,10 +1426,27 @@ async def _build_video_enhance_context(
             or ""
         )
         if prev_prompt:
-            parts.append(
-                f"CONTINUITY: The starting frame of this video is the ending frame of the previous scene. "
-                f'Previous scene described: "{prev_prompt}". The video should visually continue from that context.'
-            )
+            if use_prev_lf:
+                # FF/LF mode — the starting frame IS the previous scene's last frame.
+                # This is a SHOT EXTENSION, not a scene change.  The LLM must keep
+                # visual style, subject, environment, and colour palette continuous.
+                parts.append(
+                    f"SHOT EXTENSION (CRITICAL): This video's first frame is literally the last frame "
+                    f"of the previous scene — the camera is still rolling. You are NOT starting a new scene; "
+                    f"you are CONTINUING the same shot. Maintain the same subject, environment, lighting, "
+                    f"colour palette, and visual style. Do NOT introduce new locations, characters, or "
+                    f'dramatic shifts. Previous scene described: "{prev_prompt}". '
+                    f"Evolve the motion naturally from that exact visual state."
+                )
+            else:
+                # Sequential mode — different first frame, but narrative should still flow.
+                parts.append(
+                    f"NARRATIVE CONTINUITY: This scene follows directly after the previous scene in the "
+                    f"sequence. While it has its own starting image, it should feel like a natural narrative "
+                    f'progression. Previous scene described: "{prev_prompt}". '
+                    f"Maintain visual coherence — avoid jarring style, colour, or mood changes unless "
+                    f"the lyrics explicitly demand a tonal shift."
+                )
 
         # Camera direction continuity — prevent jarring direction changes at V2V cuts.
         # When scene B starts from scene A's last frame, a sudden direction reversal
@@ -1417,208 +1479,8 @@ async def _build_video_enhance_context(
     return " | ".join(parts)
 
 
-def _group_words_into_sentences(
-    words: list[dict],
-    lyrics_text: str = "",
-) -> list[list[dict]]:
-    """Group words into sentences/phrases — one per lyrics line.
-
-    STRATEGY: If user-provided lyrics text with line breaks is available,
-    use those lines as the authoritative phrase boundaries. Each line in
-    the lyrics = one indivisible phrase. Whisper word timestamps are matched
-    to lyrics lines by counting words per line.
-
-    FALLBACK: If no lyrics text is available, detect phrases via punctuation
-    and pauses (for instrumental sections or missing lyrics).
-
-    Returns a list of word-groups, each group being a phrase that must be
-    kept together and assigned to one scene.
-    """
-    import re
-    if not words:
-        return []
-
-    # ── PRIMARY: Use lyrics lines if available ──────────────────────────
-    if lyrics_text and lyrics_text.strip():
-        lines = [l.strip() for l in lyrics_text.strip().splitlines() if l.strip()]
-        if lines:
-            return _match_words_to_lyrics_lines(words, lines)
-
-    # ── FALLBACK: Punctuation and pause detection ───────────────────────
-    sentences: list[list[dict]] = []
-    current: list[dict] = []
-
-    for i, w in enumerate(words):
-        current.append(w)
-        word_text = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
-
-        is_last = (i == len(words) - 1)
-        if is_last:
-            sentences.append(current)
-            break
-
-        # Check for sentence-ending punctuation
-        has_sentence_end = bool(re.search(r'[.!?…]$', word_text))
-
-        # Check for clause-ending punctuation
-        has_clause_end = bool(re.search(r'[,;:\-–—]$', word_text))
-
-        # Check for significant pause after this word
-        next_start = words[i + 1].get("start", 0)
-        this_end = w.get("end", 0)
-        gap = next_start - this_end
-
-        if has_sentence_end or gap > 1.5 or (has_clause_end and gap > 0.4):
-            sentences.append(current)
-            current = []
-
-    if current:
-        sentences.append(current)
-
-    return sentences
-
-
-def _match_words_to_lyrics_lines(
-    words: list[dict],
-    lines: list[str],
-) -> list[list[dict]]:
-    """Match Whisper word timestamps to user-provided lyrics lines.
-
-    Each lyrics line defines an indivisible phrase. We walk through the
-    Whisper words and assign them to lines by matching word counts per line.
-
-    WORD ANCHORING: After initial matching, any words that were skipped
-    (between groups) are merged into the nearest adjacent group. Single-word
-    groups are also merged into their neighbor. This ensures a word like
-    "Black" from "Black hat on a wooden chair" is NEVER orphaned.
-    """
-    import re
-
-    def clean_word(w: str) -> str:
-        return re.sub(r'[^a-zA-Z0-9]', '', w).lower()
-
-    whisper_cleaned = []
-    for w in words:
-        raw = (w.get("word", "") or w.get("value", "") or w.get("text", "")).strip()
-        whisper_cleaned.append(clean_word(raw))
-
-    # Track which word indices are assigned to which group
-    # This lets us detect orphaned words after matching
-    word_to_group: dict[int, int] = {}  # word_index → group_index
-    groups: list[list[dict]] = []
-    group_ranges: list[tuple[int, int]] = []  # (start_idx, end_idx) for each group
-    word_idx = 0
-
-    for line_idx, line in enumerate(lines):
-        line_words_clean = [clean_word(w) for w in line.split()]
-        expected_count = len(line_words_clean)
-
-        if word_idx >= len(words):
-            break
-
-        first_word = line_words_clean[0] if line_words_clean else ""
-        best_start = word_idx
-        if first_word:
-            search_end = min(word_idx + 5, len(words))
-            for s in range(word_idx, search_end):
-                if whisper_cleaned[s] == first_word:
-                    best_start = s
-                    break
-
-        group_end = best_start + expected_count
-
-        if line_idx + 1 < len(lines):
-            next_line_words = [clean_word(w) for w in lines[line_idx + 1].split()]
-            next_first = next_line_words[0] if next_line_words else ""
-            if next_first:
-                for s in range(max(best_start + 1, group_end - 2), min(group_end + 5, len(words))):
-                    if whisper_cleaned[s] == next_first:
-                        group_end = s
-                        break
-
-        group_end = min(group_end, len(words))
-
-        if best_start < group_end:
-            g_idx = len(groups)
-            groups.append(words[best_start:group_end])
-            group_ranges.append((best_start, group_end))
-            for wi in range(best_start, group_end):
-                word_to_group[wi] = g_idx
-            word_idx = group_end
-        else:
-            word_idx = best_start
-
-    # Trailing words → last group
-    if word_idx < len(words):
-        if groups:
-            g_idx = len(groups) - 1
-            groups[g_idx].extend(words[word_idx:])
-            old_start, _ = group_ranges[g_idx]
-            group_ranges[g_idx] = (old_start, len(words))
-            for wi in range(word_idx, len(words)):
-                word_to_group[wi] = g_idx
-        else:
-            groups.append(words[word_idx:])
-            group_ranges.append((word_idx, len(words)))
-            for wi in range(word_idx, len(words)):
-                word_to_group[wi] = 0
-
-    # ── WORD ANCHORING: merge orphaned words into nearest group ───────
-    # Find any word indices NOT assigned to any group
-    orphaned: list[int] = [i for i in range(len(words)) if i not in word_to_group]
-    if orphaned and groups:
-        logger.info(f"[WordAnchor] Found {len(orphaned)} orphaned word(s): "
-                     f"{[whisper_cleaned[i] for i in orphaned]}")
-        for oi in orphaned:
-            # Find the nearest group by proximity to group boundaries
-            best_group = 0
-            best_dist = float('inf')
-            for gi, (gs, ge) in enumerate(group_ranges):
-                dist = min(abs(oi - gs), abs(oi - ge))
-                if dist < best_dist:
-                    best_dist = dist
-                    best_group = gi
-
-            # Insert the orphaned word into the group at the right position
-            word_obj = words[oi]
-            word_time = word_obj.get("start", 0)
-            inserted = False
-            for pos, gw in enumerate(groups[best_group]):
-                if gw.get("start", 0) > word_time:
-                    groups[best_group].insert(pos, word_obj)
-                    inserted = True
-                    break
-            if not inserted:
-                groups[best_group].append(word_obj)
-
-            word_to_group[oi] = best_group
-            logger.info(f"[WordAnchor] Anchored '{whisper_cleaned[oi]}' → group {best_group}")
-
-    # ── Merge single-word groups into neighbors ──────────────────────
-    # A single-word group means the matching failed for that word's line.
-    # Merge it into the closest adjacent group to prevent orphaned display.
-    if len(groups) > 1:
-        merged_groups: list[list[dict]] = []
-        for gi, group in enumerate(groups):
-            if len(group) == 1 and len(groups) > 1:
-                # Single-word group — merge with neighbor
-                word_text = (group[0].get("word", "") or "").strip()
-                if merged_groups:
-                    # Merge into previous group
-                    merged_groups[-1].extend(group)
-                    logger.info(f"[WordAnchor] Merged single-word '{word_text}' into previous group")
-                elif gi + 1 < len(groups):
-                    # No previous group yet — will prepend to next group
-                    groups[gi + 1] = group + groups[gi + 1]
-                    logger.info(f"[WordAnchor] Merged single-word '{word_text}' into next group")
-                else:
-                    merged_groups.append(group)
-            else:
-                merged_groups.append(group)
-        groups = merged_groups
-
-    groups = [g for g in groups if g]
-    return groups
+# ── Deduplicated: import from timeline.py (canonical version with section header filtering) ──
+from backend.api.timeline import _group_words_into_sentences, _match_words_to_lyrics_lines  # noqa: E402
 
 
 def _get_scene_lyrics(scene: Scene, words: list[dict], lyrics_text: str = "") -> str:
@@ -1769,6 +1631,8 @@ async def auto_generate(
         llm_model = None
         image_sys_override = None
         video_sys_override = None
+        image_prompt_guidance_text = ""
+        video_prompt_guidance_text = ""
         if is_enhanced and app_settings:
             from backend.services.llm.prompt_enhancer import PromptEnhancer
             from backend.api.settings import resolve_llm_config
@@ -1800,6 +1664,15 @@ async def auto_generate(
                     image_sys_override = NARRATION_IMAGE_SYSTEM_PROMPT
                 if not video_sys_override:
                     video_sys_override = NARRATION_VIDEO_SYSTEM_PROMPT
+
+            # Resolve per-model prompt guidance text
+            img_guidance_dict = app_settings.image_prompt_guidance or {}
+            img_guidance_entry = img_guidance_dict.get(image_model, "")
+            image_prompt_guidance_text = img_guidance_entry if isinstance(img_guidance_entry, str) else ""
+
+            vid_guidance_dict = app_settings.video_prompt_guidance or {}
+            vid_guidance_entry = vid_guidance_dict.get(video_model, "")
+            video_prompt_guidance_text = vid_guidance_entry if isinstance(vid_guidance_entry, str) else ""
 
         # Auto-generate video flow if no scenes have flow ideas
         # This ensures each scene gets a unique storyboard idea for differentiation
@@ -1851,6 +1724,7 @@ async def auto_generate(
                         prompt = await asyncio.to_thread(
                             enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
                             False, image_sys_override, image_model, "first",
+                            image_prompt_guidance_text or None,
                         )
                         enhanced_count += 1
                     except Exception as e:
@@ -1899,6 +1773,7 @@ async def auto_generate(
                             lf_prompt = await asyncio.to_thread(
                                 enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
                                 False, image_sys_override, image_model, "last",
+                                image_prompt_guidance_text or None,
                             )
                             enhanced_count += 1
                         except Exception as e:
@@ -1943,6 +1818,8 @@ async def auto_generate(
                         video_prompt = await asyncio.to_thread(
                             enhancer.enhance, video_prompt, vid_context, llm_provider, llm_api_key, llm_model,
                             True, video_sys_override, video_model,
+                            None,  # frame_type (not applicable for video)
+                            video_prompt_guidance_text or None,
                         )
                         enhanced_count += 1
                     except Exception as e:
@@ -2036,6 +1913,18 @@ class SeqAutoGenStatusResponse(BaseModel):
 
 # In-memory tracking per project
 _seq_auto_jobs: dict[str, dict] = {}
+
+
+async def _evict_seq_auto_job(pid: str, delay: float = 300.0):
+    """Remove finished auto-gen entry after `delay` seconds to prevent memory leak."""
+    await asyncio.sleep(delay)
+    _seq_auto_jobs.pop(pid, None)
+    logger.debug(f"Evicted _seq_auto_jobs entry for project {pid}")
+
+
+def _schedule_eviction(pid: str):
+    """Schedule cleanup of a finished auto-gen tracking entry (5 min grace)."""
+    asyncio.create_task(_evict_seq_auto_job(pid))
 
 
 # ── BatchRun persistence helpers ────────────────────────────────────────────
@@ -2322,6 +2211,14 @@ async def _wait_for_job(
     while elapsed < timeout:
         await asyncio.sleep(2)
         elapsed += 2
+
+        # Check if the auto-gen run was cancelled while we're waiting
+        # This allows cancel to take effect within 2s instead of up to 30 min
+        for pid_key, info in list(_seq_auto_jobs.items()):
+            if info.get("status") == "cancelled":
+                # If this job belongs to a cancelled run, abort early
+                pass  # Will be caught by status check below
+
         async with session_factory() as session:
             job = await session.get(Job, job_id)
             if not job:
@@ -2449,6 +2346,8 @@ async def _run_windowed_batch(
     batch_run_id: str | None = None,
     lipsync_enabled: bool = False,
     vocals_only_for_lipsync: bool = True,
+    image_prompt_guidance: str = "",
+    video_prompt_guidance: str = "",
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
 
@@ -2563,9 +2462,10 @@ async def _run_windowed_batch(
                                 project_fresh, scene, scene_lyrics, "first", image_model, None
                             )
                             enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                False, image_sys_override, image_model, "first")
+                                False, image_sys_override, image_model, "first",
+                                image_prompt_guidance or None)
                             if two_pass and ref_ids:
-                                enhance_args += (None, "base")
+                                enhance_args += ("base",)
                             prompt = await asyncio.to_thread(*enhance_args)
                         except Exception as e:
                             logger.warning(f"Windowed batch: enhance FF failed scene {i}: {e}")
@@ -2620,14 +2520,18 @@ async def _run_windowed_batch(
                 # Always re-derive video prompt from the current image prompt
                 # (not from a stale video_prompt saved by a previous auto-gen run)
                 video_prompt = scene.prompt or f"Cinematic scene {scene.order_index + 1}"
+                # Pass prev_scene for narrative continuity in the LLM context
+                prev_scene_for_ctx = scenes[i - 1] if i > 0 else None
                 if enhancer and llm_api_key:
                     try:
                         vid_ctx = await _build_video_enhance_context(
-                            project_fresh, scene, scene_lyrics, video_model, None
+                            project_fresh, scene, scene_lyrics, video_model, prev_scene_for_ctx
                         )
                         video_prompt = await asyncio.to_thread(
                             enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
                             True, video_sys_override, video_model,
+                            None,  # frame_type (not applicable for video)
+                            video_prompt_guidance or None,
                         )
                     except Exception as e:
                         logger.warning(f"Windowed batch: enhance video failed scene {i}: {e}")
@@ -2688,9 +2592,10 @@ async def _run_windowed_batch(
                             project_fresh, scene, scene_lyrics, "first", image_model, None
                         )
                         enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                            False, image_sys_override, image_model, "first")
+                            False, image_sys_override, image_model, "first",
+                            image_prompt_guidance or None)
                         if two_pass and ref_ids:
-                            enhance_args += (None, "base")
+                            enhance_args += ("base",)
                         prompt = await asyncio.to_thread(*enhance_args)
                     except Exception as e:
                         logger.warning(f"Windowed batch: enhance failed scene {i}: {e}")
@@ -3014,6 +2919,8 @@ async def _run_sequential_auto_gen(
             enhancer = None
             llm_provider = llm_api_key = llm_model = None
             image_sys_override = video_sys_override = None
+            image_prompt_guidance_text = ""
+            video_prompt_guidance_text = ""
             if app_settings:
                 from backend.services.llm.prompt_enhancer import PromptEnhancer
                 from backend.api.settings import resolve_llm_config
@@ -3044,6 +2951,15 @@ async def _run_sequential_auto_gen(
                         image_sys_override = _N_IMG
                     if not video_sys_override:
                         video_sys_override = _N_VID
+
+                # Resolve per-model prompt guidance text
+                img_guidance_dict = app_settings.image_prompt_guidance or {}
+                img_guidance_entry = img_guidance_dict.get(image_model, "")
+                image_prompt_guidance_text = img_guidance_entry if isinstance(img_guidance_entry, str) else ""
+
+                vid_guidance_dict = app_settings.video_prompt_guidance or {}
+                vid_guidance_entry = vid_guidance_dict.get(video_model, "")
+                video_prompt_guidance_text = vid_guidance_entry if isinstance(vid_guidance_entry, str) else ""
 
         # ── Auto-generate video flow if missing ─────────────────────────
         # Ensures each scene has a unique storyboard idea before generation
@@ -3105,6 +3021,8 @@ async def _run_sequential_auto_gen(
                 batch_run_id=batch_run_id,
                 lipsync_enabled=lipsync_enabled,
                 vocals_only_for_lipsync=vocals_only_for_lipsync,
+                image_prompt_guidance=image_prompt_guidance_text,
+                video_prompt_guidance=video_prompt_guidance_text,
             )
             return
 
@@ -3191,9 +3109,9 @@ async def _run_sequential_auto_gen(
                                 project, scene, scene_lyrics, "first", image_model, prev_scene
                             )
                             enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                False, image_sys_override, image_model, "first")
+                                False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                             if two_pass and ref_ids:
-                                enhance_args += (None, "base")
+                                enhance_args += ("base",)
                             prompt = await asyncio.to_thread(*enhance_args)
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance failed scene {i}: {e}")
@@ -3258,9 +3176,9 @@ async def _run_sequential_auto_gen(
                                     project, scene, scene_lyrics, "first", image_model, prev_scene
                                 )
                                 enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                    False, image_sys_override, image_model, "first")
+                                    False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                 if two_pass and ref_ids:
-                                    enhance_args += (None, "base")
+                                    enhance_args += ("base",)
                                 prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
                                 logger.warning(f"Sequential auto-gen: enhance FF failed scene {i}: {e}")
@@ -3323,6 +3241,8 @@ async def _run_sequential_auto_gen(
                             video_prompt = await asyncio.to_thread(
                                 enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
                                 True, video_sys_override, video_model,
+                                None,  # frame_type
+                                video_prompt_guidance_text or None,
                             )
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance video failed scene {i}: {e}")
@@ -3386,9 +3306,9 @@ async def _run_sequential_auto_gen(
                                     project, scene, scene_lyrics, "first", image_model, prev_scene
                                 )
                                 enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                    False, image_sys_override, image_model, "first")
+                                    False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                 if two_pass and ref_ids:
-                                    enhance_args += (None, "base")
+                                    enhance_args += ("base",)
                                 prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
                                 logger.warning(f"Sequential auto-gen: enhance FF scene 1 failed: {e}")
@@ -3458,9 +3378,9 @@ async def _run_sequential_auto_gen(
                                             project, scene, scene_lyrics, "first", image_model, prev_scene
                                         )
                                         enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                            False, image_sys_override, image_model, "first")
+                                            False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                         if two_pass and ref_ids:
-                                            enhance_args += (None, "base")
+                                            enhance_args += ("base",)
                                         prompt = await asyncio.to_thread(*enhance_args)
                                     except Exception as e:
                                         logger.warning(f"Sequential auto-gen: enhance FF fallback failed: {e}")
@@ -3530,6 +3450,8 @@ async def _run_sequential_auto_gen(
                             video_prompt = await asyncio.to_thread(
                                 enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
                                 True, video_sys_override, video_model,
+                                None,  # frame_type
+                                video_prompt_guidance_text or None,
                             )
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance video failed scene {i}: {e}")
@@ -3591,9 +3513,9 @@ async def _run_sequential_auto_gen(
                                     project, scene, scene_lyrics, "first", image_model, prev_scene
                                 )
                                 enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                    False, image_sys_override, image_model, "first")
+                                    False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                 if two_pass and ref_ids:
-                                    enhance_args += (None, "base")
+                                    enhance_args += ("base",)
                                 prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
                                 logger.warning(f"Sequential auto-gen V2V: enhance FF scene 1 failed: {e}")
@@ -3654,6 +3576,8 @@ async def _run_sequential_auto_gen(
                             video_prompt = await asyncio.to_thread(
                                 enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
                                 True, video_sys_override, video_model,
+                                None,  # frame_type
+                                video_prompt_guidance_text or None,
                             )
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen V2V: enhance video failed scene {i}: {e}")
@@ -3894,6 +3818,9 @@ async def _run_sequential_auto_gen(
                             )
                 except Exception:
                     pass  # Best-effort
+
+        # Schedule eviction of tracking dict to prevent memory leak (5 min grace)
+        _schedule_eviction(pid)
 
 
 async def _resume_sequential_auto_gen(

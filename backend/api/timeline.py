@@ -2098,8 +2098,12 @@ async def create_stem_mix(
                 detail="No selected stems found",
             )
 
-        # Mix stems by averaging
-        mixed = np.mean(stems_to_mix, axis=0)
+        # Mix stems by summing (np.mean halves volume with 2 stems)
+        # then peak-normalize to prevent clipping
+        mixed = np.sum(stems_to_mix, axis=0)
+        peak = np.max(np.abs(mixed))
+        if peak > 0:
+            mixed = mixed / peak * 0.95  # Leave 5% headroom
 
         # Save mixed audio to project cache
         cache_audio_dir = project_path / "cache" / "audio"

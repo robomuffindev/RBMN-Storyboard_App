@@ -91,6 +91,9 @@ class SettingsResponse(BaseModel):
     director_auto_image_desc: bool = True
     global_video_negative_prompt: Optional[str] = None
     gpu_acceleration_enabled: bool = True
+    # FFmpeg threading
+    ffmpeg_threads: int = 0  # 0 = auto-detect from CPU cores
+    ffmpeg_filter_threads: int = 4
     # Ollama (local LLM) — multi-server pool
     ollama_base_url: Optional[str] = None  # legacy single URL
     ollama_urls: Optional[list[str]] = None  # multi-server pool
@@ -150,6 +153,9 @@ class SettingsUpdate(BaseModel):
     director_auto_image_desc: Optional[bool] = None
     global_video_negative_prompt: Optional[str] = None
     gpu_acceleration_enabled: Optional[bool] = None
+    # FFmpeg threading
+    ffmpeg_threads: Optional[int] = None
+    ffmpeg_filter_threads: Optional[int] = None
     # Ollama (local LLM) — multi-server pool
     ollama_base_url: Optional[str] = None  # legacy single URL
     ollama_urls: Optional[list[str]] = None  # multi-server pool
@@ -267,6 +273,16 @@ async def _get_or_create_settings(session: AsyncSession) -> AppSettings:
     except Exception:
         pass  # Non-critical
 
+    # Sync FFmpeg threading with stored setting
+    try:
+        from backend.services.video.ffmpeg import configure_ffmpeg_threads
+        configure_ffmpeg_threads(
+            threads=getattr(settings, 'ffmpeg_threads', 0),
+            filter_threads=getattr(settings, 'ffmpeg_filter_threads', 4),
+        )
+    except Exception:
+        pass  # Non-critical
+
     return settings
 
 
@@ -339,6 +355,8 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         director_auto_image_desc=settings.director_auto_image_desc if settings.director_auto_image_desc is not None else True,
         global_video_negative_prompt=settings.global_video_negative_prompt,
         gpu_acceleration_enabled=settings.gpu_acceleration_enabled if settings.gpu_acceleration_enabled is not None else True,
+        ffmpeg_threads=getattr(settings, 'ffmpeg_threads', 0) or 0,
+        ffmpeg_filter_threads=getattr(settings, 'ffmpeg_filter_threads', 4) or 4,
         ollama_base_url=settings.ollama_base_url,
         ollama_urls=settings.ollama_urls or [],
         ollama_model=settings.ollama_model,
@@ -556,6 +574,11 @@ async def update_settings(
             settings.global_video_negative_prompt = req.global_video_negative_prompt or None
         if req.gpu_acceleration_enabled is not None:
             settings.gpu_acceleration_enabled = req.gpu_acceleration_enabled
+        # FFmpeg threading
+        if req.ffmpeg_threads is not None:
+            settings.ffmpeg_threads = max(0, req.ffmpeg_threads)
+        if req.ffmpeg_filter_threads is not None:
+            settings.ffmpeg_filter_threads = max(1, req.ffmpeg_filter_threads)
         # Ollama settings
         if req.ollama_base_url is not None:
             settings.ollama_base_url = req.ollama_base_url.rstrip("/") if req.ollama_base_url else None
@@ -577,6 +600,17 @@ async def update_settings(
                 logger.info(
                     f"GPU acceleration {'enabled' if settings.gpu_acceleration_enabled else 'disabled'} "
                     f"(FFmpeg: {_gpu.encoder}, Demucs: {_demucs_device.device})"
+                )
+            except Exception:
+                pass  # Non-critical
+
+        # Sync FFmpeg threading immediately after save
+        if req.ffmpeg_threads is not None or req.ffmpeg_filter_threads is not None:
+            try:
+                from backend.services.video.ffmpeg import configure_ffmpeg_threads
+                configure_ffmpeg_threads(
+                    threads=settings.ffmpeg_threads or 0,
+                    filter_threads=settings.ffmpeg_filter_threads or 4,
                 )
             except Exception:
                 pass  # Non-critical
@@ -1242,6 +1276,9 @@ class SettingsExportData(BaseModel):
     global_video_negative_prompt: Optional[str] = None
     # GPU acceleration
     gpu_acceleration_enabled: bool = True
+    # FFmpeg threading
+    ffmpeg_threads: int = 0
+    ffmpeg_filter_threads: int = 4
     # Ollama (local LLM)
     ollama_base_url: Optional[str] = None
     ollama_urls: Optional[list[str]] = None
@@ -1313,6 +1350,8 @@ async def export_settings(
             director_auto_image_desc=settings.director_auto_image_desc if settings.director_auto_image_desc is not None else True,
             global_video_negative_prompt=settings.global_video_negative_prompt,
             gpu_acceleration_enabled=settings.gpu_acceleration_enabled if settings.gpu_acceleration_enabled is not None else True,
+            ffmpeg_threads=getattr(settings, 'ffmpeg_threads', 0) or 0,
+            ffmpeg_filter_threads=getattr(settings, 'ffmpeg_filter_threads', 4) or 4,
             # Ollama
             ollama_base_url=settings.ollama_base_url,
             ollama_urls=settings.ollama_urls,
@@ -1479,6 +1518,11 @@ async def import_settings(
         # GPU acceleration
         if "gpu_acceleration_enabled" in data:
             settings.gpu_acceleration_enabled = data["gpu_acceleration_enabled"]
+        # FFmpeg threading
+        if "ffmpeg_threads" in data:
+            settings.ffmpeg_threads = max(0, data["ffmpeg_threads"])
+        if "ffmpeg_filter_threads" in data:
+            settings.ffmpeg_filter_threads = max(1, data["ffmpeg_filter_threads"])
         # Ollama (local LLM)
         if "ollama_base_url" in data:
             settings.ollama_base_url = data["ollama_base_url"]

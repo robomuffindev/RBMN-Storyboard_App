@@ -86,6 +86,21 @@ job_event_broadcaster = JobEventBroadcaster()
 # Keep backward-compatible name for imports in jobs.py
 job_event_queue = job_event_broadcaster
 
+# ── Color override suffix mapping ──────────────────────────────────────
+# Used at dispatch time to inject a color constraint directly into the
+# prompt text sent to ComfyUI, ensuring the image/video model honors
+# the selected palette even if the LLM enhancement step ignored it.
+COLOR_SUFFIXES = {
+    "black_and_white": ", black and white, monochrome, grayscale, noir",
+    "high_contrast_bw": ", high contrast black and white, stark monochrome, deep shadows, no color",
+    "sepia": ", sepia tone, warm brown tint, antique photograph style",
+    "monochrome_blue": ", monochrome blue, cyanotype, cold blue tones",
+    "monochrome_red": ", monochrome red, dark crimson tones, red-tinted",
+    "desaturated": ", desaturated colors, muted palette, low saturation, washed out",
+    "vintage_film": ", vintage film look, faded colors, retro film stock, Kodachrome",
+    "neon_cyberpunk": ", neon cyberpunk, vivid neon colors, electric pink and cyan, synthwave",
+}
+
 
 class JobDispatcher:
     """
@@ -565,10 +580,12 @@ class JobDispatcher:
         # Step 1b: Stamp a unique filename prefix on VHS_VideoCombine nodes.
         # Some ComfyUI servers don't include VHS output in /history — this
         # unique prefix enables fallback direct download by known filename.
-        vhs_prefix = stamp_vhs_unique_prefix(workflow, job_id_str[:8])
-        if vhs_prefix:
-            self._vhs_prefixes[job_id_str] = vhs_prefix
-            logger.info(f"[{job_id_str}] VHS prefix stamped: {vhs_prefix}")
+        # Skip if already stamped during two-pass base rebuild above.
+        if not is_two_pass_base:
+            vhs_prefix = stamp_vhs_unique_prefix(workflow, job_id_str[:8])
+            if vhs_prefix:
+                self._vhs_prefixes[job_id_str] = vhs_prefix
+                logger.info(f"[{job_id_str}] VHS prefix stamped: {vhs_prefix}")
 
         # Step 1c: RunPod auto-start — ensure pod is running if enabled
         # If RunPod is configured and has a pod for this service type, prefer it over local workers
@@ -1078,6 +1095,50 @@ class JobDispatcher:
         except Exception as e:
             logger.debug(f"Could not inject image direction: {e}")
 
+        # Inject color override suffix into prompt at dispatch time
+        # This ensures the color constraint reaches ComfyUI even if the LLM ignored it
+        try:
+            color_override = ""
+            # Try scene-level first
+            if job and job.scene_id:
+                async with self._session_factory() as color_session:
+                    from backend.database.models import Scene as ColorScene
+                    color_scene = await color_session.get(ColorScene, job.scene_id)
+                    if color_scene and color_scene.parameters:
+                        color_override = color_scene.parameters.get("color_override", "")
+            # Fall back to project-level
+            if not color_override and style_project and style_project.settings:
+                color_override = style_project.settings.get("global_color_override", "")
+
+            if color_override and color_override != "full_color":
+                if color_override == "custom":
+                    # Read custom palette text
+                    custom_palette = ""
+                    if job and job.scene_id:
+                        async with self._session_factory() as cp_session:
+                            from backend.database.models import Scene as CPScene
+                            cp_scene = await cp_session.get(CPScene, job.scene_id)
+                            if cp_scene and cp_scene.parameters:
+                                custom_palette = cp_scene.parameters.get("custom_color_palette", "")
+                    if not custom_palette and style_project and style_project.settings:
+                        custom_palette = style_project.settings.get("custom_color_palette", "")
+                    if custom_palette:
+                        color_suffix = f", {custom_palette}"
+                        prompt_val = params.get("prompt", "")
+                        if prompt_val:
+                            params = dict(params)
+                            params["prompt"] = prompt_val + color_suffix
+                            logger.info(f"[{job.id if job else 'N/A'}] Injected custom color palette override")
+                elif color_override in COLOR_SUFFIXES:
+                    color_suffix = COLOR_SUFFIXES[color_override]
+                    prompt_val = params.get("prompt", "")
+                    if prompt_val:
+                        params = dict(params)
+                        params["prompt"] = prompt_val + color_suffix
+                        logger.info(f"[{job.id if job else 'N/A'}] Injected color override: {color_override}")
+        except Exception as e:
+            logger.debug(f"Could not inject color override: {e}")
+
         # ── Z-Image Turbo redirect helper ──────────────────────────────────
         # Checks single_image_generator setting and redirects T2I jobs to
         # Z-Image Turbo when applicable. Returns the prepared workflow or None.
@@ -1094,18 +1155,17 @@ class JobDispatcher:
                     if zig_settings and zig_settings.single_image_generator == "z_image_turbo":
                         wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
                         p_text = _params.get("prompt", "")
-                        s_neg = _params.get("negative_prompt", "").strip() if _params.get("negative_prompt") else ""
-                        eff_neg = s_neg if s_neg else global_negative_prompt
-                        _params["effective_negative_prompt"] = eff_neg
-                        _params["submitted_image_prompt"] = p_text
-                        logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo (no reference images)")
+                        # Z-Image has no negative prompt node — don't pass or store negative prompt
+                        _params["effective_negative_prompt"] = ""
+                        anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+                        _params["submitted_image_prompt"] = (p_text + anti_text_suffix) if p_text else p_text
+                        logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo (no reference images, negative prompt ignored — unsupported)")
                         return prepare_zimage_workflow(
                             workflow_path=wf_path,
                             prompt=p_text,
                             width=_params.get("width", 1024),
                             height=_params.get("height", 1024),
                             seed=_seed,
-                            negative_prompt=eff_neg,
                         )
             except Exception as e:
                 logger.debug(f"Could not check single_image_generator: {e} — using Klein")
@@ -1141,6 +1201,7 @@ class JobDispatcher:
             "klein_2ref": "KLEIN_EDIT_ULTRA_WORKFLOW_2REF.json",
             "klein_3ref": "KLEIN_EDIT_ULTRA_WORKFLOW_3REF.json",
             "klein_4ref": "KLEIN_EDIT_ULTRA_WORKFLOW_4REF.json",
+            "klein_5ref": "KLEIN_EDIT_ULTRA_WORKFLOW_5REF.json",
             "klein_t2i": "KLEIN_EDIT_ULTRA_WORKFLOW_Text2Image.json",
         }
 
@@ -1152,8 +1213,8 @@ class JobDispatcher:
             # Fall back to correct workflow if resolved ref count doesn't match requested
             # (e.g., frontend sent klein_1ref but the character image asset couldn't be found)
             actual_ref_count = len(ref_images)
-            ref_count_map = {0: "klein_t2i", 1: "klein_1ref", 2: "klein_2ref", 3: "klein_3ref", 4: "klein_4ref"}
-            effective_workflow = ref_count_map.get(actual_ref_count, "klein_4ref")
+            ref_count_map = {0: "klein_t2i", 1: "klein_1ref", 2: "klein_2ref", 3: "klein_3ref", 4: "klein_4ref", 5: "klein_5ref"}
+            effective_workflow = ref_count_map.get(actual_ref_count, "klein_5ref")
             if effective_workflow != workflow_type:
                 logger.warning(
                     f"Workflow mismatch: requested {workflow_type} but only resolved "
@@ -1169,15 +1230,17 @@ class JobDispatcher:
                         return zimage_fallback
             workflow_path = str(workflows_dir / klein_map[effective_workflow])
             prompt_text = params.get("prompt", "")
-            # Build effective negative prompt: scene-level overrides global, otherwise use global
+            # Klein has no negative prompt node — don't pass negative prompt
+            # Log if user had one set so they know it was ignored
             scene_neg = params.get("negative_prompt", "").strip() if params.get("negative_prompt") else ""
-            effective_neg = scene_neg if scene_neg else global_negative_prompt
-            # Store what was actually used so frontend can display it
-            params["effective_negative_prompt"] = effective_neg
-            # Capture the final submitted prompt (includes SFW + image direction + anti-text suffix + neg prompt)
+            if scene_neg or global_negative_prompt:
+                logger.info(
+                    f"[{job.id if job else 'N/A'}] Klein workflow has no negative prompt node — "
+                    f"scene/global negative prompt ignored"
+                )
+            params["effective_negative_prompt"] = ""
+            # Capture the final submitted prompt (includes SFW + image direction + anti-text suffix, NO neg prompt)
             anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-            if effective_neg:
-                anti_text_suffix += ", " + effective_neg
             params["submitted_image_prompt"] = (prompt_text + anti_text_suffix) if prompt_text else prompt_text
             return prepare_klein_workflow(
                 workflow_path=workflow_path,
@@ -1186,7 +1249,6 @@ class JobDispatcher:
                 height=params.get("height", 576),
                 seed=seed,
                 ref_images=ref_images,
-                negative_prompt=effective_neg,
             )
 
         # LTX video workflows

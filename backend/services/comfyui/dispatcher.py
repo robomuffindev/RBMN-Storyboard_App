@@ -277,14 +277,24 @@ class ComfyDispatcher:
             capable = [w for w in healthy if required_caps.issubset(w.capabilities)]
 
         if not capable:
-            logger.warning(f"No workers with capabilities {required_caps}")
-            capable = healthy  # Fall back to any healthy worker
+            logger.warning(
+                f"No workers available with required capabilities {required_caps}. "
+                f"Healthy workers and their caps: "
+                f"{{{', '.join(f'{w.url}: {w.capabilities}' for w in healthy)}}}"
+            )
+            return None
 
         # Filter by models
         if required_models:
             model_capable = [w for w in capable if required_models.issubset(w.models)]
-            if model_capable:
-                capable = model_capable
+            if not model_capable:
+                logger.warning(
+                    f"No workers available with required models {required_models}. "
+                    f"Capable workers and their models: "
+                    f"{{{', '.join(f'{w.url}: {w.models}' for w in capable)}}}"
+                )
+                return None
+            capable = model_capable
 
         # Select least-loaded
         selected = min(capable, key=lambda w: (w.in_flight, -w.last_check.timestamp()))
@@ -342,6 +352,8 @@ class ComfyDispatcher:
             worker = self.workers[worker_url]
         else:
             worker = self.select_worker()
+            if worker is None:
+                raise ValueError("No capable workers available for this job")
 
         client = self.clients.get(worker.url)
         if not client:

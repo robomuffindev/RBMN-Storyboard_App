@@ -90,10 +90,13 @@ def prepare_klein_workflow(
     height: int,
     seed: int,
     ref_images: Optional[List[str]] = None,
-    negative_prompt: Optional[str] = None,
 ) -> dict:
     """
     Load and prepare a Klein image generation workflow.
+
+    NOTE: Klein workflows have NO negative prompt node. The CFGGuider's negative
+    input is wired to empty conditioning. Do NOT append negative prompt text to
+    the positive prompt — it pollutes the generation.
 
     Mutates these nodes:
     - "CLIP Text Encode (Positive Prompt)" → text input
@@ -109,7 +112,7 @@ def prepare_klein_workflow(
         width: Image width
         height: Image height
         seed: Random seed
-        ref_images: List of reference image paths (1-2 images)
+        ref_images: List of reference image paths (1-5 images)
 
     Returns:
         Mutated workflow dict
@@ -124,10 +127,8 @@ def prepare_klein_workflow(
         workflow = json.load(f)
 
     # Set text prompt — append anti-text suffix to prevent Klein from rendering subtitles/captions
+    # NOTE: No negative prompt appended here — Klein has no negative prompt node
     anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-    # Append global/scene negative prompt as additional anti-text guidance
-    if negative_prompt and negative_prompt.strip():
-        anti_text_suffix += ", " + negative_prompt.strip()
     full_prompt = prompt + anti_text_suffix if prompt else prompt
     set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", full_prompt)
 
@@ -151,6 +152,9 @@ def prepare_klein_workflow(
 
         if len(ref_images) >= 4:
             set_node_input(workflow, "Reference 4", "image", ref_images[3])
+
+        if len(ref_images) >= 5:
+            set_node_input(workflow, "Reference 5", "image", ref_images[4])
 
     logger.info("Klein workflow prepared")
     return workflow
@@ -1279,13 +1283,15 @@ def prepare_zimage_workflow(
     width: int,
     height: int,
     seed: int,
-    negative_prompt: Optional[str] = None,
 ) -> dict:
     """
     Load and prepare a Z-Image Turbo text-to-image workflow.
 
     Z-Image is text-only — no reference images.
     Uses KSampler with 8 steps, res_multistep sampler.
+
+    NOTE: Z-Image workflows have NO negative prompt node. Do NOT append
+    negative prompt text to the positive prompt.
 
     Mutates:
     - "CLIP Text Encode (Positive Prompt)" → text input
@@ -1298,9 +1304,8 @@ def prepare_zimage_workflow(
         workflow = json.load(f)
 
     # Set text prompt with anti-text suffix
+    # NOTE: No negative prompt appended here — Z-Image has no negative prompt node
     anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-    if negative_prompt and negative_prompt.strip():
-        anti_text_suffix += ", " + negative_prompt.strip()
     full_prompt = prompt + anti_text_suffix if prompt else prompt
     set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", full_prompt)
 

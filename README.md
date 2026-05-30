@@ -35,7 +35,7 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **LTXDirector Integration** — Full control over LTX Director video generation parameters: guide strength (keyframe conditioning), audio guidance (audio-to-video influence), stitch mode (smooth vs hard-cut prompt transitions), auto image description, and video negative prompt. All configurable in Settings
 - **Scene Editor** — Tabbed editor with Image (First Frame / Last Frame sub-tabs), Video, Stems, Lyrics, Tools, Image Movement, and Prompt tabs per scene
 - **Per-Scene Lyrics Override** — Manually edit auto-detected lyrics on any scene via the Lyrics tab Override button. Saves persist to scene parameters with a visual "Overridden" badge; Reset reverts to auto-detected lyrics
-- **Reference Image System** — Select up to 2 characters and upload additional reference images per scene. Workflow auto-selects based on reference count (0–4 images). Uses FLUX Klein "Image N" syntax for precise reference mapping
+- **Reference Image System** — Select up to 2 characters and upload additional reference images per scene (up to 5 total for first frame, 4 for last frame). Workflow auto-selects based on reference count (0–5 images). Uses FLUX Klein "Image N" syntax for precise reference mapping
 - **Two-Pass Image Generation** — Pass 1 generates the scene environment (no characters), Pass 2 composites characters into the scene using the Pass 1 output as a reference. Prevents character IP-Adapter from making all scenes look identical
 - **Prompt Enhancement** — LLM-powered prompt enhancement with context awareness (model type, scene flow, camera action, character descriptions, reference images, lipsync state). Built-in system prompt registry with per-model overrides configurable in Settings. Video prompts are Director-aware with multi-segment support
 - **Camera Action Presets** — 24 film-industry camera motions (pan, tilt, dolly, crane, orbit, steadicam, etc.) integrated into video prompt enhancement
@@ -126,7 +126,7 @@ Z-Image Turbo is a fast 6B-parameter text-to-image model using the S3-DiT archit
 | `nicegirls_flux_klein9b.safetensors` | `models/loras/` | Required for T2I workflow |
 | `detail_slider_klein_9b_20260123_065513.safetensors` | `models/loras/` | Required for T2I workflow |
 | `darkBeastFeb1826Latest_dbkBlitzV15.safetensors` | `models/loras/` | Required for T2I workflow |
-| `anime2real-semi.safetensors` | `models/loras/` | Required for 1REF / 2REF / 3REF / 4REF workflows |
+| `anime2real-semi.safetensors` | `models/loras/` | Required for 1REF / 2REF / 3REF / 4REF / 5REF workflows |
 
 #### LoRAs — Video Generation (LTX 2.3)
 
@@ -160,6 +160,23 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 | **ComfyUI-Whisper** | Whisper transcription via ComfyUI (alternative to local/Gradio) | [github.com/yuvraj108c/ComfyUI-Whisper](https://github.com/yuvraj108c/ComfyUI-Whisper) |
 
 > **Note:** The app auto-detects missing custom nodes on each ComfyUI server before job submission. Non-essential missing nodes (like display/debug nodes) are automatically removed and bypassed. Essential missing nodes will produce a clear error message telling you which pack to install.
+
+#### Whisper via ComfyUI Setup
+
+If you already have a ComfyUI server running for image/video generation, you can use it for Whisper transcription too — no need to set up a separate Whisper server. This is especially useful on RunPod or remote GPU setups where installing WhisperX locally isn't practical.
+
+1. **Install the custom node** on your ComfyUI server:
+   ```
+   cd ComfyUI/custom_nodes
+   git clone https://github.com/yuvraj108c/ComfyUI-Whisper.git
+   cd ComfyUI-Whisper
+   pip install -r requirements.txt
+   ```
+   Or install via ComfyUI Manager by searching for "ComfyUI-Whisper".
+
+2. **Restart ComfyUI** — the Whisper model (`openai/whisper-large-v3-turbo` by default) will download automatically on the first transcription run (~1.5 GB).
+
+3. **Configure in the app** — Go to **Settings** and set the **Whisper ComfyUI URL** to your ComfyUI server address (e.g., `http://192.168.1.100:8188`). The app will auto-detect the server type when you process audio. You can also set `WHISPER_MODE=comfyui` in your `.env` file.
 
 ## Architecture
 

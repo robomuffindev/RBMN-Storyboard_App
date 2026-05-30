@@ -7,6 +7,7 @@ import type {
   Job,
   AppSettings,
   ExportStatus,
+  ExportScanResult,
   AudioAnalysisResult,
   WorkflowConfig,
   WorkflowFieldMapping,
@@ -21,6 +22,7 @@ import type {
 const api: AxiosInstance = axios.create({
   baseURL: '/api',
   headers: { 'Content-Type': 'application/json' },
+  timeout: 60000,  // 60s default timeout — prevents requests from hanging forever
 });
 
 // ===== Projects =====
@@ -389,6 +391,8 @@ export const getConcept = (projectId: string) =>
     transition_lora_strength: number;
     random_ken_burns: boolean;
     ken_burns_allowed_effects: string[];
+    global_color_override: string;
+    custom_color_palette: string;
   }>(
     `/projects/${projectId}/concept`
   );
@@ -409,6 +413,8 @@ export const saveConcept = (projectId: string, data: {
   transition_lora_strength?: number;
   random_ken_burns?: boolean;
   ken_burns_allowed_effects?: string[];
+  global_color_override?: string;
+  custom_color_palette?: string;
 }) =>
   api.put(`/projects/${projectId}/concept`, data);
 
@@ -572,6 +578,32 @@ export const exportVideo = (projectId: string, data: {
 
 export const getExportStatus = (projectId: string) =>
   api.get<ExportStatus>(`/projects/${projectId}/export/status`);
+
+export const cancelExport = (projectId: string) =>
+  api.post<{ status: string; message: string }>(`/projects/${projectId}/export/cancel`);
+
+export const resumeExport = (projectId: string) =>
+  api.post<{ job_id: string }>(`/projects/${projectId}/export/resume`);
+
+export const scanExport = (projectId: string) =>
+  api.get<ExportScanResult>(`/projects/${projectId}/export/scan`);
+
+export const recoverExport = (projectId: string) =>
+  api.post<{ job_id: string }>(`/projects/${projectId}/export/recover`);
+
+// ===== Export Gallery =====
+export interface ExportFileInfo {
+  filename: string;
+  size_mb: number;
+  created_at: string;
+  download_url: string;
+}
+
+export const listExports = (projectId: string) =>
+  api.get<ExportFileInfo[]>(`/projects/${projectId}/export/gallery`);
+
+export const deleteExportFile = (projectId: string, filename: string) =>
+  api.delete(`/projects/${projectId}/export/gallery/${encodeURIComponent(filename)}`);
 
 // ===== Preview Render =====
 export const renderPreview = (projectId: string) =>

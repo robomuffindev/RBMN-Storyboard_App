@@ -79,6 +79,35 @@ interface AppState {
   removeAsset: (assetId: string) => void;
 }
 
+const MAX_JOBS = 200;
+const TERMINAL_STATUSES = new Set(['done', 'failed', 'cancelled']);
+
+/** Trim the jobs array to MAX_JOBS, removing oldest terminal jobs first. */
+function pruneJobs(jobs: Job[]): Job[] {
+  if (jobs.length <= MAX_JOBS) return jobs;
+
+  // Partition into in-progress and terminal
+  const inProgress: Job[] = [];
+  const terminal: Job[] = [];
+  for (const j of jobs) {
+    if (TERMINAL_STATUSES.has(j.status)) {
+      terminal.push(j);
+    } else {
+      inProgress.push(j);
+    }
+  }
+
+  // Sort terminal by created_at ascending (oldest first) so we can drop from the front
+  terminal.sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+  // How many terminal jobs we can keep
+  const terminalBudget = Math.max(0, MAX_JOBS - inProgress.length);
+  const keptTerminal = terminal.slice(terminal.length - terminalBudget);
+
+  // Recombine: in-progress first, then kept terminal (preserves rough ordering)
+  return [...inProgress, ...keptTerminal];
+}
+
 export const useAppStore = create<AppState>((set) => ({
   // Initial state
   currentProject: null,
@@ -124,10 +153,10 @@ export const useAppStore = create<AppState>((set) => ({
   setBatchPreviewEnabled: (enabled) => set({ batchPreviewEnabled: enabled }),
 
   // Jobs
-  addJob: (job) => set((s) => ({ jobs: [...s.jobs, job] })),
+  addJob: (job) => set((s) => ({ jobs: pruneJobs([...s.jobs, job]) })),
   updateJob: (jobId, updates) =>
     set((s) => ({
-      jobs: s.jobs.map((j) => (j.id === jobId ? { ...j, ...updates } : j)),
+      jobs: pruneJobs(s.jobs.map((j) => (j.id === jobId ? { ...j, ...updates } : j))),
     })),
   removeJob: (jobId) => set((s) => ({ jobs: s.jobs.filter((j) => j.id !== jobId) })),
   setJobs: (jobs) => set({ jobs }),

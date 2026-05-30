@@ -25,8 +25,8 @@ engine = create_async_engine(
     echo=False,
     future=True,
     pool_pre_ping=True,
-    pool_size=20,
-    max_overflow=40,
+    pool_size=5,
+    max_overflow=10,
     pool_timeout=60,
     connect_args={
         "timeout": 30,
@@ -283,6 +283,17 @@ async def init_db() -> None:
             logger.info("Migration: gpu_acceleration_enabled added to app_settings")
         except Exception:
             pass  # Column already exists
+
+        # Add FFmpeg threading columns to app_settings if missing
+        for col_sql in [
+            "ALTER TABLE app_settings ADD COLUMN ffmpeg_threads INTEGER DEFAULT 0",
+            "ALTER TABLE app_settings ADD COLUMN ffmpeg_filter_threads INTEGER DEFAULT 4",
+        ]:
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration: {col_sql.split('ADD COLUMN ')[1].split(' ')[0]} added to app_settings")
+            except Exception:
+                pass  # Column already exists
 
         # Add Ollama (local LLM) columns to app_settings if missing
         for col_sql in [

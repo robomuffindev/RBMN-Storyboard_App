@@ -66,6 +66,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [transitionLoraStrength, setTransitionLoraStrength] = useState(1.0);
   const [randomKenBurns, setRandomKenBurns] = useState(false);
   const [kenBurnsAllowedEffects, setKenBurnsAllowedEffects] = useState<string[]>([]);
+  const [globalColorOverride, setGlobalColorOverride] = useState('');
+  const [customColorPalette, setCustomColorPalette] = useState('');
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
@@ -138,6 +140,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         transition_lora_strength: transitionLoraStrength,
         random_ken_burns: randomKenBurns,
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
+        global_color_override: globalColorOverride,
+        custom_color_palette: customColorPalette,
       });
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
@@ -177,6 +181,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setTransitionLoraStrength(conceptData.transition_lora_strength ?? 1.0);
       setRandomKenBurns(conceptData.random_ken_burns || false);
       setKenBurnsAllowedEffects(conceptData.ken_burns_allowed_effects || []);
+      setGlobalColorOverride(conceptData.global_color_override || '');
+      setCustomColorPalette(conceptData.custom_color_palette || '');
       setDirty(false);
     }
   }, [conceptData]);
@@ -200,6 +206,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         transition_lora_strength: transitionLoraStrength,
         random_ken_burns: randomKenBurns,
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
+        global_color_override: globalColorOverride,
+        custom_color_palette: customColorPalette,
       });
     },
     onSuccess: () => {
@@ -275,7 +283,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
       }).then(() => queryClient.invalidateQueries({ queryKey: ['concept', projectId] }));
     }
-  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, projectId, queryClient]);
+  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, projectId, queryClient]);
 
   const handleImageUpload = async (index: number, file: File) => {
     try {
@@ -410,6 +418,39 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
               placeholder="Enter your custom image direction..."
               className="w-full mt-1.5 px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500"
             />
+          )}
+        </div>
+
+        {/* Global Color Override */}
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-1">Default Color Palette</label>
+          <select
+            value={globalColorOverride}
+            onChange={(e) => { setGlobalColorOverride(e.target.value); if (e.target.value !== 'custom') setCustomColorPalette(''); markDirty(); }}
+            className="w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+          >
+            <option value="">Full Color (Default)</option>
+            <option value="black_and_white">Black & White / Noir</option>
+            <option value="high_contrast_bw">High Contrast B&W</option>
+            <option value="sepia">Sepia Tone</option>
+            <option value="monochrome_blue">Monochrome Blue</option>
+            <option value="monochrome_red">Monochrome Red</option>
+            <option value="desaturated">Desaturated / Muted</option>
+            <option value="vintage_film">Vintage Film</option>
+            <option value="neon_cyberpunk">Neon Cyberpunk</option>
+            <option value="custom">Custom Palette...</option>
+          </select>
+          {globalColorOverride === 'custom' && (
+            <textarea
+              value={customColorPalette}
+              onChange={(e) => { setCustomColorPalette(e.target.value); markDirty(); }}
+              placeholder="Describe your color palette (e.g., 'warm golden tones, amber highlights, deep burgundy shadows')..."
+              rows={2}
+              className="w-full mt-1.5 px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-none"
+            />
+          )}
+          {globalColorOverride && globalColorOverride !== 'full_color' && (
+            <p className="text-[10px] text-amber-400/70 mt-1">Default for all scenes — override per-scene in Image tab</p>
           )}
         </div>
 

@@ -63,12 +63,20 @@ class JobQueue:
         Fetch the highest-priority PENDING job from the database,
         atomically set it to RUNNING, and return it.
 
+        Uses optimistic locking (WHERE status = 'pending' in the UPDATE)
+        to prevent the same job from being dispatched to two workers
+        in concurrent dequeue calls.
+
         Priority: higher number = more urgent, then oldest created_at wins ties.
 
         Returns:
             A Job instance in RUNNING state, or None if nothing is pending.
         """
+        from sqlalchemy import update
+        from datetime import datetime
+
         async with self._session_factory() as session:
+            # Step 1: Find the best candidate
             stmt = (
                 select(Job)
                 .where(Job.status == JobStatus.PENDING)
@@ -81,15 +89,21 @@ class JobQueue:
             if not job:
                 return None
 
-            # Atomically mark as running
-            from datetime import datetime
-
-            job.status = JobStatus.RUNNING
-            job.started_at = datetime.utcnow()
-            session.add(job)
+            # Step 2: Atomically UPDATE only if still PENDING (optimistic lock)
+            upd = (
+                update(Job)
+                .where(Job.id == job.id, Job.status == JobStatus.PENDING)
+                .values(status=JobStatus.RUNNING, started_at=datetime.utcnow())
+            )
+            upd_result = await session.execute(upd)
             await session.commit()
-            await session.refresh(job)
 
+            # If rowcount == 0, another worker already claimed this job
+            if upd_result.rowcount == 0:
+                logger.info(f"Job {job.id} already claimed by another dequeue — skipping")
+                return None
+
+            await session.refresh(job)
             logger.info(f"Dequeued job {job.id} (type={job.job_type}, priority={job.priority})")
             return job
 

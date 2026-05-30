@@ -218,6 +218,9 @@ export interface AppSettings {
   global_video_negative_prompt?: string;
   // GPU acceleration
   gpu_acceleration_enabled?: boolean;
+  // FFmpeg threading
+  ffmpeg_threads?: number;
+  ffmpeg_filter_threads?: number;
   // Ollama (local LLM)
   ollama_base_url?: string;
   ollama_urls?: string[];
@@ -304,6 +307,15 @@ export interface ExportConfig {
   quality: 'draft' | 'standard' | 'high';
 }
 
+export interface ExportChunk {
+  index: number;
+  path: string;
+  download_url: string;
+  scenes: string;        // e.g. "1-25"
+  size_mb: number;
+  status: string;
+}
+
 export interface ExportStatus {
   job_id: string;
   status: string;
@@ -312,6 +324,24 @@ export interface ExportStatus {
   output_path?: string;
   download_url?: string;
   error?: string;
+  chunks?: ExportChunk[];
+  total_chunks?: number;
+  current_chunk?: number;
+  phase?: string;  // "clips" | "chunks" | "final" | "post" | "cancelled"
+}
+
+export interface ExportScanResult {
+  has_manifest: boolean;
+  manifest_status?: string;
+  manifest_params?: Record<string, any>;
+  clip_count: number;
+  chunk_count: number;
+  chunks: ExportChunk[];
+  total_clips_size_mb: number;
+  total_chunks_size_mb: number;
+  recoverable: boolean;
+  export_running: boolean;
+  last_updated?: string;
 }
 
 // ===== Audio Analysis Results =====

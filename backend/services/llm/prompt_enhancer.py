@@ -98,8 +98,11 @@ def _collapse_to_single_paragraph(text: str) -> str:
 
 
 def _clean_enhanced_prompt(text: str) -> str:
-    """Strip common LLM-added prefixes from enhanced prompt output."""
+    """Strip common LLM-added prefixes and thinking blocks from enhanced prompt output."""
     result = text.strip()
+    # Strip <think>...</think> blocks (some models like DeepSeek include reasoning)
+    import re
+    result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
     for prefix in _STRIP_PREFIXES:
         if result.startswith(prefix):
             result = result[len(prefix):].strip()
@@ -128,7 +131,7 @@ REFERENCE IMAGE HANDLING (FLUX Klein specific):
 - Describe what each referenced subject is DOING — their pose, action, expression, and interaction with the scene.
 - Include enough visual detail about each referenced subject (clothing, features, body language) to reinforce the reference match.
 - NEVER use code-style tags like "@image1" or "img_ref_1" — always use natural descriptive language.
-- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 PROMPTING BEST PRACTICES:
 - LIGHTING is the single most impactful element — always describe it in detail: direction, color temperature, quality (soft/hard), source.
@@ -178,7 +181,7 @@ REFERENCE IMAGE HANDLING (FLUX Klein specific):
 - Klein understands natural language references. Use "the figure in the image", "the person from the second image", "the character shown in the image" — direct, descriptive language. VARY the reference phrasing; do not always use the same term.
 - The first reference slot in Last Frame mode is the First Frame image itself. Describe the same scene from the first reference image but at its endpoint.
 - Keep all character descriptions identical to how they appear in the First Frame.
-- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 PROMPTING BEST PRACTICES:
 - Be specific about the END POSITION of subjects: "now standing at the right edge of the frame", "having turned to face the camera", "now seen in close-up".
@@ -236,6 +239,14 @@ PROMPTING BEST PRACTICES:
 - Match prompt detail to video duration. Short clips (3-5s) need focused, concise single-segment prompts. Longer clips (8-15s) can use more detail or multiple segments.
 - Avoid contradictory descriptions within a single segment.
 - NEGATIVE PROMPT is handled separately by the system — do NOT include negative instructions (like "no blur", "not blurry") in your prompt. Only describe what SHOULD appear.
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
+
+CINEMATOGRAPHY VOCABULARY — use these terms naturally in your prompts for precise visual direction:
+- SHOT SIZE: extreme wide shot (subject tiny in environment), wide shot (full body), medium shot (waist up), medium close-up (chest up), close-up (face fills frame), extreme close-up (eyes, lips, hands, object detail), insert shot (tight on a specific object or detail).
+- CAMERA ANGLE: eye level (neutral), low angle / hero shot (looking up — power, dominance), high angle (looking down — vulnerability), bird's eye / top-down (straight down 90°), Dutch angle / canted (tilted axis — unease), over the shoulder / OTS (past one person at another), POV / subjective (camera is the character's eyes), profile / side angle (90° to eyeline — graphic, stylized).
+- CAMERA MOVEMENT: pan (rotate left/right on axis), tilt (rotate up/down on axis), dolly / track (physically move toward/away/sideways), dolly zoom / Vertigo shot (dolly out + zoom in — background warps), crash zoom (extremely fast zoom — shock, emphasis), push in / pull out (slow dolly for emotional emphasis), pedestal (camera rises/descends vertically without tilting), crane / jib (arc up/down on an arm), orbit / arc (circle the subject), roll / barrel roll (rotate on lens axis), whip pan / swish pan (extremely fast pan with motion blur).
+- COMPOSITION: rule of thirds, symmetrical / center framing, negative space, leading lines, foreground/background layering, rack focus (shift focus between planes).
+- Vary shot sizes and angles across scenes in the project to create visual rhythm and avoid monotony. Alternate between wide establishing shots, intimate close-ups, and dynamic movement shots.
 
 STRUCTURE (per segment):
 Start with the scene anchor (setting/environment), then subject and their action, then camera movement and framing, then visual style and mood, then any motion or timing cues.
@@ -291,6 +302,7 @@ DO NOT:
 - Include text, subtitles, captions, watermarks, or written content of any kind
 - Write a prompt that looks similar to prompts for other scenes in this video
 - Reuse the same location or setting as the user's original prompt unless the input specifically calls for it
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 Output MUST be a SINGLE PARAGRAPH, 40-150 words. Front-load the most important visual elements.
 IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations."""
@@ -317,7 +329,7 @@ PROMPTING RULES:
 - Front-load the most important elements
 - Keep 40-150 words as a single paragraph
 - NEVER include text, subtitles, captions, or watermarks
-- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 IMPORTANT: Output ONLY the prompt text as a SINGLE PARAGRAPH. No labels, no prefixes, no explanations."""
 
@@ -337,7 +349,7 @@ REFERENCE IMAGE HANDLING (FLUX Klein specific):
 - Describe what each referenced subject is DOING — their pose, action, expression, and interaction with the scene.
 - Include enough visual detail about each referenced subject (clothing, features, body language) to reinforce the reference match.
 - NEVER use code-style tags like "@image1" or "img_ref_1" — always use natural descriptive language.
-- IMPORTANT: If the user's Visual Style specifies a color palette (e.g. "black and white", "monochrome", "sepia"), you MUST honor it throughout the entire prompt. Never introduce colors that contradict the stated style.
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 PROMPTING BEST PRACTICES:
 - LIGHTING is the single most impactful element — always describe it in detail: direction, color temperature, quality (soft/hard), source.
@@ -399,6 +411,14 @@ PROMPTING BEST PRACTICES:
 - Match prompt detail to video duration. Short clips (3-5s) need focused, concise single-segment prompts. Longer clips (8-15s) can use more detail or multiple segments.
 - Avoid contradictory descriptions within a single segment.
 - NEGATIVE PROMPT is handled separately by the system — do NOT include negative instructions in your prompt.
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
+
+CINEMATOGRAPHY VOCABULARY — use these terms naturally in your prompts for precise visual direction:
+- SHOT SIZE: extreme wide shot (subject tiny in environment), wide shot (full body), medium shot (waist up), medium close-up (chest up), close-up (face fills frame), extreme close-up (eyes, lips, hands, object detail), insert shot (tight on a specific object or detail).
+- CAMERA ANGLE: eye level (neutral), low angle (looking up — authority), high angle (looking down — vulnerability, overview), bird's eye / top-down (straight down 90° — patterns, scope), Dutch angle (tilted axis — unease), over the shoulder / OTS (past one person at another), POV / subjective (camera is the character's eyes), profile / side angle (90° to eyeline — cinematic, graphic).
+- CAMERA MOVEMENT: pan (rotate left/right), tilt (rotate up/down), dolly / track (physically move toward/away/sideways), push in / pull out (slow dolly for emotional emphasis), pedestal (camera rises/descends vertically), crane / jib (arc up/down), orbit / arc (circle the subject), rack focus (shift focus between planes).
+- COMPOSITION: rule of thirds, symmetrical / center framing, negative space, leading lines, foreground/background layering.
+- For narration, favor shot sizes and angles that reinforce the narrative: wide shots for establishing context, medium shots for subjects, close-ups for emotional beats, insert shots for key details the narrator mentions.
 
 STRUCTURE (per segment):
 Start with the scene anchor (setting/environment), then subject and their action, then camera movement and framing, then visual style and mood.
@@ -715,23 +735,29 @@ class PromptEnhancer:
         else:
             urls = [raw]
 
-        # Round-robin: pick the next server in the pool
-        idx = next(_ollama_rr_counter) % len(urls)
-        base_url = urls[idx].rstrip("/")
-        ollama_api_url = f"{base_url}/v1"
-        logger.info(f"Ollama round-robin → server {idx + 1}/{len(urls)}: {base_url}")
+        # Round-robin with failover: try each server starting from the next in rotation
+        start_idx = next(_ollama_rr_counter) % len(urls)
+        last_error = None
+        for attempt in range(len(urls)):
+            idx = (start_idx + attempt) % len(urls)
+            base_url = urls[idx].rstrip("/")
+            ollama_api_url = f"{base_url}/v1"
+            if attempt > 0:
+                logger.warning(f"Ollama failover → trying server {idx + 1}/{len(urls)}: {base_url}")
+            else:
+                logger.info(f"Ollama round-robin → server {idx + 1}/{len(urls)}: {base_url}")
 
-        try:
-            # Ollama's OpenAI-compatible endpoint needs a dummy API key
-            client = OpenAI(
-                api_key="ollama",
-                base_url=ollama_api_url,
-                timeout=600.0,
-            )
+            try:
+                # Ollama's OpenAI-compatible endpoint needs a dummy API key
+                client = OpenAI(
+                    api_key="ollama",
+                    base_url=ollama_api_url,
+                    timeout=600.0,
+                )
 
-            # Build a more explicit, structured system prompt for local models.
-            # Smaller models need very clear instructions about what NOT to do.
-            ollama_system_prompt = f"""{system_prompt}
+                # Build a more explicit, structured system prompt for local models.
+                # Smaller models need very clear instructions about what NOT to do.
+                ollama_system_prompt = f"""{system_prompt}
 
 CRITICAL RULES FOR YOUR RESPONSE (FOLLOW EXACTLY):
 1. Output ONLY the enhanced prompt text — nothing else.
@@ -743,72 +769,83 @@ CRITICAL RULES FOR YOUR RESPONSE (FOLLOW EXACTLY):
 7. If thinking step by step, do your reasoning silently — output ONLY the final prompt.
 8. Your entire response should be usable as-is for image/video generation."""
 
-            # Build a very structured user message for local models
-            if prompt and prompt.strip():
-                user_parts = [
-                    "TASK: Enhance the following prompt for AI image/video generation.",
-                    f"ORIGINAL PROMPT: {prompt}",
-                ]
-            else:
-                user_parts = [
-                    "TASK: Create a new AI image/video generation prompt from the context below.",
-                    "There is no original prompt — generate one entirely from the context.",
-                ]
+                # Build a very structured user message for local models
+                if prompt and prompt.strip():
+                    user_parts = [
+                        "TASK: Enhance the following prompt for AI image/video generation.",
+                        f"ORIGINAL PROMPT: {prompt}",
+                    ]
+                else:
+                    user_parts = [
+                        "TASK: Create a new AI image/video generation prompt from the context below.",
+                        "There is no original prompt — generate one entirely from the context.",
+                    ]
 
-            if context:
-                user_parts.append(f"CONTEXT (use this for creative direction):\n{context}")
+                if context:
+                    user_parts.append(f"CONTEXT (use this for creative direction):\n{context}")
 
-            user_parts.append(
-                "REMEMBER: Output ONLY the prompt text as a single paragraph. "
-                "No prefixes, no explanations, no markdown, no quotes. Just the prompt."
-            )
+                user_parts.append(
+                    "REMEMBER: Output ONLY the prompt text as a single paragraph. "
+                    "No prefixes, no explanations, no markdown, no quotes. Just the prompt."
+                )
 
-            user_message = "\n\n".join(user_parts)
+                user_message = "\n\n".join(user_parts)
 
-            effective_model = model or "qwen3:14b"
-            response = client.chat.completions.create(
-                model=effective_model,
-                messages=[
-                    {"role": "system", "content": ollama_system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                max_tokens=800,
-                temperature=0.6,  # Lower than cloud — local models drift more at higher temps
-            )
+                effective_model = model or "qwen3:14b"
+                response = client.chat.completions.create(
+                    model=effective_model,
+                    messages=[
+                        {"role": "system", "content": ollama_system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    max_tokens=800,
+                    temperature=0.6,  # Lower than cloud — local models drift more at higher temps
+                )
 
-            raw_content = response.choices[0].message.content or ""
+                raw_content = response.choices[0].message.content or ""
 
-            # Extra cleanup for local models that tend to add thinking blocks
-            # or chain-of-thought before the actual output
-            cleaned = raw_content.strip()
+                # Extra cleanup for local models that tend to add thinking blocks
+                # or chain-of-thought before the actual output
+                cleaned = raw_content.strip()
 
-            # Strip <think>...</think> blocks that qwen3 models produce
-            import re
-            cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+                # Strip <think>...</think> blocks that qwen3 models produce
+                import re
+                cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
 
-            # Strip common local-model prefixes
-            for prefix in [
-                "Here is the enhanced prompt:",
-                "Here's the enhanced prompt:",
-                "Enhanced prompt:",
-                "Sure! Here",
-                "Sure,",
-                "Okay,",
-                "Here you go:",
-            ]:
-                if cleaned.lower().startswith(prefix.lower()):
-                    cleaned = cleaned[len(prefix):].strip()
-                    break
+                # Strip common local-model prefixes
+                for prefix in [
+                    "Here is the enhanced prompt:",
+                    "Here's the enhanced prompt:",
+                    "Enhanced prompt:",
+                    "Sure! Here",
+                    "Sure,",
+                    "Okay,",
+                    "Here you go:",
+                ]:
+                    if cleaned.lower().startswith(prefix.lower()):
+                        cleaned = cleaned[len(prefix):].strip()
+                        break
 
-            enhanced = _clean_enhanced_prompt(cleaned)
-            logger.info(f"Enhanced prompt via Ollama ({effective_model}, {len(enhanced)} chars)")
-            _write_enhance_log("ollama", effective_model, prompt, context, raw_content, enhanced)
-            return enhanced
+                enhanced = _clean_enhanced_prompt(cleaned)
+                logger.info(f"Enhanced prompt via Ollama ({effective_model}, {len(enhanced)} chars)")
+                _write_enhance_log("ollama", effective_model, prompt, context, raw_content, enhanced)
+                return enhanced
 
-        except Exception as e:
-            logger.error(f"Ollama enhancement failed: {e}")
-            _write_enhance_log("ollama", model or "?", prompt or "", context, "", "", str(e))
-            raise RuntimeError(f"Ollama API error: {e}")
+            except (ConnectionError, OSError, TimeoutError) as e:
+                # Server unreachable — try next one
+                last_error = e
+                logger.warning(f"Ollama server {idx + 1}/{len(urls)} unreachable: {e}")
+                continue
+            except Exception as e:
+                # Non-connection error (model error, bad response, etc.) — don't failover
+                logger.error(f"Ollama enhancement failed: {e}")
+                _write_enhance_log("ollama", model or "?", prompt or "", context, "", "", str(e))
+                raise RuntimeError(f"Ollama API error: {e}")
+
+        # All servers exhausted
+        logger.error(f"All {len(urls)} Ollama servers unreachable")
+        _write_enhance_log("ollama", model or "?", prompt or "", context, "", "", str(last_error))
+        raise RuntimeError(f"All Ollama servers unreachable. Last error: {last_error}")
 
     @staticmethod
     def _enhance_anthropic(

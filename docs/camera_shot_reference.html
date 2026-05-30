@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camera Shot Language — Field Reference</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d0d0d;
+    --surface: #161616;
+    --border: #2a2a2a;
+    --text: #f0ece4;
+    --muted: #888;
+    --dim: #555;
+    --amber: #e8a020;
+    --teal: #2ec4a0;
+    --coral: #e05a3a;
+    --purple: #8b6ef5;
+    --blue: #4a9eff;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 300;
+    line-height: 1.6;
+    padding: 2rem 1.5rem 4rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 0.4rem;
+  }
+
+  h1 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(2.8rem, 8vw, 5rem);
+    letter-spacing: 0.04em;
+    line-height: 0.95;
+    color: var(--text);
+  }
+
+  .subtitle {
+    margin-top: 0.75rem;
+    font-size: 14px;
+    color: var(--muted);
+    max-width: 480px;
+  }
+
+  .section {
+    margin-bottom: 2.5rem;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 1rem;
+  }
+
+  .section-label {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+
+  .label-framing  { background: rgba(139,110,245,0.15); color: var(--purple); border: 0.5px solid rgba(139,110,245,0.3); }
+  .label-angle    { background: rgba(46,196,160,0.12); color: var(--teal); border: 0.5px solid rgba(46,196,160,0.3); }
+  .label-movement { background: rgba(232,160,32,0.12); color: var(--amber); border: 0.5px solid rgba(232,160,32,0.3); }
+  .label-comp     { background: rgba(224,90,58,0.12); color: var(--coral); border: 0.5px solid rgba(224,90,58,0.3); }
+  .label-edit     { background: rgba(74,158,255,0.12); color: var(--blue); border: 0.5px solid rgba(74,158,255,0.3); }
+
+  .section-line {
+    flex: 1;
+    height: 0.5px;
+    background: var(--border);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 8px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    transition: border-color 0.15s;
+  }
+
+  .card:hover { border-color: #3a3a3a; }
+
+  .card-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 2px;
+  }
+
+  .card-aka {
+    font-size: 11px;
+    color: var(--dim);
+    font-style: italic;
+    margin-bottom: 6px;
+  }
+
+  .card-def {
+    font-size: 12px;
+    color: #aaa;
+    line-height: 1.55;
+  }
+
+  .accent-framing  .card-name { color: var(--purple); }
+  .accent-angle    .card-name { color: var(--teal); }
+  .accent-movement .card-name { color: var(--amber); }
+  .accent-comp     .card-name { color: var(--coral); }
+  .accent-edit     .card-name { color: var(--blue); }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 0.5px solid var(--border);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+  }
+
+  @media (max-width: 500px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="eyebrow">Production Reference</p>
+  <h1>Camera Shot<br>Language</h1>
+  <p class="subtitle">Industry-standard terminology for shot sizes, angles, camera movement, composition, and editing. Use these terms when directing, prompting, or collaborating on edit decisions.</p>
+</header>
+
+<!-- SHOT SIZE -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-label label-framing">Shot size</span>
+    <div class="section-line"></div>
+  </div>
+  <div class="grid">
+    <div class="card accent-framing">
+      <p class="card-name">Extreme wide shot (EWS)</p>
+      <p class="card-aka">aka: Extreme long shot (ELS)</p>
+      <p class="card-def">Subject tiny in environment. Establishes scale, isolation, location.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Wide shot (WS)</p>
+      <p class="card-aka">aka: Long shot (LS), full shot</p>
+      <p class="card-def">Full body visible with room to breathe. Context + character together.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Medium wide shot (MWS)</p>
+      <p class="card-aka">aka: Cowboy shot</p>
+      <p class="card-def">Thighs to top of head. Named for Western gun-draw framing.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Medium shot (MS)</p>
+      <p class="card-aka">aka: Mid shot, waist shot</p>
+      <p class="card-def">Waist to head. Workhorse shot — neutral, conversational.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Medium close-up (MCU)</p>
+      <p class="card-aka">aka: Bust shot</p>
+      <p class="card-def">Chest to head. Common for interviews, dialogue, emotional presence.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Close-up (CU)</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Face fills frame. Emotion, reaction, intensity. The emotional workhorse.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Choker</p>
+      <p class="card-aka">aka: Tight CU</p>
+      <p class="card-def">Chin to forehead only. Tighter than a CU. Claustrophobic intensity.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Extreme close-up (ECU)</p>
+      <p class="card-aka">aka: XCU, detail shot</p>
+      <p class="card-def">Eyes, lips, hands, object detail. Maximum intimacy or tension.</p>
+    </div>
+    <div class="card accent-framing">
+      <p class="card-name">Insert shot</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Tight cut to an object or detail (hands on keys, clock face). Punctuates action.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ANGLE -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-label label-angle">Camera angle</span>
+    <div class="section-line"></div>
+  </div>
+  <div class="grid">
+    <div class="card accent-angle">
+      <p class="card-name">Eye level</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Camera at subject's eye height. Neutral, equal, relatable.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Low angle</p>
+      <p class="card-aka">aka: Hero shot, worm's eye (extreme)</p>
+      <p class="card-def">Camera below subject looking up. Power, dominance, menace.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">High angle</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Camera above looking down. Vulnerability, smallness, surveillance.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Bird's eye</p>
+      <p class="card-aka">aka: Top-down, overhead, god shot</p>
+      <p class="card-def">Straight down 90°. Patterns, choreography, scope. Detached perspective.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Dutch angle</p>
+      <p class="card-aka">aka: Dutch tilt, canted angle</p>
+      <p class="card-def">Camera rolled off axis. Unease, disorientation, psychological tension.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Three-quarter / 45° angle</p>
+      <p class="card-aka">aka: Three-quarter front</p>
+      <p class="card-def">Between front-on and profile. Most flattering for faces. Very common in narrative.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Over the shoulder (OTS)</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Shooting past one person's shoulder at another. Dialogue, perspective, relationship.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Point of view (POV)</p>
+      <p class="card-aka">aka: Subjective shot</p>
+      <p class="card-def">Camera is the character's eyes. Total immersion, first-person intensity.</p>
+    </div>
+    <div class="card accent-angle">
+      <p class="card-name">Profile / side angle</p>
+      <p class="card-aka">aka: 90° shot</p>
+      <p class="card-def">Camera at 90° to subject's eyeline. Cinematic, graphic, stylized.</p>
+    </div>
+  </div>
+</div>
+
+<!-- MOVEMENT -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-label label-movement">Camera movement</span>
+    <div class="section-line"></div>
+  </div>
+  <div class="grid">
+    <div class="card accent-movement">
+      <p class="card-name">Pan</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Camera head rotates left/right on fixed axis. Follows action or reveals space.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Tilt</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Camera head rotates up/down on fixed axis. Reveal height, reveal character top-to-toe.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Whip pan</p>
+      <p class="card-aka">aka: Swish pan</p>
+      <p class="card-def">Extremely fast pan that motion-blurs between shots. Energy, humor, scene transition.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Dolly</p>
+      <p class="card-aka">aka: Track, truck</p>
+      <p class="card-def">Camera physically moves toward/away (dolly in/out) or sideways (truck/crab). Smooth cinematic depth.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Dolly zoom</p>
+      <p class="card-aka">aka: Vertigo shot, Hitchcock zoom, trombone shot</p>
+      <p class="card-def">Dolly out + zoom in simultaneously (or reverse). Background warps — dread, revelation.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Crash zoom</p>
+      <p class="card-aka">aka: Snap zoom</p>
+      <p class="card-def">Extremely fast zoom in (or out). Shock, comedy, sudden emphasis. Common in action and horror.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Push in / pull out</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Slow dolly move toward or away from subject. Emotional emphasis, intimacy or distance.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Pedestal</p>
+      <p class="card-aka">aka: Ped up / ped down</p>
+      <p class="card-def">Camera moves straight up or down on its axis without tilting. Different from a tilt — the lens stays level.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Crane / jib</p>
+      <p class="card-aka">aka: Boom shot</p>
+      <p class="card-def">Camera moves up or down on an arm. Epic reveals, God-like perspective shifts.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Handheld</p>
+      <p class="card-aka">aka: Vérité, shaky cam</p>
+      <p class="card-def">Organic, slight camera shake. Energy, realism, chaos, urgency.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Steadicam / gimbal</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Stabilized follow move. Smooth but fluid — neither locked off nor handheld.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Roll</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Camera rotates on the lens axis (barrel roll). Distinct from Dutch tilt — this is a moving rotation, not a static cant.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Orbit / arc</p>
+      <p class="card-aka">aka: Circular dolly, 360</p>
+      <p class="card-def">Camera circles subject. Heroic reveal, disorientation, dramatic emphasis.</p>
+    </div>
+    <div class="card accent-movement">
+      <p class="card-name">Drone / aerial</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Unmanned aerial movement. Scale, geography, reveal, transition between scenes.</p>
+    </div>
+  </div>
+</div>
+
+<!-- COMPOSITION -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-label label-comp">Composition</span>
+    <div class="section-line"></div>
+  </div>
+  <div class="grid">
+    <div class="card accent-comp">
+      <p class="card-name">Rule of thirds</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Subject placed on grid intersections, not centered. Natural visual weight.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Symmetrical framing</p>
+      <p class="card-aka">aka: Center framing, Kubrick framing</p>
+      <p class="card-def">Subject dead center with mirrored environment. Formal, unsettling, highly stylized.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Negative space</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Deliberate empty area around subject. Creates tension, isolation, or visual breathing room.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Leading lines</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Environmental lines (roads, corridors, fences) that draw the eye toward the subject.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Headroom / lead room</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Space above head (headroom) or in direction subject faces/moves (lead room).</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Two-shot</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Two subjects in frame together. Relationship, tension, dialogue.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Single</p>
+      <p class="card-aka"></p>
+      <p class="card-def">One subject isolated in frame. Focus, intimacy, isolation.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Foreground / background</p>
+      <p class="card-aka">aka: FG / BG</p>
+      <p class="card-def">Elements staged in layers for depth. Selective focus separates planes.</p>
+    </div>
+    <div class="card accent-comp">
+      <p class="card-name">Rack focus</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Focus shifts from FG to BG (or reverse) mid-shot. Directs attention, reveals story.</p>
+    </div>
+  </div>
+</div>
+
+<!-- EDITING -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-label label-edit">Editing</span>
+    <div class="section-line"></div>
+  </div>
+  <div class="grid">
+    <div class="card accent-edit">
+      <p class="card-name">Hard cut</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Immediate shot change. The default cut. Most common edit in any timeline.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">J-cut / L-cut</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Audio leads video (J) or video leads audio (L). Smooths transitions, creates flow.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Match cut</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Two shots connected by visual similarity (shape, motion, color). Metaphor, continuity.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Jump cut</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Cut within same scene, same angle — intentional jolt. Time compression, stylization.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Smash cut</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Abrupt cut at peak tension/emotion to contrasting scene. Humor, shock, contrast.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Cross-cut</p>
+      <p class="card-aka">aka: Parallel editing</p>
+      <p class="card-def">Cuts between two simultaneous events. Builds tension, shows connection.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Cutaway</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Cut to related but non-continuous shot (reaction, environment). Context or breathing room.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Cut on action</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Cut mid-movement — door opening, hand reaching. Hides the edit in motion.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Dissolve</p>
+      <p class="card-aka">aka: Cross dissolve</p>
+      <p class="card-def">Gradual blend between two shots. Passage of time, softness, memory.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Fade to black / fade in</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Shot gradually darkens to black (or rises from it). Finality, scene beginning, passage of time.</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Wipe</p>
+      <p class="card-aka"></p>
+      <p class="card-def">One shot pushes another off frame in a direction. Stylized, classic (Star Wars).</p>
+    </div>
+    <div class="card accent-edit">
+      <p class="card-name">Montage</p>
+      <p class="card-aka"></p>
+      <p class="card-def">Rapid sequence of shots to compress time or build emotional momentum. Training sequences, passage of time.</p>
+    </div>
+  </div>
+</div>
+
+<footer>Camera Shot Language — Production Reference &nbsp;·&nbsp; Built with Claude</footer>
+
+</body>
+</html>

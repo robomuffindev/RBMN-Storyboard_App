@@ -76,6 +76,8 @@ export default function SettingsPage() {
     runpod_idle_timeout: 30,
     runpod_pods: [],
     gpu_acceleration_enabled: true,
+    ffmpeg_threads: 0,
+    ffmpeg_filter_threads: 4,
     ollama_base_url: '',
     ollama_urls: [],
     ollama_model: '',
@@ -169,6 +171,8 @@ export default function SettingsPage() {
         runpod_idle_timeout: savedSettings.runpod_idle_timeout || 30,
         runpod_pods: savedSettings.runpod_pods || [],
         gpu_acceleration_enabled: savedSettings.gpu_acceleration_enabled ?? true,
+        ffmpeg_threads: savedSettings.ffmpeg_threads ?? 0,
+        ffmpeg_filter_threads: savedSettings.ffmpeg_filter_threads ?? 4,
         ollama_base_url: savedSettings.ollama_base_url || '',
         ollama_urls: savedSettings.ollama_urls || [],
         ollama_model: savedSettings.ollama_model || '',
@@ -1103,16 +1107,21 @@ export default function SettingsPage() {
 
           {/* Global Negative Prompt */}
           <div className="mt-6 pt-6 border-t border-gray-800">
-            <label className="block text-sm font-medium mb-2">Global Negative Prompt (Image Generation)</label>
+            <label className="block text-sm font-medium mb-2 text-gray-500">
+              Global Negative Prompt (Image Generation)
+              <span className="text-[10px] text-gray-600 ml-2 font-normal">
+                Not supported by current image workflows
+              </span>
+            </label>
             <textarea
-              value={settings.global_negative_prompt || ''}
-              onChange={(e) => setSettings((prev) => ({ ...prev, global_negative_prompt: e.target.value }))}
-              placeholder="e.g. blurry, low quality, distorted, deformed, ugly, bad anatomy..."
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-20 text-sm"
+              value=""
+              disabled
+              placeholder="Current image workflows (Klein / Z-Image) do not support negative prompts"
+              className="w-full px-3 py-2 bg-gray-800/40 border border-gray-700/50 rounded text-gray-500 placeholder-gray-600 cursor-not-allowed h-20 text-sm opacity-50"
             />
-            <p className="text-xs text-gray-400 mt-1">
-              Applied to all image generation workflows. Appended to the anti-text suffix on every image prompt.
-              Per-scene negative prompts override this when set.
+            <p className="text-xs text-gray-500 mt-1">
+              Klein and Z-Image Turbo workflows have no negative prompt node. This field is disabled.
+              The anti-text suffix (no text, no subtitles, etc.) is still applied automatically.
             </p>
           </div>
         </section>
@@ -2361,6 +2370,45 @@ export default function SettingsPage() {
           ) : (
             <p className="text-sm text-gray-500">GPU status unavailable. Click Re-detect to check again.</p>
           )}
+        </section>
+
+        {/* FFmpeg Threading */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-2 flex items-center gap-2">
+            <Cpu size={20} />
+            FFmpeg Threading
+          </h2>
+          <p className="text-sm text-gray-400 mb-4">
+            Control how many threads FFmpeg uses for encoding/decoding and filter processing.
+          </p>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">FFmpeg Threads</label>
+              <p className="text-xs text-gray-500 mb-1">0 = auto-detect from CPU cores</p>
+              <input
+                type="number"
+                min={0}
+                max={64}
+                value={settings.ffmpeg_threads ?? 0}
+                onChange={(e) => setSettings({ ...settings, ffmpeg_threads: Math.max(0, Math.min(64, parseInt(e.target.value) || 0)) })}
+                className="w-24 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">FFmpeg Filter Threads</label>
+              <p className="text-xs text-gray-500 mb-1">Number of threads for filter graph processing</p>
+              <input
+                type="number"
+                min={1}
+                max={64}
+                value={settings.ffmpeg_filter_threads ?? 4}
+                onChange={(e) => setSettings({ ...settings, ffmpeg_filter_threads: Math.max(1, Math.min(64, parseInt(e.target.value) || 4)) })}
+                className="w-24 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          </div>
         </section>
 
         {/* Purge Generation Queue */}
