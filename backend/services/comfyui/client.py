@@ -362,10 +362,48 @@ class ComfyUIClient:
             # VHS_VideoCombine) have time to finish.
             import time as _ws_time
             _progress_complete_at: float = 0.0
+            # Wall-clock timestamp of the last history poll. The
+            # WebSocketTimeoutException handler does history polling, but
+            # crystools.monitor and progress_state messages flood the WS
+            # and prevent recv() from ever timing out — so we ALSO poll on
+            # a wall-clock cadence here, regardless of whether recv() times
+            # out. Without this, VHS_VideoCombine completion can go
+            # undetected for many minutes (sometimes hitting the 15-min
+            # absolute timeout) while noisy messages keep the loop busy.
+            _last_wallclock_poll_at: float = 0.0
 
             while True:
                 try:
                     raw = ws.recv()
+
+                    # ── Wall-clock completion poll ──
+                    # Runs on EVERY recv success, before any continue/break.
+                    # Once progress is complete, poll /history every 10s
+                    # (wall-clock) to detect VHS_VideoCombine finishing even
+                    # when crystools.monitor / progress_state messages keep
+                    # recv() from ever timing out.
+                    if saw_progress_complete:
+                        _now = _ws_time.monotonic()
+                        _since_progress = _now - _progress_complete_at
+                        _since_poll = _now - _last_wallclock_poll_at
+                        if _since_progress > 5 and _since_poll > 10:
+                            _last_wallclock_poll_at = _now
+                            try:
+                                history = self._make_request(
+                                    "GET", f"/history/{prompt_id}"
+                                )
+                                prompt_history = history.get(prompt_id, {})
+                                if prompt_history and prompt_history.get("outputs"):
+                                    logger.info(
+                                        f"Prompt {prompt_id} completed "
+                                        f"(wall-clock history poll, "
+                                        f"{_since_progress:.0f}s after progress complete)"
+                                    )
+                                    break
+                            except Exception as poll_err:
+                                logger.warning(
+                                    f"Wall-clock history poll failed: {poll_err}"
+                                )
 
                     if not raw:
                         continue
