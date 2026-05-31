@@ -1266,6 +1266,15 @@ def prepare_workflow_from_config(
 
         value = values[field_type]
 
+        # INTConstant truncation guard: the LTX "Audio - Video Duration"
+        # node is an INTConstant; ComfyUI silently floors any float passed
+        # to it. The 6 hardcoded prepare_*_workflow() functions apply
+        # math.ceil() before calling set_node_input - apply the same fix
+        # here so user-uploaded WorkflowConfig templates don't re-trigger
+        # the bug. See feedback_v2v_join_split_fix memory note.
+        if field_type == "duration" and isinstance(value, float):
+            value = math.ceil(value)
+
         try:
             set_node_input(workflow, node_title, input_name, value)
             logger.debug(f"Applied: {field_type} -> {node_title}.{input_name}")

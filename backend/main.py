@@ -94,13 +94,24 @@ async def lifespan(app: FastAPI):
                     # Apply user-configured capabilities if set
                     caps_config = server_caps.get(url, {})
                     if caps_config:
-                        user_caps = set()
+                        # Preserve auto-discovered caps (inpaint, upscale, ...)
+                        # while letting the user's image/video checkboxes act
+                        # as authoritative overrides for klein / ltx
+                        # specifically.  A naive union (`caps | user_caps`)
+                        # cannot honour an unchecked state - a worker with
+                        # "video" unchecked must have `ltx` removed even if
+                        # auto-discovery found it.
+                        merged = set(worker.capabilities)
                         if caps_config.get("image", True):
-                            user_caps.add("klein")
+                            merged.add("klein")
+                        else:
+                            merged.discard("klein")
                         if caps_config.get("video", True):
-                            user_caps.add("ltx")
-                        worker.capabilities = user_caps
-                        logger.info(f"Applied user caps for {url}: {user_caps}")
+                            merged.add("ltx")
+                        else:
+                            merged.discard("ltx")
+                        worker.capabilities = merged
+                        logger.info(f"Applied user caps for {url}: {merged}")
                     logger.info(f"Added ComfyUI worker: {url}")
                 except Exception as e:
                     logger.warning(f"Failed to add ComfyUI worker {url}: {e}")

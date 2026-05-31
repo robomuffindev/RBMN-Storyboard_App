@@ -213,6 +213,42 @@ class ComfyDispatcher:
                 except (IndexError, TypeError, AttributeError) as e:
                     logger.warning(f"Failed to parse checkpoint list: {e}")
 
+            # Also scan unet / diffusion-model loaders for GGUF and
+            # safetensors files. Klein 9B and LTX 2.3 are loaded via
+            # UnetLoaderGGUF or UNETLoader, NOT via CheckpointLoaderSimple,
+            # so without this scan auto-discovery never finds them and
+            # Klein jobs fail capability/model checks at dispatch time.
+            # The /object_info field shape is identical to ckpt_name:
+            # the available file list is the first element of the tuple.
+            for unet_loader in ("UnetLoaderGGUF", "UNETLoader"):
+                if unet_loader not in obj_info:
+                    continue
+                try:
+                    unet_field = (
+                        obj_info[unet_loader]
+                        .get("input", {})
+                        .get("required", {})
+                        .get("unet_name", [])
+                    )
+                    unet_list = (
+                        unet_field[0]
+                        if unet_field and isinstance(unet_field[0], list)
+                        else []
+                    )
+                    for unet in unet_list:
+                        unet_lower = str(unet).lower()
+                        if "klein" in unet_lower or "flux" in unet_lower:
+                            models.add("FLUX")
+                            capabilities.add("klein")
+                        if "ltx" in unet_lower:
+                            models.add("LTX")
+                            capabilities.add("ltx")
+                except (IndexError, TypeError, AttributeError) as e:
+                    logger.warning(
+                        f"Failed to parse {unet_loader} unet list for "
+                        f"{worker.url}: {e}"
+                    )
+
             worker.capabilities = capabilities
             worker.models = models
             logger.info(f"Worker {worker.url}: capabilities={capabilities}, models={models}")
