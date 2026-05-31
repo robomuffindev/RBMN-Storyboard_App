@@ -284,17 +284,24 @@ class ComfyDispatcher:
             )
             return None
 
-        # Filter by models
+        # Filter by models (only if workers actually have models configured)
         if required_models:
-            model_capable = [w for w in capable if required_models.issubset(w.models)]
-            if not model_capable:
-                logger.warning(
-                    f"No workers available with required models {required_models}. "
-                    f"Capable workers and their models: "
-                    f"{{{', '.join(f'{w.url}: {w.models}' for w in capable)}}}"
-                )
-                return None
-            capable = model_capable
+            # Only apply model filter to workers that have models declared.
+            # Workers with empty model sets are assumed to support whatever
+            # models their capability implies (e.g., ltx capability = LTX model).
+            workers_with_models = [w for w in capable if w.models]
+            if workers_with_models:
+                # Some workers declare models — filter those
+                model_capable = [w for w in capable if required_models.issubset(w.models) or not w.models]
+                if not model_capable:
+                    logger.warning(
+                        f"No workers available with required models {required_models}. "
+                        f"Capable workers and their models: "
+                        f"{{{', '.join(f'{w.url}: {w.models}' for w in capable)}}}"
+                    )
+                    return None
+                capable = model_capable
+            # else: no workers have models configured — skip model filter entirely
 
         # Select least-loaded
         selected = min(capable, key=lambda w: (w.in_flight, -w.last_check.timestamp()))

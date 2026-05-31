@@ -631,28 +631,10 @@ class JobDispatcher:
         except Exception as rp_err:
             logger.warning(f"[{job_id_str}] RunPod auto-start failed, falling back to local: {rp_err}", exc_info=True)
 
-        # Step 1b: Pre-resolve Z-Image Turbo redirect BEFORE worker selection.
-        # When the user's preferred single_image_generator is z_image_turbo and
-        # the job is klein_t2i (no ref images), the workflow will be redirected
-        # to Z-Image Turbo inside _process_job_image(). But worker selection
-        # needs to happen first, and klein_t2i requires {'klein'} capability
-        # while Z-Image Turbo doesn't. Update workflow_type NOW so the
-        # correct (empty) capability set is used for worker selection.
-        _wf_type = params.get("workflow_type", "")
-        if _wf_type == "klein_t2i" and job.job_type == "image":
-            try:
-                async with self._session_factory() as _zig_pre_session:
-                    from backend.database.models import AppSettings as _ZigPreSettings
-                    _zig_pre_stmt = sfw_select(_ZigPreSettings).where(_ZigPreSettings.id == 1)
-                    _zig_pre_result = await _zig_pre_session.execute(_zig_pre_stmt)
-                    _zig_pre = _zig_pre_result.scalars().first()
-                    if _zig_pre and _zig_pre.single_image_generator == "z_image_turbo":
-                        _wf_type = "z_image_turbo"
-                        logger.debug(f"[{job_id_str}] Pre-resolved workflow_type to z_image_turbo for worker selection")
-            except Exception as _zig_pre_err:
-                logger.debug(f"[{job_id_str}] Could not pre-check Z-Image redirect: {_zig_pre_err}")
-
         # Step 2: Select worker — prefer RunPod if available.
+        # NOTE: workflow_type in params may have been updated by _build_workflow
+        # (e.g. klein_t2i → z_image_turbo). The capability check below reads
+        # from params to pick up any such redirect.
         # Use reserve=True so in_flight is incremented immediately, preventing
         # a concurrent dispatch task from picking the same worker before we
         # reach submit_job().
@@ -670,7 +652,7 @@ class JobDispatcher:
                 # picked for image jobs (or vice versa).
                 # Re-read workflow_type from params — it may have been updated
                 # by _build_workflow (e.g. klein_t2i → z_image_turbo redirect)
-                _effective_wf_type = params.get("workflow_type", _wf_type)
+                _effective_wf_type = params.get("workflow_type", "")
                 required_caps = self._get_required_caps(_effective_wf_type)
                 required_models = self._get_required_models(_effective_wf_type)
                 worker = self.comfy_dispatcher.select_worker(
@@ -3113,6 +3095,9 @@ class JobDispatcher:
             "ltx_v2v_pass1": {"ltx"},
             "ltx_v2v_pass2": {"ltx"},
             "ltx_transition": {"ltx"},
+            "ltx_seq_i2v": {"ltx"},
+            "ltx_seq_fflf": {"ltx"},
+            "ltx_seq_v2v": {"ltx"},
         }
         return caps_map.get(workflow_type, set())
 
@@ -3124,13 +3109,18 @@ class JobDispatcher:
             "klein_2ref": {"FLUX"},
             "klein_3ref": {"FLUX"},
             "klein_4ref": {"FLUX"},
+            "klein_5ref": {"FLUX"},
             "klein_t2i": {"FLUX"},
+            "z_image_turbo": set(),
             "ltx_fflf": {"LTX"},
             "ltx_i2v": {"LTX"},
             "ltx_v2v_extend": {"LTX"},
             "ltx_v2v_pass1": {"LTX"},
             "ltx_v2v_pass2": {"LTX"},
             "ltx_transition": {"LTX"},
+            "ltx_seq_i2v": {"LTX"},
+            "ltx_seq_fflf": {"LTX"},
+            "ltx_seq_v2v": {"LTX"},
         }
         return models_map.get(workflow_type, set())
 

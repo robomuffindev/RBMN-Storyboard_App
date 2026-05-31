@@ -2308,11 +2308,20 @@ def _count_capable_workers(comfy_dispatcher, job_type: str) -> int:
     if not comfy_dispatcher:
         return 1
 
-    required_caps = {"ltx"} if job_type == "video" else {"klein"}
+    # For video jobs, require 'ltx' capability.
+    # For image jobs, use empty caps — Z-Image Turbo needs no special
+    # capability, and Klein jobs will be routed to Klein-capable workers
+    # by the dispatcher's own capability check at submit time.
+    # Using {"klein"} here would exclude LTX-only workers from the count,
+    # causing the window size to drop to 1 even when 3 workers are available.
+    required_caps = {"ltx"} if job_type == "video" else set()
     healthy = [w for w in comfy_dispatcher.workers.values() if w.healthy]
-    capable = [w for w in healthy if required_caps.issubset(w.capabilities)]
-    # Fall back to all healthy workers if none have explicit caps
-    if not capable:
+    if required_caps:
+        capable = [w for w in healthy if required_caps.issubset(w.capabilities)]
+        # Fall back to all healthy workers if none have explicit caps
+        if not capable:
+            capable = healthy
+    else:
         capable = healthy
     return max(1, len(capable))
 
@@ -2836,7 +2845,7 @@ async def _run_windowed_batch(
     else:
         _seq_auto_jobs[pid]["status"] = "done"
         _seq_auto_jobs[pid]["current_step"] = "complete"
-    _seq_auto_jobs[pid]["completed_scenes"] = total_succeeded
+    _seq_auto_jobs[pid]["completed_scenes"] = total_succeeded + total_failed
     _seq_auto_jobs[pid]["current_scene_name"] = None
     logger.info(
         f"Continuous dispatch complete: {total_succeeded} succeeded, "
@@ -2846,10 +2855,13 @@ async def _run_windowed_batch(
     # Persist to BatchRun
     if batch_run_id:
         _batch_started_at = _seq_auto_jobs.get(pid, {}).get("_started_at", datetime.utcnow())
-        final_status = BatchRunStatus.COMPLETED
+        if total_succeeded == 0 and total_failed > 0:
+            final_status = BatchRunStatus.FAILED
+        else:
+            final_status = BatchRunStatus.COMPLETED
         await _update_batch_run(
             session_factory, batch_run_id,
-            completed_scenes=total_succeeded,
+            completed_scenes=total_succeeded + total_failed,
             current_scene_name=None,
         )
         await _finish_batch_run(session_factory, batch_run_id, final_status, _batch_started_at)
@@ -3091,8 +3103,9 @@ async def _run_sequential_auto_gen(
                 scene.parameters = scene_params
                 await session.commit()
 
-                # ── MODE: all_images (legacy serial path — now routed through
-                # _run_windowed_batch as missing_images_independent with override)
+                # ── MODE: all_images (DEAD CODE — unreachable because all_images
+                # is in windowed_modes and returns via _run_windowed_batch above.
+                # Kept as defensive fallback in case windowed_modes list changes.)
                 if mode == "all_images":
                     if has_ff and not override_full_set:
                         # Already has image — skip (unless override)
@@ -3156,7 +3169,9 @@ async def _run_sequential_auto_gen(
 
                 # NOTE: missing_images_independent is handled by _run_windowed_batch() above
 
-                # ── MODE: all_video_single ──
+                # ── MODE: all_video_single (DEAD CODE — unreachable because
+                # all_video_single is in windowed_modes and returns via
+                # _run_windowed_batch above. Kept as defensive fallback.)
                 elif mode == "all_video_single":
                     if has_video and not override_full_set:
                         logger.info(f"Sequential auto-gen: Scene {i} already has video, skipping")

@@ -264,6 +264,136 @@ async def cancel_batch_run(batch_id: str):
     return {"batch_id": batch_id, "status": "cancelled"}
 
 
+@router.post("/{batch_id}/retry")
+async def retry_batch_run(batch_id: str):
+    """Retry failed items in a batch run.
+
+    Looks up the in-memory batch run, finds items with status "failed",
+    resets the run to "running", and re-launches _process_single_item
+    for each failed item. The existing checkpoint/resume logic inside
+    _process_single_item detects the batch_run_id, reads completed_step
+    from the BatchRun's run_settings, and skips already-completed steps.
+    """
+    run = _batch_runs.get(batch_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Batch run {batch_id} not found",
+        )
+
+    if run["status"] not in ("done", "failed"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Batch run cannot be retried (status: {run['status']})",
+        )
+
+    # Collect failed items
+    failed_items = [
+        item_state for item_state in run["items"]
+        if item_state["status"] == "failed"
+    ]
+    if not failed_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No failed items to retry",
+        )
+
+    # Reset batch status to running
+    run["status"] = "running"
+
+    # Reset each failed item to pending and clear error
+    for item_state in failed_items:
+        item_state["status"] = "pending"
+        item_state["error"] = None
+        item_state["current_step"] = "pending retry"
+
+    # Launch background task to process failed items
+    asyncio.create_task(_retry_failed_items(batch_id, failed_items))
+
+    logger.info(
+        f"Batch run {batch_id} retry requested for {len(failed_items)} failed items"
+    )
+
+    return _build_status(batch_id)
+
+
+async def _retry_failed_items(batch_id: str, failed_items: list[dict]) -> None:
+    """Background task: re-process failed batch items with checkpoint resume."""
+    run = _batch_runs.get(batch_id)
+    if not run:
+        return
+
+    base_url = _get_internal_base_url()
+
+    try:
+        for item_state in failed_items:
+            # Check for cancellation
+            if run["status"] == "cancelled":
+                logger.info(f"Batch {batch_id} retry cancelled")
+                break
+
+            i = item_state["index"]
+            run["current_item_index"] = i
+            item_state["status"] = "running"
+            config = BatchItemConfig(**item_state["config"])
+
+            # Mark the BatchRun DB record as running again
+            br_id = item_state.get("batch_run_id")
+            if br_id:
+                asyncio.create_task(_update_batch_run_db(
+                    br_id,
+                    status=BatchRunStatusEnum.RUNNING,
+                    current_step="retrying",
+                ))
+
+            try:
+                await _process_single_item(
+                    batch_id=batch_id,
+                    item_index=i,
+                    item_state=item_state,
+                    config=config,
+                    base_url=base_url,
+                )
+                item_state["status"] = "done"
+                item_state["current_step"] = "completed"
+                logger.info(
+                    f"Batch {batch_id} retry item {i} ({item_state['project_name']}) completed"
+                )
+
+            except Exception as exc:
+                logger.exception(
+                    f"Batch {batch_id} retry item {i} ({item_state['project_name']}) failed: {exc}"
+                )
+                item_state["status"] = "failed"
+                item_state["error"] = str(exc)
+                item_state["current_step"] = f"failed: {exc}"
+
+                if br_id:
+                    from datetime import datetime
+                    asyncio.create_task(_update_batch_run_db(
+                        br_id,
+                        status=BatchRunStatusEnum.FAILED,
+                        current_step=f"failed: {exc}",
+                        completed_at=datetime.utcnow(),
+                    ))
+
+        # Final status
+        if run["status"] == "cancelled":
+            pass
+        elif all(s["status"] == "failed" for s in run["items"]):
+            run["status"] = "failed"
+        elif all(s["status"] == "done" for s in run["items"]):
+            run["status"] = "done"
+        else:
+            run["status"] = "done"
+
+        logger.info(f"Batch run {batch_id} retry finished with status: {run['status']}")
+
+    except Exception as fatal:
+        logger.exception(f"Batch {batch_id} retry fatal error: {fatal}")
+        run["status"] = "failed"
+
+
 @router.get("/active")
 async def get_active_batches():
     """Return any in-memory batch runs that are still tracked.
@@ -392,11 +522,13 @@ async def _run_batch_pipeline(batch_id: str) -> None:
         # ── Final status ──────────────────────────────────────────
         if run["status"] == "cancelled":
             pass  # already set
+        elif all(s["status"] == "failed" for s in run["items"]):
+            # Every single item failed — mark the whole batch as failed
+            run["status"] = "failed"
         elif all(s["status"] == "done" for s in run["items"]):
             run["status"] = "done"
         elif any(s["status"] == "failed" for s in run["items"]):
-            # If some succeeded and some failed, mark the batch as done
-            # (individual items have their own status)
+            # Some succeeded and some failed — partial success is still "done"
             run["status"] = "done"
         else:
             run["status"] = "done"
