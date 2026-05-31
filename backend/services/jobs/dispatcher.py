@@ -631,6 +631,27 @@ class JobDispatcher:
         except Exception as rp_err:
             logger.warning(f"[{job_id_str}] RunPod auto-start failed, falling back to local: {rp_err}", exc_info=True)
 
+        # Step 1b: Pre-resolve Z-Image Turbo redirect BEFORE worker selection.
+        # When the user's preferred single_image_generator is z_image_turbo and
+        # the job is klein_t2i (no ref images), the workflow will be redirected
+        # to Z-Image Turbo inside _process_job_image(). But worker selection
+        # needs to happen first, and klein_t2i requires {'klein'} capability
+        # while Z-Image Turbo doesn't. Update workflow_type NOW so the
+        # correct (empty) capability set is used for worker selection.
+        _wf_type = params.get("workflow_type", "")
+        if _wf_type == "klein_t2i" and job.job_type == "image":
+            try:
+                async with self._session_factory() as _zig_pre_session:
+                    from backend.database.models import AppSettings as _ZigPreSettings
+                    _zig_pre_stmt = sfw_select(_ZigPreSettings).where(_ZigPreSettings.id == 1)
+                    _zig_pre_result = await _zig_pre_session.execute(_zig_pre_stmt)
+                    _zig_pre = _zig_pre_result.scalars().first()
+                    if _zig_pre and _zig_pre.single_image_generator == "z_image_turbo":
+                        _wf_type = "z_image_turbo"
+                        logger.debug(f"[{job_id_str}] Pre-resolved workflow_type to z_image_turbo for worker selection")
+            except Exception as _zig_pre_err:
+                logger.debug(f"[{job_id_str}] Could not pre-check Z-Image redirect: {_zig_pre_err}")
+
         # Step 2: Select worker — prefer RunPod if available.
         # Use reserve=True so in_flight is incremented immediately, preventing
         # a concurrent dispatch task from picking the same worker before we
@@ -647,11 +668,19 @@ class JobDispatcher:
                 # Fall back to standard worker selection (local workers only).
                 # Exclude RunPod workers so a video-only RunPod pod doesn't get
                 # picked for image jobs (or vice versa).
-                required_caps = self._get_required_caps(params.get("workflow_type", ""))
-                required_models = self._get_required_models(params.get("workflow_type", ""))
+                # Re-read workflow_type from params — it may have been updated
+                # by _build_workflow (e.g. klein_t2i → z_image_turbo redirect)
+                _effective_wf_type = params.get("workflow_type", _wf_type)
+                required_caps = self._get_required_caps(_effective_wf_type)
+                required_models = self._get_required_models(_effective_wf_type)
                 worker = self.comfy_dispatcher.select_worker(
                     required_caps, required_models, exclude_runpod=True, reserve=True,
                 )
+                if worker is None:
+                    raise ValueError(
+                        f"No workers available with required capabilities {required_caps} "
+                        f"for workflow_type={_effective_wf_type}"
+                    )
                 worker_reserved = True
                 logger.info(f"[{job_id_str}] Using local worker (no RunPod available): {worker.url}")
         except ValueError as e:
@@ -1176,6 +1205,10 @@ class JobDispatcher:
         if workflow_type == "klein_t2i":
             zimage_result = await _try_zimage_redirect(params, seed, job.id if job else None)
             if zimage_result is not None:
+                # Update workflow_type in params so worker selection uses
+                # the correct (empty) capability set for Z-Image Turbo
+                # instead of requiring 'klein' capability.
+                params["workflow_type"] = "z_image_turbo"
                 return zimage_result
 
         # Log when Z-Image is the user's preference but refs force Klein
@@ -1227,6 +1260,7 @@ class JobDispatcher:
                         params, seed, job.id if job else None
                     )
                     if zimage_fallback is not None:
+                        params["workflow_type"] = "z_image_turbo"
                         return zimage_fallback
             workflow_path = str(workflows_dir / klein_map[effective_workflow])
             prompt_text = params.get("prompt", "")
@@ -3070,7 +3104,9 @@ class JobDispatcher:
             "klein_2ref": {"klein"},
             "klein_3ref": {"klein"},
             "klein_4ref": {"klein"},
+            "klein_5ref": {"klein"},
             "klein_t2i": {"klein"},
+            "z_image_turbo": set(),  # No special capability needed
             "ltx_fflf": {"ltx"},
             "ltx_i2v": {"ltx"},
             "ltx_v2v_extend": {"ltx"},
