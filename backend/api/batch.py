@@ -740,7 +740,7 @@ async def _process_single_item(
     _update_step("suggesting timeline")
     _check_cancelled()
 
-    async with httpx.AsyncClient(base_url=base_url, timeout=300) as client:
+    async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
         resp = await client.post(
             f"/api/projects/{project_id}/timeline/suggest-timeline",
         )
@@ -769,7 +769,7 @@ async def _process_single_item(
     _update_step("generating concept from lyrics")
     _check_cancelled()
 
-    async with httpx.AsyncClient(base_url=base_url, timeout=120) as client:
+    async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
         resp = await client.post(
             f"/api/projects/{project_id}/concept/base-on-lyrics",
             json={},
@@ -816,7 +816,7 @@ async def _process_single_item(
         _update_step("auto-generating characters")
         _check_cancelled()
 
-        async with httpx.AsyncClient(base_url=base_url, timeout=120) as client:
+        async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
             resp = await client.post(
                 f"/api/projects/{project_id}/concept/characters/autogenerate",
             )
@@ -831,7 +831,7 @@ async def _process_single_item(
     _update_step("generating video flow")
     _check_cancelled()
 
-    async with httpx.AsyncClient(base_url=base_url, timeout=120) as client:
+    async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
         resp = await client.post(
             f"/api/projects/{project_id}/concept/flow/generate",
         )

@@ -976,17 +976,12 @@ def assemble_music_video(
         # Individual clips are validated before reuse (duration > 0 check),
         # and the merged-video resume logic (above) skips straight past
         # clip rendering + chunk merge when a valid merge file exists.
+        # ── PRESERVE everything on failure for resume ─────────────────
+        # DO NOT delete temp_files — clips and merge outputs ARE temp_files.
         logger.error(
             f"Music video assembly failed — preserving work_dir {work_dir} "
             f"for resume on next export attempt: {exc}"
         )
-        # Only clean up individually tracked temp files (partial outputs,
-        # colour-match intermediates), NOT the working directory itself.
-        for _f in temp_files:
-            try:
-                Path(_f).unlink(missing_ok=True)
-            except Exception:
-                pass
         raise
     else:
         # Success path cleanup — remove everything
@@ -1426,25 +1421,19 @@ def assemble_narration_video(
         report("Assembly complete!", 100)
         logger.info(f"Narration video assembled: {output_path}")
     except BaseException as exc:
-        # ── PRESERVE working directory on failure for resume ──────────
+        # ── PRESERVE everything on failure for resume ─────────────────
         # Clip rendering (Step 1) is the most expensive phase — hours of
         # CPU-bound FFmpeg work with 4 parallel threads.  If a later step
-        # fails (audio mix, subtitle burn-in, normalization), we keep the
-        # work_dir intact so the next export attempt can:
+        # fails (audio mix, subtitle burn-in, normalization), we keep ALL
+        # files in work_dir intact so the next export attempt can:
         #   1. Reuse already-rendered clips (per-clip duration check)
         #   2. Skip directly to audio prep if merged video exists
         # This turns a multi-hour redo into a ~30 second retry.
+        # DO NOT delete temp_files — clips and merge outputs ARE temp_files.
         logger.error(
             f"Narration video assembly failed — preserving work_dir {work_dir} "
             f"for resume on next export attempt: {exc}"
         )
-        # Only clean up individually tracked temp files (partial audio mixes,
-        # colour-match intermediates), NOT the working directory itself.
-        for _f in temp_files:
-            try:
-                Path(_f).unlink(missing_ok=True)
-            except Exception:
-                pass
         raise
     else:
         # Success path cleanup — remove everything

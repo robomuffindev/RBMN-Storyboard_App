@@ -217,7 +217,7 @@ def configure_ffmpeg_threads(threads: int = 0, filter_threads: int = 4) -> None:
     logger.info(f"FFmpeg threads configured: threads={_ffmpeg_threads}, filter_threads={_ffmpeg_filter_threads}")
 
 
-def _run_ffmpeg(cmd: list, description: str = "") -> str:
+def _run_ffmpeg(cmd: list, description: str = "", cwd: str | None = None) -> str:
     """
     Run FFmpeg command with error handling.
 
@@ -227,6 +227,7 @@ def _run_ffmpeg(cmd: list, description: str = "") -> str:
     Args:
         cmd: FFmpeg command list
         description: Description for logging
+        cwd: Optional working directory for the FFmpeg subprocess.
 
     Returns:
         stdout output
@@ -247,7 +248,7 @@ def _run_ffmpeg(cmd: list, description: str = "") -> str:
     if cmd and cmd[0] == "ffmpeg" and "-threads" not in cmd:
         cmd = [cmd[0]] + threading_flags + cmd[1:]
 
-    logger.debug(f"Running: {' '.join(cmd)}")
+    logger.debug(f"Running: {' '.join(cmd)}" + (f" (cwd={cwd})" if cwd else ""))
 
     try:
         result = subprocess.run(
@@ -256,6 +257,7 @@ def _run_ffmpeg(cmd: list, description: str = "") -> str:
             capture_output=True,
             text=True,
             timeout=3600,  # 1 hour timeout
+            cwd=cwd,
         )
         logger.debug(f"FFmpeg {description}: {result.stdout[:100]}")
         return result.stdout
@@ -2414,26 +2416,32 @@ def burn_subtitles(video_path: str, ass_path: str, output_path: str) -> str:
     """
     logger.info(f"Burning subtitles: {video_path} + {ass_path} → {output_path}")
 
-    # Escape the ASS path for FFmpeg's filter-graph parser.
-    # On Windows the colon in drive letters (e.g. D:/) is parsed as the
-    # filter option separator.  FFmpeg's escaping rule: ``\:`` is a literal
-    # colon.  We also convert backslashes to forward slashes so the path
-    # is uniform, and escape any other filter-special characters.
-    escaped_ass = ass_path.replace("\\", "/")
-    # Escape colons (critical for Windows drive letters like D:)
-    escaped_ass = escaped_ass.replace(":", "\\:")
+    # ── Windows colon workaround ──────────────────────────────────────
+    # FFmpeg's filter-graph parser treats ":" as an option separator.
+    # On Windows, absolute paths contain "D:" which gets split, causing:
+    #   [Parsed_ass_0] Unable to parse option value "..." as image size
+    # Both backslash-escaping (\:) and single-quote wrapping failed on
+    # Windows FFmpeg builds.  The bulletproof fix: set FFmpeg's working
+    # directory to the folder containing the ASS file, then reference
+    # only the filename in the filter — no path, no colon, no escaping.
+    ass_dir = str(Path(ass_path).parent)
+    ass_basename = Path(ass_path).name
+
+    # Ensure input/output paths are absolute so they work regardless of cwd
+    video_path = str(Path(video_path).resolve())
+    output_path = str(Path(output_path).resolve())
 
     cmd = [
         "ffmpeg",
         "-i", video_path,
-        "-vf", f"ass={escaped_ass}",
+        "-vf", f"ass={ass_basename}",
         *_gpu.get_encode_flags(),
         "-c:a", "copy",
         "-y",
         output_path,
     ]
 
-    _run_ffmpeg(cmd, "burn_subtitles")
+    _run_ffmpeg(cmd, "burn_subtitles", cwd=ass_dir)
     logger.info(f"Subtitles burned: {output_path}")
     return output_path
 
