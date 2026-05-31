@@ -837,13 +837,13 @@ async def test_whisper(
             comfy_url = settings.whisper_comfyui_url.rstrip("/")
             try:
                 # Check ComfyUI system stats endpoint
-                resp = requests.get(f"{comfy_url}/system_stats", timeout=10)
+                resp = await asyncio.to_thread(requests.get, f"{comfy_url}/system_stats", timeout=10)
                 if resp.status_code == 200:
                     stats = resp.json()
                     # Also check if "Apply Whisper" node is available
                     has_whisper = False
                     try:
-                        obj_resp = requests.get(f"{comfy_url}/object_info/Apply%20Whisper", timeout=10)
+                        obj_resp = await asyncio.to_thread(requests.get, f"{comfy_url}/object_info/Apply%20Whisper", timeout=10)
                         if obj_resp.status_code == 200:
                             has_whisper = True
                     except Exception:
@@ -903,7 +903,7 @@ async def test_whisper(
 
             # Try Gradio endpoints first (Whisper-WebUI is a Gradio app)
             try:
-                resp = requests.get(f"{base_url}/info", timeout=5)
+                resp = await asyncio.to_thread(requests.get, f"{base_url}/info", timeout=5)
                 if resp.status_code == 200:
                     server_type = "gradio"
                     info = resp.json()
@@ -913,7 +913,7 @@ async def test_whisper(
             # Try /config (another Gradio endpoint)
             if not server_type:
                 try:
-                    resp = requests.get(f"{base_url}/config", timeout=5)
+                    resp = await asyncio.to_thread(requests.get, f"{base_url}/config", timeout=5)
                     if resp.status_code == 200:
                         server_type = "gradio"
                 except Exception:
@@ -922,7 +922,7 @@ async def test_whisper(
             # Try /health (OpenAI-compatible / generic servers)
             if not server_type:
                 try:
-                    resp = requests.get(f"{base_url}/health", timeout=5)
+                    resp = await asyncio.to_thread(requests.get, f"{base_url}/health", timeout=5)
                     if resp.status_code == 200:
                         server_type = "rest"
                 except Exception:
@@ -931,7 +931,7 @@ async def test_whisper(
             # Try root URL as last resort (Gradio apps return HTML)
             if not server_type:
                 try:
-                    resp = requests.get(base_url, timeout=5)
+                    resp = await asyncio.to_thread(requests.get, base_url, timeout=5)
                     if resp.status_code == 200:
                         if "gradio" in resp.text.lower():
                             server_type = "gradio"

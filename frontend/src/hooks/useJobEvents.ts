@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '@/store';
 import { getScene, getScenes } from '@/api/client';
+import { parseBackendMs } from '@/utils/time';
 
 export const useJobEvents = () => {
   const retryCountRef = useRef(0);
@@ -146,7 +147,7 @@ export const useJobEvents = () => {
                   : null;
 
                 const elapsed = job?.started_at
-                  ? Date.now() - new Date(job.started_at).getTime()
+                  ? Date.now() - (parseBackendMs(job.started_at) ?? Date.now())
                   : 0;
 
                 s.setLastCompletedAsset({

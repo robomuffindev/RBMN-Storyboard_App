@@ -16,6 +16,7 @@ from sqlmodel import select
 from backend.config import settings as app_settings
 from backend.database import get_session
 from backend.database.models import Project, Job, JobType, JobStatus, Scene, Asset, AssetType, AppSettings, Lyrics
+from backend.utils.background import track as _track_task
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class ExportFileInfo(BaseModel):
     download_url: str
 
 
-class JobResponse(BaseModel):
+class ExportJobResponse(BaseModel):
     """Response model for a job."""
     id: UUID
     project_id: UUID
@@ -881,14 +882,14 @@ async def _run_export_task(
         _export_tasks.pop(pid_s, None)
         _cancel_flag.pop(pid_s, None)
         # Schedule eviction of terminal progress entry to prevent memory leak
-        asyncio.create_task(_schedule_progress_eviction(pid_s))
+        _track_task(_schedule_progress_eviction(pid_s))
 
 
 # ── Endpoints ────────────────────────────────────────────────────────
 
 @router.post(
     "",
-    response_model=JobResponse,
+    response_model=ExportJobResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Export project to video",
 )
@@ -897,7 +898,7 @@ async def export_project(
     req: ExportRequest,
     request: Request,
     session: AsyncSession = Depends(get_session),
-) -> JobResponse:
+) -> ExportJobResponse:
     """Assemble and export final video from all scenes and assets."""
     try:
         project = await _get_project_or_404(project_id, session)
@@ -996,7 +997,7 @@ async def export_project(
         )
         _export_tasks[pid_str] = task
 
-        return JobResponse.model_validate(job)
+        return ExportJobResponse.model_validate(job)
     except HTTPException:
         raise
     except Exception as e:
@@ -1096,7 +1097,7 @@ async def render_preview(
                     "error": str(e),
                 }
 
-        asyncio.create_task(_do_preview(project_id, project.mode))
+        _track_task(_do_preview(project_id, project.mode))
 
         return PreviewRenderResponse(job_id=pid_str, status="rendering")
 
@@ -1263,14 +1264,14 @@ async def cancel_export(
 
 @router.post(
     "/resume",
-    response_model=JobResponse,
+    response_model=ExportJobResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Resume a failed export",
 )
 async def resume_export(
     project_id: UUID,
     session: AsyncSession = Depends(get_session),
-) -> JobResponse:
+) -> ExportJobResponse:
     """Resume a previously failed export from where it left off.
 
     Uses the export manifest and existing clip/chunk files to skip
@@ -1341,7 +1342,7 @@ async def resume_export(
     )
     _export_tasks[pid_str] = task
 
-    return JobResponse.model_validate(job)
+    return ExportJobResponse.model_validate(job)
 
 
 # ── Crash Recovery ─────────────────────────────────────────────────
@@ -1462,14 +1463,14 @@ async def scan_export(
 
 @router.post(
     "/recover",
-    response_model=JobResponse,
+    response_model=ExportJobResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Recover and resume a crashed export",
 )
 async def recover_export(
     project_id: UUID,
     session: AsyncSession = Depends(get_session),
-) -> JobResponse:
+) -> ExportJobResponse:
     """Recover from a crash by scanning the exports directory.
 
     Unlike /resume which requires a completed manifest, this endpoint:
@@ -1575,7 +1576,7 @@ async def recover_export(
     )
     _export_tasks[pid_str] = task
 
-    return JobResponse.model_validate(job)
+    return ExportJobResponse.model_validate(job)
 
 
 # ── Export Gallery ────────────────────────────────────────────────────

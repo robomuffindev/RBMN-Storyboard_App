@@ -62,7 +62,7 @@ export default function ReferenceSelector({
   const charSlotsLeft = maxCharRefs - value.characterIndices.length;
 
   const [describingIdx, setDescribingIdx] = useState<number | null>(null);
-  const { assets } = useAppStore();
+  const assets = useAppStore(s => s.assets);
 
   // ── Asset picker for "Upload or Choose from Assets" flow ──────────
 

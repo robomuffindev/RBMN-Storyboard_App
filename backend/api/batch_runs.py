@@ -16,6 +16,7 @@ from sqlmodel import select
 
 from backend.database import get_session
 from backend.database.models import BatchRun, BatchRunStatus, Project
+from backend.utils.background import track as _track_task
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ async def resume_batch_run(
     from backend.api.generation import _resume_sequential_auto_gen
     import asyncio
 
-    asyncio.create_task(
+    _track_task(
         _resume_sequential_auto_gen(
             batch_run_id=str(run.id),
             project_id=str(run.project_id),

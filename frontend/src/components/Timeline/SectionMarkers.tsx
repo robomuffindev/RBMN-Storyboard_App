@@ -15,7 +15,9 @@ interface SectionMarkersProps {
 }
 
 export default function SectionMarkers({ duration }: SectionMarkersProps) {
-  const { sections, viewMode, setActiveScene } = useAppStore();
+  const sections = useAppStore(s => s.sections);
+  const viewMode = useAppStore(s => s.viewMode);
+  const setActiveScene = useAppStore(s => s.setActiveScene);
 
   if (viewMode !== 'sections' || !sections?.length) return null;
 

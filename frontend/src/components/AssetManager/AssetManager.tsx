@@ -36,7 +36,10 @@ export default function AssetManager() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedType, setSelectedType] = useState<AssetType | 'all'>('all');
   const [assetTypeForUpload, setAssetTypeForUpload] = useState<AssetType>('item');
-  const { currentProject, assets, addAsset, removeAsset } = useAppStore();
+  const currentProject = useAppStore(s => s.currentProject);
+  const assets = useAppStore(s => s.assets);
+  const addAsset = useAppStore(s => s.addAsset);
+  const removeAsset = useAppStore(s => s.removeAsset);
   const [uploading, setUploading] = useState(false);
   const [lightboxAsset, setLightboxAsset] = useState<Asset | null>(null);
   const [showManageModal, setShowManageModal] = useState(false);

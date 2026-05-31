@@ -256,16 +256,18 @@ class JobQueue:
 
     async def recover_running_jobs(self) -> int:
         """
-        On startup, cancel ALL incomplete jobs (PENDING and RUNNING).
+        On startup, handle incomplete jobs from a previous session.
 
-        Previous behaviour reset RUNNING→PENDING, which caused stale
-        jobs from a previous session to immediately start processing
-        on restart — confusing and often failing because ComfyUI state
-        had changed.  Now we wipe the queue clean so every restart is
-        a fresh start.
+        Behaviour:
+          - PENDING jobs are cancelled.
+          - RUNNING jobs WITH `prompt_id` + `worker_url` are LEFT in
+            RUNNING state so the dispatcher's retry fast-path can
+            reconnect via WebSocket and pick up the result, preserving
+            expensive in-flight ComfyUI renders across a restart.
+          - RUNNING jobs without `prompt_id` are cancelled.
 
         Returns:
-            Number of jobs cancelled.
+            Number of jobs marked CANCELLED.
         """
         async with self._session_factory() as session:
             stmt = select(Job).where(
@@ -274,15 +276,45 @@ class JobQueue:
             result = await session.execute(stmt)
             stale_jobs = result.scalars().all()
 
-            count = 0
+            cancelled = 0
+            reconnect = 0
             for job in stale_jobs:
+                if (
+                    job.status == JobStatus.RUNNING
+                    and job.prompt_id
+                    and job.worker_url
+                ):
+                    reconnect += 1
+                    continue
                 job.status = JobStatus.CANCELLED
                 job.error = "Cancelled: application restarted"
                 session.add(job)
-                count += 1
+                cancelled += 1
 
-            if count > 0:
+            if cancelled > 0 or reconnect > 0:
                 await session.commit()
-                logger.info(f"Startup cleanup: cancelled {count} stale jobs (PENDING/RUNNING)")
+                logger.info(
+                    f"Startup cleanup: cancelled {cancelled} stale jobs, "
+                    f"kept {reconnect} RUNNING jobs for reconnect"
+                )
 
-            return count
+            return cancelled
+
+    async def get_running_jobs_for_reconnect(self) -> list[Job]:
+        """Return RUNNING jobs with an in-flight ComfyUI prompt.
+
+        Called by the dispatcher on startup so we can reconnect via the
+        retry fast-path instead of cancelling expensive renders.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(Job)
+                .where(
+                    Job.status == JobStatus.RUNNING,
+                    Job.prompt_id.is_not(None),
+                    Job.worker_url.is_not(None),
+                )
+                .order_by(Job.priority.desc(), Job.created_at.asc())
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())

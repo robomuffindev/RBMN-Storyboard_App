@@ -232,6 +232,25 @@ class JobDispatcher:
         if recovered:
             logger.info(f"Recovered {recovered} jobs from previous run")
 
+        # Reconnect to RUNNING jobs that have a ComfyUI prompt in flight.
+        # `recover_running_jobs()` left these alive so we can pick up the
+        # live result instead of cancelling expensive renders.
+        try:
+            reconnect_jobs = await self.job_queue.get_running_jobs_for_reconnect()
+            for job in reconnect_jobs:
+                task = asyncio.create_task(
+                    self._dispatch_single_job(job),
+                    name=f"reconnect-{job.id}",
+                )
+                self._active_tasks.add(task)
+            if reconnect_jobs:
+                logger.info(
+                    f"Dispatch loop: reconnecting to {len(reconnect_jobs)} in-flight "
+                    f"ComfyUI jobs from previous run"
+                )
+        except Exception as e:
+            logger.warning(f"Reconnect on startup failed: {e}")
+
         while self.running:
             try:
                 # Wait for signal or timeout
@@ -506,7 +525,13 @@ class JobDispatcher:
                         f"Will try to reconnect WS."
                     )
 
-                # Prompt still running — reconnect WebSocket and monitor
+                # Prompt still running — reconnect WebSocket and monitor.
+                # NOTE: increment in_flight here because the worker was
+                # already reserved when the original submit happened, but
+                # stream_and_wait's `finally` always decrements. Without
+                # this matching increment the counter drifts toward zero
+                # on every retry.
+                worker.in_flight += 1
                 self.on_progress(job_id_str, {
                     "event": "worker_assigned",
                     "worker_url": existing_worker_url,

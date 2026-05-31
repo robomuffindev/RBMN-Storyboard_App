@@ -27,8 +27,11 @@ async def serve_raw_file(file_path: str):
     original = (settings.project_dir / file_path).resolve()
     untrimmed = original.parent / (original.stem + "_untrimmed" + original.suffix)
 
-    # Security check
-    if not str(original).startswith(str(project_dir_resolved)):
+    # Security check — use relative_to to avoid prefix-collision attack
+    # (e.g. project_dir=/foo/bar, request=/foo/bar2/x).
+    try:
+        original.relative_to(project_dir_resolved)
+    except ValueError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     # Prefer untrimmed (raw) version; fall back to original
@@ -66,7 +69,11 @@ async def serve_project_file(file_path: str):
     full_path = (settings.project_dir / file_path).resolve()
     project_dir_resolved = settings.project_dir.resolve()
 
-    if not str(full_path).startswith(str(project_dir_resolved)):
+    # Use relative_to to avoid prefix-collision attack
+    # (e.g. project_dir=/foo/bar, request=/foo/bar2/x).
+    try:
+        full_path.relative_to(project_dir_resolved)
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied",

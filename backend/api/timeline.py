@@ -54,12 +54,12 @@ def _write_llm_log(
     try:
         LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         filename = f"{ts}_{endpoint}.json"
         filepath = LLM_LOG_DIR / filename
 
         log_entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.utcnow().isoformat(),
             "endpoint": endpoint,
             "provider": provider,
             "model": model,

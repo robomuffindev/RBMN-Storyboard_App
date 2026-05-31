@@ -258,6 +258,11 @@ async def update_project(
         if req.settings is not None:
             project.settings = req.settings
 
+        # Bump updated_at so list_projects (which sorts by updated_at DESC)
+        # reflects the edit.
+        from datetime import datetime as _dt
+        project.updated_at = _dt.utcnow()
+
         await session.commit()
         await session.refresh(project)
 

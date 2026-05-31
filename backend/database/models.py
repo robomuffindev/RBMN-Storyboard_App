@@ -96,6 +96,9 @@ class Project(SQLModel, table=True):
     lyrics: Optional["Lyrics"] = Relationship(
         back_populates="project", cascade_delete=True
     )
+    backing_tracks: list["BackingTrack"] = Relationship(
+        back_populates="project", cascade_delete=True
+    )
 
 
 class Scene(SQLModel, table=True):
@@ -280,7 +283,7 @@ class BackingTrack(SQLModel, table=True):
     __tablename__ = "backing_tracks"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    project_id: UUID = Field(foreign_key="projects.id", index=True)
+    project_id: UUID = Field(foreign_key="projects.id", index=True, ondelete="CASCADE")
     filename: str = Field(default="")
     rel_path: str = Field(default="")  # relative path within project dir
     order_index: int = Field(default=0)
@@ -292,6 +295,9 @@ class BackingTrack(SQLModel, table=True):
     fade_in_sec: float = Field(default=0.0)
     fade_out_sec: float = Field(default=0.0)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Relationships
+    project: "Project" = Relationship(back_populates="backing_tracks")
 
 
 class AppSettings(SQLModel, table=True):

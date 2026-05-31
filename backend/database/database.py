@@ -232,11 +232,14 @@ async def init_db() -> None:
             "ALTER TABLE app_settings ADD COLUMN comfyui_server_caps JSON DEFAULT NULL",
             "ALTER TABLE app_settings ADD COLUMN export_lfff_trim_enabled BOOLEAN DEFAULT 1",
             "UPDATE app_settings SET export_lfff_trim_enabled = 1 WHERE export_lfff_trim_enabled IS NULL",
-            # Migration: change default transition from crossfade to none
-            "UPDATE app_settings SET export_transition_type = 'none' WHERE export_transition_type = 'crossfade'",
-            # Migration: disable color correction and color match by default (too harsh)
-            "UPDATE app_settings SET color_correction_enabled = 0 WHERE color_correction_enabled = 1",
-            "UPDATE app_settings SET export_color_match_clips = 0 WHERE export_color_match_clips = 1",
+            # Migration: change default transition from crossfade to none (one-shot)
+            "ALTER TABLE app_settings ADD COLUMN _mig_transition_none BOOLEAN DEFAULT 0",
+            "UPDATE app_settings SET export_transition_type = 'none', _mig_transition_none = 1 WHERE _mig_transition_none = 0 AND export_transition_type = 'crossfade'",
+            "UPDATE app_settings SET _mig_transition_none = 1 WHERE _mig_transition_none IS NULL",
+            # Migration: disable color correction and color match by default once
+            # (the previous unguarded UPDATE reset the user's choice on every restart).
+            "ALTER TABLE app_settings ADD COLUMN _mig_color_default_off BOOLEAN DEFAULT 0",
+            "UPDATE app_settings SET color_correction_enabled = 0, export_color_match_clips = 0, _mig_color_default_off = 1 WHERE _mig_color_default_off = 0 OR _mig_color_default_off IS NULL",
             "ALTER TABLE app_settings ADD COLUMN ltx_model_gguf VARCHAR DEFAULT 'ltx-2.3-22b-dev-Q8_0.gguf'",
             "ALTER TABLE app_settings ADD COLUMN single_image_generator VARCHAR DEFAULT 'z_image_turbo'",
             "ALTER TABLE app_settings ADD COLUMN use_distilled_lora BOOLEAN DEFAULT 1",

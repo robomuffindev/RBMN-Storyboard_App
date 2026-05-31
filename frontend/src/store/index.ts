@@ -39,6 +39,11 @@ interface AppState {
   batchPreviewVisible: boolean;
   batchPreviewEnabled: boolean;   // user toggle — when true, PIP auto-shows on job completion
 
+  // Auto-gen modal visibility — lifted to the store so both the header
+  // button (AppLayout) and the Timeline toolbar button open the SAME
+  // modal, which is the one wired to the bottom-of-screen status bar.
+  autoGenOpen: boolean;
+
   // Actions
   setProject: (project: Project | null) => void;
   setScenes: (scenes: Scene[]) => void;
@@ -62,6 +67,9 @@ interface AppState {
   setLastCompletedAsset: (asset: LastCompletedAsset | null) => void;
   setBatchPreviewVisible: (visible: boolean) => void;
   setBatchPreviewEnabled: (enabled: boolean) => void;
+
+  // Auto-gen modal
+  setAutoGenOpen: (open: boolean) => void;
 
   // Job management
   addJob: (job: Job) => void;
@@ -128,6 +136,7 @@ export const useAppStore = create<AppState>((set) => ({
   lastCompletedAsset: null,
   batchPreviewVisible: false,
   batchPreviewEnabled: false,
+  autoGenOpen: false,
 
   // Setters
   setProject: (project) => set({ currentProject: project }),
@@ -151,6 +160,7 @@ export const useAppStore = create<AppState>((set) => ({
   })),
   setBatchPreviewVisible: (visible) => set({ batchPreviewVisible: visible }),
   setBatchPreviewEnabled: (enabled) => set({ batchPreviewEnabled: enabled }),
+  setAutoGenOpen: (open) => set({ autoGenOpen: open }),
 
   // Jobs
   addJob: (job) => set((s) => ({ jobs: pruneJobs([...s.jobs, job]) })),

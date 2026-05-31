@@ -4,6 +4,7 @@ import { useMutation } from '@tanstack/react-query';
 import { cancelJob, retryJob, deleteJob } from '@/api/client';
 import { X, RotateCcw, Trash2, Loader, CheckCircle, AlertCircle, Server, Film, Clock } from 'lucide-react';
 import type { Job } from '@/types/index';
+import { parseBackendMs, parseBackendDate } from '@/utils/time';
 
 /** Live elapsed timer that ticks every second */
 function ElapsedTimer({ startedAt, completedAt }: { startedAt?: string; completedAt?: string }) {
@@ -17,8 +18,8 @@ function ElapsedTimer({ startedAt, completedAt }: { startedAt?: string; complete
 
   if (!startedAt) return null;
 
-  const start = new Date(startedAt).getTime();
-  const end = completedAt ? new Date(completedAt).getTime() : now;
+  const start = parseBackendMs(startedAt) ?? 0;
+  const end = completedAt ? (parseBackendMs(completedAt) ?? now) : now;
   const secs = Math.max(0, Math.floor((end - start) / 1000));
 
   const h = Math.floor(secs / 3600);
@@ -228,7 +229,7 @@ export default function GenerationPanel() {
       {job.started_at && (
         <div className="flex items-center justify-between mt-2">
           <span className="text-xs text-gray-500">
-            {new Date(job.started_at).toLocaleTimeString()}
+            {parseBackendDate(job.started_at)?.toLocaleTimeString() ?? ''}
           </span>
           <ElapsedTimer
             startedAt={job.started_at}

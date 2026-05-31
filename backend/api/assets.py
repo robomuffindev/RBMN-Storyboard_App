@@ -94,13 +94,6 @@ async def upload_assets(
         project_path = settings.project_dir / str(project_id)
         assets_base = project_path / "assets"
 
-        # Read file content
-        content = await file.read()
-
-        # Compute SHA256
-        import hashlib
-        file_sha256 = hashlib.sha256(content).hexdigest() if content else None
-
         # Determine subdirectory based on asset type
         if asset_type in (AssetType.MUSIC, AssetType.NARRATION):
             type_dir = "audio"
@@ -110,17 +103,60 @@ async def upload_assets(
             type_dir = "images"
 
         type_path = assets_base / type_dir
+        type_path.mkdir(parents=True, exist_ok=True)
 
-        # Use content-addressed path if we have SHA256
-        if file_sha256:
-            target_path = content_addressed_path(type_path, file_sha256, file.filename)
-        else:
-            target_path = type_path / file.filename
+        # ── Stream to a temp file in chunks (don't slurp into memory) ──
+        # Compute SHA256 incrementally; enforce a hard size cap. Once we
+        # know the hash, rename to the final content-addressed path.
+        import hashlib
+        import tempfile
+        import os as _os
 
-        # Write file
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(target_path, "wb") as f:
-            f.write(content)
+        MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+        CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+        sha = hashlib.sha256()
+        total_bytes = 0
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=".upload_", suffix=".part", dir=str(type_path)
+        )
+        try:
+            with _os.fdopen(tmp_fd, "wb") as out:
+                while True:
+                    chunk = await file.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=(
+                                f"Upload exceeds maximum size "
+                                f"({MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"
+                            ),
+                        )
+                    sha.update(chunk)
+                    out.write(chunk)
+
+            file_sha256 = sha.hexdigest() if total_bytes > 0 else None
+
+            if file_sha256:
+                target_path = content_addressed_path(type_path, file_sha256, file.filename)
+            else:
+                target_path = type_path / file.filename
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            if target_path.exists():
+                _os.unlink(tmp_name)
+            else:
+                _os.replace(tmp_name, target_path)
+        except Exception:
+            try:
+                if _os.path.exists(tmp_name):
+                    _os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
 
         # Compute relative path from project directory
         rel_path = target_path.relative_to(project_path)
@@ -132,7 +168,7 @@ async def upload_assets(
             rel_path=str(rel_path),
             asset_type=asset_type,
             sha256=file_sha256 or "",
-            file_size=len(content),
+            file_size=total_bytes,
             meta={
                 "content_type": file.content_type or "application/octet-stream"
             },
@@ -210,6 +246,59 @@ async def list_assets(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list assets",
+        )
+
+
+@router.get(
+    "/generated",
+    response_model=list[AssetResponse],
+    summary="List generated assets",
+)
+async def list_generated_assets(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> list[AssetResponse]:
+    """List all generated image and video assets, newest first.
+
+    NOTE: Named route — MUST be registered BEFORE `/{asset_id}` routes,
+    otherwise FastAPI parses the literal "generated" as a UUID and 422s.
+    See gotcha #18.
+
+    Returns assets with type generated_image or generated_video that were
+    created by the Asset Generator (standalone generation outside of scenes).
+
+    Args:
+        project_id: UUID of the project.
+        session: Database session.
+
+    Returns:
+        List of generated assets, newest first.
+
+    Raises:
+        HTTPException: If project not found.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        stmt = (
+            select(Asset)
+            .where(
+                Asset.project_id == project_id,
+                Asset.asset_type.in_([AssetType.GENERATED_IMAGE, AssetType.GENERATED_VIDEO]),
+            )
+            .order_by(Asset.created_at.desc())
+        )
+        result = await session.execute(stmt)
+        assets = result.scalars().all()
+
+        return [AssetResponse.model_validate(asset) for asset in assets]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing generated assets for project {project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list generated assets",
         )
 
 
@@ -575,53 +664,6 @@ async def update_asset(
         )
 
 
-@router.get(
-    "/generated",
-    response_model=list[AssetResponse],
-    summary="List generated assets",
-)
-async def list_generated_assets(
-    project_id: UUID,
-    session: AsyncSession = Depends(get_session),
-) -> list[AssetResponse]:
-    """List all generated image and video assets, newest first.
-
-    Returns assets with type generated_image or generated_video that were
-    created by the Asset Generator (standalone generation outside of scenes).
-
-    Args:
-        project_id: UUID of the project.
-        session: Database session.
-
-    Returns:
-        List of generated assets, newest first.
-
-    Raises:
-        HTTPException: If project not found.
-    """
-    try:
-        await _get_project_or_404(project_id, session)
-
-        stmt = (
-            select(Asset)
-            .where(
-                Asset.project_id == project_id,
-                Asset.asset_type.in_([AssetType.GENERATED_IMAGE, AssetType.GENERATED_VIDEO]),
-            )
-            .order_by(Asset.created_at.desc())
-        )
-        result = await session.execute(stmt)
-        assets = result.scalars().all()
-
-        return [AssetResponse.model_validate(asset) for asset in assets]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error listing generated assets for project {project_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list generated assets",
-        )
 
 
 class AssignAssetToSceneRequest(BaseModel):

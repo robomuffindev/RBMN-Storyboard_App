@@ -85,7 +85,8 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
   const srtInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const queryClient = useQueryClient();
-  const { assets, scenes } = useAppStore();
+  const assets = useAppStore(s => s.assets);
+  const scenes = useAppStore(s => s.scenes);
 
   const [stage, setStage] = useState<AnalysisStage>('idle');
   const [errorMessage, setErrorMessage] = useState('');

@@ -18,7 +18,9 @@ export default function VideoFlowPanel({ projectId }: VideoFlowPanelProps) {
   const [ideas, setIdeas] = useState<FlowIdea[]>([]);
   const [editedIds, setEditedIds] = useState<Set<string>>(new Set());
   const [showFlowStatus, setShowFlowStatus] = useState(false);
-  const { scenes, setActiveScene, currentProject } = useAppStore();
+  const scenes = useAppStore(s => s.scenes);
+  const setActiveScene = useAppStore(s => s.setActiveScene);
+  const currentProject = useAppStore(s => s.currentProject);
   const queryClient = useQueryClient();
   const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
 

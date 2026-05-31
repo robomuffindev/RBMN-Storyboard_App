@@ -20,6 +20,7 @@ import AssetGeneratorModal from '@/components/AssetGenerator/AssetGeneratorModal
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { useBackingTrackPlayer } from '@/hooks/useBackingTrackPlayer';
 import type { BackingTrackData } from '@/hooks/useBackingTrackPlayer';
+import { parseBackendDate } from '@/utils/time';
 
 const EMPTY_ARRAY: never[] = [];
 
@@ -30,7 +31,11 @@ export default function AppLayout() {
   const [selectedPanel, setSelectedPanel] = useState<'audio' | 'scenes' | 'assets' | 'concept' | 'flow'>('audio');
   const [exportOpen, setExportOpen] = useState(false);
   const [exportGalleryOpen, setExportGalleryOpen] = useState(false);
-  const [autoGenOpen, setAutoGenOpen] = useState(false);
+  // autoGenOpen lives in the Zustand store so both the header button
+  // (here) and the Timeline toolbar button open the SAME modal (the one
+  // wired to AutoGenStatusBar for minimize-to-bottom-of-screen).
+  const autoGenOpen = useAppStore((s) => s.autoGenOpen);
+  const setAutoGenOpen = useAppStore((s) => s.setAutoGenOpen);
   const [assetGenOpen, setAssetGenOpen] = useState(false);
   const [editorCollapsed, setEditorCollapsed] = useState(false);
   const [previewRendering, setPreviewRendering] = useState(false);
@@ -84,8 +89,10 @@ export default function AppLayout() {
     window.addEventListener('mouseup', handleMouseUp);
   }, [timelineHeight]);
 
-  const { setProject, setScenes, setSections, setAssets } =
-    useAppStore();
+  const setProject = useAppStore(s => s.setProject);
+  const setScenes = useAppStore(s => s.setScenes);
+  const setSections = useAppStore(s => s.setSections);
+  const setAssets = useAppStore(s => s.setAssets);
 
   const { data: project } = useQuery({
     queryKey: ['project', id],
@@ -1301,7 +1308,12 @@ export default function AppLayout() {
 }
 
 function SceneList({ scenes, onAddScene, isAdding }: { scenes: Scene[]; onAddScene: () => void; isAdding: boolean }) {
-  const { activeScene, setActiveScene, setPlaybackPosition, setIsPlaying, isPlaying, playbackPosition } = useAppStore();
+  const activeScene = useAppStore(s => s.activeScene);
+  const setActiveScene = useAppStore(s => s.setActiveScene);
+  const setPlaybackPosition = useAppStore(s => s.setPlaybackPosition);
+  const setIsPlaying = useAppStore(s => s.setIsPlaying);
+  const isPlaying = useAppStore(s => s.isPlaying);
+  const playbackPosition = useAppStore(s => s.playbackPosition);
   const [playingSceneId, setPlayingSceneId] = useState<string | null>(null);
 
   // Stop per-scene playback when playback position passes the scene end
@@ -2398,7 +2410,8 @@ function ExportGalleryModal({ projectId, onClose }: { projectId: string; onClose
 
   const formatDate = (iso: string) => {
     try {
-      const d = new Date(iso);
+      const d = parseBackendDate(iso);
+      if (!d) return iso;
       return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) +
         ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
     } catch { return iso; }
@@ -2529,30 +2542,53 @@ function ExportGalleryModal({ projectId, onClose }: { projectId: string; onClose
 }
 
 
-type AutoGenMode = 'all_images' | 'empty_only' | 'enhanced_all' | 'enhanced_missing';
+// These are the modes the backend `_run_sequential_auto_gen` actually handles.
+// Don't add modes here without a matching branch in the dispatcher — they'll
+// silently no-op and the run will "complete" with nothing generated.
+type AutoGenMode =
+  | 'all_images'
+  | 'missing_images_independent'
+  | 'all_video_single'
+  | 'missing_videos_single'
+  | 'all_video_fflf'
+  | 'all_video_v2v';
 
 const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string }[] = [
   {
-    value: 'enhanced_all',
-    label: 'Full Pipeline (All Scenes)',
+    value: 'all_video_fflf',
+    label: 'Full Pipeline \u2014 FF/LF Chaining',
     description:
-      'Generate story/video flow, LLM-enhance prompts, then queue first frames, last frames, and videos for every scene.',
+      "Enhance prompts and generate first-frame image + video for every scene. Uses the previous scene's last frame as this scene's first frame for visual continuity.",
   },
   {
-    value: 'enhanced_missing',
-    label: 'Full Pipeline (Missing Only)',
+    value: 'all_video_v2v',
+    label: 'Full Pipeline \u2014 V2V Extend',
     description:
-      'LLM-enhance and generate only what\'s missing per scene — skips scenes that already have images/videos.',
+      "Like FF/LF but uses the previous scene's video tail directly as conditioning, producing smoother transitions between cuts. Generates one scene at a time.",
+  },
+  {
+    value: 'all_video_single',
+    label: 'Full Pipeline \u2014 Single Image (no Last Frame)',
+    description:
+      'Enhance prompts and generate first-frame image + video for every scene independently. No previous-frame continuity. Runs in parallel across workers.',
+  },
+  {
+    value: 'missing_videos_single',
+    label: 'Missing Videos Only (Single Image)',
+    description:
+      'Only scenes that lack a chosen video \u2014 keep existing images, generate videos via I2V. Runs in parallel.',
   },
   {
     value: 'all_images',
-    label: 'Images Only (All Scenes)',
-    description: 'Queue first-frame image generation for every scene in order.',
+    label: 'All Images \u2014 Use Previous Scene as Reference',
+    description:
+      'Generate first-frame images for every scene. Each scene uses the previous scene as an extra reference for style continuity. No video generation.',
   },
   {
-    value: 'empty_only',
-    label: 'Images Only (Empty Scenes)',
-    description: 'Only generate images for scenes that don\'t have a chosen preview yet.',
+    value: 'missing_images_independent',
+    label: 'Missing Images \u2014 Independent',
+    description:
+      "Only scenes that lack a chosen image \u2014 generate independently (no previous-scene reference). Runs in parallel.",
   },
 ];
 
@@ -2572,7 +2608,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const navigate = useNavigate();
   const currentProject = useAppStore((s) => s.currentProject);
   const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
-  const [mode, setMode] = useState<AutoGenMode>('enhanced_all');
+  const [mode, setMode] = useState<AutoGenMode>('all_video_fflf');
   const [isStarting, setIsStarting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2580,6 +2616,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const [elapsed, setElapsed] = useState(0);
 
   // Advanced options
+  const [overrideFullSet, setOverrideFullSet] = useState(false);
   const [twoPass, setTwoPass] = useState(true);
   const [useStoryFlow, setUseStoryFlow] = useState(true);
   const [lipsyncEnabled, setLipsyncEnabled] = useState(true);
@@ -2638,8 +2675,9 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
     setStatusMsg(null);
 
     try {
-      // For enhanced_all mode, generate video flow first
-      if (mode === 'enhanced_all') {
+      // Generate video flow first if useStoryFlow is on and we're producing
+      // video — the per-scene enhance picks it up from project state.
+      if (useStoryFlow && (mode.includes('video') || mode === 'all_images')) {
         setStatusMsg(isNarration ? 'Generating story flow ideas...' : 'Generating video flow ideas...');
         try {
           await generateVideoFlow(projectId);
@@ -2648,16 +2686,12 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
         }
       }
 
-      setStatusMsg(
-        mode.startsWith('enhanced')
-          ? 'Enhancing prompts and queuing jobs...'
-          : 'Queuing generation jobs...'
-      );
+      setStatusMsg('Queuing generation jobs...');
 
       await startSequentialAutoGen(
         projectId,
         mode,
-        false, // overrideFullSet
+        overrideFullSet,
         false, // vocalsOnlyAudio
         skipAudioMux,
         twoPass,
@@ -2686,14 +2720,12 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
 
   const getModeLabel = (m: string) => {
     switch (m) {
-      case 'all_video_fflf': return 'Video (Use Previous Frame)';
-      case 'all_video_v2v': return 'Video (V2V Extend)';
-      case 'all_video_single': return 'Video (Single Frame)';
-      case 'missing_videos_single': return 'Missing Videos (Single Frame)';
-      case 'all_images': return 'Images Only';
-      case 'missing_images_independent': return 'Images (Independent)';
-      case 'enhanced_all': return 'Full Pipeline (All)';
-      case 'enhanced_missing': return 'Full Pipeline (Missing)';
+      case 'all_video_fflf': return 'Full Pipeline \u2014 FF/LF Chaining';
+      case 'all_video_v2v': return 'Full Pipeline \u2014 V2V Extend';
+      case 'all_video_single': return 'Full Pipeline \u2014 Single Image';
+      case 'missing_videos_single': return 'Missing Videos (Single Image)';
+      case 'all_images': return 'All Images (Prev Scene Ref)';
+      case 'missing_images_independent': return 'Missing Images (Independent)';
       default: return m.replace(/_/g, ' ');
     }
   };
@@ -2883,6 +2915,15 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
 
             {showAdvanced && (
               <div className="mb-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg space-y-2.5">
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input type="checkbox" checked={overrideFullSet} onChange={e => setOverrideFullSet(e.target.checked)} disabled={isStarting}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-amber-500" />
+                  <div>
+                    <span className="text-sm text-gray-200">Override \u2014 Regenerate Full Set</span>
+                    <p className="text-xs text-gray-500">For "Missing" modes: regenerate every scene instead of only the missing ones. Prior versions remain in the gallery.</p>
+                  </div>
+                </label>
+
                 <label className="flex items-center gap-2.5 cursor-pointer">
                   <input type="checkbox" checked={twoPass} onChange={e => setTwoPass(e.target.checked)} disabled={isStarting}
                     className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />

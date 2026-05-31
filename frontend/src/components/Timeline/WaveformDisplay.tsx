@@ -29,7 +29,8 @@ export default function WaveformDisplay({
   // Track whether position changes come from wavesurfer (playback/click)
   // vs from the external slider, to avoid feedback loops
   const isInternalUpdateRef = useRef(false);
-  const { currentProject, assets } = useAppStore();
+  const currentProject = useAppStore(s => s.currentProject);
+  const assets = useAppStore(s => s.assets);
 
   // Find the music asset URL
   const musicAsset = (assets || []).find(a => a.asset_type === 'music');

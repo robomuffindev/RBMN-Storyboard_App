@@ -51,7 +51,9 @@ export function useBackingTrackPlayer(tracks: BackingTrackData[], projectId: str
   const startedAtRef = useRef<number>(0); // AudioContext.currentTime when playback started
   const rafRef = useRef<number>(0);
 
-  const { isPlaying, playbackPosition, backingMasterVolume } = useAppStore();
+  const isPlaying = useAppStore(s => s.isPlaying);
+  const playbackPosition = useAppStore(s => s.playbackPosition);
+  const backingMasterVolume = useAppStore(s => s.backingMasterVolume);
 
   // Get or create AudioContext + master gain node
   const getContext = useCallback(() => {

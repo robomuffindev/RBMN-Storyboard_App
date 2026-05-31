@@ -31,6 +31,7 @@ class JobResponse(BaseModel):
     status: str
     priority: int
     worker_url: Optional[str]
+    prompt_id: Optional[str] = None  # ComfyUI prompt id — useful for debugging stuck jobs
     parameters: dict
     result: Optional[dict] = None
     error: Optional[str] = None
@@ -291,10 +292,13 @@ async def cancel_job(
                 detail=f"Job {job_id} not found",
             )
 
-        if job.status not in [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.DONE, JobStatus.FAILED]:
+        # Only PENDING and RUNNING jobs can be cancelled.  Allowing DONE/FAILED
+        # here let stale cancels flip completed jobs to CANCELLED and emit a
+        # misleading job_failed SSE event — confusing the retry UX.
+        if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot cancel job with status {job.status}",
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot cancel job in status {job.status}",
             )
 
         # If running on a ComfyUI worker, try to interrupt it

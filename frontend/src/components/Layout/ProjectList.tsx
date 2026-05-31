@@ -6,6 +6,7 @@ import { getProjects, createProject, deleteProject, startBatchRun, getBatchStatu
 import BatchItemAddModal from '@/components/BatchMode/BatchItemAddModal';
 import BatchQueuePanel from '@/components/BatchMode/BatchQueuePanel';
 import type { Project, ProjectMode, BatchItemConfig, BatchRunStatus } from '@/types/index';
+import { parseBackendDate } from '@/utils/time';
 
 export default function ProjectList() {
   const navigate = useNavigate();
@@ -229,7 +230,7 @@ export default function ProjectList() {
                     Mode: <span className="text-gray-200 font-medium">{getModeLabel(project.mode)}</span>
                   </p>
                   <p className="text-gray-500 text-xs mb-4">
-                    Created {new Date(project.created_at).toLocaleDateString()}
+                    Created {parseBackendDate(project.created_at)?.toLocaleDateString() ?? ''}
                   </p>
                   <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button

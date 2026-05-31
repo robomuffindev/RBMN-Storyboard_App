@@ -103,7 +103,7 @@ export default function CharacterCreatorModal({
   const [activeImagePath, setActiveImagePath] = useState<string | null>(character.image_path);
 
   // Asset picker for reference images
-  const { assets } = useAppStore();
+  const assets = useAppStore(s => s.assets);
   const { openPicker: openRefPicker, PickerModals: RefPickerModals } = useAssetPicker({
     assets: assets || [],
     onFileUpload: (file) => handleRefUpload(file),

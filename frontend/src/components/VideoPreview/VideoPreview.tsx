@@ -58,10 +58,10 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
   // Track the last painted video URL to detect source changes
   const lastPaintedUrl = useRef<string>('');
 
-  const {
-    activeScene, scenes,
-    playbackPosition, isPlaying,
-  } = useAppStore();
+  const activeScene = useAppStore(s => s.activeScene);
+  const scenes = useAppStore(s => s.scenes);
+  const playbackPosition = useAppStore(s => s.playbackPosition);
+  const isPlaying = useAppStore(s => s.isPlaying);
 
   // ─── Scene resolution ──────────────────────────────────────────
   const sceneAtPlayhead = useMemo(() => {

@@ -28,6 +28,7 @@ import {
 } from '@/api/client';
 import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle, Cpu, Monitor, Zap } from 'lucide-react';
 import type { AppSettings, SystemPromptOverrideEntry, RunPodPodConfig, RunPodPodStatus, GpuStatus } from '@/types/index';
+import { parseBackendDate } from '@/utils/time';
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -456,7 +457,7 @@ export default function SettingsPage() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       const exportedDate = data.exported_at
-        ? new Date(data.exported_at).toLocaleString()
+        ? (parseBackendDate(data.exported_at)?.toLocaleString() ?? new Date().toLocaleString())
         : new Date().toLocaleString();
       setImportExportStatus({ type: 'success', message: `Settings exported (${exportedDate})` });
     } catch (error) {

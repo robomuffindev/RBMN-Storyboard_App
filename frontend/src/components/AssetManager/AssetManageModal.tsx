@@ -18,6 +18,7 @@ import { useAppStore } from '@/store';
 import { AssetLightbox } from './AssetPickerModal';
 import { handleImgError } from '@/utils/brokenImage';
 import type { Asset, AssetType } from '@/types/index';
+import { parseBackendMs, parseBackendDate } from '@/utils/time';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff'];
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi', '.mkv'];
@@ -96,7 +97,7 @@ export default function AssetManageModal({ onClose, onAssetsDeleted }: AssetMana
         case 'name':
           return a.filename.localeCompare(b.filename);
         case 'date':
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          return (parseBackendMs(b.created_at) ?? 0) - (parseBackendMs(a.created_at) ?? 0);
         case 'type':
           return a.asset_type.localeCompare(b.asset_type);
         case 'size':
@@ -176,7 +177,8 @@ export default function AssetManageModal({ onClose, onAssetsDeleted }: AssetMana
   }
 
   function formatDate(dateStr: string): string {
-    const d = new Date(dateStr);
+    const d = parseBackendDate(dateStr);
+    if (!d) return '';
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
 

@@ -14,6 +14,7 @@ import {
   assignAssetToScene,
 } from '@/api/client';
 import type { Scene, Asset, AppSettings } from '@/types/index';
+import { parseBackendDate } from '@/utils/time';
 
 interface AssetGeneratorModalProps {
   projectId: string;
@@ -1025,7 +1026,7 @@ function ResultsGallery({
               </p>
               <p className="text-[10px] text-gray-500 flex items-center gap-1">
                 <Clock size={10} />
-                {new Date(asset.created_at).toLocaleTimeString()}
+                {parseBackendDate(asset.created_at)?.toLocaleTimeString() ?? ''}
               </p>
             </div>
           </div>

@@ -32,10 +32,10 @@ def _write_enhance_log(
     """Write a debug log for enhance calls."""
     try:
         _ENHANCE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
         fp = _ENHANCE_LOG_DIR / f"{ts}_enhance.json"
         fp.write_text(json.dumps({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.utcnow().isoformat(),
             "endpoint": "enhance_prompt",
             "provider": provider,
             "model": model,

@@ -8,7 +8,9 @@ import { useAppStore } from '@/store';
  * during batch processing. Draggable, resizable, with scene info overlay.
  */
 export default function BatchPreviewPIP() {
-  const { lastCompletedAsset, batchPreviewVisible, setBatchPreviewVisible } = useAppStore();
+  const lastCompletedAsset = useAppStore(s => s.lastCompletedAsset);
+  const batchPreviewVisible = useAppStore(s => s.batchPreviewVisible);
+  const setBatchPreviewVisible = useAppStore(s => s.setBatchPreviewVisible);
   const [minimized, setMinimized] = useState(false);
   const [position, setPosition] = useState({ x: 20, y: 20 });
   const [size, setSize] = useState<'small' | 'medium' | 'large'>('medium');

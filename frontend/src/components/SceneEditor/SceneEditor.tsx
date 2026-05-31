@@ -60,6 +60,7 @@ type Tab = 'image' | 'video' | 'movement' | 'transitions' | 'stems' | 'lyrics' |
 type FrameSubTab = 'first' | 'last';
 
 import { handleImgError } from '@/utils/brokenImage';
+import { parseBackendDate } from '@/utils/time';
 
 // ─── Lightbox Component ───────────────────────────────────────────────
 function ImageLightbox({
@@ -192,7 +193,7 @@ function ImageLightbox({
           )}
           {version?.completed_at && (
             <span style={{ marginLeft: '12px', color: '#6b7280' }}>
-              {new Date(version.completed_at).toLocaleString()}
+              {(parseBackendDate(version.completed_at)?.toLocaleString() ?? '')}
             </span>
           )}
         </span>
@@ -405,10 +406,10 @@ function GenerationDetailsModal({
               {/* Timestamps */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                 {version?.created_at && (
-                  <DetailItem label="Created" value={new Date(version.created_at).toLocaleString()} />
+                  <DetailItem label="Created" value={(parseBackendDate(version.created_at)?.toLocaleString() ?? '')} />
                 )}
                 {version?.completed_at && (
-                  <DetailItem label="Completed" value={new Date(version.completed_at).toLocaleString()} />
+                  <DetailItem label="Completed" value={(parseBackendDate(version.completed_at)?.toLocaleString() ?? '')} />
                 )}
               </div>
 
@@ -755,7 +756,11 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const activeRefs = frameSubTab === 'first' ? firstFrameRefs : lastFrameRefs;
   const setActiveRefs = frameSubTab === 'first' ? setFirstFrameRefs : setLastFrameRefs;
 
-  const { activeScene, currentProject, assets, jobs, scenes } = useAppStore();
+  const activeScene = useAppStore(s => s.activeScene);
+  const currentProject = useAppStore(s => s.currentProject);
+  const assets = useAppStore(s => s.assets);
+  const jobs = useAppStore(s => s.jobs);
+  const scenes = useAppStore(s => s.scenes);
 
   // "Use Story Flow" — persisted in scene.parameters.use_story_flow
   const useStoryFlow = activeScene?.parameters?.use_story_flow || false;
@@ -2699,7 +2704,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                         {ver?.parameters?.seed != null && (
                           <> · <span className="text-purple-400 font-mono">Seed: {ver.parameters.seed}</span></>
                         )}
-                        {ver.completed_at && (<> · {new Date(ver.completed_at).toLocaleString()}</>)}
+                        {ver.completed_at && (<> · {(parseBackendDate(ver.completed_at)?.toLocaleString() ?? '')}</>)}
                       </div>
                     )}
                   </div>
@@ -3273,7 +3278,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                         {ver?.parameters?.seed != null && (
                           <> · <span className="text-purple-400 font-mono">Seed: {ver.parameters.seed}</span></>
                         )}
-                        {ver.completed_at && (<> · {new Date(ver.completed_at).toLocaleString()}</>)}
+                        {ver.completed_at && (<> · {(parseBackendDate(ver.completed_at)?.toLocaleString() ?? '')}</>)}
                       </div>
                     )}
                   </div>

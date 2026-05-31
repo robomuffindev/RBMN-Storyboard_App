@@ -121,6 +121,7 @@ class SceneResponse(BaseModel):
     prompt: str
     negative_prompt: str
     parameters: dict
+    workflow_snapshot: Optional[dict] = None  # gotcha #54 — frontend reads this
     generation_history: list[GenerationHistoryResponse] = []
     stem_selection: Optional[StemSelectionResponse] = None
     timeline_positions: list[TimelinePositionResponse] = []
@@ -396,6 +397,54 @@ async def cleanup_scenes(
         )
 
 
+@router.put(
+    "/reorder",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Reorder scenes",
+)
+async def reorder_scenes(
+    project_id: UUID,
+    items: list[SceneReorderItem],
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Reorder scenes by setting new order_index values.
+
+    NOTE: Named route — MUST be registered BEFORE `/{scene_id}` routes,
+    otherwise FastAPI parses the literal "reorder" as a UUID and 422s.
+    See gotcha #18.
+
+    Args:
+        project_id: UUID of the project.
+        items: List of scene_id + order_index pairs.
+        session: Database session.
+
+    Raises:
+        HTTPException: If project not found or scene not in project.
+    """
+    try:
+        await _get_project_or_404(project_id, session)
+
+        for item in items:
+            scene = await session.get(Scene, item.scene_id)
+            if not scene or scene.project_id != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Scene {item.scene_id} not found in project",
+                )
+            scene.order_index = item.order_index
+
+        await session.commit()
+        logger.info(f"Reordered {len(items)} scenes in project {project_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reordering scenes in project {project_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reorder scenes",
+        )
+
+
 @router.get(
     "/{scene_id}",
     response_model=SceneResponse,
@@ -588,48 +637,6 @@ async def delete_scene(
         )
 
 
-@router.put(
-    "/reorder",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Reorder scenes",
-)
-async def reorder_scenes(
-    project_id: UUID,
-    items: list[SceneReorderItem],
-    session: AsyncSession = Depends(get_session),
-) -> None:
-    """Reorder scenes by setting new order_index values.
-
-    Args:
-        project_id: UUID of the project.
-        items: List of scene_id + order_index pairs.
-        session: Database session.
-
-    Raises:
-        HTTPException: If project not found or scene not in project.
-    """
-    try:
-        await _get_project_or_404(project_id, session)
-
-        for item in items:
-            scene = await session.get(Scene, item.scene_id)
-            if not scene or scene.project_id != project_id:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Scene {item.scene_id} not found in project",
-                )
-            scene.order_index = item.order_index
-
-        await session.commit()
-        logger.info(f"Reordered {len(items)} scenes in project {project_id}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error reordering scenes in project {project_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to reorder scenes",
-        )
 
 
 @router.post(

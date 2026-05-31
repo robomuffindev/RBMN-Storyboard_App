@@ -301,7 +301,22 @@ class AudioAnalyzer:
                         else:
                             logger.debug(f"Demucs: {line}")
 
-            process.wait()
+            # Hard timeout — Demucs can wedge on disk I/O / OOM swap thrash
+            # and would otherwise hang the audio pipeline until app restart.
+            # 30-minute cap is generous for a single song on CPU.
+            try:
+                process.wait(timeout=1800)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                tail = "\n".join(stderr_lines[-20:])
+                raise RuntimeError(
+                    f"Demucs timed out after 30 minutes and was killed. "
+                    f"Last stderr lines:\n{tail}"
+                )
 
             if process.returncode != 0:
                 stderr_text = "\n".join(stderr_lines)

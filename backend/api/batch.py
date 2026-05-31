@@ -36,6 +36,7 @@ from backend.database.models import (
     StemSelection,
 )
 from backend.utils.file_utils import ensure_project_dirs, sha256_file
+from backend.utils.background import track as _track_task
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +309,7 @@ async def retry_batch_run(batch_id: str):
         item_state["current_step"] = "pending retry"
 
     # Launch background task to process failed items
-    asyncio.create_task(_retry_failed_items(batch_id, failed_items))
+    _track_task(_retry_failed_items(batch_id, failed_items))
 
     logger.info(
         f"Batch run {batch_id} retry requested for {len(failed_items)} failed items"
@@ -340,7 +341,7 @@ async def _retry_failed_items(batch_id: str, failed_items: list[dict]) -> None:
             # Mark the BatchRun DB record as running again
             br_id = item_state.get("batch_run_id")
             if br_id:
-                asyncio.create_task(_update_batch_run_db(
+                _track_task(_update_batch_run_db(
                     br_id,
                     status=BatchRunStatusEnum.RUNNING,
                     current_step="retrying",
@@ -370,7 +371,7 @@ async def _retry_failed_items(batch_id: str, failed_items: list[dict]) -> None:
 
                 if br_id:
                     from datetime import datetime
-                    asyncio.create_task(_update_batch_run_db(
+                    _track_task(_update_batch_run_db(
                         br_id,
                         status=BatchRunStatusEnum.FAILED,
                         current_step=f"failed: {exc}",
@@ -500,7 +501,7 @@ async def _run_batch_pipeline(batch_id: str) -> None:
                 br_id = item_state.get("batch_run_id")
                 if br_id:
                     from datetime import datetime
-                    asyncio.create_task(_update_batch_run_db(
+                    _track_task(_update_batch_run_db(
                         br_id,
                         status=BatchRunStatusEnum.FAILED,
                         current_step=f"failed: {exc}",
@@ -683,7 +684,7 @@ async def _process_single_item(
     else:
         # Resuming — mark status as running again
         if batch_run_id:
-            asyncio.create_task(_update_batch_run_db(
+            _track_task(_update_batch_run_db(
                 batch_run_id,
                 status=BatchRunStatusEnum.RUNNING,
                 current_step="resuming",
@@ -712,7 +713,7 @@ async def _process_single_item(
             }
             if scene_name:
                 _step_entry["scene_name"] = scene_name
-            asyncio.create_task(_update_batch_run_db(
+            _track_task(_update_batch_run_db(
                 batch_run_id, current_step=step,
                 step_entry=_step_entry,
             ))
@@ -749,7 +750,7 @@ async def _process_single_item(
 
         # Update BatchRun with project_id now that it's known
         if batch_run_id:
-            asyncio.create_task(_update_batch_run_db(
+            _track_task(_update_batch_run_db(
                 batch_run_id, project_id=str(project_id),
             ))
 
@@ -994,7 +995,7 @@ async def _process_single_item(
                     scene_count_stmt = select(Scene).where(Scene.project_id == project_id)
                     scene_count_result = await session.execute(scene_count_stmt)
                     scenes_list = scene_count_result.scalars().all()
-                    asyncio.create_task(_update_batch_run_db(
+                    _track_task(_update_batch_run_db(
                         batch_run_id, total_scenes=len(scenes_list),
                     ))
             except Exception:
@@ -1210,7 +1211,7 @@ async def _process_single_item(
 
     # Mark BatchRun as completed
     if batch_run_id:
-        asyncio.create_task(_update_batch_run_db(
+        _track_task(_update_batch_run_db(
             batch_run_id,
             status=BatchRunStatusEnum.COMPLETED,
             completed_at=datetime.utcnow(),

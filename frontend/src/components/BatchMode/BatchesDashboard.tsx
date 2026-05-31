@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { listPersistentBatchRuns, deletePersistentBatchRun, deletePersistentBatchRunsBulk } from '@/api/client';
 import type { PersistentBatchRunSummary } from '@/types/index';
+import { parseBackendDate } from '@/utils/time';
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return '< 1s';
@@ -30,8 +31,8 @@ function formatElapsed(ms: number): string {
 }
 
 function formatDate(iso: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
+  const d = parseBackendDate(iso);
+  if (!d) return '—';
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 

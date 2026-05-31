@@ -152,6 +152,12 @@ Install these via ComfyUI Manager or clone into `custom_nodes/`:
 | **ComfyUI-Easy-Use** | GPU memory cleanup between video passes (prevents OOM) | [github.com/yolain/ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use) |
 | **rgthree-comfy** | Power LoRA loader, image comparison | [github.com/rgthree/rgthree-comfy](https://github.com/rgthree/rgthree-comfy) |
 | **ComfyUI-Custom-Scripts** | Math expressions, switch nodes | [github.com/pythongosssss/ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) |
+| **ComfyUI-Detail-Daemon** | DetailDaemonSamplerNode (Klein workflows) | [github.com/Jonseed/ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon) |
+| **ComfyUI_essentials** | FastFilmGrain, FastLaplacianSharpen (Klein T2I) | [github.com/cubiq/ComfyUI_essentials](https://github.com/cubiq/ComfyUI_essentials) |
+| **ComfyUI-TTPlanet** | LTXVFirstLastFrameControl_TTP (LTX FF/LF) | [github.com/TTPlanetPig/Comfyui_TTPlanet_Tile_Vae](https://github.com/TTPlanetPig/Comfyui_TTPlanet_Tile_Vae) |
+| **ComfyUI-ResizeImagesByLongerEdge** | ResizeImagesByLongerEdge (LTX FF/LF) | search ComfyUI Manager |
+| **ComfyUI-TrimAudioDuration** | TrimAudioDuration (LTX FF/LF) | search ComfyUI Manager |
+| **ComfySwitchNode** | ComfySwitchNode (Klein workflows) | search ComfyUI Manager |
 
 #### Optional Custom Nodes
 
@@ -322,11 +328,16 @@ See `.env.example` for the full list. Key variables:
 | `COMFYUI_URLS` | Comma-separated remote ComfyUI server URLs |
 | `WHISPER_MODE` | `local`, `remote` (Gradio), or `comfyui` |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | LLM API keys |
+| `OLLAMA_BASE_URL` / `OLLAMA_URLS` / `OLLAMA_MODEL` | Ollama server URL(s) and default model for local LLM |
 | `PROJECT_DIR` | Where project data is stored (default: `./project_data`) |
+| `APP_HOST` / `APP_PORT` | Bind host/port (defaults `127.0.0.1:8899`) |
+| `RBMN_PARALLEL_CLIPS` | Max number of clips to encode in parallel during export (default 1) |
+| `RBMN_TMPFS_DIR` | Override tmpfs/ramdisk path used for intermediate export files |
+| `RBMN_TMPFS_MIN_FREE` | Minimum free bytes required on tmpfs before using it (default 2 GB) |
 
 ## Version
 
-Current version: **1.4.0** — See [CHANGELOG.md](CHANGELOG.md) for release history.
+See [VERSION](VERSION) for the current version (currently 1.6.3) and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Special Thanks
 

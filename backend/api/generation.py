@@ -29,6 +29,7 @@ from backend.database.models import (
     BatchRunStatus,
 )
 from backend.services.jobs.queue import JobQueue
+from backend.utils.background import track as _track_task
 
 COLOR_OVERRIDE_DESCRIPTIONS: dict[str, str] = {
     "black_and_white": "STRICT BLACK AND WHITE / NOIR: The entire scene MUST be rendered in grayscale — blacks, whites, and shades of gray ONLY. Absolutely NO color whatsoever. Describe the scene using light, shadow, contrast, and tone. Never mention any hue, saturation, or chromatic color (no red, blue, green, gold, amber, etc.). Think classic film noir.",
@@ -1924,7 +1925,7 @@ async def _evict_seq_auto_job(pid: str, delay: float = 300.0):
 
 def _schedule_eviction(pid: str):
     """Schedule cleanup of a finished auto-gen tracking entry (5 min grace)."""
-    asyncio.create_task(_evict_seq_auto_job(pid))
+    _track_task(_evict_seq_auto_job(pid), name=f"evict_seq_auto_job:{pid}")
 
 
 # ── BatchRun persistence helpers ────────────────────────────────────────────
@@ -2128,7 +2129,7 @@ async def start_sequential_auto_gen(
         "batch_run_id": batch_run_id,
     }
 
-    asyncio.create_task(
+    _track_task(
         _run_sequential_auto_gen(
             pid, project_id, req.mode,
             request.app.state.job_queue,
@@ -2187,8 +2188,9 @@ async def cancel_sequential_auto_gen(
         if batch_run_id:
             from backend.database import async_session as bg_session_factory
             started_at = info.get("_started_at", datetime.utcnow())
-            asyncio.create_task(
-                _finish_batch_run(bg_session_factory, batch_run_id, BatchRunStatus.CANCELLED, started_at)
+            _track_task(
+                _finish_batch_run(bg_session_factory, batch_run_id, BatchRunStatus.CANCELLED, started_at),
+                name=f"finish_batch_run_cancelled:{batch_run_id}",
             )
     return SeqAutoGenStatusResponse(**(info or {"status": "idle"}))
 
@@ -2991,6 +2993,31 @@ async def _run_sequential_auto_gen(
                     scenes_stmt2 = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
                     scenes_result2 = await flow_session.execute(scenes_stmt2)
                     scenes = list(scenes_result2.scalars().all())
+
+        # ── Mode validation guard ─────────────────────────────────────
+        # Reject unknown modes up front so the run can't silently "complete"
+        # with nothing generated.  Old aliases (enhanced_all, empty_only)
+        # used to fall through here; surface them as a clear error instead.
+        _VALID_MODES = {
+            "missing_videos_single", "missing_images_independent",
+            "all_video_single", "all_images",
+            "all_video_fflf", "all_video_v2v",
+        }
+        if mode not in _VALID_MODES:
+            err = (
+                f"Unknown auto-gen mode {mode!r}. "
+                f"Supported: {sorted(_VALID_MODES)}"
+            )
+            logger.error(err)
+            _seq_auto_jobs[pid]["status"] = "failed"
+            _seq_auto_jobs[pid]["error"] = err
+            _seq_auto_jobs[pid]["current_step"] = "invalid mode"
+            if batch_run_id:
+                await _finish_batch_run(
+                    session_factory, batch_run_id,
+                    BatchRunStatus.FAILED, _batch_started_at,
+                )
+            return
 
         # ── Windowed batch modes ──────────────────────────────────────
         # These modes process scenes in windows of N (= number of available

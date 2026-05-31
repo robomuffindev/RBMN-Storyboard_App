@@ -1292,16 +1292,32 @@ def assemble_narration_video(
                             chunk_with_audio,
                         ]
                         import subprocess
-                        result = subprocess.run(mux_cmd, capture_output=True, timeout=120)
+                        try:
+                            result = subprocess.run(
+                                mux_cmd, capture_output=True, text=True, timeout=180
+                            )
+                        except subprocess.TimeoutExpired:
+                            Path(chunk_with_audio).unlink(missing_ok=True)
+                            raise RuntimeError(
+                                f"FFmpeg mux timed out after 180s for chunk {chunk_idx}"
+                            )
                         if result.returncode != 0:
-                            logger.warning(f"FFmpeg mux failed for chunk {chunk_idx}: {result.stderr.decode(errors='replace')[:500]}")
-
-                        # Replace original chunk with muxed version
-                        if Path(chunk_with_audio).exists() and Path(chunk_with_audio).stat().st_size > 0:
+                            Path(chunk_with_audio).unlink(missing_ok=True)
+                            logger.warning(
+                                f"FFmpeg mux failed for chunk {chunk_idx}: "
+                                f"{(result.stderr or '')[:500]}"
+                            )
+                        elif Path(chunk_with_audio).exists() and Path(chunk_with_audio).stat().st_size > 0:
                             shutil.move(chunk_with_audio, chunk_path)
-                            logger.info(f"Muxed narration audio ({audio_start:.1f}s-{audio_end:.1f}s) into chunk {chunk_idx}")
+                            logger.info(
+                                f"Muxed narration audio ({audio_start:.1f}s-{audio_end:.1f}s) "
+                                f"into chunk {chunk_idx}"
+                            )
                         else:
-                            logger.warning(f"Audio mux produced empty file for chunk {chunk_idx}, keeping video-only")
+                            logger.warning(
+                                f"Audio mux produced empty file for chunk {chunk_idx}, "
+                                f"keeping video-only"
+                            )
                             Path(chunk_with_audio).unlink(missing_ok=True)
                 except Exception as _mux_err:
                     logger.warning(f"Failed to mux audio into chunk {chunk_idx}: {_mux_err}")
