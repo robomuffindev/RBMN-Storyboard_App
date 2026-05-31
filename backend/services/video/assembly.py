@@ -968,11 +968,28 @@ def assemble_music_video(
         report("Assembly complete!", 100)
         logger.info(f"Music video assembled: {output_path}")
     except BaseException as exc:
-        logger.error(f"Music video assembly failed, cleaning up temp files: {exc}")
-        _cleanup_temp_files()
+        # ── PRESERVE working directory on failure for resume ──────────
+        # The clip rendering step (Step 1) is the most expensive — hours
+        # of CPU-bound FFmpeg work.  If a later step fails (mux, subtitles,
+        # normalization), we keep the work_dir intact so the next export
+        # attempt can reuse already-rendered clips and the merged video.
+        # Individual clips are validated before reuse (duration > 0 check),
+        # and the merged-video resume logic (above) skips straight past
+        # clip rendering + chunk merge when a valid merge file exists.
+        logger.error(
+            f"Music video assembly failed — preserving work_dir {work_dir} "
+            f"for resume on next export attempt: {exc}"
+        )
+        # Only clean up individually tracked temp files (partial outputs,
+        # colour-match intermediates), NOT the working directory itself.
+        for _f in temp_files:
+            try:
+                Path(_f).unlink(missing_ok=True)
+            except Exception:
+                pass
         raise
     else:
-        # Success path cleanup
+        # Success path cleanup — remove everything
         _cleanup_temp_files()
 
 
@@ -1409,10 +1426,27 @@ def assemble_narration_video(
         report("Assembly complete!", 100)
         logger.info(f"Narration video assembled: {output_path}")
     except BaseException as exc:
-        logger.error(f"Narration video assembly failed, cleaning up temp files: {exc}")
-        _cleanup_narration_temp_files()
+        # ── PRESERVE working directory on failure for resume ──────────
+        # Clip rendering (Step 1) is the most expensive phase — hours of
+        # CPU-bound FFmpeg work with 4 parallel threads.  If a later step
+        # fails (audio mix, subtitle burn-in, normalization), we keep the
+        # work_dir intact so the next export attempt can:
+        #   1. Reuse already-rendered clips (per-clip duration check)
+        #   2. Skip directly to audio prep if merged video exists
+        # This turns a multi-hour redo into a ~30 second retry.
+        logger.error(
+            f"Narration video assembly failed — preserving work_dir {work_dir} "
+            f"for resume on next export attempt: {exc}"
+        )
+        # Only clean up individually tracked temp files (partial audio mixes,
+        # colour-match intermediates), NOT the working directory itself.
+        for _f in temp_files:
+            try:
+                Path(_f).unlink(missing_ok=True)
+            except Exception:
+                pass
         raise
     else:
-        # Success path cleanup
+        # Success path cleanup — remove everything
         _cleanup_narration_temp_files()
 

@@ -2414,17 +2414,19 @@ def burn_subtitles(video_path: str, ass_path: str, output_path: str) -> str:
     """
     logger.info(f"Burning subtitles: {video_path} + {ass_path} → {output_path}")
 
-    # Wrap the ASS path in single quotes inside the FFmpeg filter expression.
-    # This prevents the colon in Windows drive letters (e.g. D:/) from being
-    # parsed as an FFmpeg filter option separator.  Inside single-quoted
-    # strings the only characters that need escaping are ' and \.
+    # Escape the ASS path for FFmpeg's filter-graph parser.
+    # On Windows the colon in drive letters (e.g. D:/) is parsed as the
+    # filter option separator.  FFmpeg's escaping rule: ``\:`` is a literal
+    # colon.  We also convert backslashes to forward slashes so the path
+    # is uniform, and escape any other filter-special characters.
     escaped_ass = ass_path.replace("\\", "/")
-    escaped_ass = escaped_ass.replace("'", "'\\''")
+    # Escape colons (critical for Windows drive letters like D:)
+    escaped_ass = escaped_ass.replace(":", "\\:")
 
     cmd = [
         "ffmpeg",
         "-i", video_path,
-        "-vf", f"ass='{escaped_ass}'",
+        "-vf", f"ass={escaped_ass}",
         *_gpu.get_encode_flags(),
         "-c:a", "copy",
         "-y",
