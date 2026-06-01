@@ -625,6 +625,39 @@ async def _run_export_task(
                     ).scalar_one_or_none()
                     if lyrics_row_narr and lyrics_row_narr.words:
                         narr_subtitle_words = lyrics_row_narr.words
+                        # ── Reconcile Whisper transcription against the
+                        #    user's canonical script (initial_text) ─────────
+                        # Whisper mis-hears a percentage of words even on
+                        # clean synthesized audio (homophones, dropped
+                        # articles, hallucinated filler).  When the user
+                        # has pasted the source-of-truth script into the
+                        # lyrics field (typical for ElevenLabs workflows),
+                        # we keep Whisper's timestamps (those align to
+                        # real audio) but swap the strings for the
+                        # canonical tokens.  Bails out cleanly if the
+                        # canonical text doesn't actually match this
+                        # audio (<30% similarity).
+                        _canonical = (
+                            getattr(lyrics_row_narr, "initial_text", "") or ""
+                        ).strip()
+                        if _canonical:
+                            from backend.services.audio.text_align import (
+                                reconcile_words_to_canonical,
+                            )
+                            _before = len(narr_subtitle_words)
+                            narr_subtitle_words = reconcile_words_to_canonical(
+                                narr_subtitle_words, _canonical
+                            )
+                            logger.info(
+                                f"Subtitles: reconciled {_before} Whisper "
+                                f"words → {len(narr_subtitle_words)} canonical "
+                                f"words using project lyrics ({len(_canonical)} chars)"
+                            )
+                        else:
+                            logger.info(
+                                "Subtitles: no canonical lyrics — burning "
+                                "Whisper transcription as-is"
+                            )
                         pos_map_narr = {"bottom": 2, "top": 8, "center": 5}
                         color_map_narr = {
                             "white": "&H00FFFFFF",
