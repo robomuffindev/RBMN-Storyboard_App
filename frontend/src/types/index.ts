@@ -53,6 +53,9 @@ export interface Scene {
   workflow_snapshot?: Record<string, any>;
   created_at: string;
   updated_at: string;
+  // Chapter membership (leaf-most chapter when nested)
+  chapter_id?: string | null;
+  short_code?: string | null;
   // Relations
   stem_selection?: StemSelection;
   generation_history?: GenerationHistory[];
@@ -95,6 +98,8 @@ export interface Asset {
   height?: number;
   file_size?: number;
   meta: Record<string, any>;
+  short_code?: string | null;
+  tags?: string[];
   created_at: string;
 }
 
@@ -226,6 +231,11 @@ export interface AppSettings {
   ollama_urls?: string[];
   ollama_model?: string;
   ollama_available_models?: string[];
+  // ── Chapters / LLM batching ──
+  llm_chapter_scene_limit_cloud?: number;
+  llm_chapter_scene_limit_ollama?: number;
+  chapter_auto_split_threshold?: number;
+  chapter_max_depth?: number;
 }
 
 export interface GpuStatus {
@@ -467,3 +477,81 @@ export interface PersistentBatchRunDetail extends PersistentBatchRunSummary {
   run_settings: Record<string, any>;
   step_log: BatchRunStepEntry[];
 }
+
+// ── Chapters ───────────────────────────────────────────────────────
+
+/** Chapter source — how the row was created. */
+export type ChapterSource = 'auto' | 'script_header' | 'manual';
+
+/** Flat Chapter row (matches backend.database.models.Chapter). */
+export interface Chapter {
+  id: string;
+  project_id: string;
+  parent_chapter_id: string | null;
+  order_index: number;
+  depth: number;            // 0 = top-level, 1 = sub, 2 = sub-sub
+  name: string;
+  short_code: string;
+  color: string;
+  auto_generated: boolean;
+  source: ChapterSource;
+  start_time: number;
+  end_time: number;
+  tags: string[];
+  scene_count?: number;
+  scene_ids?: string[];
+}
+
+/** Recursive chapter tree node returned by GET /api/projects/:pid/chapters. */
+export interface ChapterTreeNode extends Chapter {
+  children: ChapterTreeNode[];
+}
+
+/** Top-level response shape for the chapter tree endpoint. */
+export interface ChapterTreeResponse {
+  project_id: string;
+  chapter_count: number;
+  chapters: ChapterTreeNode[];
+  rebuild_method?: string;
+}
+
+/** Patch body for PATCH /api/projects/:pid/chapters/:cid. */
+export interface ChapterUpdate {
+  name?: string;
+  color?: string;
+  tags?: string[];
+  metadata_patch?: Record<string, any>;
+}
+
+/** Export modal scope selector value. */
+export interface ChapterSelection {
+  mode: 'all' | 'single' | 'multiple';
+  chapter_ids: string[];
+}
+
+/** LLM batch preview response — how a chapter would be sent to the LLM. */
+export interface LLMBatchPreview {
+  chapter: string;          // short_code
+  provider: 'cloud' | 'ollama';
+  limit: number;
+  total_scenes: number;
+  batch_count: number;
+  batches: Array<{
+    index: number;
+    scene_count: number;
+    scene_ids: string[];
+    start_time: number;
+    end_time: number;
+  }>;
+}
+
+/** Universal shortcode lookup result. */
+export interface ShortcodeResolution {
+  kind: 'asset' | 'scene' | 'chapter';
+  id: string;
+  project_id: string;
+  chapter_id?: string | null;
+  shortcode: string;
+  frontend_route: string;
+}
+

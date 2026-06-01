@@ -21,14 +21,18 @@ import ErrorBoundary from '@/components/ErrorBoundary';
 import { useBackingTrackPlayer } from '@/hooks/useBackingTrackPlayer';
 import type { BackingTrackData } from '@/hooks/useBackingTrackPlayer';
 import { parseBackendDate } from '@/utils/time';
+import ChapterOverlay from '@/components/Chapters/ChapterOverlay';
+import ChapterBreadcrumb from '@/components/Chapters/ChapterBreadcrumb';
+import ChapterTree from '@/components/Chapters/ChapterTree';
+import ChapterPicker from '@/components/Chapters/ChapterPicker';
 
 const EMPTY_ARRAY: never[] = [];
 
 export default function AppLayout() {
-  const { id } = useParams<{ id: string }>();
+  const { id, chapterShortCode } = useParams<{ id: string; chapterShortCode?: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [selectedPanel, setSelectedPanel] = useState<'audio' | 'scenes' | 'assets' | 'concept' | 'flow'>('audio');
+  const [selectedPanel, setSelectedPanel] = useState<'audio' | 'scenes' | 'assets' | 'concept' | 'flow' | 'chapters'>('audio');
   const [exportOpen, setExportOpen] = useState(false);
   const [exportGalleryOpen, setExportGalleryOpen] = useState(false);
   // autoGenOpen lives in the Zustand store so both the header button
@@ -52,6 +56,80 @@ export default function AppLayout() {
   const dragStartHeight = useRef(0);
   // Mobile panel visibility
   const [mobilePanel, setMobilePanel] = useState<'editor' | 'left' | 'queue'>('editor');
+
+  // ── Chapter awareness ─────────────────────────────────────────────
+  // When the URL is /project/:id/c/:shortcode the layout enters
+  // "chapter focus" mode: timeline, scene list, and auto-gen scope are
+  // filtered to that chapter (or its subtree).  See BLUEPRINT_CHAPTERS_v1.md.
+  const [chapterTree, setChapterTree] = useState<import('@/types').ChapterTreeNode[]>([]);
+  const [chapterRebuilding, setChapterRebuilding] = useState<boolean>(false);
+
+  const reloadChapters = useCallback(async () => {
+    if (!id) return;
+    try {
+      const { data } = await import('@/api/client').then(m => m.getChapters(id));
+      setChapterTree(data.chapters || []);
+    } catch (err) {
+      console.warn('[chapters] failed to load tree:', err);
+    }
+  }, [id]);
+
+  useEffect(() => { reloadChapters(); }, [reloadChapters]);
+
+  // Flatten chapter tree → map by short_code (for lookup)
+  const chapterByShortCode = useMemo(() => {
+    const m = new Map<string, import('@/types').ChapterTreeNode>();
+    const walk = (nodes: import('@/types').ChapterTreeNode[]) => {
+      for (const n of nodes) {
+        m.set(n.short_code, n);
+        if (n.children?.length) walk(n.children);
+      }
+    };
+    walk(chapterTree);
+    return m;
+  }, [chapterTree]);
+
+  // Active chapter (current drill-down target, if any)
+  const activeChapter = chapterShortCode
+    ? chapterByShortCode.get(chapterShortCode) ?? null
+    : null;
+
+  // (chapter scene-id filter will land in Phase 1.5 once Timeline /
+  //  SceneList accept a scope prop — see BLUEPRINT_CHAPTERS_v1.md §6.4)
+
+  // Ancestry for breadcrumb (root → leaf)
+  const activeChapterAncestry = useMemo<import('@/types').Chapter[]>(() => {
+    if (!activeChapter) return [];
+    const arr: import('@/types').Chapter[] = [];
+    // Walk parents
+    const byId = new Map<string, import('@/types').ChapterTreeNode>();
+    const collect = (nodes: import('@/types').ChapterTreeNode[]) => {
+      for (const n of nodes) {
+        byId.set(n.id, n);
+        if (n.children?.length) collect(n.children);
+      }
+    };
+    collect(chapterTree);
+    let cur: import('@/types').ChapterTreeNode | undefined = activeChapter;
+    while (cur) {
+      arr.unshift(cur);
+      cur = cur.parent_chapter_id ? byId.get(cur.parent_chapter_id) : undefined;
+    }
+    return arr;
+  }, [activeChapter, chapterTree]);
+
+  const handleReparseChapters = useCallback(async (forceAuto: boolean = false) => {
+    if (!id) return;
+    setChapterRebuilding(true);
+    try {
+      const { data } = await import('@/api/client').then(m => m.reparseChapters(id, forceAuto));
+      setChapterTree(data.chapters || []);
+    } catch (err) {
+      console.error('[chapters] reparse failed:', err);
+    } finally {
+      setChapterRebuilding(false);
+    }
+  }, [id]);
 
   // Auto-gen status bar state
   const [autoGenStatus, setAutoGenStatus] = useState<string>('idle');
@@ -899,6 +977,18 @@ export default function AppLayout() {
               <GitBranch size={12} />
               {isNarrationProject ? 'Story Flow' : 'Video Flow'}
             </button>
+            <button
+              onClick={() => setSelectedPanel('chapters')}
+              className={`flex-1 px-2 py-1 rounded text-xs font-medium transition-colors flex items-center justify-center gap-1 ${
+                selectedPanel === 'chapters'
+                  ? 'bg-purple-600 text-white'
+                  : 'bg-gray-800 text-gray-400 hover:text-white'
+              }`}
+              title="Chapter umbrella — work in smaller batches"
+            >
+              <Layers size={12} />
+              Chapters {chapterTree.length > 0 && (<span className="text-[10px] opacity-70 ml-0.5">({chapterTree.length})</span>)}
+            </button>
           </div>
 
           <div className="flex-1 overflow-hidden">
@@ -914,6 +1004,51 @@ export default function AppLayout() {
               <ConceptPanel projectId={id!} />
             ) : selectedPanel === 'flow' ? (
               <VideoFlowPanel projectId={id!} />
+            ) : selectedPanel === 'chapters' ? (
+              <div className="h-full flex flex-col p-2 overflow-y-auto">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="text-xs text-gray-400 font-medium">Chapters</div>
+                  <button
+                    type="button"
+                    onClick={() => handleReparseChapters(false)}
+                    disabled={chapterRebuilding}
+                    title="Re-derive chapters from the script (preserves manual rename / color)"
+                    className="text-[10px] px-2 py-0.5 rounded bg-purple-700/40 text-purple-200 hover:bg-purple-700/70 disabled:opacity-50"
+                  >
+                    {chapterRebuilding ? 'Re-parsing…' : 'Re-parse'}
+                  </button>
+                </div>
+                {id && (
+                  <ChapterTree
+                    projectId={id}
+                    chapters={chapterTree}
+                    activeChapterShortCode={chapterShortCode || null}
+                    onAction={(ch, action) => {
+                      if (action === 'rename') {
+                        const name = prompt('New chapter name:', ch.name);
+                        if (name && name.trim()) {
+                          import('@/api/client').then(m => m.updateChapter(id, ch.id, { name: name.trim() })).then(reloadChapters);
+                        }
+                      } else if (action === 'recolor') {
+                        const color = prompt('New hex color (e.g. #7c3aed):', ch.color);
+                        if (color && /^#[0-9a-fA-F]{6}$/.test(color.trim())) {
+                          import('@/api/client').then(m => m.updateChapter(id, ch.id, { color: color.trim() })).then(reloadChapters);
+                        }
+                      } else if (action === 'merge') {
+                        if (confirm(`Merge "${ch.name}" with its next sibling?`)) {
+                          import('@/api/client').then(m => m.mergeChapterWithNext(id, ch.id)).then(reloadChapters);
+                        }
+                      } else if (action === 'split') {
+                        alert('Split: pick a scene in the chapter view → use Scene context menu → Split chapter here. (UI Phase 2)');
+                      }
+                    }}
+                  />
+                )}
+                <div className="mt-3 text-[10px] text-gray-500 leading-snug">
+                  Add <code>#</code> headings to your script (Audio &gt; Script) to define chapters automatically.
+                  Without headings the project is split by scene count (configurable in Settings &gt; LLM Batching).
+                </div>
+              </div>
             ) : (
               <AssetManager />
             )}
@@ -1156,6 +1291,25 @@ export default function AppLayout() {
           </div>
         )}
 
+        {/* Chapter breadcrumb (only when drilled into a chapter) */}
+        {activeChapter && id && (
+          <div className="px-3 py-1.5 bg-gray-900/70 border-b border-gray-800">
+            <ChapterBreadcrumb projectId={id} projectName={project?.name} ancestry={activeChapterAncestry} />
+          </div>
+        )}
+        {/* Chapter overlay — colored bars row above the waveform */}
+        {project && id && chapterTree.length > 0 && (
+          <div className="px-3 pt-1 pb-0.5 bg-gray-900/50 border-b border-gray-800/60">
+            <ChapterOverlay
+              chapters={chapterTree}
+              totalDuration={(scenes && scenes.length > 0)
+                ? Math.max(...scenes.map((s: any) => s.end_time || 0))
+                : 0}
+              projectId={id}
+              activeChapterShortCode={chapterShortCode || null}
+            />
+          </div>
+        )}
         {/* Both timelines stay mounted (to preserve WaveSurfer playback state); CSS hides the inactive one */}
         <div className={`flex-1 overflow-hidden ${activeTimeline !== 'scenes' && project && project.mode !== 'music_video' && id ? 'hidden' : ''}`}>
           <Timeline onSplitScene={handleSplitScene} onBoundaryDrag={handleBoundaryDrag} onDeleteScene={handleDeleteScene} />
@@ -1445,6 +1599,11 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [forceRecreate, setForceRecreate] = useState(false);
   const [exportStems, setExportStems] = useState(false);
   const [stemsOnly, setStemsOnly] = useState(false);
+  // Chapter scope — defaults to 'all'.  When set to single/multiple
+  // the export pipeline filters scenes, slices audio, and shifts
+  // backing tracks + subtitle word timestamps.
+  const [chapterSelection, setChapterSelection] = useState<import('@/types').ChapterSelection>({ mode: 'all', chapter_ids: [] });
+  const [chapterTreeForPicker, setChapterTreeForPicker] = useState<import('@/types').ChapterTreeNode[]>([]);
   const [reExportOpen, setReExportOpen] = useState(false);
   const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed' | 'cancelled'>('config');
   const [progressPercent, setProgressPercent] = useState(0);
@@ -1482,6 +1641,22 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
       }
     };
     doScan();
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  // Load chapter tree for the scope picker
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const m = await import('@/api/client');
+        const { data } = await m.getChapters(projectId);
+        if (!cancelled) setChapterTreeForPicker(data.chapters || []);
+      } catch (e) {
+        console.warn('[export-modal] failed to load chapter tree:', e);
+      }
+    })();
     return () => { cancelled = true; };
   }, [projectId]);
 
@@ -1550,10 +1725,12 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
           force_recreate: forceRecreate,
           export_stems: exportStems,
           stems_only: stemsOnly,
+          chapter_selection: chapterSelection.mode === 'all' ? null : chapterSelection,
         } : {
-          // For music mode we still support force_recreate + stems_only
+          // For music mode we still support force_recreate + stems_only + chapter scope
           force_recreate: forceRecreate,
           stems_only: stemsOnly,
+          chapter_selection: chapterSelection.mode === 'all' ? null : chapterSelection,
         }),
       });
     },
@@ -2023,6 +2200,17 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                 </>
               )}
             </div>
+
+            {/* Chapter scope — Entire video / Single / Multiple */}
+            {chapterTreeForPicker.length > 0 && (
+              <div className="mb-3 flex-shrink-0">
+                <ChapterPicker
+                  chapters={chapterTreeForPicker}
+                  value={chapterSelection}
+                  onChange={setChapterSelection}
+                />
+              </div>
+            )}
 
             {/* Re-export options — collapsible accordion, closed by default so main export controls stay visible */}
             <div className="bg-gray-800/40 border border-gray-700/60 rounded-lg mb-3 flex-shrink-0 overflow-hidden">

@@ -720,4 +720,64 @@ export const listGeneratedAssets = (projectId: string) =>
 export const assignAssetToScene = (projectId: string, sceneId: string, data: { asset_id: string; target: string }) =>
   api.post(`/projects/${projectId}/scenes/${sceneId}/assign-asset`, data);
 
+
+// ===== Chapters =====
+import type {
+  ChapterTreeResponse,
+  ChapterUpdate,
+  LLMBatchPreview,
+  ShortcodeResolution,
+} from '../types';
+
+/** Fetch the chapter tree for a project (top-level + nested). */
+export const getChapters = (projectId: string) =>
+  api.get<ChapterTreeResponse>(`/projects/${projectId}/chapters/`);
+
+/** Re-derive chapters from the current script + scenes.
+ *  Pass force_auto=true to ignore script headers and auto-split by count. */
+export const reparseChapters = (projectId: string, forceAuto: boolean = false) =>
+  api.post<ChapterTreeResponse>(`/projects/${projectId}/chapters/reparse`, {
+    force_auto: forceAuto,
+  });
+
+/** Patch a chapter: rename, recolor, retag, manual metadata.
+ *  Setting any field flips source to "manual" so the next reparse
+ *  won't wipe the customization. */
+export const updateChapter = (
+  projectId: string,
+  chapterId: string,
+  patch: ChapterUpdate,
+) => api.patch(`/projects/${projectId}/chapters/${chapterId}`, patch);
+
+/** Split a chapter into two siblings at the given scene boundary. */
+export const splitChapter = (
+  projectId: string,
+  chapterId: string,
+  atSceneId: string,
+  newName: string,
+) =>
+  api.post(`/projects/${projectId}/chapters/${chapterId}/split`, {
+    at_scene_id: atSceneId,
+    new_name: newName,
+  });
+
+/** Merge a chapter with its next sibling at the same depth. */
+export const mergeChapterWithNext = (projectId: string, chapterId: string) =>
+  api.post(`/projects/${projectId}/chapters/${chapterId}/merge_with_next`);
+
+/** Dry-run: show how this chapter would be batched for LLM generation. */
+export const previewLLMBatches = (
+  projectId: string,
+  chapterId: string,
+  llmProvider?: 'cloud' | 'ollama',
+) =>
+  api.post<LLMBatchPreview>(
+    `/projects/${projectId}/chapters/${chapterId}/preview-llm-batches`,
+    { llm_provider: llmProvider ?? null },
+  );
+
+/** Resolve any shortcode (asset / scene / chapter) → entity + redirect. */
+export const resolveShortcode = (code: string) =>
+  api.get<ShortcodeResolution>(`/shortcode/${code}`);
+
 export default api;

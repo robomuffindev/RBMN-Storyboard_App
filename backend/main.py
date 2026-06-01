@@ -248,6 +248,12 @@ app.include_router(batch_runs_router)
 app.include_router(backing_tracks_router)
 app.include_router(files_router)
 
+# Chapters + shortcodes (Phase 1 — chapter umbrellas)
+from backend.api.chapters import router as chapters_router
+from backend.api.shortcodes import router as shortcodes_router
+app.include_router(chapters_router)
+app.include_router(shortcodes_router)
+
 # Debug / diagnostics endpoints (snapshot + log tail)
 from backend.api.debug import router as debug_router
 app.include_router(debug_router)

@@ -359,6 +359,87 @@ async def init_db() -> None:
         if stale.rowcount:
             logger.info(f"Migration: marked {stale.rowcount} stale batch run(s) as failed")
 
+
+        # ── Chapters / Shortcodes migration ────────────────────────────
+        # See BLUEPRINT_CHAPTERS_v1.md for the design.
+        # All operations idempotent — safe to re-run on startup.
+
+        # 1. Add chapter_id + short_code to scenes
+        for col_sql in (
+            "ALTER TABLE scenes ADD COLUMN chapter_id VARCHAR",
+            "ALTER TABLE scenes ADD COLUMN short_code VARCHAR",
+        ):
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration (chapters): {col_sql}")
+            except Exception:
+                pass
+
+        # 2. Add short_code + tags to assets
+        for col_sql in (
+            "ALTER TABLE assets ADD COLUMN short_code VARCHAR",
+            "ALTER TABLE assets ADD COLUMN tags JSON DEFAULT '[]'",
+        ):
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration (chapters): {col_sql}")
+            except Exception:
+                pass
+
+        # 3. Add 4 LLM-batching columns to app_settings
+        for col_sql, default in (
+            ("ALTER TABLE app_settings ADD COLUMN llm_chapter_scene_limit_cloud INTEGER DEFAULT 25", 25),
+            ("ALTER TABLE app_settings ADD COLUMN llm_chapter_scene_limit_ollama INTEGER DEFAULT 12", 12),
+            ("ALTER TABLE app_settings ADD COLUMN chapter_auto_split_threshold INTEGER DEFAULT 25", 25),
+            ("ALTER TABLE app_settings ADD COLUMN chapter_max_depth INTEGER DEFAULT 2", 2),
+        ):
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration (chapters): {col_sql}")
+            except Exception:
+                pass
+
+        # 4. Indexes for new shortcode columns (unique partial index — only enforce on non-null)
+        for idx_sql in (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_scenes_short_code ON scenes (short_code) WHERE short_code IS NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_assets_short_code ON assets (short_code) WHERE short_code IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_scenes_chapter_id ON scenes (chapter_id)",
+        ):
+            try:
+                await conn.execute(text(idx_sql))
+            except Exception as e:
+                logger.debug(f"Migration (chapters) idx skipped: {e}")
+
+        # 5. Indexes for chapters table (created by create_all but explicit for clarity)
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS ix_chapters_project_id ON chapters (project_id)",
+            "CREATE INDEX IF NOT EXISTS ix_chapters_parent ON chapters (parent_chapter_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_chapters_short_code ON chapters (short_code)",
+            "CREATE INDEX IF NOT EXISTS ix_shortcode_counters_project_type ON shortcode_counters (project_id, type_code)",
+        ):
+            try:
+                await conn.execute(text(idx_sql))
+            except Exception as e:
+                logger.debug(f"Migration (chapters) idx skipped: {e}")
+
+        logger.info("Migration (chapters): schema patches complete")
+
+        # 6. Backfill — runs only for projects/assets that don't yet have shortcodes.
+        #    The actual allocation logic lives in backend.services.shortcode so the
+        #    same algorithm is used at runtime.  Import lazily to avoid circular
+        #    imports during startup.
+        try:
+            from backend.services.shortcode import backfill_missing_shortcodes
+            n_assets, n_scenes, n_chapters = await backfill_missing_shortcodes(conn)
+            if n_assets or n_scenes or n_chapters:
+                logger.info(
+                    f"Migration (chapters): backfilled shortcodes — "
+                    f"{n_assets} assets, {n_scenes} scenes, {n_chapters} chapters"
+                )
+        except Exception as e:
+            # Backfill failure is non-fatal — runtime allocation still works
+            logger.warning(f"Migration (chapters): backfill failed (non-fatal): {e}")
+
     logger.info("Database initialized successfully")
 
 

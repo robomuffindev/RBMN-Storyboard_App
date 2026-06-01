@@ -4,7 +4,7 @@ import logging
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable
+from typing import Literal, Optional, List, Dict, Any, Callable
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -34,6 +34,21 @@ router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["export"])
 
 
 # ── Pydantic models ──────────────────────────────────────────────────
+
+class ChapterSelection(BaseModel):
+    """Which chapters to include in the export.
+
+    - mode="all"      → export every scene in the project (default).
+    - mode="single"   → ``chapter_ids[0]`` is the only chapter rendered.
+    - mode="multiple" → render each chapter in ``chapter_ids`` in
+                        timeline order; their concatenation is the
+                        output.  Crossfade joins handled by the
+                        assembler (50ms by default).
+    """
+
+    mode: Literal["all", "single", "multiple"] = "all"
+    chapter_ids: List[UUID] = []
+
 
 class ExportRequest(BaseModel):
     """Request model for exporting final video.
@@ -85,6 +100,10 @@ class ExportRequest(BaseModel):
     # just need the stems (or want to grab them later).  Outputs:
     #   stems/narration.wav, stems/backing_mix.wav, stems/backing_NN_name.wav
     stems_only: bool = False
+    # ── Chapter scope ───────────────────────────────────────────
+    # Restrict the export to a subset of chapters.  Default (None
+    # or mode="all") exports the entire video.  See ChapterSelection.
+    chapter_selection: Optional[ChapterSelection] = None
 
 
 class ExportProgressResponse(BaseModel):
@@ -134,6 +153,186 @@ class PreviewRenderResponse(BaseModel):
 
 
 # ── Shared helpers ───────────────────────────────────────────────────
+# ── Chapter scope helpers ────────────────────────────────────────────
+
+
+def _slice_audio_for_chapter_export(
+    src_audio_path: str,
+    t_start: float,
+    t_end: float,
+    output_dir,
+) -> str:
+    """Trim ``src_audio_path`` to ``[t_start, t_end]``, write a fresh WAV.
+
+    Result is cached in ``output_dir/.chapter_audio_cache`` keyed by
+    (src basename, t_start, t_end) — re-running an identical chapter
+    export hits the cache.
+    """
+    import hashlib
+    import subprocess
+    from pathlib import Path as _Path
+
+    src_p = _Path(src_audio_path)
+    cache_dir = _Path(output_dir) / ".chapter_audio_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    key = hashlib.sha256(
+        f"{src_p.name}|{t_start:.6f}|{t_end:.6f}".encode()
+    ).hexdigest()[:16]
+    cached = cache_dir / f"chapter_{key}.wav"
+    if cached.exists() and cached.stat().st_size > 1024:
+        logger.info(f"Chapter audio cache HIT: {cached}")
+        return str(cached)
+
+    logger.info(
+        f"Slicing master audio for chapter scope: "
+        f"[{t_start:.2f}s, {t_end:.2f}s] -> {cached}"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{t_start:.6f}",
+        "-to", f"{t_end:.6f}",
+        "-i", str(src_p),
+        "-c:a", "pcm_s16le",
+        "-ar", "48000",
+        "-map", "0:a:0?",  # take audio if present, otherwise input directly
+        str(cached),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        # Try without -map (assumes input IS audio)
+        logger.warning(
+            f"Audio slice with -map failed ({e.stderr[:200] if e.stderr else ''}), "
+            "retrying without -map"
+        )
+        cmd_alt = [
+            "ffmpeg", "-y",
+            "-ss", f"{t_start:.6f}",
+            "-to", f"{t_end:.6f}",
+            "-i", str(src_p),
+            "-c:a", "pcm_s16le",
+            "-ar", "48000",
+            str(cached),
+        ]
+        subprocess.run(cmd_alt, check=True, capture_output=True)
+    return str(cached)
+
+
+def _shift_backing_tracks_for_chapter(
+    backing_tracks: list,
+    t_start: float,
+    t_end: float,
+) -> list:
+    """Filter backing tracks to the chapter time range and shift their
+    timeline positions so the chapter export starts at 0:00.
+
+    Tracks fully outside [t_start, t_end] are dropped.  Tracks that
+    partially overlap are clamped (start = max(0, original_start - t_start),
+    end = min(t_end - t_start, original_end - t_start)).
+    """
+    out: list = []
+    for bt in backing_tracks or []:
+        orig_start = float(bt.get("start_time", 0))
+        orig_end = float(bt.get("end_time", 0))
+        if orig_end <= t_start or orig_start >= t_end:
+            continue
+        new_bt = dict(bt)
+        new_bt["start_time"] = max(0.0, orig_start - t_start)
+        new_bt["end_time"] = min(t_end - t_start, orig_end - t_start)
+        out.append(new_bt)
+    return out
+
+
+def _shift_subtitle_words_for_chapter(
+    words: list,
+    t_start: float,
+    t_end: float,
+) -> list:
+    """Drop subtitle words outside [t_start, t_end]; shift the rest so
+    the export starts at 0:00.
+    """
+    if not words:
+        return words
+    out: list = []
+    for w in words:
+        ws = float(w.get("start", 0))
+        we = float(w.get("end", 0))
+        if we <= t_start or ws >= t_end:
+            continue
+        nw = dict(w)
+        nw["start"] = max(0.0, ws - t_start)
+        nw["end"] = max(nw["start"], min(t_end - t_start, we - t_start))
+        out.append(nw)
+    return out
+
+
+async def _resolve_chapter_scope(
+    session,
+    project_id,
+    chapter_selection,
+):
+    """Inspect the export request's ``chapter_selection`` and return:
+
+        (chapter_ids: List[UUID] | None,
+         time_range: (t_start, t_end) | None,
+         label: str)        # for filename
+
+    ``chapter_ids`` is None when mode == "all"; otherwise the list of
+    chapter UUIDs to include (excluding descendants — caller expands).
+    """
+    if chapter_selection is None or chapter_selection.mode == "all":
+        return None, None, ""
+    if not chapter_selection.chapter_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Chapter scope requires at least one chapter_id",
+        )
+
+    from backend.database.models import Chapter as _Chapter
+    chapters_result = await session.execute(
+        select(_Chapter).where(_Chapter.id.in_(list(chapter_selection.chapter_ids)))
+    )
+    chapters = list(chapters_result.scalars().all())
+    if not chapters:
+        raise HTTPException(
+            status_code=404,
+            detail=f"None of the requested chapter IDs exist",
+        )
+    # Expand to descendants for the time range
+    all_chapters_result = await session.execute(
+        select(_Chapter).where(_Chapter.project_id == project_id)
+    )
+    all_chapters = list(all_chapters_result.scalars().all())
+    targets: set = set()
+    queue: list = list(chapter_selection.chapter_ids)
+    while queue:
+        cid = queue.pop(0)
+        if cid in targets:
+            continue
+        targets.add(cid)
+        for c in all_chapters:
+            if c.parent_chapter_id == cid and c.id not in targets:
+                queue.append(c.id)
+    selected = [c for c in all_chapters if c.id in targets]
+    t_start = min(c.start_time for c in selected)
+    t_end = max(c.end_time for c in selected)
+    # Label for filename
+    if chapter_selection.mode == "single" or len(chapters) == 1:
+        label = chapters[0].short_code
+    else:
+        label = "chapters_" + "_".join(
+            sorted(c.short_code.rsplit("-", 1)[-1] for c in chapters)
+        )
+    logger.info(
+        f"Chapter scope resolved: mode={chapter_selection.mode} "
+        f"chapters={[c.short_code for c in chapters]} "
+        f"range=[{t_start:.2f}s, {t_end:.2f}s] label={label!r}"
+    )
+    return list(chapter_selection.chapter_ids), (t_start, t_end), label
+
+
+
 
 async def _get_project_or_404(project_id: UUID, session: AsyncSession) -> Project:
     """Get project or raise 404."""
@@ -152,6 +351,7 @@ async def _build_scene_dicts(
     lfff_trim_enabled: bool = True,
     override_random_kb: Optional[bool] = None,
     override_kb_allowed: Optional[List[str]] = None,
+    chapter_ids: Optional[List[UUID]] = None,
 ) -> tuple[List[Dict[str, Any]], str]:
     """Build scene dicts and find master audio for assembly.
 
@@ -171,6 +371,38 @@ async def _build_scene_dicts(
 
     if not scenes:
         raise ValueError("No scenes found in project")
+
+    # ── Chapter filter ──────────────────────────────────────────────
+    # When ``chapter_ids`` is provided, expand it to include every
+    # descendant chapter via the resolver, then keep only scenes whose
+    # leaf chapter is in the resulting set.  Scene order is preserved
+    # (already sorted by order_index above).
+    if chapter_ids:
+        from backend.database.models import Chapter as _Chapter
+        # Recursively collect all descendant chapter ids
+        targets: set = set()
+        queue: list = list(chapter_ids)
+        while queue:
+            cid = queue.pop(0)
+            if cid in targets:
+                continue
+            targets.add(cid)
+            child_result = await session.execute(
+                select(_Chapter.id).where(_Chapter.parent_chapter_id == cid)
+            )
+            for row in child_result.scalars().all():
+                if row not in targets:
+                    queue.append(row)
+        before_count = len(scenes)
+        scenes = [s for s in scenes if s.chapter_id in targets]
+        logger.info(
+            f"Chapter scope: filtered {before_count} -> {len(scenes)} scenes "
+            f"(targets: {len(targets)} chapter(s) including descendants)"
+        )
+        if not scenes:
+            raise ValueError(
+                f"Chapter selection {chapter_ids} matches zero scenes — nothing to export."
+            )
 
     # Find the master audio asset
     audio_stmt = (
@@ -531,10 +763,32 @@ async def _run_export_task(
             _export_progress[pid_s]["percent"] = 5
 
             lfff_trim = await _read_lfff_trim_setting(bg_session)
+
+            # ── Resolve chapter scope from request ───────────────────
+            _chap_sel_raw = export_params.get("chapter_selection")
+            _chap_sel_obj: Optional[ChapterSelection] = None
+            if _chap_sel_raw is not None:
+                try:
+                    _chap_sel_obj = (
+                        _chap_sel_raw
+                        if isinstance(_chap_sel_raw, ChapterSelection)
+                        else ChapterSelection(**_chap_sel_raw)
+                    )
+                except Exception as _chsel_err:
+                    logger.warning(
+                        f"Invalid chapter_selection in export params: {_chsel_err} — "
+                        "falling back to full project"
+                    )
+                    _chap_sel_obj = None
+            _chap_ids, _chap_time_range, _chapter_scope_label = (
+                await _resolve_chapter_scope(bg_session, pid, _chap_sel_obj)
+            )
+
             scene_dicts, master_audio = await _build_scene_dicts(
                 bg_session, pid, lfff_trim_enabled=lfff_trim,
                 override_random_kb=export_params.get("random_ken_burns"),
                 override_kb_allowed=export_params.get("ken_burns_allowed_effects"),
+                chapter_ids=_chap_ids,
             )
             transition_type, transition_dur, color_match = await _read_transition_settings(bg_session)
 
@@ -566,8 +820,37 @@ async def _run_export_task(
                     logger.warning(f"Could not remove stale file {stale.name}: {e}")
 
             output_ext = export_params.get("output_format", "mp4")
-            output_path = str(output_dir / f"export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.{output_ext}")
+            # Filename includes chapter scope label when applicable
+            _fname_stamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            if _chapter_scope_label:
+                output_path = str(
+                    output_dir / f"export_{_fname_stamp}_{_chapter_scope_label}.{output_ext}"
+                )
+            else:
+                output_path = str(
+                    output_dir / f"export_{_fname_stamp}.{output_ext}"
+                )
             _export_progress[pid_s]["output_path"] = output_path
+
+            # ── Slice master audio to the chapter time range ──────────
+            # The video is naturally chapter-only because we filtered
+            # scene_dicts; the audio is currently the FULL master and
+            # must be sliced so subtitle/backing alignment is correct.
+            if _chap_time_range and master_audio:
+                _t_start, _t_end = _chap_time_range
+                try:
+                    master_audio = _slice_audio_for_chapter_export(
+                        master_audio, _t_start, _t_end, output_dir,
+                    )
+                    logger.info(
+                        f"Chapter scope: master audio sliced to "
+                        f"[{_t_start:.2f}s, {_t_end:.2f}s] -> {master_audio}"
+                    )
+                except Exception as _slice_err:
+                    logger.exception(
+                        f"Failed to slice master audio for chapter scope: {_slice_err} — "
+                        "falling back to full audio"
+                    )
 
             from backend.services.video.assembly import assemble_music_video, assemble_narration_video
 
@@ -702,6 +985,31 @@ async def _run_export_task(
                 _main_fi = float(export_params.get("backing_main_fade_in", _proj_settings.get("backing_main_fade_in", 0.0)))
                 _main_fo = float(export_params.get("backing_main_fade_out", _proj_settings.get("backing_main_fade_out", 0.0)))
                 _norm_bt = bool(export_params.get("normalize_backing", _proj_settings.get("normalize_backing", False)))
+
+                # ── Chapter scope: shift backing tracks + subtitle words ──
+                # The video/audio are already trimmed to the chapter range
+                # at this point; backing tracks and subtitle word timestamps
+                # must shift so position 0 lines up with the sliced audio.
+                if _chap_time_range:
+                    _t_start, _t_end = _chap_time_range
+                    if narr_backing_tracks:
+                        _before = len(narr_backing_tracks)
+                        narr_backing_tracks = _shift_backing_tracks_for_chapter(
+                            narr_backing_tracks, _t_start, _t_end
+                        )
+                        logger.info(
+                            f"Chapter scope: backing tracks shifted/filtered "
+                            f"{_before} -> {len(narr_backing_tracks)}"
+                        )
+                    if narr_subtitle_words:
+                        _before_w = len(narr_subtitle_words)
+                        narr_subtitle_words = _shift_subtitle_words_for_chapter(
+                            narr_subtitle_words, _t_start, _t_end
+                        )
+                        logger.info(
+                            f"Chapter scope: subtitle words shifted/filtered "
+                            f"{_before_w} -> {len(narr_subtitle_words)}"
+                        )
 
                 # ── Stems-only short-circuit ─────────────────────────────
                 # Skip the entire video pipeline; just produce the audio

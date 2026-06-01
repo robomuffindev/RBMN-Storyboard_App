@@ -291,3 +291,138 @@ async def log_tail(
         "count": len(entries),
         "entries": entries,
     }
+
+@router.get("/chapters/{project_id}")
+async def debug_chapters(project_id: str) -> dict:
+    """Compact snapshot of chapter resolution state for a project.
+
+    Returns:
+        - parsed_headers: what the script parser found (depth, name, char_offset)
+        - clean_text_word_count: words in the clean script (post-header strip)
+        - lyrics_word_count: words Whisper produced for this project
+        - chapters: every Chapter row with scene counts and bind status
+        - unbound_scenes: scenes with chapter_id = NULL
+        - settings: chapter-related AppSettings values
+
+    Used by tools/diag.py to give one-shot visibility into why
+    chapters look the way they do, without parsing log lines.
+    """
+    from uuid import UUID
+    from sqlmodel import select
+    from backend.database.models import (
+        AppSettings, Chapter, Lyrics, Project, Scene,
+    )
+    from backend.services.chapters import parse_script_headers
+
+    try:
+        pid = UUID(project_id)
+    except Exception:
+        return {"error": f"invalid project_id {project_id!r}"}
+
+    async with async_session() as session:
+        proj_result = await session.execute(
+            select(Project).where(Project.id == pid)
+        )
+        project = proj_result.scalars().first()
+        if not project:
+            return {"error": f"project {project_id} not found"}
+
+        ly_result = await session.execute(
+            select(Lyrics).where(Lyrics.project_id == pid)
+        )
+        lyrics = ly_result.scalars().first()
+
+        # Run the parser fresh so output reflects what rebuild WOULD see now
+        parsed = None
+        if lyrics and lyrics.initial_text:
+            try:
+                parsed = parse_script_headers(lyrics.initial_text)
+            except Exception as e:
+                parsed = None
+                parser_error = str(e)
+            else:
+                parser_error = None
+        else:
+            parser_error = "no initial_text on Lyrics"
+
+        ch_result = await session.execute(
+            select(Chapter).where(Chapter.project_id == pid).order_by(
+                Chapter.depth, Chapter.order_index
+            )
+        )
+        chapters = list(ch_result.scalars().all())
+
+        sc_result = await session.execute(
+            select(Scene.id, Scene.chapter_id, Scene.order_index, Scene.name)
+            .where(Scene.project_id == pid)
+            .order_by(Scene.order_index)
+        )
+        scenes_meta = [
+            {"id": str(r[0]), "chapter_id": str(r[1]) if r[1] else None,
+             "order_index": r[2], "name": r[3]}
+            for r in sc_result.all()
+        ]
+        scene_count_by_chapter: dict[str, int] = {}
+        unbound = []
+        for s in scenes_meta:
+            if s["chapter_id"]:
+                scene_count_by_chapter[s["chapter_id"]] = (
+                    scene_count_by_chapter.get(s["chapter_id"], 0) + 1
+                )
+            else:
+                unbound.append(s)
+
+        settings_result = await session.execute(
+            select(AppSettings).where(AppSettings.id == 1)
+        )
+        s_obj = settings_result.scalars().first()
+
+        return {
+            "project_id": project_id,
+            "project_name": project.name,
+            "project_mode": str(project.mode),
+            "lyrics_word_count": len(lyrics.words) if lyrics and lyrics.words else 0,
+            "lyrics_initial_text_len": len(lyrics.initial_text) if lyrics else 0,
+            "parsed_headers": (
+                [
+                    {
+                        "depth": h.depth,
+                        "raw_depth": h.raw_depth,
+                        "name": h.name,
+                        "char_offset": h.char_offset,
+                        "word_index": h.word_index_in_clean,
+                    }
+                    for h in parsed.headers
+                ] if parsed else []
+            ),
+            "clean_text_word_count": parsed.word_count if parsed else 0,
+            "parser_error": parser_error,
+            "chapter_count": len(chapters),
+            "chapters": [
+                {
+                    "id": str(c.id),
+                    "short_code": c.short_code,
+                    "name": c.name,
+                    "depth": c.depth,
+                    "parent_id": str(c.parent_chapter_id) if c.parent_chapter_id else None,
+                    "order_index": c.order_index,
+                    "source": c.source,
+                    "auto_generated": c.auto_generated,
+                    "color": c.color,
+                    "start_time": c.start_time,
+                    "end_time": c.end_time,
+                    "scene_count": scene_count_by_chapter.get(str(c.id), 0),
+                }
+                for c in chapters
+            ],
+            "scene_count": len(scenes_meta),
+            "unbound_scene_count": len(unbound),
+            "unbound_scenes": unbound[:10],  # preview
+            "settings": {
+                "llm_chapter_scene_limit_cloud": getattr(s_obj, "llm_chapter_scene_limit_cloud", 25) if s_obj else 25,
+                "llm_chapter_scene_limit_ollama": getattr(s_obj, "llm_chapter_scene_limit_ollama", 12) if s_obj else 12,
+                "chapter_auto_split_threshold": getattr(s_obj, "chapter_auto_split_threshold", 25) if s_obj else 25,
+                "chapter_max_depth": getattr(s_obj, "chapter_max_depth", 2) if s_obj else 2,
+            },
+        }
+

@@ -173,7 +173,49 @@ def main() -> int:
         help="instead of snapshot, dump rbmn.log tail (see --tail-level, --logs, --grep)",
     )
     parser.add_argument("--tail-level", default="WARNING", help="for --tail: ERROR | WARNING | INFO (default WARNING)")
+    parser.add_argument(
+        "--chapters",
+        metavar="PROJECT_ID",
+        help="instead of snapshot, dump chapter resolution state for this project (UUID)",
+    )
     args = parser.parse_args()
+
+    # ── Chapters snapshot mode ──
+    if args.chapters:
+        data = fetch(args.host, f"/api/debug/chapters/{args.chapters}")
+        if args.json:
+            print(json.dumps(data, indent=2))
+            return 0
+        if data.get("_error") or data.get("error"):
+            print(f"# Chapter snapshot FAILED\n\n{data.get('_error') or data.get('error')}")
+            return 1
+        print(f"# Chapter snapshot — {data.get('project_name')} ({args.chapters})")
+        print(f"_mode: {data.get('project_mode')}_\n")
+        print(f"- lyrics: {data.get('lyrics_word_count', 0)} Whisper words, "
+              f"{data.get('lyrics_initial_text_len', 0)} chars in initial_text")
+        print(f"- parser: {data.get('clean_text_word_count', 0)} clean words; "
+              f"{len(data.get('parsed_headers') or [])} headers detected")
+        if data.get('parser_error'):
+            print(f"  - parser_error: {data['parser_error']}")
+        for h in data.get('parsed_headers') or []:
+            print(f"  - depth={h['depth']} `{h['name']}` @char {h['char_offset']}, word {h['word_index']}")
+        print(f"\n## Chapters ({data.get('chapter_count', 0)})")
+        for c in data.get('chapters') or []:
+            indent = '  ' * c['depth']
+            print(f"{indent}- `{c['short_code']}` **{c['name']}** "
+                  f"(depth={c['depth']}, source={c['source']}, scenes={c['scene_count']}) "
+                  f"[{c['start_time']:.1f}s - {c['end_time']:.1f}s]")
+        print(f"\n## Scenes")
+        print(f"- total: {data.get('scene_count', 0)}, unbound: {data.get('unbound_scene_count', 0)}")
+        for s in data.get('unbound_scenes') or []:
+            print(f"  - **{s['name']}** (order={s['order_index']}, id={s['id']})")
+        s = data.get('settings') or {}
+        print(f"\n## Settings")
+        print(f"- cloud limit: {s.get('llm_chapter_scene_limit_cloud')}")
+        print(f"- ollama limit: {s.get('llm_chapter_scene_limit_ollama')}")
+        print(f"- auto-split threshold: {s.get('chapter_auto_split_threshold')}")
+        print(f"- max depth: {s.get('chapter_max_depth')}")
+        return 0
 
     if args.tail:
         data = fetch(

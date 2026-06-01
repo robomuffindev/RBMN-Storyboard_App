@@ -99,6 +99,11 @@ class SettingsResponse(BaseModel):
     ollama_urls: Optional[list[str]] = None  # multi-server pool
     ollama_model: Optional[str] = None
     ollama_available_models: Optional[list[str]] = None
+    # ── Chapters / LLM batching ──
+    llm_chapter_scene_limit_cloud: int = 25
+    llm_chapter_scene_limit_ollama: int = 12
+    chapter_auto_split_threshold: int = 25
+    chapter_max_depth: int = 2
 
     class Config:
         from_attributes = True
@@ -160,6 +165,11 @@ class SettingsUpdate(BaseModel):
     ollama_base_url: Optional[str] = None  # legacy single URL
     ollama_urls: Optional[list[str]] = None  # multi-server pool
     ollama_model: Optional[str] = None
+    # ── Chapters / LLM batching ──
+    llm_chapter_scene_limit_cloud: Optional[int] = None
+    llm_chapter_scene_limit_ollama: Optional[int] = None
+    chapter_auto_split_threshold: Optional[int] = None
+    chapter_max_depth: Optional[int] = None
 
 
 class ChangeProjectDirRequest(BaseModel):
@@ -360,6 +370,10 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         ollama_base_url=settings.ollama_base_url,
         ollama_urls=settings.ollama_urls or [],
         ollama_model=settings.ollama_model,
+        llm_chapter_scene_limit_cloud=getattr(settings, "llm_chapter_scene_limit_cloud", 25) or 25,
+        llm_chapter_scene_limit_ollama=getattr(settings, "llm_chapter_scene_limit_ollama", 12) or 12,
+        chapter_auto_split_threshold=getattr(settings, "chapter_auto_split_threshold", 25) or 25,
+        chapter_max_depth=getattr(settings, "chapter_max_depth", 2) or 2,
         ollama_available_models=settings.ollama_available_models,
     )
 
@@ -586,6 +600,16 @@ async def update_settings(
             settings.ollama_urls = [u.rstrip("/") for u in req.ollama_urls if u and u.strip()]
         if req.ollama_model is not None:
             settings.ollama_model = req.ollama_model or None
+
+        # ── Chapter / LLM batching ──
+        if req.llm_chapter_scene_limit_cloud is not None:
+            settings.llm_chapter_scene_limit_cloud = max(1, min(req.llm_chapter_scene_limit_cloud, 200))
+        if req.llm_chapter_scene_limit_ollama is not None:
+            settings.llm_chapter_scene_limit_ollama = max(1, min(req.llm_chapter_scene_limit_ollama, 100))
+        if req.chapter_auto_split_threshold is not None:
+            settings.chapter_auto_split_threshold = max(5, min(req.chapter_auto_split_threshold, 500))
+        if req.chapter_max_depth is not None:
+            settings.chapter_max_depth = max(0, min(req.chapter_max_depth, 2))
 
         await session.commit()
         await session.refresh(settings)
@@ -1821,18 +1845,4 @@ async def change_project_dir(
         raise HTTPException(status_code=500, detail=f"Failed to change directory: {e}")
 
     # Save the new path to database settings
-    settings.project_dir = str(new_path)
-    session.add(settings)
-    await session.commit()
-
-    # Update the runtime config so it takes effect immediately
-    env_settings.project_dir = new_path
-
-    logger.info(f"Project directory changed: {old_path} → {new_path} ({result_msg})")
-
-    return ChangeProjectDirResponse(
-        success=True,
-        message=result_msg,
-        old_path=str(old_path),
-        new_path=str(new_path),
-    )
+    settings.project_dir = str

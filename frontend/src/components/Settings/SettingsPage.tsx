@@ -83,6 +83,11 @@ export default function SettingsPage() {
     ollama_urls: [],
     ollama_model: '',
     ollama_available_models: [],
+    // ── Chapters / LLM batching ──
+    llm_chapter_scene_limit_cloud: 25,
+    llm_chapter_scene_limit_ollama: 12,
+    chapter_auto_split_threshold: 25,
+    chapter_max_depth: 2,
   });
   const [customImageModel, setCustomImageModel] = useState('');
   // GPU status state
@@ -177,6 +182,10 @@ export default function SettingsPage() {
         ollama_base_url: savedSettings.ollama_base_url || '',
         ollama_urls: savedSettings.ollama_urls || [],
         ollama_model: savedSettings.ollama_model || '',
+        llm_chapter_scene_limit_cloud: savedSettings.llm_chapter_scene_limit_cloud ?? 25,
+        llm_chapter_scene_limit_ollama: savedSettings.llm_chapter_scene_limit_ollama ?? 12,
+        chapter_auto_split_threshold: savedSettings.chapter_auto_split_threshold ?? 25,
+        chapter_max_depth: savedSettings.chapter_max_depth ?? 2,
         ollama_available_models: savedSettings.ollama_available_models || [],
       });
       // Initialize project directory input
@@ -2371,6 +2380,109 @@ export default function SettingsPage() {
           ) : (
             <p className="text-sm text-gray-500">GPU status unavailable. Click Re-detect to check again.</p>
           )}
+        </section>
+
+        {/* LLM / Chapter Batching */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-2 flex items-center gap-2">
+            <Cpu size={20} />
+            Chapter Batching &amp; LLM Limits
+          </h2>
+          <p className="text-sm text-gray-400 mb-4">
+            Caps the number of scenes sent per LLM call.  Chapters
+            larger than this are auto-split into sub-chapters during
+            re-parse.  Cloud LLMs (OpenAI / Anthropic / Gemini) can
+            usually handle more than Ollama at typical context sizes.
+          </p>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Max scenes per Cloud LLM call
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={settings.llm_chapter_scene_limit_cloud ?? 25}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    llm_chapter_scene_limit_cloud: Math.max(1, Math.min(200, Number(e.target.value) || 25)),
+                  }))
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Default 25.  Higher = fewer LLM round trips but bigger prompts.
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Max scenes per Ollama call
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={settings.llm_chapter_scene_limit_ollama ?? 12}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    llm_chapter_scene_limit_ollama: Math.max(1, Math.min(100, Number(e.target.value) || 12)),
+                  }))
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Default 12.  Local models usually have smaller context.
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Chapter auto-split threshold (scenes)
+              </label>
+              <input
+                type="number"
+                min={5}
+                max={500}
+                value={settings.chapter_auto_split_threshold ?? 25}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    chapter_auto_split_threshold: Math.max(5, Math.min(500, Number(e.target.value) || 25)),
+                  }))
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                When a chapter exceeds this many scenes, it's split into
+                sub-chapters at natural pause boundaries (or evenly if no
+                pauses are found).
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Max chapter depth
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={2}
+                value={settings.chapter_max_depth ?? 2}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    chapter_max_depth: Math.max(0, Math.min(2, Number(e.target.value) || 2)),
+                  }))
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Maximum nesting level for sub-chapters.  0 = flat,
+                1 = sections, 2 = subsections (default).
+              </p>
+            </div>
+          </div>
         </section>
 
         {/* FFmpeg Threading */}
