@@ -45,13 +45,16 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Image Movement (Ken Burns)** — Apply pan, zoom, and motion effects to still images during export
 - **Export Transitions** — Automatic crossfade/dissolve transitions between clips with configurable duration and adjacent-clip color matching
 - **Render Preview** — Quick 720p preview assembly before full export
+- **Audio-Only Re-Mix** — After every successful export the silent concatenated video is cached. Re-exporting with the same scenes/dimensions but different audio mix settings (narration volume, backing track levels, fades, normalization) skips the multi-hour clip-render + chunk-merge work and only re-runs the audio mix + mux. Turns a "tweak the mixer and re-render" cycle from hours to seconds. Export modal also has a "Force full recreate" toggle for when you want a guaranteed fresh render
+- **Export Audio Stems** — Checkbox on the export modal that also writes per-channel WAVs to `{output_dir}/stems/`: `narration.wav`, `backing_mix.wav`, and `backing_NN_<name>.wav` for each backing track. 48 kHz 16-bit PCM — drop straight into a DAW
+- **Stems-Only Export** — Skip all video work entirely and just produce the audio stem WAVs. For when you already have the exported video and want to grab the stems later for outside-the-app mixing
 - **Scene Locking** — Lock scene boundaries to prevent accidental changes. Persists across app restarts
 - **Global Negative Prompt** — Set a negative prompt in Settings that applies to all image generation workflows. Per-scene negative prompts override the global when set. The effective negative prompt (global vs scene override) is displayed in each scene's Prompt tab after generation
 - **Custom Workflow Management** — Upload your own ComfyUI workflow JSON files with auto-introspection and field mapping. Assign custom workflows per-server or globally, and select them from the Image/Video tab dropdowns
 - **Asset Manager** — Browse and manage all project assets (characters, reference images, generated images/videos) with thumbnail grid view, lightbox preview, and direct-use-as-reference from the asset library
 - **Live Batch Preview (PIP)** — Floating picture-in-picture overlay during batch processing shows the last generated image or video with scene name, elapsed time, prompt snippet, and IMAGE/VIDEO badge. Draggable (mouse + touch), resizable (small/medium/large), minimizable. Auto-positions to bottom-right corner
 - **Mobile Responsive Layout** — Full mobile support lets you open the UI on your phone at `http://local-ip:8899` to monitor batch progress. Bottom navigation bar with panel/editor/queue tabs, collapsible sidebars, wrapping toolbars, and full-screen modals on small screens. Tablet breakpoint at 1024px
-- **Batch Mode** — Queue multiple audio files with per-item configuration (render type, video mode, two-pass, story flow, auto character generation) and process them as a batch pipeline. Each item gets its own project with full concept/lyrics/character generation
+- **Batch Mode** — Queue multiple audio files with per-item configuration (render type, video mode incl. FF/LF chaining, image mode incl. previous-scene refs, two-pass, story flow, auto character generation, lipsync, override-full-set) and process them as a batch pipeline. Each item gets its own project with full concept/lyrics/character generation. Reliability hardening: per-step kickoff verification with `saw_running` idle-race guard, 2-hour per-step timeout, orphan-project cleanup on early failure, fresh-session lyrics retry, Whisper hard timeout, and surfaced auto-character warnings in the activity feed
 - **Auto Gen Dashboard** — All Auto Gen runs are persisted and viewable on the `/batches` dashboard with status cards (running/completed/failed), progress bars, video/image thumbnails, and live-ticking elapsed timers. Click any card to see per-scene detail with live activity feed, step-by-step logs, worker IPs, asset previews, and error reports
 - **Narration Images Mode** — Create narration-driven still image slideshows with Ken Burns effects. UI auto-hides video-specific tabs, forcing an image-only workflow optimized for documentary and storytelling content
 - **Narration Videos Mode** — Full video pipeline for speech narrations with storytelling-focused LLM prompts. Same powerful generation as Music Video mode, tuned for documentary and narration pacing
@@ -304,7 +307,9 @@ This auto-detects your GPU and CUDA version, uninstalls the CPU-only PyTorch, an
 7. **Generate video flow** — LLM creates per-scene storyboard ideas
 8. **Generate images** — Select character references, enhance prompts, generate first frames
 9. **Generate videos** — Choose Single Image (I2V), First/Last Frame, or V2V Extend mode
-10. **Preview and export** — Render preview, then export final video with transitions
+10. **Preview and export** — Render preview, then export final video with transitions. Tweak mixer settings? Re-export with **Audio-only re-mix** to skip the multi-hour video work. Want stems? Check **Export audio stems** for per-channel WAVs, or **Stems only** to grab them later without any video rendering.
+
+For batch jobs, use **Batch Mode** from the project list to queue multiple audio files with per-item config (render type, video mode incl. FF/LF chaining, image mode, lipsync, two-pass, story flow, auto-characters, override-full-set). Each item runs through the full pipeline above and you can monitor it from the persistent **Auto Gen Dashboard** at `/batches`.
 
 ## Development
 
@@ -318,6 +323,24 @@ cd frontend && npm run dev
 # TypeScript check
 cd frontend && npx tsc --noEmit
 ```
+
+### Debugging
+
+When something goes wrong and you want to give an LLM (or yourself) a compact view of the running backend state — in-memory batch runs, auto-gen runs, ComfyUI worker stats, job queue depth, recent WARNING/ERROR log lines — run:
+
+```bash
+python tools/diag.py > diag.md
+```
+
+That hits `/api/debug/snapshot` and writes a small markdown summary you can paste straight into chat instead of multi-MB log dumps. Useful flags:
+
+- `--logs 200` — include more recent log entries (default 40, max 500)
+- `--grep batch` — only log lines mentioning a substring
+- `--tail --tail-level ERROR` — just tail `rbmn.log` filtered to errors
+- `--json` — emit raw JSON for piping
+- `--host 127.0.0.1:8899` — override target host:port
+
+The endpoints (`GET /api/debug/snapshot` and `GET /api/debug/log/tail`) are always available — `diag.py` is just the friendly CLI wrapper.
 
 ## Environment Variables
 

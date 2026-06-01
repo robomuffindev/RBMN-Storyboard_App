@@ -1,219 +1,126 @@
 # Frontend Architecture
 
-## Component Hierarchy
+This document covers data flow, state coherence, and the most important patterns. For the component tree and file layout see [`README.md`](README.md). For the user-facing feature list see the project root [`README.md`](../README.md).
 
-```
-App
-├── ProjectList (/)
-│   └── Project Cards Grid
-│       └── New Project Modal
-└── AppLayout (/project/:id)
-    ├── Toolbar
-    │   ├── Project Name & Mode Badge
-    │   ├── View Mode Toggle (Sections/Scenes)
-    │   ├── Export Button
-    │   └── Settings Link
-    ├── Left Panel (64px width)
-    │   ├── Scene List OR Asset Manager (tab toggle)
-    │   └── SceneList / AssetManager
-    ├── Middle/Right Panels (flex-1)
-    │   ├── VideoPreview (flex-1)
-    │   └── SceneEditor (flex-1)
-    │       ├── Image Tab
-    │       │   ├── Image Prompt Textarea
-    │       │   ├── Negative Prompt Textarea
-    │       │   ├── Width/Height Inputs
-    │       │   ├── Seed Input
-    │       │   ├── Enhance Prompt Button
-    │       │   └── Generate Image Button
-    │       │       └── Generation History Navigation
-    │       ├── Video Tab
-    │       │   ├── Video Prompt Textarea
-    │       │   ├── Duration/Framerate Inputs
-    │       │   └── Generate Video Button
-    │       ├── Stems Tab
-    │       │   ├── Vocals Checkbox
-    │       │   ├── Drums Checkbox
-    │       │   ├── Bass Checkbox
-    │       │   ├── Other Checkbox
-    │       │   └── Preview Mix Button
-    │       └── Lyrics Tab
-    │           └── Lyrics Display
-    ├── Generation Panel (w-80)
-    │   ├── Active Jobs Section
-    │   ├── Completed Jobs Section
-    │   ├── Failed Jobs Section
-    │   └── Job Cards
-    │       ├── Status Icon + Progress Bar
-    │       ├── Cancel Button (for active)
-    │       └── Retry Button (for failed)
-    └── Timeline (h-64)
-        ├── Playback Controls
-        │   ├── Play/Pause Button
-        │   ├── Time Scrubber
-        │   ├── Current/Total Time Display
-        │   ├── Zoom Controls
-        ├── Waveform Display
-        │   └── WaveSurfer Instance
-        ├── Section Markers Overlay
-        │   └── Color-coded Section Labels
-        └── Active Scene/Section Info
+## State boundary
+
+The frontend has two pieces of state and they have to stay in sync.
+
+### React Query (`@tanstack/react-query`)
+
+Holds **server state**: project, scenes, sections, assets, settings, batch runs, persistent BatchRuns. Owned by `AppLayout.tsx` via `useQuery({ queryKey: ['scenes', id], queryFn: getScenes })` and similar. It's the source of truth when the page loads or refocuses.
+
+### Zustand (`@/store`)
+
+Holds **UI state and a mirror of the most-used server data** for fast component access without going through React Query selectors. Fields: `currentProject`, `scenes`, `sections`, `assets`, `jobs`, `activeScene`, `playbackPosition`, `isPlaying`, `narrationVolume`, `backingMasterVolume`, `lastCompletedAsset`, `batchPreviewVisible`, `autoGenOpen`, mixer volumes.
+
+### The mirror
+
+`AppLayout.tsx` has:
+
+```ts
+useEffect(() => { setScenes(stableScenes as Scene[]); }, [stableScenes, setScenes]);
 ```
 
-## State Management (Zustand)
+This pushes React Query data into Zustand on every change. **One-way: React Query → Zustand.** If you only write to Zustand, the next time the mirror fires (re-render, navigate-away-and-back, focus refetch) it overwrites your local write with the stale React Query value.
 
-```typescript
-AppState {
-  // Project data
-  currentProject: Project | null
-  scenes: Scene[]
-  sections: SongSection[]
-  assets: Asset[]
-  jobs: Job[]
-  
-  // UI state
-  activeScene: Scene | null
-  playbackPosition: number
-  isPlaying: boolean
-  viewMode: 'sections' | 'scenes'
-  
-  // Actions
-  setCurrentProject()
-  setScenes()
-  setSections()
-  setAssets()
-  addJob()
-  updateJob()
-  removeJob()
-  setActiveScene()
-  setPlaybackPosition()
-  togglePlay()
-  setViewMode()
-}
+### The pattern: `updateSceneAndSync`
+
+Every scene mutation must update all three: backend, React Query cache, Zustand. `SceneEditor.tsx` exports a helper:
+
+```ts
+const updateSceneAndSync = useCallback(
+  async (sceneId: string, patch: { parameters?: any; [k: string]: any }) => {
+    if (!currentProject) return;
+    await updateScene(currentProject.id, sceneId, patch);
+    queryClient.setQueryData(['scenes', currentProject.id], (old: any) =>
+      Array.isArray(old)
+        ? old.map((sc: any) => (sc.id === sceneId ? { ...sc, ...patch } : sc))
+        : old
+    );
+    useAppStore.getState().updateSceneInStore(sceneId, patch);
+  },
+  [currentProject, queryClient]
+);
 ```
 
-## Data Flow
+All 24 scene-write call sites in `SceneEditor.tsx` go through this helper. **Never** call `updateScene` + `updateSceneInStore` as a 2-line pair without also calling `setQueryData` — the cache will go stale and the user's "Set Active Image" will revert when they navigate away and back. Same pattern in `useJobEvents.ts` SSE reconnect handler.
 
-### Project Loading
-1. User navigates to `/project/:id`
-2. AppLayout queries `getProject()` via React Query
-3. Project loaded → `setCurrentProject()`
-4. Queries `getScenes()`, `getSections()`, `getAssets()`
-5. Data synced to Zustand store
+For non-scene data (assets, sections, lyrics) the same principle applies: any direct Zustand setter that isn't matched by a React Query update will eventually get overwritten by the mirror. Prefer invalidating the query, or call both.
 
-### Timeline Interaction
-1. User clicks section/scene marker on timeline
-2. `setActiveScene()` called
-3. SceneEditor displays active scene data
-4. WaveformDisplay updates cursor position
+## Zustand selectors, not whole-store destructure
 
-### Generation Flow
-1. User fills prompt + parameters in SceneEditor
-2. Clicks "Generate Image/Video"
-3. `generateImage()` or `generateVideo()` API call
-4. Job returned with ID
-5. `addJob()` adds to store
-6. Job updates via SSE → `subscribeToJobEvents()`
-7. `updateJob()` syncs real-time status
-8. GenerationPanel displays progress
+Components subscribe to the store with **per-field selectors**:
 
-### Export Flow
-1. User clicks "Export" button
-2. Export modal opens (format, quality selection)
-3. Calls `exportVideo()` with project ID
-4. Job created and tracked like generation
-5. User can monitor progress in Generation Panel
+```ts
+// ✅ Re-renders only when scenes change
+const scenes = useAppStore(s => s.scenes);
 
-## API Integration Points
+// ❌ Re-renders on ANY store change
+const { scenes, jobs, activeScene } = useAppStore();
+```
 
-### REST Endpoints
-- `GET /api/projects` - List all projects
-- `POST /api/projects` - Create project
-- `GET /api/projects/:id` - Get project details
-- `PATCH /api/projects/:id` - Update project
-- `DELETE /api/projects/:id` - Delete project
-- `GET /api/projects/:id/scenes` - Get project scenes
-- `POST /api/projects/:id/scenes` - Create scene
-- `PATCH /api/projects/:id/scenes/:sceneId` - Update scene
-- `DELETE /api/projects/:id/scenes/:sceneId` - Delete scene
-- `POST /api/projects/:id/scenes/:sceneId/generate-image` - Generate image
-- `POST /api/projects/:id/scenes/:sceneId/generate-video` - Generate video
-- `POST /api/projects/:id/assets` - Upload asset (multipart)
-- `GET /api/projects/:id/assets` - Get project assets
-- `DELETE /api/projects/:id/assets/:assetId` - Delete asset
-- `POST /api/llm/enhance-prompt` - Enhance prompt with LLM
-- `GET /api/projects/:id/sections` - Get song sections
-- `POST /api/settings/test-comfyui` - Test ComfyUI connection
-- `POST /api/settings/test-whisper` - Test Whisper connection
-- `POST /api/settings/test-llm` - Test LLM API connection
-- `GET /api/settings` - Get app settings
-- `PATCH /api/settings` - Update app settings
-- `GET /api/jobs` - Get job list
-- `POST /api/jobs/:id/cancel` - Cancel job
-- `POST /api/jobs/:id/retry` - Retry failed job
-- `POST /api/projects/:id/export` - Export video
+The second pattern was used everywhere up through 1.6.x and caused re-render storms during SSE batches (every `job_progress` event re-rendered the entire AppLayout tree). 15+ components were converted to per-field selectors in 1.7.0. Linters won't catch the whole-store destructure — when adding a new component, copy the pattern from a sibling.
 
-### Server-Sent Events
-- `GET /api/jobs/stream` - Real-time job updates
-  - Event: `job:update` - Emits Job object with updated status/progress
+`useAppStore.getState()` and `useAppStore.setState(...)` are intentional non-reactive escape hatches (used in callbacks where you just need to read or write once without subscribing).
 
-## Styling Strategy
+## Routing
 
-### Dark Theme Base
-- `bg-gray-950` - Darkest backgrounds
-- `bg-gray-900` - Primary background
-- `bg-gray-800` - Secondary/hover backgrounds
-- `text-gray-100` - Primary text
-- `text-gray-400` - Secondary text
+```
+/                            ProjectList
+/project/:id                  AppLayout (main editor)
+/batches                      BatchesDashboard
+/batches/:batchId             BatchRunDetail
+/settings                     SettingsPage
+```
 
-### Section Colors
-- Intro: `bg-section-intro` (#3b82f6 blue)
-- Verse: `bg-section-verse` (#10b981 green)
-- Chorus: `bg-section-chorus` (#f97316 orange)
-- Bridge: `bg-section-bridge` (#a855f7 purple)
-- Outro: `bg-section-outro` (#ef4444 red)
+Defined in `App.tsx`. AppLayout is the largest surface — it owns scenes/sections/assets queries, the Export modal, the Auto Gen modal, the Asset Generator modal, the Timeline, SceneEditor, ConceptPanel, VideoFlowPanel, BackingTrackTimeline, VideoPreview, and GenerationPanel.
 
-### Component Classes
-- `.btn-primary` - Blue primary buttons
-- `.btn-secondary` - Gray secondary buttons
-- `.btn-danger` - Red danger buttons
-- `.btn-ghost` - Transparent ghost buttons
-- `.card` - Card container (gray-900 border)
-- `.input-field` - Form inputs (gray-800 background)
+## Real-time updates (SSE)
 
-## Responsive Behavior
+`useJobEvents.ts` mounts once at the app level and:
 
-The layout uses CSS Grid and Flexbox:
-- Top toolbar: Full width, fixed height
-- Main content: 4-panel grid (left panel, center, right panel, generation panel)
-- Timeline: Full width at bottom, fixed height
-- All panels scroll independently
+1. Opens an EventSource on `/api/jobs/stream`.
+2. Translates job events into Zustand store updates (`addJob`, `updateJob`).
+3. On reconnect (after backend restart, network blip, etc.), refetches scenes from REST AND writes the result to both Zustand and the React Query cache. Without the cache write, the AppLayout mirror would shortly overwrite the fresh data with the stale cache.
+4. Maintains exponential backoff with jitter.
+5. Empty dependency array — the EventSource is created once. The hook uses `useAppStore.getState()` / `getQueryClient` from refs for all access, never via the dependency array.
 
-## Performance Optimizations
+If `useJobEvents` had a Zustand value in its `useEffect` deps, the EventSource would tear down and reconnect on every state update. That bug is documented in `feedback_comfyui_gotchas.md` (gotcha #4) and resolved by the empty deps pattern.
 
-1. **React Query**: Caches data, prevents redundant requests
-2. **Zustand**: Minimal re-renders via selector functions
-3. **Component Splitting**: Each major feature is isolated
-4. **Lazy Imports**: Route-based code splitting via React Router
-5. **WaveSurfer Optimization**: Single instance per project, manual cleanup
-6. **Tailwind**: Purged unused styles in production
+## Timestamp handling
 
-## Error Handling
+The backend emits timestamps as `datetime.utcnow().isoformat()` — **without** a `Z` suffix. JavaScript's `new Date(ts)` interprets non-Z strings as local time, which makes every "elapsed" / "x seconds ago" computation wrong by the user's TZ offset.
 
-- API errors logged to console
-- Mutations show loading/error states
-- Job failures display error messages in GenerationPanel
-- Test connection buttons show success/failure indicators
-- Form validation on required fields
+`src/utils/time.ts` exports `parseBackendDate(ts)` and `parseBackendMs(ts)` that append `Z` if missing before parsing. **Always** use these for backend timestamps. Direct `new Date(backendField)` is a bug.
 
-## Future Enhancements
+## Export modal
 
-- [ ] Keyboard shortcuts for timeline navigation
-- [ ] Drag-and-drop scene reordering
-- [ ] Multi-select for batch operations
-- [ ] Undo/redo history
-- [ ] Keyboard shortcuts modal
-- [ ] Dark/light theme toggle
-- [ ] Responsive mobile layout
-- [ ] Scene templates/presets
-- [ ] Prompt history/suggestions
+`AppLayout.tsx` contains the Export modal inline (search for `function ExportModal`). The interesting bits:
+
+- **Re-export options block**: checkboxes for "Audio-only re-mix", "Export audio stems", "Stems only", "Force full recreate". `audioOnlyRemix` and `forceRecreate` are mutually exclusive — toggling `forceRecreate` clears `audioOnlyRemix` in the same setState.
+- **Recovery banner**: shown when `/export/scan` finds recoverable artifacts on disk from a previous run.
+- **Chunk gallery**: chunk video cards appear as the backend reports each finished chunk via the export progress poll.
+
+The payload to `POST /api/projects/{id}/export` differs between music mode and narration mode. Narration mode includes subtitle settings, backing track mix params, audio normalization, and all four export flags. Music mode includes only `force_recreate` and `stems_only`.
+
+## Wavesurfer + pywebview
+
+`WaveformDisplay.tsx` loads audio with axios as an `ArrayBuffer`, converts to a blob URL, and feeds wavesurfer the blob URL instead of the raw API URL. Some pywebview / browser-extension setups block `fetch()` calls but allow XHR/axios; the blob-URL workaround avoids the block.
+
+## Build
+
+- Vite proxies `/api/*` to the backend in dev (`vite.config.ts`).
+- Production build outputs to `frontend/dist/`. The backend's static-file mount serves this directly when running `python run.py`.
+- TS strict mode is on. `npx tsc --noEmit` runs in CI / pre-commit.
+
+## Things that have bitten us
+
+- **Whole-store destructure**: `const { x, y, z } = useAppStore()` subscribes to the entire store. Use `const x = useAppStore(s => s.x)`.
+- **Bare `updateScene` + `updateSceneInStore` pair**: skip the React Query cache write at your peril. Use `updateSceneAndSync`.
+- **`new Date(backendTs)` without `Z` normalize**: every relative-time display is wrong by your local TZ offset. Use `parseBackendDate` / `parseBackendMs`.
+- **Zustand deps in `useEffect` for `useJobEvents`**: EventSource tears down and reconnects on every state change. Use empty `[]` and `useAppStore.getState()`.
+- **EventSource over a long-lived window**: `ConnectionResetError` after hours on Windows. `useJobEvents` detects reconnect and refreshes scene data; on long runs without a reconnect, F5 also works.
+- **Auto Gen modal duplication**: there used to be two AutoGenModals (Timeline + AppLayout). Now there's one in AppLayout, opened via the Zustand `autoGenOpen` flag. The Timeline button toggles the same flag.
+
+See `feedback_comfyui_gotchas.md` and `feedback_cache_coherence.md` in the project memory for the long version.

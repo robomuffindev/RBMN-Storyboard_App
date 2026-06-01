@@ -327,7 +327,8 @@ export interface ExportStatus {
   chunks?: ExportChunk[];
   total_chunks?: number;
   current_chunk?: number;
-  phase?: string;  // "clips" | "chunks" | "final" | "post" | "cancelled"
+  phase?: string;  // "clips" | "chunks" | "final" | "post" | "cancelled" | "done"
+  stems?: Array<{ filename: string; size_mb: number; download_url: string }>;
 }
 
 export interface ExportScanResult {

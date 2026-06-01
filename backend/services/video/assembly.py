@@ -16,6 +16,7 @@ Performance optimizations (v1.6.0):
 import logging
 import os
 import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
@@ -47,6 +48,243 @@ _MAX_PARALLEL_CLIPS = int(os.environ.get("RBMN_PARALLEL_CLIPS", "4"))
 # Minimum free space (bytes) required on tmpfs before we'll use it.
 # 512 MB — a 20-scene export with CRF 14 intermediates can easily use 200+ MB.
 _TMPFS_MIN_FREE = int(os.environ.get("RBMN_TMPFS_MIN_FREE", str(512 * 1024 * 1024)))
+
+
+# ─── Persistent export cache (audio-only remix support) ──────────────────
+# The expensive part of an export is the per-clip render + chunk merge,
+# producing a single silent concatenated video (concat.mp4 / chunkmerge).
+# When the user re-exports the same project with only audio tweaks
+# (narration volume, backing track levels, etc.), we want to skip
+# clip rendering entirely and jump straight to the audio mux step.
+#
+# Strategy: after every successful concat we save the merged silent video
+# AND a manifest of the video-affecting params to a persistent cache dir
+# next to the output. On the next export we compute the same hash and, if
+# it matches, skip the entire render pipeline and reuse the cached concat.
+#
+# The "audio-only" flag forces use of the cache (errors if missing).
+# The "force_recreate" flag wipes the cache before starting.
+
+import hashlib as _cache_hashlib
+
+
+def _video_cache_key(
+    scenes: List[Dict[str, Any]],
+    width: int,
+    height: int,
+    fps: int,
+    intermediate_crf: int,
+    final_crf: int,
+    default_transition: Optional[str],
+    default_transition_duration: float,
+    color_match_clips: bool,
+    ai_transition_clips: Optional[Dict[int, str]] = None,
+) -> str:
+    """Hash all params that affect the silent concatenated video.
+
+    Audio-only params (narration_volume, backing_volume, fades,
+    normalize_audio, subtitles, etc.) are deliberately excluded — they're
+    applied AFTER the cached concat is reused.
+    """
+    payload = {
+        "scenes": [
+            {
+                "src": s.get("scene_source_type"),
+                "img": s.get("image_path"),
+                "vid": s.get("video_path"),
+                "dur": s.get("duration"),
+                "fx": s.get("image_movement") or s.get("effect"),
+                "tin": s.get("transition_in"),
+                "tout": s.get("transition_out"),
+                "tclip": s.get("transition_clip_path"),
+            }
+            for s in scenes
+        ],
+        "geom": [width, height, fps],
+        "crf": [intermediate_crf, final_crf],
+        "trans": [default_transition, default_transition_duration],
+        "cm": color_match_clips,
+        "ait": (ai_transition_clips or {}),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return _cache_hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _export_cache_dir(output_path: str) -> Path:
+    """Cache lives alongside the output, hidden from gallery listing."""
+    return Path(output_path).parent / ".export_cache"
+
+
+def _load_cached_concat(
+    output_path: str, expected_key: str
+) -> Optional[Path]:
+    """Return path to cached concat.mp4 if and only if the manifest matches."""
+    cdir = _export_cache_dir(output_path)
+    concat = cdir / "concat.mp4"
+    manifest = cdir / "manifest.json"
+    if not concat.exists() or not manifest.exists():
+        return None
+    try:
+        m = json.loads(manifest.read_text())
+        if m.get("video_cache_key") != expected_key:
+            return None
+        if not concat.stat().st_size > 0:
+            return None
+    except Exception:
+        return None
+    return concat
+
+
+def _save_concat_to_cache(
+    output_path: str, concat_path: Path, key: str, scene_count: int
+) -> None:
+    """Copy the merged silent video into the cache + write manifest.
+
+    Best-effort: failures are logged but don't break the export.
+    """
+    try:
+        cdir = _export_cache_dir(output_path)
+        cdir.mkdir(parents=True, exist_ok=True)
+        target = cdir / "concat.mp4"
+        shutil.copy2(str(concat_path), str(target))
+        (cdir / "manifest.json").write_text(json.dumps({
+            "video_cache_key": key,
+            "scene_count": scene_count,
+            "saved_at": datetime.utcnow().isoformat() + "Z",
+        }, indent=2))
+        logger.info(f"Export cache saved: {target} (key={key})")
+    except Exception as e:
+        logger.warning(f"Failed to write export cache: {e}")
+
+
+def _clear_export_cache(output_path: str) -> None:
+    """Wipe the cache directory entirely (used by force_recreate)."""
+    cdir = _export_cache_dir(output_path)
+    if cdir.exists():
+        try:
+            shutil.rmtree(str(cdir), ignore_errors=True)
+            logger.info(f"Export cache cleared: {cdir}")
+        except Exception as e:
+            logger.warning(f"Failed to clear export cache: {e}")
+
+
+def _safe_stem_name(name: str) -> str:
+    """Strip path/extension noise and keep the bit safe for a filename."""
+    base = Path(name).stem if name else ""
+    # Replace anything that isn't alnum / underscore / dash with underscore.
+    out = "".join(c if (c.isalnum() or c in "-_") else "_" for c in base)
+    return (out or "track").strip("_") or "track"
+
+
+def _export_audio_stems(
+    output_path: str,
+    narration_audio_path: str,
+    backing_tracks: Optional[List[Dict[str, Any]]],
+    narration_volume: float,
+    backing_volume: float,
+    loop_backing: bool,
+    main_fade_in: float,
+    main_fade_out: float,
+    normalize_backing: bool,
+    total_duration: float,
+    individual_backing: bool = False,
+) -> None:
+    """Write per-channel WAVs for DAW remixing.
+
+    Produces (under ``{output_dir}/stems/``):
+        {basename}.narration.wav          — narration with master volume
+        {basename}.backing_mix.wav        — all backing tracks combined
+        {basename}.backing_NN_name.wav    — each backing track separately
+                                            (only when individual_backing=True)
+
+    Best-effort: failures are logged but don't break the export.
+    """
+    try:
+        out_p = Path(output_path)
+        stems_dir = out_p.parent / "stems"
+        stems_dir.mkdir(parents=True, exist_ok=True)
+        base = out_p.stem
+
+        # ── narration stem: narration audio with volume applied ──
+        narr_out = stems_dir / f"{base}.narration.wav"
+        narr_filter = f"volume={narration_volume:.4f}"
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", narration_audio_path,
+            "-af", narr_filter,
+            "-c:a", "pcm_s16le",
+            "-ar", "48000",
+            str(narr_out),
+        ], check=True, capture_output=True)
+        logger.info(f"Stem written: {narr_out}")
+
+        if not backing_tracks:
+            return
+
+        # ── individual backing track stems (one WAV per track) ──
+        if individual_backing:
+            for idx, bt in enumerate(backing_tracks, start=1):
+                try:
+                    src = bt.get("path")
+                    if not src or not Path(src).exists():
+                        logger.warning(
+                            f"Individual backing stem #{idx}: source missing — {src}"
+                        )
+                        continue
+                    raw_name = bt.get("name") or bt.get("filename") or Path(src).name
+                    pretty = _safe_stem_name(str(raw_name))
+                    bt_out = stems_dir / f"{base}.backing_{idx:02d}_{pretty}.wav"
+                    vol = float(bt.get("volume_db", 0))
+                    vol_linear = (10 ** (vol / 20.0)) * float(backing_volume)
+                    start_ms = int(float(bt.get("start_time", 0)) * 1000)
+                    filt_parts = []
+                    if start_ms > 0:
+                        filt_parts.append(f"adelay={start_ms}|{start_ms}")
+                    filt_parts.append(f"volume={vol_linear:.4f}")
+                    filt = ",".join(filt_parts) or "anull"
+                    subprocess.run([
+                        "ffmpeg", "-y",
+                        "-i", src,
+                        "-af", filt,
+                        "-c:a", "pcm_s16le",
+                        "-ar", "48000",
+                        str(bt_out),
+                    ], check=True, capture_output=True)
+                    logger.info(f"Individual backing stem written: {bt_out}")
+                except Exception as _ind_err:
+                    logger.warning(
+                        f"Individual backing stem #{idx} failed (non-fatal): {_ind_err}"
+                    )
+
+        # ── backing_mix: all backing tracks summed into one stem ──
+        back_out = stems_dir / f"{base}.backing_mix.wav"
+        cmd = ["ffmpeg", "-y"]
+        for bt in backing_tracks:
+            cmd += ["-i", bt["path"]]
+        filter_parts = []
+        for i, bt in enumerate(backing_tracks):
+            vol = float(bt.get("volume_db", 0))
+            vol_linear = (10 ** (vol / 20.0)) * float(backing_volume)
+            start_ms = int(float(bt.get("start_time", 0)) * 1000)
+            delay_filter = f"adelay={start_ms}|{start_ms}" if start_ms > 0 else "anull"
+            filter_parts.append(
+                f"[{i}:a]{delay_filter},volume={vol_linear:.4f}[a{i}]"
+            )
+        mix_inputs = "".join(f"[a{i}]" for i in range(len(backing_tracks)))
+        filter_parts.append(
+            f"{mix_inputs}amix=inputs={len(backing_tracks)}:duration=longest:dropout_transition=0[mix]"
+        )
+        cmd += [
+            "-filter_complex", ";".join(filter_parts),
+            "-map", "[mix]",
+            "-c:a", "pcm_s16le",
+            "-ar", "48000",
+            str(back_out),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        logger.info(f"Stem written: {back_out}")
+    except Exception as e:
+        logger.warning(f"Stems export failed (non-fatal): {e}")
 
 
 def _get_tmpfs_dir(fallback: Path, label: str = "rbmn_export") -> Path:
@@ -1013,6 +1251,10 @@ def assemble_narration_video(
     chunk_size: int = 0,
     chunk_callback: Optional[Callable[[int, str, int, int], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    # ── Re-export cache controls ──
+    audio_only_remix: bool = False,
+    force_recreate: bool = False,
+    export_stems: bool = False,
 ) -> None:
     """
     Assemble narration video from scenes with full feature parity to music video.
@@ -1075,6 +1317,46 @@ def assemble_narration_video(
     """
     if not scenes:
         raise ValueError("No scenes provided")
+
+    # ── Mutual-exclusion guard ─────────────────────────────────────────
+    # audio_only_remix relies on the cache; force_recreate WIPES the cache.
+    # The frontend already enforces this, but guard at the backend too.
+    if audio_only_remix and force_recreate:
+        raise RuntimeError(
+            "audio_only_remix and force_recreate are mutually exclusive: "
+            "force_recreate clears the cache that audio_only_remix needs."
+        )
+
+    # ── Re-export cache: compute key & decide strategy ──────────────────
+    # Hash the video-affecting params; if cache hits we skip the entire
+    # render pipeline and reuse the cached silent concat for audio mux.
+    intermediate_crf_for_cache = 14  # matches the value used below
+    _cache_key = _video_cache_key(
+        scenes,
+        width=width,
+        height=height,
+        fps=fps,
+        intermediate_crf=intermediate_crf_for_cache,
+        final_crf=final_crf,
+        default_transition=default_transition,
+        default_transition_duration=default_transition_duration,
+        color_match_clips=color_match_clips,
+    )
+    if force_recreate:
+        logger.info("force_recreate=True — clearing export cache before render")
+        _clear_export_cache(output_path)
+    _cached_concat_path: Optional[Path] = _load_cached_concat(output_path, _cache_key)
+    if audio_only_remix and _cached_concat_path is None:
+        raise RuntimeError(
+            "audio_only_remix requested but no matching cached video found. "
+            "Run a full export first, or disable audio_only_remix to render "
+            "from scratch."
+        )
+    if _cached_concat_path is not None:
+        logger.info(
+            f"Reusing cached concat from previous export: {_cached_concat_path} "
+            f"(key={_cache_key}). Audio mix will run fresh."
+        )
 
     def report(step: str, percent: int) -> None:
         if progress_callback:
@@ -1184,159 +1466,182 @@ def assemble_narration_video(
             if clip_padding[ci] > 0:
                 scene_padding_map[si] = clip_padding[ci]
 
-        # ── Step 1: Create clips — SINGLE-PASS + PARALLEL pipeline ──────
-        # Each clip is created with ONE FFmpeg call that chains:
-        #   normalize (scale+pad+setsar) + duration pad + fade in + fade out
-        # Clips are independent and processed in parallel (ThreadPoolExecutor).
-        clip_tasks: list[dict] = []
-        for i, scene in enumerate(scenes):
-            task = _build_clip_task(
-                scene, i, work_dir, width, height, fps,
-                intermediate_crf, scene_padding_map.get(i, 0.0),
+        # ── Skip Step 1/1b/1c/2-setup entirely when cache hits ──
+        if _cached_concat_path is None:
+            # ── Step 1: Create clips — SINGLE-PASS + PARALLEL pipeline ──────
+            # Each clip is created with ONE FFmpeg call that chains:
+            #   normalize (scale+pad+setsar) + duration pad + fade in + fade out
+            # Clips are independent and processed in parallel (ThreadPoolExecutor).
+            clip_tasks: list[dict] = []
+            for i, scene in enumerate(scenes):
+                task = _build_clip_task(
+                    scene, i, work_dir, width, height, fps,
+                    intermediate_crf, scene_padding_map.get(i, 0.0),
+                )
+                if task is None:
+                    logger.warning(f"Scene {i} has no content, skipping")
+                    continue
+                clip_tasks.append(task)
+
+            scene_clips, clip_scene_indices, clip_temp_files = _process_clips_parallel(
+                clip_tasks,
+                report=report,
+                cancel_check=cancel_check,
+                total_scenes=total_scenes,
+                base_percent=0,
+                percent_range=50,
             )
-            if task is None:
-                logger.warning(f"Scene {i} has no content, skipping")
-                continue
-            clip_tasks.append(task)
+            temp_files.extend(clip_temp_files)
 
-        scene_clips, clip_scene_indices, clip_temp_files = _process_clips_parallel(
-            clip_tasks,
-            report=report,
-            cancel_check=cancel_check,
-            total_scenes=total_scenes,
-            base_percent=0,
-            percent_range=50,
-        )
-        temp_files.extend(clip_temp_files)
+            if not scene_clips:
+                raise RuntimeError("No clips to concatenate")
 
-        if not scene_clips:
-            raise RuntimeError("No clips to concatenate")
+            if cancel_check and cancel_check():
+                raise RuntimeError("Export cancelled by user")
 
-        if cancel_check and cancel_check():
-            raise RuntimeError("Export cancelled by user")
+            num_clips = len(scene_clips)
 
-        num_clips = len(scene_clips)
+            # ── Step 1b: Adjacent-clip colour matching (before transitions) ──
+            if color_match_clips and len(scene_clips) > 1:
+                report("Matching colors between adjacent clips...", 55)
+                logger.info("Applying adjacent-clip colour matching across %d clips", len(scene_clips))
+                cm_dir = str(work_dir / "_colormatch")
+                matched_clips = match_adjacent_clips(scene_clips, cm_dir, crf=intermediate_crf)
+                for mc in matched_clips:
+                    if mc not in scene_clips and mc not in temp_files:
+                        temp_files.append(mc)
+                scene_clips = matched_clips
 
-        # ── Step 1b: Adjacent-clip colour matching (before transitions) ──
-        if color_match_clips and len(scene_clips) > 1:
-            report("Matching colors between adjacent clips...", 55)
-            logger.info("Applying adjacent-clip colour matching across %d clips", len(scene_clips))
-            cm_dir = str(work_dir / "_colormatch")
-            matched_clips = match_adjacent_clips(scene_clips, cm_dir, crf=intermediate_crf)
-            for mc in matched_clips:
-                if mc not in scene_clips and mc not in temp_files:
-                    temp_files.append(mc)
-            scene_clips = matched_clips
+            # ── Step 1c: Check for AI transition clips ──
+            ai_transition_clips: dict[int, str] = {}
+            for ci in range(num_clips - 1):
+                si = clip_scene_indices[ci]
+                t_clip = scenes[si].get("transition_clip_path")
+                if t_clip and Path(t_clip).exists():
+                    t_norm_path = work_dir / f"transition_{ci:03d}.mp4"
+                    normalize_clip(t_clip, str(t_norm_path), width, height, fps,
+                                   crf=intermediate_crf)
+                    temp_files.append(str(t_norm_path))
+                    ai_transition_clips[ci] = str(t_norm_path)
+                    logger.info(f"Normalized AI transition clip for boundary {ci}→{ci+1}")
 
-        # ── Step 1c: Check for AI transition clips ──
-        ai_transition_clips: dict[int, str] = {}
-        for ci in range(num_clips - 1):
-            si = clip_scene_indices[ci]
-            t_clip = scenes[si].get("transition_clip_path")
-            if t_clip and Path(t_clip).exists():
-                t_norm_path = work_dir / f"transition_{ci:03d}.mp4"
-                normalize_clip(t_clip, str(t_norm_path), width, height, fps,
-                               crf=intermediate_crf)
-                temp_files.append(str(t_norm_path))
-                ai_transition_clips[ci] = str(t_norm_path)
-                logger.info(f"Normalized AI transition clip for boundary {ci}→{ci+1}")
+            if ai_transition_clips:
+                logger.info(f"Found {len(ai_transition_clips)} AI transition clips to interleave")
 
-        if ai_transition_clips:
-            logger.info(f"Found {len(ai_transition_clips)} AI transition clips to interleave")
+            # Cancel check: between color matching and transition merge
+            if cancel_check and cancel_check():
+                raise RuntimeError("Export cancelled by user")
 
-        # Cancel check: between color matching and transition merge
-        if cancel_check and cancel_check():
-            raise RuntimeError("Export cancelled by user")
+            # ── Step 2: Apply inter-scene xfade transitions, then concatenate ──
+            has_xfade = _has_explicit or _will_use_default
+            use_default_xfade = _will_use_default
 
-        # ── Step 2: Apply inter-scene xfade transitions, then concatenate ──
-        has_xfade = _has_explicit or _will_use_default
-        use_default_xfade = _will_use_default
+            # ── Wrap chunk_callback for narration: mux audio into each chunk ──
+            # This lets users preview chunks with audio during long renders.
+            _original_chunk_callback = chunk_callback
+            if chunk_callback and narration_audio_path and Path(narration_audio_path).exists():
+                # Pre-compute cumulative scene start times for chunk audio slicing
+                _cumulative_times: list[float] = []
+                _t = 0.0
+                for _sc in scenes:
+                    _cumulative_times.append(_t)
+                    _t += _sc.get("duration", 0.0)
+                _total_audio_dur = _t
 
-        # ── Wrap chunk_callback for narration: mux audio into each chunk ──
-        # This lets users preview chunks with audio during long renders.
-        _original_chunk_callback = chunk_callback
-        if chunk_callback and narration_audio_path and Path(narration_audio_path).exists():
-            # Pre-compute cumulative scene start times for chunk audio slicing
-            _cumulative_times: list[float] = []
-            _t = 0.0
-            for _sc in scenes:
-                _cumulative_times.append(_t)
-                _t += _sc.get("duration", 0.0)
-            _total_audio_dur = _t
-
-            def _narration_chunk_callback(chunk_idx: int, chunk_path: str, scene_start: int, scene_end: int):
-                """Mux the corresponding audio segment into the chunk before reporting."""
-                try:
-                    # Find time range for this chunk's scenes
-                    audio_start = _cumulative_times[scene_start] if scene_start < len(_cumulative_times) else 0.0
-                    if scene_end + 1 < len(_cumulative_times):
-                        audio_end = _cumulative_times[scene_end + 1]
-                    else:
-                        audio_end = _total_audio_dur
-                    audio_duration = audio_end - audio_start
-                    if audio_duration <= 0:
-                        logger.warning(f"Chunk {chunk_idx}: audio duration <= 0 ({audio_start:.1f}s-{audio_end:.1f}s), skipping mux")
-                    else:
-                        # Mux audio segment into chunk
-                        chunk_with_audio = chunk_path.replace(".mp4", "_muxed.mp4")
-                        mux_cmd = [
-                            "ffmpeg", "-y",
-                            "-i", chunk_path,
-                            "-ss", str(audio_start),
-                            "-t", str(audio_duration),
-                            "-i", narration_audio_path,
-                            "-c:v", "copy",
-                            "-c:a", "aac", "-b:a", "192k",
-                            "-map", "0:v:0", "-map", "1:a:0",
-                            "-shortest",
-                            chunk_with_audio,
-                        ]
-                        import subprocess
-                        try:
-                            result = subprocess.run(
-                                mux_cmd, capture_output=True, text=True, timeout=180
-                            )
-                        except subprocess.TimeoutExpired:
-                            Path(chunk_with_audio).unlink(missing_ok=True)
-                            raise RuntimeError(
-                                f"FFmpeg mux timed out after 180s for chunk {chunk_idx}"
-                            )
-                        if result.returncode != 0:
-                            Path(chunk_with_audio).unlink(missing_ok=True)
-                            logger.warning(
-                                f"FFmpeg mux failed for chunk {chunk_idx}: "
-                                f"{(result.stderr or '')[:500]}"
-                            )
-                        elif Path(chunk_with_audio).exists() and Path(chunk_with_audio).stat().st_size > 0:
-                            shutil.move(chunk_with_audio, chunk_path)
-                            logger.info(
-                                f"Muxed narration audio ({audio_start:.1f}s-{audio_end:.1f}s) "
-                                f"into chunk {chunk_idx}"
-                            )
+                def _narration_chunk_callback(chunk_idx: int, chunk_path: str, scene_start: int, scene_end: int):
+                    """Mux the corresponding audio segment into the chunk before reporting."""
+                    try:
+                        # Find time range for this chunk's scenes
+                        audio_start = _cumulative_times[scene_start] if scene_start < len(_cumulative_times) else 0.0
+                        if scene_end + 1 < len(_cumulative_times):
+                            audio_end = _cumulative_times[scene_end + 1]
                         else:
-                            logger.warning(
-                                f"Audio mux produced empty file for chunk {chunk_idx}, "
-                                f"keeping video-only"
-                            )
-                            Path(chunk_with_audio).unlink(missing_ok=True)
-                except Exception as _mux_err:
-                    logger.warning(f"Failed to mux audio into chunk {chunk_idx}: {_mux_err}")
-                    # Clean up partial file
-                    Path(chunk_path.replace(".mp4", "_muxed.mp4")).unlink(missing_ok=True)
+                            audio_end = _total_audio_dur
+                        audio_duration = audio_end - audio_start
+                        if audio_duration <= 0:
+                            logger.warning(f"Chunk {chunk_idx}: audio duration <= 0 ({audio_start:.1f}s-{audio_end:.1f}s), skipping mux")
+                        else:
+                            # Mux audio segment into chunk
+                            chunk_with_audio = chunk_path.replace(".mp4", "_muxed.mp4")
+                            mux_cmd = [
+                                "ffmpeg", "-y",
+                                "-i", chunk_path,
+                                "-ss", str(audio_start),
+                                "-t", str(audio_duration),
+                                "-i", narration_audio_path,
+                                "-c:v", "copy",
+                                "-c:a", "aac", "-b:a", "192k",
+                                "-map", "0:v:0", "-map", "1:a:0",
+                                "-shortest",
+                                chunk_with_audio,
+                            ]
+                            import subprocess
+                            try:
+                                result = subprocess.run(
+                                    mux_cmd, capture_output=True, text=True, timeout=180
+                                )
+                            except subprocess.TimeoutExpired:
+                                Path(chunk_with_audio).unlink(missing_ok=True)
+                                raise RuntimeError(
+                                    f"FFmpeg mux timed out after 180s for chunk {chunk_idx}"
+                                )
+                            if result.returncode != 0:
+                                Path(chunk_with_audio).unlink(missing_ok=True)
+                                logger.warning(
+                                    f"FFmpeg mux failed for chunk {chunk_idx}: "
+                                    f"{(result.stderr or '')[:500]}"
+                                )
+                            elif Path(chunk_with_audio).exists() and Path(chunk_with_audio).stat().st_size > 0:
+                                shutil.move(chunk_with_audio, chunk_path)
+                                logger.info(
+                                    f"Muxed narration audio ({audio_start:.1f}s-{audio_end:.1f}s) "
+                                    f"into chunk {chunk_idx}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"Audio mux produced empty file for chunk {chunk_idx}, "
+                                    f"keeping video-only"
+                                )
+                                Path(chunk_with_audio).unlink(missing_ok=True)
+                    except Exception as _mux_err:
+                        logger.warning(f"Failed to mux audio into chunk {chunk_idx}: {_mux_err}")
+                        # Clean up partial file
+                        Path(chunk_path.replace(".mp4", "_muxed.mp4")).unlink(missing_ok=True)
 
-                # Always call original callback
-                if _original_chunk_callback:
-                    _original_chunk_callback(chunk_idx, chunk_path, scene_start, scene_end)
+                    # Always call original callback
+                    if _original_chunk_callback:
+                        _original_chunk_callback(chunk_idx, chunk_path, scene_start, scene_end)
 
-            chunk_callback = _narration_chunk_callback
+                chunk_callback = _narration_chunk_callback
 
+        # ── PERSISTENT CACHE HIT: use cached concat from previous export ──
+        # This skips ALL clip rendering for audio-only remixes.
+        if _cached_concat_path is not None:
+            logger.info(
+                f"PERSISTENT CACHE: Using cached concat {_cached_concat_path}, "
+                f"skipping clip processing and chunk merge"
+            )
+            report("Using cached video, mixing audio...", 80)
+            concat_path = _cached_concat_path
+            chunk_file_paths: list[str] = []
+            merge_temp_files: list[str] = []
+            scene_clips: list = []
+            clip_scene_indices: list = []
+            xfade_types_set = set()  # not needed
+            use_default_xfade = False
+            has_xfade = False
+            ai_transition_clips = {}
+            _existing_merge = [concat_path]
+            # Skip directly past clip rendering by ensuring downstream code
+            # sees the cached merge.
         # ── Resume detection: check if a previous merged video exists in work_dir ──
         # If the export failed at the audio mux/subtitle step after the expensive
         # chunked merge was already complete, we can skip straight to audio prep.
-        _existing_merge = sorted(work_dir.glob("chunkmerge_xfade_*.mp4"))
-        if not _existing_merge:
-            _existing_merge = sorted(work_dir.glob("concatenated.mp4"))
-        if _existing_merge:
+        if _cached_concat_path is None:
+            _existing_merge = sorted(work_dir.glob("chunkmerge_xfade_*.mp4"))
+            if not _existing_merge:
+                _existing_merge = sorted(work_dir.glob("concatenated.mp4"))
+        if _existing_merge and _cached_concat_path is None:
             _merge_candidate = _existing_merge[-1]  # largest index = final merge
             _merge_info = get_media_info(str(_merge_candidate))
             _merge_dur = _merge_info.get("duration", 0)
@@ -1374,6 +1679,11 @@ def assemble_narration_video(
                 report_base_percent=60,
                 report_range=18,
                 chunk_output_dir=output_dir,
+            )
+            # Save the concat to the persistent cache for future audio-only
+            # remixes. Best-effort — failure here doesn't break this export.
+            _save_concat_to_cache(
+                output_path, Path(concat_path), _cache_key, len(scenes)
             )
         # Add merge temp files to our cleanup list (but NOT chunk_file_paths)
         temp_files.extend(merge_temp_files)
@@ -1419,6 +1729,36 @@ def assemble_narration_video(
         logger.info(f"Muxing with audio: {audio_path}")
         mux_audio(str(concat_path), audio_path, output_path)
 
+        # ── Step 4b: Optional stems export for DAW remixing ──
+        # Writes per-channel WAVs alongside the main MP4 so the user can
+        # remix outside the app without re-rendering.
+        if export_stems:
+            report("Exporting audio stems...", 91)
+            logger.info("Exporting audio stems for DAW remixing")
+            _total_dur_for_stems = 0.0
+            try:
+                _total_dur_for_stems = get_media_info(
+                    narration_audio_path
+                ).get("duration", 0.0)
+            except Exception:
+                pass
+            try:
+                _export_audio_stems(
+                    output_path=output_path,
+                    narration_audio_path=narration_audio_path,
+                    backing_tracks=backing_tracks,
+                    narration_volume=narration_volume,
+                    backing_volume=backing_volume,
+                    loop_backing=loop_backing,
+                    main_fade_in=main_fade_in,
+                    main_fade_out=main_fade_out,
+                    normalize_backing=normalize_backing,
+                    total_duration=_total_dur_for_stems,
+                    individual_backing=True,
+                )
+            except Exception as _stems_err:
+                logger.warning(f"Stems export failed (non-fatal): {_stems_err}")
+
         # ── Step 5: Subtitle burn-in ──
         if subtitle_words and subtitle_style:
             report("Burning subtitles...", 93)
@@ -1454,4 +1794,3 @@ def assemble_narration_video(
     else:
         # Success path cleanup — remove everything
         _cleanup_narration_temp_files()
-

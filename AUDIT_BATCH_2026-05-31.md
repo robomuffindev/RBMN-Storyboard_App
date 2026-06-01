@@ -1,6 +1,8 @@
 # Batch Processing Audit
 **Date:** 2026-05-31
 **Scope:** Project Batch Mode end-to-end (frontend → API → pipeline → auto-gen).
+
+> **Historical snapshot.** All findings B-1 through B-14 were addressed in **v1.7.0** — see [`CHANGELOG.md`](CHANGELOG.md). Kept as a reference for how the pipeline was hardened.
 **Files inspected:** `backend/api/batch.py`, `backend/api/generation.py`, `frontend/src/components/Layout/ProjectList.tsx`.
 
 ## TL;DR

@@ -1440,6 +1440,12 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [backingMainFadeIn, setBackingMainFadeIn] = useState(projSettings.backing_main_fade_in ?? 0.0);
   const [backingMainFadeOut, setBackingMainFadeOut] = useState(projSettings.backing_main_fade_out ?? 0.0);
   const [normalizeBacking, setNormalizeBacking] = useState(projSettings.normalize_backing ?? false);
+  // ── Re-export controls ──
+  const [audioOnlyRemix, setAudioOnlyRemix] = useState(false);
+  const [forceRecreate, setForceRecreate] = useState(false);
+  const [exportStems, setExportStems] = useState(false);
+  const [stemsOnly, setStemsOnly] = useState(false);
+  const [reExportOpen, setReExportOpen] = useState(false);
   const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed' | 'cancelled'>('config');
   const [progressPercent, setProgressPercent] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
@@ -1449,6 +1455,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [totalChunks, setTotalChunks] = useState(0);
   const [currentChunk, setCurrentChunk] = useState(0);
   const [chunks, setChunks] = useState<Array<{ index: number; path: string; download_url: string; scenes: string; size_mb: number }>>([]);
+  const [stems, setStems] = useState<Array<{ filename: string; size_mb: number; download_url: string }>>([]);
   const [lightboxChunkUrl, setLightboxChunkUrl] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   // Recovery scan state
@@ -1490,6 +1497,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
         if (data.total_chunks) setTotalChunks(data.total_chunks);
         if (data.current_chunk) setCurrentChunk(data.current_chunk);
         if (data.chunks && data.chunks.length > 0) setChunks(data.chunks);
+        if (data.stems && data.stems.length > 0) setStems(data.stems);
 
         if (data.status === 'done') {
           if (pollRef.current) clearInterval(pollRef.current);
@@ -1537,7 +1545,16 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
           backing_main_fade_in: backingMainFadeIn,
           backing_main_fade_out: backingMainFadeOut,
           normalize_backing: normalizeBacking,
-        } : {}),
+          // Re-export controls (narration-only; music_video ignores these for now)
+          audio_only_remix: audioOnlyRemix,
+          force_recreate: forceRecreate,
+          export_stems: exportStems,
+          stems_only: stemsOnly,
+        } : {
+          // For music mode we still support force_recreate + stems_only
+          force_recreate: forceRecreate,
+          stems_only: stemsOnly,
+        }),
       });
     },
     onSuccess: () => {
@@ -1559,6 +1576,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
     setCurrentStep('Initializing...');
     setProgressPercent(0);
     setChunks([]);
+    setStems([]);
     setExportPhase(null);
     setTotalChunks(0);
     setCurrentChunk(0);
@@ -2006,6 +2024,115 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
               )}
             </div>
 
+            {/* Re-export options — collapsible accordion, closed by default so main export controls stay visible */}
+            <div className="bg-gray-800/40 border border-gray-700/60 rounded-lg mb-3 flex-shrink-0 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setReExportOpen((v) => !v)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-gray-800/60 transition-colors"
+                aria-expanded={reExportOpen}
+              >
+                <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
+                  <svg
+                    className={`w-4 h-4 transition-transform ${reExportOpen ? 'rotate-90' : ''}`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span>Re-export options</span>
+                  {(audioOnlyRemix || forceRecreate || exportStems || stemsOnly) && (
+                    <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-600/30 text-blue-200 border border-blue-500/40">
+                      {[
+                        audioOnlyRemix && 'audio-only',
+                        forceRecreate && 'force recreate',
+                        exportStems && 'stems',
+                        stemsOnly && 'stems only',
+                      ].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                </div>
+                <span className="text-xs text-gray-500">{reExportOpen ? 'hide' : 'show'}</span>
+              </button>
+              {reExportOpen && (
+              <div className="space-y-2.5 px-3 pb-3 border-t border-gray-700/50 pt-3">
+                {isNarration && (
+                  <>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={audioOnlyRemix}
+                        onChange={(e) => setAudioOnlyRemix(e.target.checked)}
+                        disabled={forceRecreate}
+                        className="w-4 h-4 mt-0.5 rounded accent-blue-500"
+                      />
+                      <div className="flex-1">
+                        <div className="text-sm text-gray-200">
+                          Audio-only re-mix <span className="text-xs text-blue-300">(reuse cached video)</span>
+                        </div>
+                        <div className="text-xs text-gray-500 leading-snug">
+                          Skip clip rendering and chunk merging. Reuses the silent video from a previous successful export and applies the new audio mix on top. Use this after adjusting narration/backing volumes, fades, or normalization. Requires a prior export with matching video settings.
+                        </div>
+                      </div>
+                    </label>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={exportStems}
+                        onChange={(e) => setExportStems(e.target.checked)}
+                        className="w-4 h-4 mt-0.5 rounded accent-emerald-500"
+                      />
+                      <div className="flex-1">
+                        <div className="text-sm text-gray-200">
+                          Export audio stems <span className="text-xs text-emerald-300">(for DAW remix)</span>
+                        </div>
+                        <div className="text-xs text-gray-500 leading-snug">
+                          Also writes <code className="text-emerald-400">narration.wav</code> and <code className="text-emerald-400">backing_mix.wav</code> to a <code>stems/</code> folder alongside the main MP4. Mix outside the app without re-rendering.
+                        </div>
+                      </div>
+                    </label>
+                  </>
+                )}
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={forceRecreate}
+                    onChange={(e) => {
+                      setForceRecreate(e.target.checked);
+                      if (e.target.checked) setAudioOnlyRemix(false);
+                    }}
+                    className="w-4 h-4 mt-0.5 rounded accent-amber-500"
+                  />
+                  <div className="flex-1">
+                    <div className="text-sm text-gray-200">
+                      Force full recreate <span className="text-xs text-amber-300">(ignore cache)</span>
+                    </div>
+                    <div className="text-xs text-gray-500 leading-snug">
+                      Wipe the export cache and re-render everything from scratch. Use this if cached artifacts are stale or you want to start completely fresh.
+                    </div>
+                  </div>
+                </label>
+                {isNarration && (
+                  <label className="flex items-start gap-2 cursor-pointer pt-1 border-t border-gray-700/50">
+                    <input
+                      type="checkbox"
+                      checked={stemsOnly}
+                      onChange={(e) => setStemsOnly(e.target.checked)}
+                      className="w-4 h-4 mt-0.5 rounded accent-purple-500"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm text-gray-200">
+                        Stems only <span className="text-xs text-purple-300">(skip video entirely)</span>
+                      </div>
+                      <div className="text-xs text-gray-500 leading-snug">
+                        Skip all video rendering and produce ONLY the audio stems in <code>{'{output_dir}'}/stems/</code>: <code className="text-purple-300">narration.wav</code>, <code className="text-purple-300">backing_mix.wav</code>, and one WAV per backing track (<code className="text-purple-300">backing_01_<i>name</i>.wav</code>, ...). Use this when you already have the exported video and just want to grab stems for outside-the-app mixing.
+                      </div>
+                    </div>
+                  </label>
+                )}
+              </div>
+              )}
+            </div>
+
             {/* Recovery banner — shown when recoverable artifacts are found */}
             {scanResult?.recoverable && (
               <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-3 mb-3 flex-shrink-0">
@@ -2130,12 +2257,48 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <p className="text-sm text-gray-300">Your video has been exported successfully.</p>
+              <p className="text-sm text-gray-300">
+                {stems.length > 0 && chunks.length === 0
+                  ? "Your audio stems have been exported successfully."
+                  : "Your video has been exported successfully."}
+              </p>
             </div>
 
             <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
               <div className="bg-green-500 h-full w-full" />
             </div>
+
+            {/* Stems gallery on done */}
+            {stems.length > 0 && (
+              <div className="border-t border-gray-700 pt-3">
+                <div className="text-xs text-gray-400 mb-2 font-medium">
+                  Audio Stems ({stems.length}) · click to download
+                </div>
+                <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                  {stems.map((stem) => (
+                    <a
+                      key={stem.filename}
+                      href={stem.download_url}
+                      download
+                      className="flex items-center justify-between gap-3 px-3 py-2 bg-gray-800 border border-gray-700 hover:border-purple-500 rounded transition-colors group"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <svg className="w-4 h-4 text-purple-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 19V6l12-3v13M9 19c0 1.657-1.343 3-3 3s-3-1.343-3-3 1.343-3 3-3 3 1.343 3 3zm12-3c0 1.657-1.343 3-3 3s-3-1.343-3-3 1.343-3 3-3 3 1.343 3 3z" />
+                        </svg>
+                        <span className="text-xs font-mono text-gray-200 truncate">{stem.filename}</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-[10px] text-gray-500">{stem.size_mb} MB</span>
+                        <svg className="w-4 h-4 text-gray-500 group-hover:text-purple-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Chunk gallery on done */}
             {chunks.length > 0 && (

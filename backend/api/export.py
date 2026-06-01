@@ -68,6 +68,23 @@ class ExportRequest(BaseModel):
     # Ken Burns override (None = use project.settings defaults)
     random_ken_burns: Optional[bool] = None
     ken_burns_allowed_effects: Optional[List[str]] = None
+    # ── Re-export controls ──
+    # audio_only_remix: skip clip rendering + chunk merge, reuse the cached
+    # concatenated video from the previous successful export. Use this when
+    # you only changed audio mix params (volumes, fades, normalize, etc.).
+    # Requires a previous successful export with matching video params.
+    audio_only_remix: bool = False
+    # force_recreate: wipe the export cache before starting. Use this when
+    # you want a guaranteed fresh render.
+    force_recreate: bool = False
+    # export_stems: ALSO produce per-channel WAVs in {output_dir}/stems/
+    # so you can mix outside the app (DAW workflow).
+    export_stems: bool = False
+    # stems_only: SKIP all video rendering entirely and only produce the
+    # audio stems. Use this when you already have the exported video and
+    # just need the stems (or want to grab them later).  Outputs:
+    #   stems/narration.wav, stems/backing_mix.wav, stems/backing_NN_name.wav
+    stems_only: bool = False
 
 
 class ExportProgressResponse(BaseModel):
@@ -82,6 +99,7 @@ class ExportProgressResponse(BaseModel):
     error: Optional[str] = None
     chunks: Optional[List[Dict[str, Any]]] = None  # Per-chunk status array
     total_chunks: Optional[int] = None
+    stems: Optional[List[Dict[str, Any]]] = None  # Per-stem download list (stems-only / stems export)
     current_chunk: Optional[int] = None
     phase: Optional[str] = None  # "clips", "chunks", "final", "post"
 
@@ -634,6 +652,84 @@ async def _run_export_task(
                 _main_fo = float(export_params.get("backing_main_fade_out", _proj_settings.get("backing_main_fade_out", 0.0)))
                 _norm_bt = bool(export_params.get("normalize_backing", _proj_settings.get("normalize_backing", False)))
 
+                # ── Stems-only short-circuit ─────────────────────────────
+                # Skip the entire video pipeline; just produce the audio
+                # stems from the resolved narration + backing tracks.
+                if bool(export_params.get("stems_only")):
+                    from backend.services.video.assembly import _export_audio_stems
+                    _export_progress[pid_s]["step"] = "Exporting audio stems..."
+                    _export_progress[pid_s]["percent"] = 30
+                    _total_dur_for_stems = 0.0
+                    try:
+                        from backend.services.video.ffmpeg import get_media_info as _gmi
+                        _total_dur_for_stems = _gmi(master_audio).get("duration", 0.0)
+                    except Exception:
+                        pass
+                    await asyncio.to_thread(
+                        _export_audio_stems,
+                        output_path,
+                        master_audio,
+                        narr_backing_tracks,
+                        _narr_vol,
+                        _back_vol,
+                        _bt_loop,
+                        _main_fi,
+                        _main_fo,
+                        _norm_bt,
+                        _total_dur_for_stems,
+                        True,  # individual_backing=True for stems-only mode
+                    )
+                    # Collect the written stem files for the status response.
+                    stems_dir = Path(output_path).parent / "stems"
+                    stems_list: list[dict] = []
+                    if stems_dir.exists():
+                        for sp in sorted(stems_dir.glob("*.wav")):
+                            try:
+                                size_mb = round(sp.stat().st_size / (1024 * 1024), 2)
+                            except Exception:
+                                size_mb = 0.0
+                            rel = sp.relative_to(app_settings.project_dir).as_posix()
+                            stems_list.append({
+                                "filename": sp.name,
+                                "size_mb": size_mb,
+                                "download_url": f"/api/files/{rel}",
+                            })
+                    # Mark the Job row as DONE so the export gallery sees the run
+                    _stems_dir_rel = stems_dir.relative_to(app_settings.project_dir).as_posix() if stems_dir.exists() else None
+                    export_job = await bg_session.get(Job, job_id)
+                    if export_job:
+                        export_job.status = JobStatus.DONE
+                        export_job.result = {
+                            "stems_only": True,
+                            "stems_dir": str(stems_dir),
+                            "stems": stems_list,
+                        }
+                        export_job.completed_at = datetime.utcnow()
+                        await bg_session.commit()
+                    # Flip _export_progress to 'done' so the frontend transitions
+                    # out of the "Exporting..." view.  download_url points at
+                    # the stems folder via the file API for compatibility with
+                    # existing code paths; the new `stems` field is the list of
+                    # individual WAV files for direct link rendering.
+                    _export_progress[pid_s] = {
+                        "job_id": str(job_id),
+                        "status": "done",
+                        "step": "Stems exported",
+                        "percent": 100,
+                        "path": str(stems_dir),
+                        "download_url": f"/api/files/{_stems_dir_rel}/" if _stems_dir_rel else None,
+                        "error": None,
+                        "chunks": [],
+                        "total_chunks": 0,
+                        "current_chunk": 0,
+                        "phase": "done",
+                        "stems": stems_list,
+                    }
+                    logger.info(
+                        f"Stems-only export complete: {len(stems_list)} files in {stems_dir}"
+                    )
+                    return
+
                 await asyncio.to_thread(
                     assemble_narration_video,
                     scene_dicts, master_audio, output_path,
@@ -656,8 +752,83 @@ async def _run_export_task(
                     chunk_size=CHUNK_SIZE,
                     chunk_callback=on_chunk_complete,
                     cancel_check=is_cancelled,
+                    # Re-export controls
+                    audio_only_remix=bool(export_params.get("audio_only_remix")),
+                    force_recreate=bool(export_params.get("force_recreate")),
+                    export_stems=bool(export_params.get("export_stems")),
                 )
             else:
+                # ── Stems-only short-circuit for music mode ──
+                # Music mode has no backing tracks; we just emit the
+                # master audio as the "narration" stem.
+                if bool(export_params.get("stems_only")):
+                    from backend.services.video.assembly import _export_audio_stems
+                    _export_progress[pid_s]["step"] = "Exporting audio stems..."
+                    _export_progress[pid_s]["percent"] = 30
+                    _total_dur_for_stems = 0.0
+                    try:
+                        from backend.services.video.ffmpeg import get_media_info as _gmi
+                        _total_dur_for_stems = _gmi(master_audio).get("duration", 0.0)
+                    except Exception:
+                        pass
+                    await asyncio.to_thread(
+                        _export_audio_stems,
+                        output_path,
+                        master_audio,
+                        None,
+                        1.0,
+                        1.0,
+                        False,
+                        0.0,
+                        0.0,
+                        False,
+                        _total_dur_for_stems,
+                        False,
+                    )
+                    stems_dir = Path(output_path).parent / "stems"
+                    stems_list: list[dict] = []
+                    if stems_dir.exists():
+                        for sp in sorted(stems_dir.glob("*.wav")):
+                            try:
+                                size_mb = round(sp.stat().st_size / (1024 * 1024), 2)
+                            except Exception:
+                                size_mb = 0.0
+                            rel = sp.relative_to(app_settings.project_dir).as_posix()
+                            stems_list.append({
+                                "filename": sp.name,
+                                "size_mb": size_mb,
+                                "download_url": f"/api/files/{rel}",
+                            })
+                    _stems_dir_rel = stems_dir.relative_to(app_settings.project_dir).as_posix() if stems_dir.exists() else None
+                    export_job = await bg_session.get(Job, job_id)
+                    if export_job:
+                        export_job.status = JobStatus.DONE
+                        export_job.result = {
+                            "stems_only": True,
+                            "stems_dir": str(stems_dir),
+                            "stems": stems_list,
+                        }
+                        export_job.completed_at = datetime.utcnow()
+                        await bg_session.commit()
+                    _export_progress[pid_s] = {
+                        "job_id": str(job_id),
+                        "status": "done",
+                        "step": "Stems exported",
+                        "percent": 100,
+                        "path": str(stems_dir),
+                        "download_url": f"/api/files/{_stems_dir_rel}/" if _stems_dir_rel else None,
+                        "error": None,
+                        "chunks": [],
+                        "total_chunks": 0,
+                        "current_chunk": 0,
+                        "phase": "done",
+                        "stems": stems_list,
+                    }
+                    logger.info(
+                        f"Stems-only export complete: {len(stems_list)} files in {stems_dir}"
+                    )
+                    return
+
                 await asyncio.to_thread(
                     assemble_music_video,
                     scene_dicts, master_audio, output_path,
@@ -986,6 +1157,10 @@ async def export_project(
                 "subtitle_outline": req.subtitle_outline,
                 "normalize_audio": req.normalize_audio,
                 "backing_track_loop": req.backing_track_loop,
+                "audio_only_remix": req.audio_only_remix,
+                "force_recreate": req.force_recreate,
+                "export_stems": req.export_stems,
+                "stems_only": req.stems_only,
                 "narration_volume": req.narration_volume,
                 "backing_volume": req.backing_volume,
                 "backing_main_fade_in": req.backing_main_fade_in,
