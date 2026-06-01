@@ -72,10 +72,14 @@ class BatchItemConfig(BaseModel):
     concept_direction: str = ""
     style_text: str = ""
     render_type: str = "music_video"  # music_video | narration_video
-    video_mode: str = "i2v"  # i2v | v2v
+    video_mode: str = "i2v"  # i2v | v2v | fflf
+    image_mode: str = "missing"  # missing (skip filled) | all_with_refs (regenerate using prev-scene reference)
     two_pass: bool = True
     use_story_flow: bool = True
     auto_characters: bool = False
+    lipsync_enabled: bool = True
+    vocals_only_for_lipsync: bool = False
+    override_full_set: bool = False  # for "missing" modes: regenerate everything
 
 
 class BatchRunRequest(BaseModel):
@@ -508,17 +512,66 @@ async def _run_batch_pipeline(batch_id: str) -> None:
                         completed_at=datetime.utcnow(),
                     ))
 
-            # Clean up staging file for this item
-            try:
-                staging_path = Path(config.audio_upload_path)
-                if staging_path.exists():
-                    staging_path.unlink()
-                # Remove parent dir if empty
-                parent = staging_path.parent
-                if parent.exists() and not any(parent.iterdir()):
-                    parent.rmdir()
-            except Exception as cleanup_err:
-                logger.warning(f"Staging cleanup error for item {i}: {cleanup_err}")
+                # B-4: best-effort cleanup of the orphan project IF the
+                # failure happened before any image/video was generated.
+                # Once generation has produced work we want to preserve,
+                # leave the project intact so the user can salvage it.
+                _cleanup_proj_id = item_state.get("project_id")
+                if _cleanup_proj_id:
+                    try:
+                        async with async_session() as cleanup_sess:
+                            from uuid import UUID as _UUID
+                            pid_obj = _UUID(_cleanup_proj_id) if isinstance(_cleanup_proj_id, str) else _cleanup_proj_id
+                            # Check if any generation work happened
+                            gen_count_stmt = select(Asset).where(
+                                Asset.project_id == pid_obj,
+                                Asset.asset_type.in_([
+                                    AssetType.GENERATED_IMAGE,
+                                    AssetType.GENERATED_VIDEO,
+                                ]),
+                            )
+                            gen_count_result = await cleanup_sess.execute(gen_count_stmt)
+                            has_gen = gen_count_result.scalars().first() is not None
+                            if not has_gen:
+                                proj_stmt = select(Project).where(Project.id == pid_obj)
+                                proj_result = await cleanup_sess.execute(proj_stmt)
+                                proj = proj_result.scalars().first()
+                                if proj:
+                                    await cleanup_sess.delete(proj)
+                                    await cleanup_sess.commit()
+                                    logger.info(
+                                        f"Batch item {i}: cleaned up orphan project {_cleanup_proj_id} "
+                                        f"(no generation work to preserve)"
+                                    )
+                                # Best-effort: also remove the project directory
+                                try:
+                                    _orphan_dir = settings.project_dir / _cleanup_proj_id
+                                    if _orphan_dir.exists():
+                                        shutil.rmtree(_orphan_dir, ignore_errors=True)
+                                except Exception:
+                                    pass
+                            else:
+                                logger.info(
+                                    f"Batch item {i}: keeping project {_cleanup_proj_id} "
+                                    f"(has generation work)"
+                                )
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            f"Batch item {i}: orphan cleanup failed: {cleanup_err}"
+                        )
+
+            # B-12: only delete the staging file on SUCCESS so the retry
+            # path can still find the audio if the item failed early.
+            if item_state["status"] == "done":
+                try:
+                    staging_path = Path(config.audio_upload_path)
+                    if staging_path.exists():
+                        staging_path.unlink()
+                    parent = staging_path.parent
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+                except Exception as cleanup_err:
+                    logger.warning(f"Staging cleanup error for item {i}: {cleanup_err}")
 
         # ── Final status ──────────────────────────────────────────
         if run["status"] == "cancelled":
@@ -824,16 +877,27 @@ async def _process_single_item(
             cache_dir=str(project_path / "cache" / "audio_analysis")
         )
         initial_text = config.lyrics_text.strip() or ""
-        analysis_result = await asyncio.to_thread(
-            analyzer.analyze_full,
-            str(audio_dest),
-            whisper_mode,
-            whisper_remote_url,
-            whisper_comfyui_url=whisper_comfyui_url,
-            initial_text=initial_text,
-            whisper_model=whisper_model,
-            whisper_language=whisper_language,
-        )
+        # B-7: 1h hard cap so a wedged Whisper can't hang the batch item
+        # indefinitely.  Demucs has its own 30-min subprocess timeout.
+        try:
+            analysis_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    analyzer.analyze_full,
+                    str(audio_dest),
+                    whisper_mode,
+                    whisper_remote_url,
+                    whisper_comfyui_url=whisper_comfyui_url,
+                    initial_text=initial_text,
+                    whisper_model=whisper_model,
+                    whisper_language=whisper_language,
+                ),
+                timeout=3600,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "Audio analysis timed out after 1 hour "
+                "(check Whisper backend / GPU)"
+            )
 
         # Save analysis results to cache
         cache_dir = project_path / "cache"
@@ -915,9 +979,13 @@ async def _process_single_item(
         if not lyrics_text and initial_text:
             lyrics_text = initial_text
 
-        async with async_session() as session:
-            try:
-                # Upsert lyrics
+        # B-9: use a fresh session for the retry to escape transaction
+        # corruption (gotcha #9: a failed commit + rollback can corrupt the
+        # session and break subsequent commits in the same session).  Also
+        # don't silently strip initial_text on retry — preserve user lyrics.
+        _lyrics_saved = False
+        try:
+            async with async_session() as session:
                 existing_lyrics_stmt = select(Lyrics).where(
                     Lyrics.project_id == project_id
                 )
@@ -935,28 +1003,33 @@ async def _process_single_item(
                 )
                 session.add(lyrics_record)
                 await session.commit()
-            except Exception as lyrics_err:
-                logger.warning(f"Lyrics save failed: {lyrics_err}")
-                await session.rollback()
-                try:
+                _lyrics_saved = True
+        except Exception as lyrics_err:
+            logger.warning(f"Lyrics save failed: {lyrics_err}; retrying with fresh session")
+
+        if not _lyrics_saved:
+            try:
+                async with async_session() as session2:
                     existing_lyrics_stmt = select(Lyrics).where(
                         Lyrics.project_id == project_id
                     )
-                    existing_lyrics_result = await session.execute(existing_lyrics_stmt)
+                    existing_lyrics_result = await session2.execute(existing_lyrics_stmt)
                     existing_lyrics = existing_lyrics_result.scalars().first()
                     if existing_lyrics:
-                        await session.delete(existing_lyrics)
-                        await session.flush()
+                        await session2.delete(existing_lyrics)
+                        await session2.flush()
                     lyrics_record = Lyrics(
                         project_id=project_id,
                         full_text=lyrics_text,
+                        initial_text=initial_text,
                         words=transcription_words,
                     )
-                    session.add(lyrics_record)
-                    await session.commit()
-                except Exception as e2:
-                    logger.warning(f"Lyrics save retry also failed: {e2}")
-                    await session.rollback()
+                    session2.add(lyrics_record)
+                    await session2.commit()
+            except Exception as e2:
+                logger.error(
+                    f"Lyrics save retry also failed: {e2} — continuing without lyrics record"
+                )
 
         # Cache lyrics to file
         lyrics_data = {"text": lyrics_text, "words": transcription_words}
@@ -1008,27 +1081,35 @@ async def _process_single_item(
         _update_step("skipping concept generation (already done)")
         logger.info(f"Batch item {item_index}: skipping step 5 (concept already generated)")
     else:
-        _update_step("generating concept from lyrics")
         _check_cancelled()
-
-        async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
-            resp = await client.post(
-                f"/api/projects/{project_id}/concept/base-on-lyrics",
-                json={},
+        # B-6: skip the LLM call entirely when the user already supplied
+        # both concept_direction and style_text — they'd be overwritten
+        # anyway, so the call is pure waste.
+        concept_data: dict = {}
+        if config.concept_direction and config.style_text:
+            _update_step("skipping concept LLM (user supplied direction + style)")
+            logger.info(
+                f"Batch item {item_index}: skipping base-on-lyrics — user supplied both fields"
             )
-            if resp.status_code != 200:
-                logger.warning(
-                    f"Base-on-lyrics returned {resp.status_code}: {resp.text}"
-                )
-
-        # Persist generated concept data (song_title, concept_text, style_text)
-        # The base-on-lyrics endpoint only *returns* the data; we must save it.
-        concept_data = {}
-        if resp.status_code == 200:
+        else:
+            _update_step("generating concept from lyrics")
             try:
-                concept_data = resp.json()
-            except Exception:
-                pass
+                async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
+                    resp = await client.post(
+                        f"/api/projects/{project_id}/concept/base-on-lyrics",
+                        json={},
+                    )
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"Base-on-lyrics returned {resp.status_code}: {resp.text[:300]}"
+                    )
+                else:
+                    try:
+                        concept_data = resp.json()
+                    except Exception:
+                        pass
+            except Exception as concept_err:
+                logger.warning(f"Base-on-lyrics call raised: {concept_err}")
 
         async with async_session() as session:
             stmt = select(Project).where(Project.id == project_id)
@@ -1065,16 +1146,25 @@ async def _process_single_item(
             _update_step("auto-generating characters")
             _check_cancelled()
 
-            async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
-                resp = await client.post(
-                    f"/api/projects/{project_id}/concept/characters/autogenerate",
-                )
-                if resp.status_code != 200:
-                    logger.warning(
-                        f"Character autogenerate returned {resp.status_code}: {resp.text}"
+            try:
+                async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
+                    resp = await client.post(
+                        f"/api/projects/{project_id}/concept/characters/autogenerate",
                     )
+                if resp.status_code != 200:
+                    msg = (
+                        f"Character autogenerate returned {resp.status_code}: "
+                        f"{resp.text[:300]}"
+                    )
+                    logger.warning(msg)
+                    _update_step(f"warning: characters failed ({resp.status_code})",
+                                 entry_type="warning")
                 else:
                     logger.info(f"Batch item {item_index}: characters auto-generated")
+            except Exception as char_err:
+                logger.warning(f"Character autogenerate raised: {char_err}")
+                _update_step(f"warning: characters error: {char_err}",
+                             entry_type="warning")
 
         await _save_checkpoint(_STEP_CHARACTERS_GENERATED)
 
@@ -1107,41 +1197,91 @@ async def _process_single_item(
         _update_step("generating images")
         _check_cancelled()
 
-        auto_gen_mode = "missing_images_independent"  # parallel image gen
-        async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
-            resp = await client.post(
-                f"/api/projects/{project_id}/generate/auto-sequential",
-                json={
-                    "mode": auto_gen_mode,
-                    "two_pass": config.two_pass,
-                    "use_story_flow": config.use_story_flow,
-                },
+        # B-10: image_mode selects between missing-only and full set with refs
+        image_mode_map = {
+            "missing": "missing_images_independent",
+            "all_with_refs": "all_images",
+        }
+        if config.image_mode not in image_mode_map:
+            raise RuntimeError(
+                f"Unknown image_mode {config.image_mode!r}. "
+                f"Valid: {sorted(image_mode_map)}"
             )
-            if resp.status_code != 200:
-                logger.warning(
-                    f"Auto-gen images start returned {resp.status_code}: {resp.text}"
-                )
-                # Try to continue — might already be running
+        auto_gen_mode = image_mode_map[config.image_mode]
 
-        # Poll until done
+        # B-1: kickoff must succeed; raise on failure so the item is marked
+        # failed instead of "completing" with zero work done.
         async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
+            try:
+                resp = await client.post(
+                    f"/api/projects/{project_id}/generate/auto-sequential",
+                    json={
+                        "mode": auto_gen_mode,
+                        "two_pass": config.two_pass,
+                        "use_story_flow": config.use_story_flow,
+                        "override_full_set": config.override_full_set,
+                        "lipsync_enabled": config.lipsync_enabled,
+                        "vocals_only_for_lipsync": config.vocals_only_for_lipsync,
+                    },
+                )
+            except Exception as start_err:
+                raise RuntimeError(f"Image auto-gen kickoff failed: {start_err}")
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Image auto-gen kickoff returned {resp.status_code}: "
+                    f"{resp.text[:300]}"
+                )
+
+        # B-2: bounded poll with 2-hour deadline. B-1: saw_running guards
+        # against the idle race (idle = no entry, which happens before the
+        # run starts OR after 5-min eviction post-completion).
+        import time as _t
+        deadline = _t.monotonic() + 2 * 60 * 60  # 2h cap
+        saw_running = False
+        async with httpx.AsyncClient(base_url=base_url, timeout=15) as client:
             while True:
+                if _t.monotonic() > deadline:
+                    raise RuntimeError(
+                        "Image auto-gen poll timed out after 2h "
+                        "(check ComfyUI workers / queue)"
+                    )
                 _check_cancelled()
                 try:
                     status_resp = await client.get(
                         f"/api/projects/{project_id}/generate/auto-sequential/status",
                     )
-                    if status_resp.status_code == 200:
-                        data = status_resp.json()
-                        gen_status = data.get("status", "unknown")
-                        if gen_status in ("done", "failed", "cancelled", "idle"):
-                            break
-                        step_detail = data.get("current_step", "")
-                        _update_step(f"generating images: {step_detail}")
-                    else:
+                    if status_resp.status_code != 200:
                         logger.warning(
                             f"Image gen status check returned {status_resp.status_code}"
                         )
+                        await asyncio.sleep(3)
+                        continue
+                    data = status_resp.json()
+                    gen_status = data.get("status", "unknown")
+                    if gen_status == "running":
+                        saw_running = True
+                        step_detail = data.get("current_step", "")
+                        _update_step(f"generating images: {step_detail}")
+                    elif gen_status in ("done", "failed", "cancelled"):
+                        if gen_status == "failed":
+                            err = data.get("error") or "auto-gen reported failure"
+                            raise RuntimeError(f"Image auto-gen failed: {err}")
+                        if gen_status == "cancelled":
+                            raise RuntimeError("Image auto-gen was cancelled")
+                        break
+                    elif gen_status == "idle":
+                        # B-1 idle race: only treat idle as terminal AFTER we
+                        # confirmed the run started.  If we see idle before
+                        # ever seeing running, the run never kicked off.
+                        if saw_running:
+                            break
+                        # Give the kickoff a generous head start before we
+                        # call it a no-show; backend sets the entry inside
+                        # the POST handler so this should be near-immediate.
+                        await asyncio.sleep(2)
+                        continue
+                except RuntimeError:
+                    raise
                 except Exception as poll_err:
                     logger.warning(f"Image gen poll error: {poll_err}")
 
@@ -1159,44 +1299,82 @@ async def _process_single_item(
         _update_step("generating videos")
         _check_cancelled()
 
+        # B-3: exhaustive video mode map. Unknown values now raise instead
+        # of silently demoting to single-image mode.
         video_mode_map = {
             "i2v": "all_video_single",
             "v2v": "all_video_v2v",
+            "fflf": "all_video_fflf",
         }
-        video_gen_mode = video_mode_map.get(config.video_mode, "all_video_single")
+        if config.video_mode not in video_mode_map:
+            raise RuntimeError(
+                f"Unknown video_mode {config.video_mode!r}. "
+                f"Valid: {sorted(video_mode_map)}"
+            )
+        video_gen_mode = video_mode_map[config.video_mode]
 
         async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
-            resp = await client.post(
-                f"/api/projects/{project_id}/generate/auto-sequential",
-                json={
-                    "mode": video_gen_mode,
-                    "use_story_flow": config.use_story_flow,
-                },
-            )
+            try:
+                resp = await client.post(
+                    f"/api/projects/{project_id}/generate/auto-sequential",
+                    json={
+                        "mode": video_gen_mode,
+                        "use_story_flow": config.use_story_flow,
+                        "override_full_set": config.override_full_set,
+                        "lipsync_enabled": config.lipsync_enabled,
+                        "vocals_only_for_lipsync": config.vocals_only_for_lipsync,
+                    },
+                )
+            except Exception as start_err:
+                raise RuntimeError(f"Video auto-gen kickoff failed: {start_err}")
             if resp.status_code != 200:
-                logger.warning(
-                    f"Auto-gen videos start returned {resp.status_code}: {resp.text}"
+                raise RuntimeError(
+                    f"Video auto-gen kickoff returned {resp.status_code}: "
+                    f"{resp.text[:300]}"
                 )
 
-        # Poll until done
-        async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
+        # B-2: 2-hour deadline. B-1: saw_running guard for idle race.
+        import time as _t
+        deadline = _t.monotonic() + 2 * 60 * 60
+        saw_running = False
+        async with httpx.AsyncClient(base_url=base_url, timeout=15) as client:
             while True:
+                if _t.monotonic() > deadline:
+                    raise RuntimeError(
+                        "Video auto-gen poll timed out after 2h "
+                        "(check ComfyUI workers / queue)"
+                    )
                 _check_cancelled()
                 try:
                     status_resp = await client.get(
                         f"/api/projects/{project_id}/generate/auto-sequential/status",
                     )
-                    if status_resp.status_code == 200:
-                        data = status_resp.json()
-                        gen_status = data.get("status", "unknown")
-                        if gen_status in ("done", "failed", "cancelled", "idle"):
-                            break
-                        step_detail = data.get("current_step", "")
-                        _update_step(f"generating videos: {step_detail}")
-                    else:
+                    if status_resp.status_code != 200:
                         logger.warning(
                             f"Video gen status check returned {status_resp.status_code}"
                         )
+                        await asyncio.sleep(5)
+                        continue
+                    data = status_resp.json()
+                    gen_status = data.get("status", "unknown")
+                    if gen_status == "running":
+                        saw_running = True
+                        step_detail = data.get("current_step", "")
+                        _update_step(f"generating videos: {step_detail}")
+                    elif gen_status in ("done", "failed", "cancelled"):
+                        if gen_status == "failed":
+                            err = data.get("error") or "auto-gen reported failure"
+                            raise RuntimeError(f"Video auto-gen failed: {err}")
+                        if gen_status == "cancelled":
+                            raise RuntimeError("Video auto-gen was cancelled")
+                        break
+                    elif gen_status == "idle":
+                        if saw_running:
+                            break
+                        await asyncio.sleep(2)
+                        continue
+                except RuntimeError:
+                    raise
                 except Exception as poll_err:
                     logger.warning(f"Video gen poll error: {poll_err}")
 

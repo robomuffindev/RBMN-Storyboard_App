@@ -248,6 +248,10 @@ app.include_router(batch_runs_router)
 app.include_router(backing_tracks_router)
 app.include_router(files_router)
 
+# Debug / diagnostics endpoints (snapshot + log tail)
+from backend.api.debug import router as debug_router
+app.include_router(debug_router)
+
 # Log registered routes for debugging
 _gen_routes = []
 for route in app.routes:

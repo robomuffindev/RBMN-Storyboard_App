@@ -33,6 +33,11 @@ export const useJobEvents = () => {
             getScenes(projectId).then((res) => {
               const s = useAppStore.getState();
               s.setScenes(res.data);
+              // Keep React Query cache in sync — otherwise AppLayout's
+              // useEffect that mirrors React Query → Zustand will later
+              // overwrite this fresh data with the stale cache. Same
+              // root cause as the chosen_image/video set-active delay.
+              queryClient.setQueryData(['scenes', projectId], res.data);
             }).catch(() => {/* ignore */});
           }
         }

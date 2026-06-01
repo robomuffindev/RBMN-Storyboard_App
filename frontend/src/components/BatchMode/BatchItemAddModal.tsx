@@ -15,10 +15,14 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
   const [conceptDirection, setConceptDirection] = useState('');
   const [style, setStyle] = useState('');
   const [renderType, setRenderType] = useState<'music_video' | 'narration_video'>('music_video');
-  const [videoMode, setVideoMode] = useState<'i2v' | 'v2v'>('i2v');
+  const [videoMode, setVideoMode] = useState<'i2v' | 'v2v' | 'fflf'>('fflf');
+  const [imageMode, setImageMode] = useState<'missing' | 'all_with_refs'>('missing');
   const [twoPass, setTwoPass] = useState(true);
   const [useStoryFlow, setUseStoryFlow] = useState(true);
   const [autoCharacters, setAutoCharacters] = useState(false);
+  const [lipsyncEnabled, setLipsyncEnabled] = useState(true);
+  const [vocalsOnlyForLipsync, setVocalsOnlyForLipsync] = useState(false);
+  const [overrideFullSet, setOverrideFullSet] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
 
@@ -53,9 +57,13 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
         style_text: style,
         render_type: renderType,
         video_mode: videoMode,
+        image_mode: imageMode,
         two_pass: twoPass,
         use_story_flow: useStoryFlow,
         auto_characters: autoCharacters,
+        lipsync_enabled: lipsyncEnabled,
+        vocals_only_for_lipsync: vocalsOnlyForLipsync,
+        override_full_set: overrideFullSet,
       };
 
       onAdd(item);
@@ -174,10 +182,47 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
           </div>
         </div>
 
+        {/* Image Mode */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-gray-300 mb-2">Image Mode</label>
+          <div className="flex gap-4 flex-wrap">
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+              <input
+                type="radio"
+                name="imageMode"
+                checked={imageMode === 'missing'}
+                onChange={() => setImageMode('missing')}
+                className="w-4 h-4"
+              />
+              Missing only (independent)
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+              <input
+                type="radio"
+                name="imageMode"
+                checked={imageMode === 'all_with_refs'}
+                onChange={() => setImageMode('all_with_refs')}
+                className="w-4 h-4"
+              />
+              All scenes (use previous as ref)
+            </label>
+          </div>
+        </div>
+
         {/* Video Mode */}
         <div className="mb-4">
           <label className="block text-sm font-medium text-gray-300 mb-2">Video Mode</label>
-          <div className="flex gap-4">
+          <div className="flex gap-4 flex-wrap">
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+              <input
+                type="radio"
+                name="videoMode"
+                checked={videoMode === 'fflf'}
+                onChange={() => setVideoMode('fflf')}
+                className="w-4 h-4"
+              />
+              FF/LF chaining
+            </label>
             <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
               <input
                 type="radio"
@@ -186,7 +231,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
                 onChange={() => setVideoMode('i2v')}
                 className="w-4 h-4"
               />
-              I2V
+              I2V (single frame)
             </label>
             <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
               <input
@@ -196,7 +241,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
                 onChange={() => setVideoMode('v2v')}
                 className="w-4 h-4"
               />
-              V2V
+              V2V extend
             </label>
           </div>
         </div>
@@ -224,11 +269,40 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
           <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
             <input
               type="checkbox"
+              checked={lipsyncEnabled}
+              onChange={(e) => setLipsyncEnabled(e.target.checked)}
+              className="w-4 h-4 rounded"
+            />
+            Lipsync-aware prompts
+          </label>
+          {lipsyncEnabled && (
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300 ml-6">
+              <input
+                type="checkbox"
+                checked={vocalsOnlyForLipsync}
+                onChange={(e) => setVocalsOnlyForLipsync(e.target.checked)}
+                className="w-4 h-4 rounded"
+              />
+              Vocals-only audio (cleaner lipsync signal)
+            </label>
+          )}
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+            <input
+              type="checkbox"
               checked={autoCharacters}
               onChange={(e) => setAutoCharacters(e.target.checked)}
               className="w-4 h-4 rounded"
             />
             Auto-generate characters
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+            <input
+              type="checkbox"
+              checked={overrideFullSet}
+              onChange={(e) => setOverrideFullSet(e.target.checked)}
+              className="w-4 h-4 rounded accent-amber-500"
+            />
+            Override — regenerate full set (ignore existing)
           </label>
         </div>
 

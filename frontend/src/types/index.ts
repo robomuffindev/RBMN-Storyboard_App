@@ -401,10 +401,14 @@ export interface BatchItemConfig {
   concept_direction: string;
   style_text: string;
   render_type: 'music_video' | 'narration_video';
-  video_mode: 'i2v' | 'v2v';
+  video_mode: 'i2v' | 'v2v' | 'fflf';
+  image_mode: 'missing' | 'all_with_refs';
   two_pass: boolean;
   use_story_flow: boolean;
   auto_characters: boolean;
+  lipsync_enabled: boolean;
+  vocals_only_for_lipsync: boolean;
+  override_full_set: boolean;
 }
 
 export interface BatchItemStatus {

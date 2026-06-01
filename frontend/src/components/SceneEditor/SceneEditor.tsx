@@ -768,13 +768,36 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetUseStoryFlow = async (checked: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, use_story_flow: checked };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   // Get the story flow idea for the current scene
   const sceneFlowIdea = activeScene?.parameters?.flow_idea || '';
   const queryClient = useQueryClient();
+
+  // ─── Centralized scene update helper ──────────────────────────────
+  // The bug: AppLayout has a useEffect that mirrors React Query data
+  // into the Zustand store on every change. If we update Zustand directly
+  // without also updating React Query, the mirror later overwrites our
+  // change with the stale cached version — visible as "I set the active
+  // image, navigated away, came back, and it isn't active any more."
+  // Fix: every scene PUT must update (a) backend, (b) React Query cache,
+  // (c) Zustand store. Call this helper instead of updateScene+
+  // updateSceneInStore pairs.
+  const updateSceneAndSync = useCallback(
+    async (sceneId: string, patch: { parameters?: any; [k: string]: any }) => {
+      if (!currentProject) return;
+      await updateScene(currentProject.id, sceneId, patch);
+      queryClient.setQueryData(['scenes', currentProject.id], (old: any) => {
+        if (!Array.isArray(old)) return old;
+        return old.map((sc: any) =>
+          sc.id === sceneId ? { ...sc, ...patch } : sc
+        );
+      });
+      useAppStore.getState().updateSceneInStore(sceneId, patch);
+    },
+    [currentProject, queryClient]
+  );
 
   // Fetch concept characters for reference selector
   const { data: conceptData } = useQuery({
@@ -871,8 +894,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetUsePrevLfAsFf = async (checked: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, use_prev_lf_as_ff: checked };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   // "Use Last Frame of Previous Scene" setting (Image tab, First Frame sub-tab)
@@ -883,8 +905,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetUsePrevSceneLastFrame = async (checked: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, use_prev_scene_last_frame: checked };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
 
     if (checked) {
       // Fetch and set the previous scene's last frame as this scene's first frame
@@ -905,8 +926,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       // Auto-set as chosen first frame if a path was found
       if (path) {
         const newParams = { ...activeScene.parameters, use_prev_scene_last_frame: true, chosen_image_path: path };
-        await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-        useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+        await updateSceneAndSync(activeScene.id, { parameters: newParams });
       }
     } catch {
       setPrevSceneLastFramePath(null);
@@ -931,8 +951,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, ignore_prev_scene_ref: checked };
     try {
-      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+      await updateSceneAndSync(activeScene.id, { parameters: newParams });
       // Sync React Query cache so refetch-on-focus doesn't overwrite the toggle
       queryClient.setQueryData(['scenes', currentProject.id], (old: any) => {
         if (!Array.isArray(old)) return old;
@@ -951,31 +970,27 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetTwoPass = async (checked: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, two_pass_enabled: checked };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const handleCameraActionChange = async (value: string) => {
     setCameraAction(value);
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, camera_action: value };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const handleCustomCameraActionChange = async (value: string) => {
     setCustomCameraAction(value);
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, custom_camera_action: value };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const saveSceneSourceType = async (type: 'image' | 'video') => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, scene_source_type: type };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const saveMovementSettings = async () => {
@@ -988,8 +1003,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         easing: movementEasing,
       },
     };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const saveTransitionSettings = async () => {
@@ -999,8 +1013,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       transition_in: transitionIn !== 'none' ? { type: transitionIn, duration: transitionInDuration } : null,
       transition_out: transitionOut !== 'none' ? { type: transitionOut, duration: transitionOutDuration } : null,
     };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const { data: workflows = [] } = useQuery({
@@ -1415,8 +1428,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         ...activeScene.parameters,
         [chosenParamKey]: version.output_path,
       };
-      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+      await updateSceneAndSync(activeScene.id, { parameters: newParams });
       setLightboxOpen(false);
     } catch (err) {
       console.error('Failed to save preview:', err);
@@ -1467,8 +1479,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           : null;
         const newChosenPath = fallbackVersion?.output_path ?? undefined;
         const newParams = { ...activeScene.parameters, [chosenParamKey]: newChosenPath };
-        await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-        useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+        await updateSceneAndSync(activeScene.id, { parameters: newParams });
       }
 
       queryClient.invalidateQueries({
@@ -1497,8 +1508,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         ...activeScene.parameters,
         chosen_video_path: version.output_path,
       };
-      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+      await updateSceneAndSync(activeScene.id, { parameters: newParams });
     } catch (err) {
       console.error('Failed to save active video:', err);
     } finally {
@@ -1529,8 +1539,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           : null;
         const newChosenVideo = fallbackVideo?.output_path ?? undefined;
         const newParams = { ...activeScene.parameters, chosen_video_path: newChosenVideo };
-        await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-        useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+        await updateSceneAndSync(activeScene.id, { parameters: newParams });
       }
 
       queryClient.invalidateQueries({
@@ -1676,26 +1685,23 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetLipsync = async (enabled: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, lipsync_enabled: enabled };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const handleSetVocalsOnlyForLipsync = async (enabled: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, vocals_only_for_lipsync: enabled };
-    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
   const handleSetVideoMode = async (mode: 'single' | 'ff_lf' | 'v2v_extend') => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, video_mode: mode };
-    // Update UI state immediately so toggle feels responsive
-    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
     setVideoWorkflowType(mode === 'ff_lf' ? 'ltx_fflf' : mode === 'v2v_extend' ? 'ltx_v2v_extend' : 'ltx_i2v');
-    // Persist to backend (non-blocking)
+    // Persist to backend + React Query + Zustand together so the toggle
+    // doesn't get overwritten by AppLayout's React-Query→Zustand mirror.
     try {
-      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
+      await updateSceneAndSync(activeScene.id, { parameters: newParams });
     } catch (err) {
       console.error('Failed to save video mode:', err);
     }
@@ -1747,8 +1753,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         sceneUpdate.negative_prompt = negativePrompt;
       }
 
-      await updateScene(currentProject.id, activeScene.id, sceneUpdate);
-      useAppStore.getState().updateSceneInStore(activeScene.id, sceneUpdate);
+      await updateSceneAndSync(activeScene.id, sceneUpdate);
 
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(effectiveWorkflow);
       const response = await generateImage(currentProject.id, {
@@ -1988,8 +1993,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         video_seed_override: videoSeedOverride,
         video_seed: videoSeedOverride && videoSeed ? parseInt(videoSeed) : undefined,
       };
-      await updateScene(currentProject.id, activeScene.id, { parameters: paramUpdates });
-      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: paramUpdates });
+      await updateSceneAndSync(activeScene.id, { parameters: paramUpdates });
 
       // Look up asset IDs for first/last frame images and audio
       const storeAssets = useAppStore.getState().assets;
@@ -2371,8 +2375,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                     if (e.target.value !== 'custom') {
                       delete newParams.custom_color_palette;
                     }
-                    await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                    useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                    await updateSceneAndSync(activeScene.id, { parameters: newParams });
                   }}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
                 >
@@ -2393,8 +2396,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                     onChange={async (e) => {
                       if (!activeScene || !currentProject) return;
                       const newParams = { ...activeScene.parameters, custom_color_palette: e.target.value };
-                      await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                      await updateSceneAndSync(activeScene.id, { parameters: newParams });
                     }}
                     placeholder="Describe your color palette (e.g., 'only shades of green and gold', 'pastel pink and baby blue')"
                     className="w-full mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-16 text-sm"
@@ -3630,8 +3632,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                             lyrics: editedLyrics,
                             lyrics_override: true,
                           };
-                          await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                          useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                          await updateSceneAndSync(activeScene.id, { parameters: newParams });
                           setIsEditingLyrics(false);
                         } catch (err) {
                           console.error('Failed to save lyrics override:', err);
@@ -3654,8 +3655,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                             const newParams = { ...activeScene.parameters };
                             delete (newParams as any).lyrics;
                             delete (newParams as any).lyrics_override;
-                            await updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                            useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                            await updateSceneAndSync(activeScene.id, { parameters: newParams });
                             setIsEditingLyrics(false);
                           } catch (err) {
                             console.error('Failed to reset lyrics:', err);

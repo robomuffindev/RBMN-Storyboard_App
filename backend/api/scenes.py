@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
@@ -536,6 +537,12 @@ async def update_scene(
             scene.negative_prompt = req.negative_prompt
         if req.parameters is not None:
             scene.parameters = req.parameters
+            # Defensive: MutableDict.as_mutable should detect this, but
+            # gotcha #53 has shown SQLAlchemy can silently skip the commit
+            # when the new dict happens to compare equal to the old one
+            # under JSON serialization. Explicit flag_modified guarantees
+            # the column persists.
+            flag_modified(scene, "parameters")
 
         await session.commit()
 
