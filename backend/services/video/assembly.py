@@ -198,6 +198,14 @@ def _export_audio_stems(
                                             (only when individual_backing=True)
 
     Best-effort: failures are logged but don't break the export.
+
+    Looping & duration:
+        When ``loop_backing`` is True and ``total_duration`` > 0, the backing
+        track sequence is replicated to cover the full narration runtime —
+        mirrors the looping behavior of the regular video export.  Both the
+        narration WAV and the backing_mix WAV are then trimmed/padded to
+        exactly ``total_duration`` so a DAW can drop them in at position 0
+        and have them line up automatically.
     """
     try:
         out_p = Path(output_path)
@@ -206,8 +214,17 @@ def _export_audio_stems(
         base = out_p.stem
 
         # ── narration stem: narration audio with volume applied ──
+        # Trim/pad to total_duration when known so this WAV matches the
+        # backing_mix length exactly — DAW-friendly.
         narr_out = stems_dir / f"{base}.narration.wav"
-        narr_filter = f"volume={narration_volume:.4f}"
+        narr_filter_parts = [f"volume={narration_volume:.4f}"]
+        if total_duration > 0:
+            # apad first (in case narration is shorter), then atrim+asetpts to
+            # cap at exactly total_duration.
+            narr_filter_parts.append("apad")
+            narr_filter_parts.append(f"atrim=end={total_duration:.6f}")
+            narr_filter_parts.append("asetpts=PTS-STARTPTS")
+        narr_filter = ",".join(narr_filter_parts)
         subprocess.run([
             "ffmpeg", "-y",
             "-i", narration_audio_path,
@@ -221,48 +238,115 @@ def _export_audio_stems(
         if not backing_tracks:
             return
 
-        # ── individual backing track stems (one WAV per track) ──
+        # ── Expand the backing track sequence if looping is requested ──
+        # Mirrors the loop logic in ffmpeg.py:mix_narration_with_backing
+        # so the stems output matches what the video export would produce.
+        effective_tracks: List[Dict[str, Any]] = list(backing_tracks)
+        if loop_backing and total_duration > 0 and effective_tracks:
+            seq_end = max(
+                float(bt.get("end_time", 0)) for bt in effective_tracks
+            )
+            if seq_end > 0 and seq_end < total_duration:
+                iterations = int(total_duration / seq_end) + 1
+                logger.info(
+                    f"Stems loop backing: sequence duration={seq_end:.2f}s, "
+                    f"total={total_duration:.2f}s → {iterations} iterations"
+                )
+                looped: list[Dict[str, Any]] = []
+                for loop_i in range(iterations):
+                    offset = loop_i * seq_end
+                    for bt in backing_tracks:
+                        shifted = dict(bt)
+                        shifted["start_time"] = float(bt.get("start_time", 0)) + offset
+                        shifted["end_time"] = float(bt.get("end_time", 0)) + offset
+                        if shifted["start_time"] >= total_duration:
+                            continue
+                        if shifted["end_time"] > total_duration:
+                            shifted["end_time"] = total_duration
+                        looped.append(shifted)
+                effective_tracks = looped
+
+        # ── individual backing track stems (one WAV per source track) ──
+        # Off by default — most workflows want a single backing_mix.wav.
+        # When on, each source track produces one WAV containing all of its
+        # looped instances at the correct timeline offsets, also trimmed to
+        # total_duration so it lines up in a DAW.
         if individual_backing:
-            for idx, bt in enumerate(backing_tracks, start=1):
+            # Group expanded entries by their original source path so each
+            # source becomes one WAV with all its loop iterations summed.
+            by_src: Dict[str, list] = {}
+            for bt in effective_tracks:
+                src = bt.get("path")
+                if not src:
+                    continue
+                by_src.setdefault(str(src), []).append(bt)
+            for idx, (src, entries) in enumerate(by_src.items(), start=1):
                 try:
-                    src = bt.get("path")
-                    if not src or not Path(src).exists():
+                    if not Path(src).exists():
                         logger.warning(
                             f"Individual backing stem #{idx}: source missing — {src}"
                         )
                         continue
-                    raw_name = bt.get("name") or bt.get("filename") or Path(src).name
+                    raw_name = (
+                        entries[0].get("name")
+                        or entries[0].get("filename")
+                        or Path(src).name
+                    )
                     pretty = _safe_stem_name(str(raw_name))
                     bt_out = stems_dir / f"{base}.backing_{idx:02d}_{pretty}.wav"
-                    vol = float(bt.get("volume_db", 0))
-                    vol_linear = (10 ** (vol / 20.0)) * float(backing_volume)
-                    start_ms = int(float(bt.get("start_time", 0)) * 1000)
+                    cmd = ["ffmpeg", "-y"]
+                    # Re-decode the source once per instance so each can have
+                    # its own delay; amix the lot.
+                    for _ in entries:
+                        cmd += ["-i", src]
                     filt_parts = []
-                    if start_ms > 0:
-                        filt_parts.append(f"adelay={start_ms}|{start_ms}")
-                    filt_parts.append(f"volume={vol_linear:.4f}")
-                    filt = ",".join(filt_parts) or "anull"
-                    subprocess.run([
-                        "ffmpeg", "-y",
-                        "-i", src,
-                        "-af", filt,
+                    for i, bt in enumerate(entries):
+                        vol = float(bt.get("volume_db", 0))
+                        vol_linear = (10 ** (vol / 20.0)) * float(backing_volume)
+                        start_ms = int(float(bt.get("start_time", 0)) * 1000)
+                        delay = f"adelay={start_ms}|{start_ms}" if start_ms > 0 else "anull"
+                        filt_parts.append(
+                            f"[{i}:a]{delay},volume={vol_linear:.4f}[a{i}]"
+                        )
+                    mix_inputs = "".join(f"[a{i}]" for i in range(len(entries)))
+                    tail_filters = "apad,"
+                    if total_duration > 0:
+                        tail_filters += f"atrim=end={total_duration:.6f},asetpts=PTS-STARTPTS"
+                    else:
+                        tail_filters = ""
+                    if len(entries) > 1:
+                        filt_parts.append(
+                            f"{mix_inputs}amix=inputs={len(entries)}:duration=longest:dropout_transition=0"
+                            + (f",{tail_filters}" if tail_filters else "")
+                            + "[mix]"
+                        )
+                    else:
+                        # Single instance — no amix needed
+                        filt_parts.append(
+                            f"[a0]{tail_filters}[mix]" if tail_filters
+                            else "[a0]anull[mix]"
+                        )
+                    cmd += [
+                        "-filter_complex", ";".join(filt_parts),
+                        "-map", "[mix]",
                         "-c:a", "pcm_s16le",
                         "-ar", "48000",
                         str(bt_out),
-                    ], check=True, capture_output=True)
+                    ]
+                    subprocess.run(cmd, check=True, capture_output=True)
                     logger.info(f"Individual backing stem written: {bt_out}")
                 except Exception as _ind_err:
                     logger.warning(
                         f"Individual backing stem #{idx} failed (non-fatal): {_ind_err}"
                     )
 
-        # ── backing_mix: all backing tracks summed into one stem ──
+        # ── backing_mix: ALL backing tracks (looped if requested) summed ──
         back_out = stems_dir / f"{base}.backing_mix.wav"
         cmd = ["ffmpeg", "-y"]
-        for bt in backing_tracks:
+        for bt in effective_tracks:
             cmd += ["-i", bt["path"]]
         filter_parts = []
-        for i, bt in enumerate(backing_tracks):
+        for i, bt in enumerate(effective_tracks):
             vol = float(bt.get("volume_db", 0))
             vol_linear = (10 ** (vol / 20.0)) * float(backing_volume)
             start_ms = int(float(bt.get("start_time", 0)) * 1000)
@@ -270,10 +354,18 @@ def _export_audio_stems(
             filter_parts.append(
                 f"[{i}:a]{delay_filter},volume={vol_linear:.4f}[a{i}]"
             )
-        mix_inputs = "".join(f"[a{i}]" for i in range(len(backing_tracks)))
-        filter_parts.append(
-            f"{mix_inputs}amix=inputs={len(backing_tracks)}:duration=longest:dropout_transition=0[mix]"
-        )
+        mix_inputs = "".join(f"[a{i}]" for i in range(len(effective_tracks)))
+        # Pad with silence then trim to total_duration so the file is exactly
+        # the narration length — easy to drop into a DAW at time 0.
+        if total_duration > 0:
+            filter_parts.append(
+                f"{mix_inputs}amix=inputs={len(effective_tracks)}:duration=longest:dropout_transition=0,"
+                f"apad,atrim=end={total_duration:.6f},asetpts=PTS-STARTPTS[mix]"
+            )
+        else:
+            filter_parts.append(
+                f"{mix_inputs}amix=inputs={len(effective_tracks)}:duration=longest:dropout_transition=0[mix]"
+            )
         cmd += [
             "-filter_complex", ";".join(filter_parts),
             "-map", "[mix]",
@@ -282,7 +374,11 @@ def _export_audio_stems(
             str(back_out),
         ]
         subprocess.run(cmd, check=True, capture_output=True)
-        logger.info(f"Stem written: {back_out}")
+        logger.info(
+            f"Stem written: {back_out} "
+            f"(loop_backing={loop_backing}, total={total_duration:.2f}s, "
+            f"expanded {len(backing_tracks)}→{len(effective_tracks)} tracks)"
+        )
     except Exception as e:
         logger.warning(f"Stems export failed (non-fatal): {e}")
 
@@ -672,29 +768,36 @@ def _chunked_transition_merge(
             report(step, percent)
 
     def _resolve_transition(ci_out: int, ci_in: int) -> tuple[Optional[str], float]:
-        """Resolve transition type and duration for boundary between clip ci_out and ci_in."""
+        """Resolve transition type and duration for boundary between clip ci_out and ci_in.
+
+        Precedence (matches the global override semantics):
+          1. If the global default_transition is set (not "none"), it OVERRIDES
+             all per-scene transitions — every boundary in the export gets the
+             same transition.
+          2. If the global default is "none" / None, defer to per-scene:
+             scene.transition_in first, then previous scene's transition_out.
+          3. If nothing matches, no transition.
+        """
         si_in = clip_scene_indices[ci_in]
         si_prev = clip_scene_indices[ci_out]
         scene_in = scenes[si_in]
         scene_prev = scenes[si_prev]
 
+        # (1) Global override active → use it everywhere
+        if use_default_xfade:
+            return default_transition, default_transition_duration
+
+        # (2) Defer to per-scene
         t_in = scene_in.get("transition_in", {}) or {}
         t_out_prev = scene_prev.get("transition_out", {}) or {}
 
-        t_type = None
-        t_dur = 0.5
         if t_in.get("type") in xfade_types_set:
-            t_type = t_in["type"]
-            t_dur = t_in.get("duration", 0.5)
-        elif t_out_prev.get("type") in xfade_types_set:
-            t_type = t_out_prev["type"]
-            t_dur = t_out_prev.get("duration", 0.5)
+            return t_in["type"], t_in.get("duration", 0.5)
+        if t_out_prev.get("type") in xfade_types_set:
+            return t_out_prev["type"], t_out_prev.get("duration", 0.5)
 
-        if not t_type and use_default_xfade:
-            t_type = default_transition
-            t_dur = default_transition_duration
-
-        return t_type, t_dur
+        # (3) Nothing → straight concat
+        return None, 0.5
 
     def _sequential_merge(clips: list[str], clip_indices: list[int],
                           ai_clips: dict[int, str], label: str = "",
@@ -1020,7 +1123,22 @@ def assemble_music_video(
 
         num_expected = len(valid_scene_indices)
 
-        # Determine if we'll use a default xfade
+        # ── Transition precedence rule ──────────────────────────────────
+        # global != "none"  →  global xfade OVERRIDES every scene boundary
+        #                     (consistent uniform transition for the whole video)
+        # global == "none" / None  →  defer to per-scene transition_in /
+        #                             transition_out set in the Scene Editor.
+        _global_override_active = (
+            default_transition
+            and default_transition != "none"
+            and default_transition in xfade_types_set
+            and default_transition_duration > 0
+            and num_expected > 1
+        )
+
+        # Determine if any per-scene transition is set (used only when the
+        # global override is NOT active — drives whether transition
+        # compensation padding is needed at all).
         _has_explicit = False
         for ci in range(num_expected - 1):
             si_out = valid_scene_indices[ci]
@@ -1032,16 +1150,8 @@ def assemble_music_video(
                 _has_explicit = True
                 break
 
-        _will_use_default = (
-            not _has_explicit
-            and default_transition
-            and default_transition != "none"
-            and default_transition in xfade_types_set
-            and default_transition_duration > 0
-            and num_expected > 1
-        )
-
-        # Build per-clip-boundary transition durations
+        # Build per-clip-boundary transition durations.  Global override
+        # wins when active; otherwise per-scene transitions are honored.
         clip_boundary_durations: list[float] = []
         for ci in range(num_expected - 1):
             si_out = valid_scene_indices[ci]
@@ -1050,12 +1160,13 @@ def assemble_music_video(
             t_out = scenes[si_out].get("transition_out", {}) or {}
 
             t_dur = 0.0
-            if t_in.get("type") in xfade_types_set:
+            if _global_override_active:
+                # Global wins — all boundaries get the global duration.
+                t_dur = default_transition_duration
+            elif t_in.get("type") in xfade_types_set:
                 t_dur = t_in.get("duration", 0.5)
             elif t_out.get("type") in xfade_types_set:
                 t_dur = t_out.get("duration", 0.5)
-            elif _will_use_default:
-                t_dur = default_transition_duration
             clip_boundary_durations.append(t_dur)
 
         # Per-clip padding: each clip absorbs half the overlap from
@@ -1149,8 +1260,9 @@ def assemble_music_video(
             raise RuntimeError("Export cancelled by user")
 
         # Step 2: Apply inter-scene xfade transitions where specified, then concatenate
-        has_xfade = _has_explicit or _will_use_default
-        use_default_xfade = _will_use_default
+        # Global override means EVERY boundary has an xfade; per-scene is honored only when no global override.
+        has_xfade = _global_override_active or _has_explicit
+        use_default_xfade = _global_override_active
 
         # ── Resume detection: check if a previous merged video exists in work_dir ──
         _existing_merge = sorted(work_dir.glob("chunkmerge_xfade_*.mp4"))
@@ -1412,6 +1524,17 @@ def assemble_narration_video(
 
         num_expected = len(valid_scene_indices)
 
+        # Global override precedence (mirrors narration path):
+        # global non-"none" → overrides ALL boundaries
+        # global "none"/None → defer to per-scene transition_in/transition_out
+        _global_override_active = (
+            default_transition
+            and default_transition != "none"
+            and default_transition in xfade_types_set
+            and default_transition_duration > 0
+            and num_expected > 1
+        )
+
         _has_explicit = False
         for ci in range(num_expected - 1):
             si_out = valid_scene_indices[ci]
@@ -1423,15 +1546,6 @@ def assemble_narration_video(
                 _has_explicit = True
                 break
 
-        _will_use_default = (
-            not _has_explicit
-            and default_transition
-            and default_transition != "none"
-            and default_transition in xfade_types_set
-            and default_transition_duration > 0
-            and num_expected > 1
-        )
-
         clip_boundary_durations: list[float] = []
         for ci in range(num_expected - 1):
             si_out = valid_scene_indices[ci]
@@ -1440,12 +1554,12 @@ def assemble_narration_video(
             t_out = scenes[si_out].get("transition_out", {}) or {}
 
             t_dur = 0.0
-            if t_in.get("type") in xfade_types_set:
+            if _global_override_active:
+                t_dur = default_transition_duration
+            elif t_in.get("type") in xfade_types_set:
                 t_dur = t_in.get("duration", 0.5)
             elif t_out.get("type") in xfade_types_set:
                 t_dur = t_out.get("duration", 0.5)
-            elif _will_use_default:
-                t_dur = default_transition_duration
             clip_boundary_durations.append(t_dur)
 
         clip_padding: list[float] = [0.0] * num_expected
@@ -1533,8 +1647,10 @@ def assemble_narration_video(
                 raise RuntimeError("Export cancelled by user")
 
             # ── Step 2: Apply inter-scene xfade transitions, then concatenate ──
-            has_xfade = _has_explicit or _will_use_default
-            use_default_xfade = _will_use_default
+            # Global override forces an xfade at every boundary; otherwise we
+            # honor per-scene transition_in/transition_out.
+            has_xfade = _global_override_active or _has_explicit
+            use_default_xfade = _global_override_active
 
             # ── Wrap chunk_callback for narration: mux audio into each chunk ──
             # This lets users preview chunks with audio during long renders.

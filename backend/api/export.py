@@ -290,6 +290,16 @@ async def _build_scene_dicts(
             logger.warning(f"Scene {sc.order_index}: transition clip not found: {transition_clip_resolved}")
             transition_clip_resolved = None
 
+        # Per-scene transition_in / transition_out from the Scene Editor.
+        # These reach the assembler so they can be honored when the global
+        # export-transition override is set to "none" (i.e. defer to per-scene).
+        # Frontend stores these as { type: "<name>", duration: <sec> } in
+        # scene.parameters; anything missing / "none" reads as no transition.
+        _t_in_raw = sc_params.get("transition_in")
+        _t_out_raw = sc_params.get("transition_out")
+        scene_transition_in = _t_in_raw if isinstance(_t_in_raw, dict) and _t_in_raw.get("type") and _t_in_raw.get("type") != "none" else None
+        scene_transition_out = _t_out_raw if isinstance(_t_out_raw, dict) and _t_out_raw.get("type") and _t_out_raw.get("type") != "none" else None
+
         # Validate resolved paths exist before adding to scene_dicts
         resolved_video = _resolve(video_source) if video_source else None
         resolved_image = _resolve(image_path) if image_path else None
@@ -317,6 +327,8 @@ async def _build_scene_dicts(
                 "trim_first_frame": trim_first_frame,
                 "is_v2v": is_v2v,
                 "transition_clip_path": transition_clip_resolved,
+                "transition_in": scene_transition_in,
+                "transition_out": scene_transition_out,
             })
         elif source_type == "video" and not resolved_video:
             # Video source type but video file is missing — skip entirely.
@@ -345,6 +357,8 @@ async def _build_scene_dicts(
                 "effect": effect if effect != "none" else "zoom_in_center",
                 "image_movement": movement_dict,
                 "transition_clip_path": transition_clip_resolved,
+                "transition_in": scene_transition_in,
+                "transition_out": scene_transition_out,
             })
         elif resolved_video:
             # Fallback: source_type is image but only video exists
@@ -355,6 +369,8 @@ async def _build_scene_dicts(
                 "trim_first_frame": trim_first_frame,
                 "is_v2v": is_v2v,
                 "transition_clip_path": transition_clip_resolved,
+                "transition_in": scene_transition_in,
+                "transition_out": scene_transition_out,
             })
         elif resolved_image:
             # Last resort: source_type not explicitly set and only image exists
@@ -375,6 +391,8 @@ async def _build_scene_dicts(
                 "effect": effect if effect != "none" else "zoom_in_center",
                 "image_movement": movement_dict,
                 "transition_clip_path": transition_clip_resolved,
+                "transition_in": scene_transition_in,
+                "transition_out": scene_transition_out,
             })
         # else: scene has no content yet — skip it
 
@@ -677,7 +695,12 @@ async def _run_export_task(
                         _main_fo,
                         _norm_bt,
                         _total_dur_for_stems,
-                        True,  # individual_backing=True for stems-only mode
+                        # individual_backing=False — user wants ONE backing
+                        # file (the combined backing_mix), not one WAV per
+                        # source track.  Looping (when enabled) is applied
+                        # inside the function so backing_mix matches the
+                        # narration length.
+                        False,
                     )
                     # Collect the written stem files for the status response.
                     stems_dir = Path(output_path).parent / "stems"
@@ -1351,6 +1374,7 @@ async def get_export_status(
             total_chunks=progress.get("total_chunks"),
             current_chunk=progress.get("current_chunk"),
             phase=progress.get("phase"),
+            stems=progress.get("stems"),
         )
 
     # Fallback to DB if no in-memory record
@@ -1386,10 +1410,15 @@ async def get_export_status(
 
         output_path = None
         download_url = None
-        if export_job.result and export_job.result.get("output_path"):
-            output_path = export_job.result["output_path"]
-        if export_job.result and export_job.result.get("download_url"):
-            download_url = export_job.result["download_url"]
+        stems_list = None
+        if export_job.result:
+            if export_job.result.get("output_path"):
+                output_path = export_job.result["output_path"]
+            if export_job.result.get("download_url"):
+                download_url = export_job.result["download_url"]
+            # Stems-only / stems-export Jobs persist the per-file list in result["stems"]
+            if export_job.result.get("stems"):
+                stems_list = export_job.result["stems"]
 
         return ExportProgressResponse(
             job_id=str(export_job.id),
@@ -1400,6 +1429,7 @@ async def get_export_status(
             output_path=output_path,
             download_url=download_url,
             error=export_job.error,
+            stems=stems_list,
         )
     except Exception as e:
         logger.error(f"Error getting export status for project {project_id}: {e}")

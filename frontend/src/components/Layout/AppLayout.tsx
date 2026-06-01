@@ -2335,7 +2335,11 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
               >
                 Close
               </button>
-              {downloadUrl && (
+              {/* Hide the single big Download button on a stems-only export — the
+                  per-stem cards above are the right action.  Show it only when
+                  we have a real video to download (chunks present, or stems
+                  list empty so the user hasn't done a stems-only export). */}
+              {downloadUrl && !(stems.length > 0 && chunks.length === 0) && (
                 <button
                   onClick={handleDownload}
                   className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 rounded font-medium transition-colors flex items-center justify-center gap-2"
