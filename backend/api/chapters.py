@@ -49,6 +49,15 @@ class ChapterUpdateRequest(BaseModel):
     color: Optional[str] = None
     tags: Optional[List[str]] = None
     metadata_patch: Optional[Dict[str, Any]] = None
+    description: Optional[str] = None
+    character_focus: Optional[List[str]] = None
+    style_notes: Optional[str] = None
+
+
+class ChapterGenerateDescriptionRequest(BaseModel):
+    # When True, also suggest character_focus + style_notes (multi-field
+    # extraction).  When False, only fill description.  Default True.
+    full: bool = True
 
 
 class ReparseRequest(BaseModel):
@@ -191,6 +200,15 @@ async def update_chapter(
         changed = True
     if req.metadata_patch is not None:
         ch.chapter_metadata = {**(ch.chapter_metadata or {}), **req.metadata_patch}
+        changed = True
+    if req.description is not None and req.description != (ch.description or ""):
+        ch.description = req.description
+        changed = True
+    if req.character_focus is not None:
+        ch.character_focus = list(req.character_focus)
+        changed = True
+    if req.style_notes is not None and req.style_notes != (ch.style_notes or ""):
+        ch.style_notes = req.style_notes
         changed = True
     if changed:
         ch.source = "manual"
@@ -351,6 +369,241 @@ async def merge_chapter_with_next(
     return _chapter_to_dict(ch)
 
 
+@router.post(
+    "/{chapter_id}/generate-description",
+    summary="Generate chapter description via LLM",
+)
+async def generate_chapter_description(
+    project_id: UUID,
+    chapter_id: UUID,
+    req: ChapterGenerateDescriptionRequest,
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    """Read the chapter's narration text and ask an LLM to produce a
+    short chapter concept + (optionally) the character cast and style
+    notes.  Used as creative direction for downstream Story Flow and
+    scene-prompt generation inside this chapter.
+    """
+    ch = await _get_chapter(session, project_id, chapter_id)
+    scenes = await scenes_in_chapter_tree(session, chapter_id)
+    if not scenes:
+        raise HTTPException(
+            status_code=400,
+            detail="Chapter has no scenes; nothing to summarize.",
+        )
+
+    # Read the project's reconciled narration text for this chapter's
+    # time range (better than per-scene parameters because it preserves
+    # narrative flow).
+    from backend.database.models import Lyrics
+    lyr_result = await session.execute(
+        select(Lyrics).where(Lyrics.project_id == project_id)
+    )
+    lyrics = lyr_result.scalars().first()
+    narration_excerpt = ""
+    if lyrics and lyrics.words:
+        chapter_words = [
+            w for w in (lyrics.words or [])
+            if ch.start_time <= float(w.get("start", 0)) < (ch.end_time or float("inf"))
+        ]
+        narration_excerpt = " ".join(w.get("word", "") for w in chapter_words).strip()
+    if not narration_excerpt:
+        # Fall back to whatever lyrics text the scenes carry
+        narration_excerpt = " ".join(
+            (sc.parameters or {}).get("lyrics", "") for sc in scenes
+        ).strip()
+    if not narration_excerpt:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No narration text found for this chapter — "
+                "run audio analysis first or upload an SRT/lyrics file."
+            ),
+        )
+
+    # Cap to avoid context overflow on weak LLMs
+    if len(narration_excerpt) > 8000:
+        narration_excerpt = narration_excerpt[:8000] + "…"
+
+    # Resolve LLM provider
+    from backend.api.settings import resolve_llm_config
+    settings_row = await session.execute(
+        select(AppSettings).where(AppSettings.id == 1)
+    )
+    app_settings = settings_row.scalars().first()
+    if not app_settings:
+        raise HTTPException(
+            status_code=400, detail="No app settings — set up an LLM provider first."
+        )
+    provider, api_key, model = resolve_llm_config(app_settings)
+
+    # Build prompt
+    if req.full:
+        system_prompt = (
+            "You are a story editor.  The user will share the narration "
+            "text for one chapter of a longer narrated video.  Return "
+            "STRICT JSON with the following keys and NO other text:\n"
+            "{\n"
+            '  "description": "1-3 sentence chapter concept",\n'
+            '  "character_focus": ["names of characters or speakers featured"],\n'
+            '  "style_notes": "short note on visual tone/mood for this chapter"\n'
+            "}"
+        )
+    else:
+        system_prompt = (
+            "You are a story editor.  Given the narration for a chapter, "
+            "return only a JSON object: { \"description\": \"…\" } — a 1-3 "
+            "sentence chapter concept summarizing what happens.  No other text."
+        )
+
+    user_msg = (
+        f"Chapter name: {ch.name}\n\n"
+        f"Narration text for this chapter:\n{narration_excerpt}"
+    )
+
+    # Call the LLM
+    raw_response = ""
+    try:
+        if provider == "openai":
+            from openai import OpenAI, BadRequestError
+            client = OpenAI(api_key=api_key)
+            effective_model = model or "gpt-4o-mini"
+            # Newer OpenAI models (GPT-4.1+, GPT-5.x, o-series, chatgpt-*)
+            # require max_completion_tokens instead of max_tokens, and
+            # only accept temperature=1 (the default).
+            _new_style = any(
+                effective_model.startswith(p)
+                for p in ("gpt-4.1", "gpt-5", "chatgpt", "o1", "o3", "o4")
+            )
+
+            def _build_params(use_new_style: bool) -> dict:
+                if use_new_style:
+                    return {"max_completion_tokens": 600}
+                return {"max_tokens": 600, "temperature": 0.6}
+
+            base_kwargs = dict(
+                model=effective_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            try:
+                resp = client.chat.completions.create(
+                    **base_kwargs, **_build_params(_new_style)
+                )
+            except BadRequestError as e:
+                # Retry once flipping the param style if the API tells us
+                # we chose the wrong one.  Covers model aliases the
+                # heuristic doesn't catch.
+                msg = str(e).lower()
+                if "max_tokens" in msg or "max_completion_tokens" in msg:
+                    logger.warning(
+                        f"OpenAI rejected token-limit param for model "
+                        f"{effective_model!r}; retrying with the other style"
+                    )
+                    resp = client.chat.completions.create(
+                        **base_kwargs, **_build_params(not _new_style)
+                    )
+                else:
+                    raise
+            raw_response = resp.choices[0].message.content or ""
+        elif provider == "anthropic":
+            from anthropic import Anthropic
+            client = Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model=model or "claude-3-5-sonnet-20240620",
+                max_tokens=600,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            raw_response = "".join(
+                getattr(b, "text", "") for b in (resp.content or [])
+            )
+        elif provider == "gemini":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            gm = genai.GenerativeModel(model_name=model or "gemini-2.0-flash")
+            r = gm.generate_content(system_prompt + "\n\n" + user_msg)
+            raw_response = r.text or ""
+        elif provider == "ollama":
+            import requests
+            ollama_url = (
+                app_settings.ollama_base_url
+                or (app_settings.ollama_urls or ["http://localhost:11434"])[0]
+            )
+            r = requests.post(
+                f"{ollama_url.rstrip('/')}/api/chat",
+                json={
+                    "model": model or app_settings.ollama_model or "llama3.1",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.6},
+                },
+                timeout=120,
+            )
+            r.raise_for_status()
+            raw_response = (r.json().get("message") or {}).get("content", "")
+        else:
+            raise HTTPException(
+                status_code=400, detail=f"Unsupported provider: {provider}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Chapter description LLM call failed")
+        raise HTTPException(
+            status_code=502, detail=f"LLM call failed: {e}"
+        )
+
+    # Parse JSON
+    import json as _json
+    import re as _re
+    cleaned = raw_response.strip()
+    fence_match = _re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, _re.DOTALL)
+    if fence_match:
+        cleaned = fence_match.group(1)
+    else:
+        bm = _re.search(r"\{[\s\S]*\}", cleaned)
+        if bm:
+            cleaned = bm.group(0)
+    try:
+        parsed = _json.loads(cleaned)
+    except Exception:
+        logger.warning(
+            f"Chapter description LLM returned non-JSON; using as plain text. "
+            f"Raw: {raw_response[:200]!r}"
+        )
+        parsed = {"description": raw_response.strip()[:600]}
+
+    new_desc = (parsed.get("description") or "").strip()
+    new_chars = parsed.get("character_focus") or []
+    if not isinstance(new_chars, list):
+        new_chars = []
+    new_style = (parsed.get("style_notes") or "").strip()
+
+    if new_desc:
+        ch.description = new_desc
+    if req.full and new_chars:
+        ch.character_focus = [str(x).strip() for x in new_chars if str(x).strip()]
+    if req.full and new_style:
+        ch.style_notes = new_style
+    ch.source = "manual"
+    ch.updated_at = datetime.utcnow()
+    session.add(ch)
+    await session.commit()
+    await session.refresh(ch)
+    logger.info(
+        f"Chapter description generated for {ch.short_code}: "
+        f"{len(new_desc)} chars desc, {len(new_chars)} characters, "
+        f"{len(new_style)} chars style"
+    )
+    return _chapter_to_dict(ch)
+
+
 @router.post("/{chapter_id}/preview-llm-batches", summary="Dry-run LLM batching")
 async def preview_llm_batches(
     project_id: UUID,
@@ -358,11 +611,7 @@ async def preview_llm_batches(
     req: PreviewBatchRequest,
     session: AsyncSession = Depends(get_session),
 ) -> Dict[str, Any]:
-    """Show how the chapter would be batched for LLM generation.
-
-    Useful for the "Generate prompts for this chapter" preview.  No work
-    is actually started — this just reports the plan.
-    """
+    """Show how the chapter would be batched for LLM generation."""
     ch = await _get_chapter(session, project_id, chapter_id)
     scenes = await scenes_in_chapter_tree(session, chapter_id)
 
@@ -370,15 +619,15 @@ async def preview_llm_batches(
     s = settings_result.scalars().first()
     if (req.llm_provider or "cloud").lower() == "ollama":
         limit = int(getattr(s, "llm_chapter_scene_limit_ollama", 12) or 12)
-        provider = "ollama"
+        provider_lbl = "ollama"
     else:
         limit = int(getattr(s, "llm_chapter_scene_limit_cloud", 25) or 25)
-        provider = "cloud"
+        provider_lbl = "cloud"
 
     batches = resolve_llm_batches(scenes, limit)
     return {
         "chapter": ch.short_code,
-        "provider": provider,
+        "provider": provider_lbl,
         "limit": limit,
         "total_scenes": len(scenes),
         "batch_count": len(batches),
@@ -410,6 +659,9 @@ def _chapter_to_dict(ch: Chapter) -> Dict[str, Any]:
         "start_time": ch.start_time,
         "end_time": ch.end_time,
         "tags": list(ch.tags or []),
+        "description": getattr(ch, "description", "") or "",
+        "character_focus": list(getattr(ch, "character_focus", []) or []),
+        "style_notes": getattr(ch, "style_notes", "") or "",
     }
 
 
@@ -419,5 +671,4 @@ def _chapter_to_dict(ch: Chapter) -> Dict[str, Any]:
 # focused on chapter CRUD.
 
 
-# Late import to avoid loading datetime everywhere at module top
 from datetime import datetime  # noqa: E402

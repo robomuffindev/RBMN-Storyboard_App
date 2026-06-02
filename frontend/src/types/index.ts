@@ -498,6 +498,9 @@ export interface Chapter {
   start_time: number;
   end_time: number;
   tags: string[];
+  description: string;
+  character_focus: string[];
+  style_notes: string;
   scene_count?: number;
   scene_ids?: string[];
 }
@@ -521,6 +524,9 @@ export interface ChapterUpdate {
   color?: string;
   tags?: string[];
   metadata_patch?: Record<string, any>;
+  description?: string;
+  character_focus?: string[];
+  style_notes?: string;
 }
 
 /** Export modal scope selector value. */

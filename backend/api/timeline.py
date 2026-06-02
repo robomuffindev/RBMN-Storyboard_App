@@ -20,6 +20,7 @@ from backend.database import get_session
 from backend.services.audio.analysis import AudioAnalyzer
 from backend.database.models import (
     Project,
+    ProjectMode,
     Scene,
     SongSection,
     SongSectionLabel,
@@ -341,7 +342,19 @@ async def analyze_audio(
                 detail="Either file or asset_id must be provided",
             )
 
-        logger.info(f"Analyzing audio file {audio_asset.filename} for project {project_id} (asset {audio_asset.id})")
+        # Determine whether Demucs stem separation is worth running.
+        # Narration modes upload pure-speech audio (e.g. ElevenLabs TTS)
+        # with no music to separate — Demucs is wasted compute there and
+        # can introduce phase artifacts in the "vocal" stem.
+        _proj_for_mode = await session.get(Project, project_id)
+        _skip_demucs = (
+            _proj_for_mode is not None
+            and _proj_for_mode.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO)
+        )
+        logger.info(
+            f"Analyzing audio file {audio_asset.filename} for project "
+            f"{project_id} (asset {audio_asset.id}, skip_demucs={_skip_demucs})"
+        )
 
         # Get settings for Whisper mode
         settings_stmt = select(AppSettings).where(AppSettings.id == 1)
@@ -367,6 +380,7 @@ async def analyze_audio(
             initial_text=initial_text,
             whisper_model=whisper_model,
             whisper_language=whisper_language,
+            skip_demucs=_skip_demucs,
         )
 
         # Save analysis results to cache
@@ -2774,7 +2788,7 @@ async def suggest_timeline(
         existing_scenes_stmt = (
             select(Scene)
             .where(Scene.project_id == project_id)
-            .order_by(Scene.scene_index)
+            .order_by(Scene.order_index)
         )
         existing_scenes = (await session.execute(existing_scenes_stmt)).scalars().all()
         for sc in existing_scenes:
@@ -2782,6 +2796,9 @@ async def suggest_timeline(
         await session.flush()
 
         # Create new scenes from DP output
+        # NOTE: Scene model uses `order_index` (not scene_index) — see
+        # backend.database.models.Scene.  Also fill the required `prompt`
+        # field so the NOT NULL constraint doesn't trip on the flush.
         created_scenes = []
         for i, sd in enumerate(dp_scenes):
             new_scene = Scene(
@@ -2789,35 +2806,70 @@ async def suggest_timeline(
                 name=sd["name"],
                 start_time=sd["start_time"],
                 end_time=sd["end_time"],
-                scene_index=i,
+                order_index=i,
+                prompt="",
                 parameters={"lyrics": sd.get("lyrics", "")},
             )
             session.add(new_scene)
             created_scenes.append(new_scene)
         await session.flush()
 
-        # Slice audio segments
-        await _auto_slice_scene_audio(project_id, session)
-
-        scene_responses = [
-            SceneResponse(
-                id=sc.id,
-                project_id=sc.project_id,
-                name=sc.name,
-                start_time=sc.start_time,
-                end_time=sc.end_time,
-                scene_index=sc.scene_index,
-                prompt=sc.prompt or "",
-                negative_prompt=sc.negative_prompt or "",
-                parameters=sc.parameters or {},
+        # Slice audio segments — the helper is _slice_audio_for_scenes
+        # (returns the per-scene slice count; we don't need it here).
+        try:
+            await _slice_audio_for_scenes(project_id, session)
+        except Exception as _slice_err:
+            # Slicing is convenience — log and continue so the user still
+            # gets the scenes even if their audio asset isn't slice-able.
+            logger.warning(
+                f"[SuggestTimeline] Auto-slice failed (non-fatal): {_slice_err}"
             )
-            for sc in created_scenes
-        ]
+
+        # Capture the scene IDs NOW, before chapter auto-build runs,
+        # so a chapter-build failure that poisons the session can't
+        # break our response.  ORM-loaded UUIDs are already populated
+        # at this point because we session.flushed earlier.
+        _created_scene_ids = [str(sc.id) for sc in created_scenes]
+
+        # ── Auto-create chapters from the new scenes ─────────────────
+        # Whether the user added `# headers` to the script or not, the
+        # chapter builder gives us either:
+        #   - headers present → one chapter per `# heading` block
+        #   - no headers      → auto-split by scene count (Settings >
+        #                       Chapter Batching > "Chapter auto-split
+        #                       threshold" controls the size)
+        # This makes a 1-hour narration immediately workable in chunks
+        # without the user having to do anything manual.
+        chapter_count = 0
+        try:
+            from backend.services.chapters import rebuild_chapters
+            chapters = await rebuild_chapters(session, project_id)
+            chapter_count = len(chapters)
+            logger.info(
+                f"[SuggestTimeline] Auto-built {chapter_count} chapter(s) "
+                f"from {len(created_scenes)} scenes"
+            )
+        except Exception as _ch_err:
+            # Chapter builder failed; rollback its session changes so
+            # the OUTER request handler can still close cleanly.  The
+            # scenes themselves were committed by the audio-slicer
+            # earlier so they're safe.
+            logger.warning(
+                f"[SuggestTimeline] Chapter auto-build failed (non-fatal): {_ch_err}"
+            )
+            try:
+                await session.rollback()
+            except Exception:
+                pass
 
         return SuggestTimelineResponse(
-            scenes=scene_responses,
-            message=f"Created {len(created_scenes)} scenes using optimal segmentation "
-                    f"(DP algorithm, {len(phrase_groups)} phrases analyzed)",
+            created_count=len(created_scenes),
+            scene_ids=_created_scene_ids,
+            message=(
+                f"Created {len(created_scenes)} scenes using optimal "
+                f"segmentation (DP algorithm, {len(phrase_groups)} phrases). "
+                f"Auto-built {chapter_count} chapter(s) for chunked editing."
+            ),
         )
 
     # ── Build lyrics block for LLM (music mode) ───────────────────────
@@ -3731,6 +3783,22 @@ async def suggest_timeline(
         logger.info(f"Sliced audio for {sliced} scenes")
     except Exception as e:
         logger.warning(f"Audio slicing failed: {e}")
+
+    # Auto-build chapters from the new scenes — same as the DP-narration
+    # path above.  This wires "Suggest Timeline" → chunked editing for
+    # free regardless of project mode.  Picks `# script_headers` if
+    # present, otherwise auto-splits by scene count from Settings.
+    _chapter_count = 0
+    try:
+        from backend.services.chapters import rebuild_chapters as _rebuild_chapters
+        _chs = await _rebuild_chapters(session, project_id)
+        _chapter_count = len(_chs)
+        logger.info(
+            f"Suggest Fresh Timeline: auto-built {_chapter_count} chapter(s) "
+            f"for project {project_id}"
+        )
+    except Exception as _ch_err:
+        logger.warning(f"Chapter auto-build failed (non-fatal): {_ch_err}")
 
     logger.info(
         f"Suggest Fresh Timeline: created {len(created_ids)} scenes for project {project_id}"

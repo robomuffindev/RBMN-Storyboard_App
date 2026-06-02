@@ -565,15 +565,47 @@ async def get_flow_progress(project_id: UUID) -> FlowProgressResponse:
 async def generate_video_flow(
     project_id: UUID,
     session: AsyncSession = Depends(get_session),
+    chapter_id: Optional[UUID] = None,
 ) -> VideoFlowResponse:
     """Use an LLM to generate a cohesive scene-by-scene storyboard flow
-    based on the project concept, style, characters, lyrics, and existing scenes."""
+    based on the project concept, style, characters, lyrics, and existing scenes.
+
+    When ``chapter_id`` query param is provided, generation is SCOPED to
+    that chapter's scenes only and the chapter's description /
+    character_focus / style_notes are passed into the LLM as extra
+    creative direction.  Use this for the "mini-project per chapter"
+    workflow on long narrations.
+    """
     project = await _get_project(project_id, session)
 
-    # Gather scenes
-    stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
-    result = await session.execute(stmt)
-    scenes = result.scalars().all()
+    # Gather scenes — chapter-scoped when requested
+    chapter_ctx: Optional[dict] = None
+    if chapter_id:
+        from backend.database.models import Chapter as _Chapter
+        from backend.services.chapters import scenes_in_chapter_tree
+        ch_result = await session.execute(
+            select(_Chapter).where(
+                _Chapter.id == chapter_id, _Chapter.project_id == project_id
+            )
+        )
+        ch = ch_result.scalars().first()
+        if not ch:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+        scenes = await scenes_in_chapter_tree(session, chapter_id)
+        chapter_ctx = {
+            "name": ch.name,
+            "description": ch.description or "",
+            "character_focus": list(ch.character_focus or []),
+            "style_notes": ch.style_notes or "",
+        }
+        logger.info(
+            f"Flow generate scoped to chapter {ch.short_code}: "
+            f"{len(scenes)} scenes, desc={len(ch.description or '')} chars"
+        )
+    else:
+        stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+        result = await session.execute(stmt)
+        scenes = result.scalars().all()
 
     if not scenes:
         raise HTTPException(status_code=400, detail="No scenes found. Create scenes first.")
@@ -592,7 +624,8 @@ async def generate_video_flow(
 
     try:
         result = await _generate_flow_inner(
-            project_id, project, scenes, session, pid
+            project_id, project, scenes, session, pid,
+            chapter_ctx=chapter_ctx,
         )
         _flow_progress[pid]["status"] = "done"
         _flow_progress[pid]["completed_batches"] = _flow_progress[pid]["total_batches"]
@@ -618,8 +651,15 @@ async def _generate_flow_inner(
     scenes: list,
     session: AsyncSession,
     pid: str,
+    chapter_ctx: Optional[dict] = None,
 ) -> "VideoFlowResponse":
-    """Inner flow generation logic with progress updates."""
+    """Inner flow generation logic with progress updates.
+
+    When ``chapter_ctx`` is provided, the chapter's description,
+    character_focus, and style_notes are appended to the LLM context
+    block so the generated flow honors the chapter-level creative
+    direction.
+    """
     from backend.database.models import Lyrics as LyricsModel
     from backend.api.generation import _get_scene_lyrics
 
@@ -627,6 +667,35 @@ async def _generate_flow_inner(
     s = project.settings or {}
     concept_text = s.get("concept_text", "")
     style_text = s.get("style_text", "")
+    # If chapter context provided, fold its description into concept_text
+    # and its style_notes into style_text so existing prompt-building
+    # paths pick it up automatically.
+    if chapter_ctx:
+        chapter_block = []
+        if chapter_ctx.get("description"):
+            chapter_block.append(
+                f"CHAPTER \"{chapter_ctx.get('name', '')}\" CONCEPT:\n"
+                f"{chapter_ctx['description']}"
+            )
+        if chapter_ctx.get("character_focus"):
+            chapter_block.append(
+                f"CHARACTERS FEATURED IN THIS CHAPTER: "
+                f"{', '.join(chapter_ctx['character_focus'])}"
+            )
+        if chapter_ctx.get("style_notes"):
+            chapter_block.append(
+                f"CHAPTER VISUAL STYLE NOTES: {chapter_ctx['style_notes']}"
+            )
+        if chapter_block:
+            concept_text = (
+                ("\n\n".join(chapter_block) + "\n\n")
+                + (concept_text or "")
+            )
+        if chapter_ctx.get("style_notes"):
+            style_text = (
+                f"{chapter_ctx['style_notes']}\n\n{style_text}"
+                if style_text else chapter_ctx['style_notes']
+            )
     characters = s.get("characters", [])
 
     # Gather lyrics

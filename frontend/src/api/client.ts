@@ -198,6 +198,7 @@ export const startSequentialAutoGen = (
   useStoryFlow: boolean = true,
   lipsyncEnabled: boolean = true,
   vocalsOnlyForLipsync: boolean = false,
+  chapterId?: string,
 ) =>
   api.post<{
     status: string;
@@ -216,6 +217,7 @@ export const startSequentialAutoGen = (
     use_story_flow: useStoryFlow,
     lipsync_enabled: lipsyncEnabled,
     vocals_only_for_lipsync: vocalsOnlyForLipsync,
+    chapter_id: chapterId ?? null,
   });
 
 export const getSequentialAutoGenStatus = (projectId: string) =>
@@ -441,9 +443,9 @@ export const getVideoFlow = (projectId: string) =>
     `/projects/${projectId}/concept/flow`
   );
 
-export const generateVideoFlow = (projectId: string) =>
+export const generateVideoFlow = (projectId: string, chapterId?: string) =>
   api.post<{ ideas: Array<{ scene_id: string; flow_idea: string }> }>(
-    `/projects/${projectId}/concept/flow/generate`
+    `/projects/${projectId}/concept/flow/generate${chapterId ? `?chapter_id=${chapterId}` : ''}`
   );
 
 export const getFlowProgress = (projectId: string) =>
@@ -774,6 +776,18 @@ export const previewLLMBatches = (
   api.post<LLMBatchPreview>(
     `/projects/${projectId}/chapters/${chapterId}/preview-llm-batches`,
     { llm_provider: llmProvider ?? null },
+  );
+
+/** Generate a chapter description via LLM, optionally also inferring character_focus + style_notes (full=true). */
+export const generateChapterDescription = (
+  projectId: string,
+  chapterId: string,
+  full: boolean = true,
+) =>
+  api.post(
+    `/projects/${projectId}/chapters/${chapterId}/generate-description`,
+    { full },
+    { timeout: 180000 },
   );
 
 /** Resolve any shortcode (asset / scene / chapter) → entity + redirect. */

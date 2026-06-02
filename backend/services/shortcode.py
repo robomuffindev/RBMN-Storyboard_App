@@ -367,7 +367,7 @@ async def resolve_shortcode(session: AsyncSession, code: str) -> Optional[Dict[s
                 "id": str(row[0]),
                 "project_id": str(row[1]),
                 "shortcode": normalized,
-                "frontend_route": f"/projects/{row[1]}/assets#{row[0]}",
+                "frontend_route": f"/project/{row[1]}/assets#{row[0]}",
             }
         return None
 
@@ -386,8 +386,8 @@ async def resolve_shortcode(session: AsyncSession, code: str) -> Optional[Dict[s
                 "chapter_id": str(row[2]) if row[2] else None,
                 "shortcode": normalized,
                 "frontend_route": (
-                    f"/projects/{row[1]}/c/{await _chapter_shortcode(session, row[2])}"
-                    if row[2] else f"/projects/{row[1]}"
+                    f"/project/{row[1]}/c/{await _chapter_shortcode(session, row[2])}"
+                    if row[2] else f"/project/{row[1]}"
                 ),
             }
         return None
@@ -405,7 +405,7 @@ async def resolve_shortcode(session: AsyncSession, code: str) -> Optional[Dict[s
                 "id": str(row[0]),
                 "project_id": str(row[1]),
                 "shortcode": normalized,
-                "frontend_route": f"/projects/{row[1]}/c/{normalized}",
+                "frontend_route": f"/project/{row[1]}/c/{normalized}",
             }
         return None
 

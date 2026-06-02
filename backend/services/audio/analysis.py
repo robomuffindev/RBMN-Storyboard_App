@@ -15,6 +15,45 @@ from typing import Optional, Dict, List, Any
 logger = logging.getLogger(__name__)
 
 
+# ── Audio duration helper ───────────────────────────────────────────────
+# Used to scale Whisper / Demucs timeouts and budget by file length.
+# Cheap probe with ffprobe; cached per (path, mtime) so we don't shell
+# out twice in the same pipeline run.
+
+_DURATION_CACHE: Dict[str, float] = {}
+
+
+def _get_audio_duration_seconds(audio_path: str) -> float:
+    """Return audio duration in seconds.  Returns 0.0 on failure (so
+    callers can fall back to a fixed budget without crashing).
+
+    Caches results keyed by (absolute_path, mtime) so repeated calls in
+    the same run reuse the answer.
+    """
+    try:
+        p = Path(audio_path)
+        if not p.exists():
+            return 0.0
+        cache_key = f"{p.resolve()}|{p.stat().st_mtime}"
+        if cache_key in _DURATION_CACHE:
+            return _DURATION_CACHE[cache_key]
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(p),
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        dur = float(result.stdout.strip()) if result.stdout.strip() else 0.0
+        _DURATION_CACHE[cache_key] = dur
+        return dur
+    except Exception as e:
+        logger.debug(f"ffprobe duration probe failed for {audio_path}: {e}")
+        return 0.0
+
+
 # ── GPU Detection for Demucs (PyTorch / CUDA) ───────────────────────────
 # Demucs uses PyTorch under the hood.  If CUDA is available we pass
 # `-d cuda` to the CLI so stem separation runs on the GPU.  Detection
@@ -107,6 +146,7 @@ class AudioAnalyzer:
         initial_text: Optional[str] = None,
         whisper_model: str = "large-v2",
         whisper_language: str = "English",
+        skip_demucs: bool = False,
     ) -> Dict[str, Any]:
         """
         Run full analysis pipeline: stem separation → transcription → section detection.
@@ -137,8 +177,25 @@ class AudioAnalyzer:
             logger.info(f"Using provided lyrics/script as initial prompt ({len(initial_text)} chars)")
 
         # Step 1: Stem separation
-        stems = self.separate_stems(str(audio_path))
-        logger.info(f"Stem separation complete: {stems.keys()}")
+        # In narration modes the source audio is already pure speech with
+        # no music to separate — running Demucs is pure wasted compute
+        # (and can introduce phase artifacts).  skip_demucs=True wires
+        # every "stem" path to the original audio so downstream consumers
+        # (transcription fallback, UI playback) keep working.
+        if skip_demucs:
+            logger.info(
+                "Skipping Demucs stem separation — narration mode "
+                "(audio is already pure speech)"
+            )
+            stems = {
+                "vocals": str(audio_path),
+                "drums": str(audio_path),
+                "bass": str(audio_path),
+                "other": str(audio_path),
+            }
+        else:
+            stems = self.separate_stems(str(audio_path))
+            logger.info(f"Stem separation complete: {stems.keys()}")
 
         # Step 2: Transcription on vocal stem (with fallback to original audio)
         vocal_stem = stems.get("vocals")
@@ -433,9 +490,40 @@ class AudioAnalyzer:
                 compute_type=compute_type, asr_options=asr_options,
             )
 
-            # Transcribe with VAD
+            # Transcribe with VAD.  Log audio duration up-front so a
+            # long narration (60+ min) doesn't look like a stuck job —
+            # the user can see "1h audio, expect ~10 min on CUDA / ~2h
+            # on CPU" before the silent transcribe phase starts.  A
+            # background heartbeat thread logs every 60s while the
+            # transcribe call is blocked.
+            _dur = _get_audio_duration_seconds(str(audio_path))
+            if _dur > 0:
+                if device == "cuda":
+                    _est = max(_dur / 8.0, 30.0)   # ~5-10× faster than realtime
+                else:
+                    _est = max(_dur * 1.5, 60.0)   # CPU ~1-2× realtime
+                logger.info(
+                    f"Whisper transcribe starting: audio={_dur:.0f}s "
+                    f"({_dur / 60:.1f} min); estimated runtime "
+                    f"~{_est:.0f}s on {device}"
+                )
             audio = whisperx.load_audio(str(audio_path))
-            result = model.transcribe(audio, language=lang_code)
+            import threading
+            _hb_stop = threading.Event()
+            def _heartbeat() -> None:
+                t = 0
+                while not _hb_stop.wait(60):
+                    t += 60
+                    logger.info(
+                        f"Whisper transcribe heartbeat: still running, "
+                        f"{t}s elapsed (device={device}, audio={_dur:.0f}s)"
+                    )
+            _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+            _hb_thread.start()
+            try:
+                result = model.transcribe(audio, language=lang_code)
+            finally:
+                _hb_stop.set()
 
             # Align words
             model_a, metadata = whisperx.load_align_model(language_code=lang_code, device=device)
@@ -1358,17 +1446,40 @@ class AudioAnalyzer:
         except Exception as e:
             raise RuntimeError(f"Failed to submit ComfyUI Whisper workflow: {e}")
 
-        # Step 5: Wait for completion via polling history
-        # Whisper can take minutes for long audio files
-        max_wait = 1200  # 20 minutes
+        # Step 5: Wait for completion via polling history + queue.
+        # Whisper's runtime scales ROUGHLY linearly with audio length:
+        # large-v2 on a 4090 → ~5-10x faster than real time → 6-12 min/hr
+        # CPU fallback (no CUDA, int8) → 1-3x real time → 1-3 hr/hr
+        # We size the budget for the slow case so long narrations finish:
+        # max_wait = max(20 min baseline, 4 × audio_seconds, 30 min hard floor).
+        # This keeps short clips snappy and avoids spurious timeouts on
+        # hour-long narrations.
+        _audio_dur = _get_audio_duration_seconds(audio_path)
+        max_wait = max(
+            1200,                           # 20 min absolute minimum
+            int(_audio_dur * 4),            # 4x audio length budget
+            1800,                           # 30 min floor for long jobs
+        )
+        # Cap at 6 hours to prevent infinite hangs on a wedged server.
+        max_wait = min(max_wait, 6 * 3600)
         poll_interval = 3
         elapsed = 0.0
         history = None
+        logger.info(
+            f"ComfyUI Whisper poll budget: {max_wait // 60} min "
+            f"(audio ~{_audio_dur:.0f}s)"
+        )
+
+        # Track the running task so progress logs can show queue position
+        # while we're still queued behind other jobs.
+        last_queue_status = ""
 
         while elapsed < max_wait:
             time.sleep(poll_interval)
             elapsed += poll_interval
 
+            # Check the /history first — if we already have an output this
+            # job is done and we don't need /queue.
             try:
                 hist_resp = requests.get(f"{base_url}/history/{prompt_id}", timeout=10)
                 if hist_resp.status_code == 200:
@@ -1376,18 +1487,56 @@ class AudioAnalyzer:
                     if prompt_id in hist_data:
                         prompt_history = hist_data[prompt_id]
                         outputs = prompt_history.get("outputs", {})
-                        # Check if the key output nodes have data
                         if outputs.get("92") or outputs.get("98") or outputs.get("93"):
                             history = prompt_history
                             break
             except Exception as e:
                 logger.debug(f"History poll failed: {e}")
 
+            # Every 30s, also peek at /queue so we can report whether we're
+            # queued behind other prompts or actually running.
             if elapsed % 30 < poll_interval:
-                logger.info(f"ComfyUI Whisper: waiting... ({elapsed:.0f}s elapsed)")
+                try:
+                    q_resp = requests.get(f"{base_url}/queue", timeout=10)
+                    if q_resp.status_code == 200:
+                        q_data = q_resp.json()
+                        running = q_data.get("queue_running") or []
+                        pending = q_data.get("queue_pending") or []
+                        # ComfyUI queue items are [(prompt_number, prompt_id, prompt, extra, outputs), ...]
+                        is_running = any(
+                            (isinstance(it, list) and len(it) >= 2 and it[1] == prompt_id)
+                            for it in running
+                        )
+                        pending_position = None
+                        for idx, it in enumerate(pending):
+                            if isinstance(it, list) and len(it) >= 2 and it[1] == prompt_id:
+                                pending_position = idx + 1
+                                break
+                        if is_running:
+                            last_queue_status = "running on server"
+                        elif pending_position is not None:
+                            last_queue_status = (
+                                f"queued (position {pending_position} of {len(pending)})"
+                            )
+                        else:
+                            last_queue_status = (
+                                "no longer in queue — waiting for /history to surface output"
+                            )
+                except Exception as e:
+                    logger.debug(f"Queue poll failed: {e}")
+                logger.info(
+                    f"ComfyUI Whisper: {last_queue_status or 'polling'}; "
+                    f"{elapsed:.0f}s elapsed / budget {max_wait}s "
+                    f"(audio {_audio_dur:.0f}s)"
+                )
 
         if not history:
-            raise RuntimeError(f"ComfyUI Whisper timed out after {max_wait}s")
+            raise RuntimeError(
+                f"ComfyUI Whisper timed out after {max_wait}s "
+                f"(audio length {_audio_dur:.0f}s).  Last status: "
+                f"{last_queue_status or 'unknown'}.  Raise the budget by uploading "
+                f"in chapters or by running Whisper locally."
+            )
 
         outputs = history.get("outputs", {})
         logger.info(f"ComfyUI Whisper completed. Output nodes: {list(outputs.keys())}")

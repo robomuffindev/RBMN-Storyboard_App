@@ -1898,6 +1898,11 @@ class SeqAutoGenRequest(BaseModel):
     use_story_flow: bool = True  # If True, include video flow ideas in LLM enhance context
     lipsync_enabled: bool = True  # If True, boost audio_guidance for lip-sync on all scenes
     vocals_only_for_lipsync: bool = False  # If True, send only vocal stems when lipsync is enabled
+    # Chapter scope — when provided, auto-gen runs ONLY against scenes
+    # in this chapter (and its descendants).  Lets the user open the
+    # Auto-Gen modal from a chapter drilldown and run jobs only for that
+    # mini-project.  When None, runs against every scene in the project.
+    chapter_id: Optional[UUID] = None
 
 
 class SeqAutoGenStatusResponse(BaseModel):
@@ -2065,13 +2070,25 @@ async def start_sequential_auto_gen(
     if existing and existing.get("status") == "running":
         return SeqAutoGenStatusResponse(**existing)
 
-    # Count eligible scenes
-    scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
-    scenes_result = await session.execute(scenes_stmt)
-    scenes = list(scenes_result.scalars().all())
-
-    if not scenes:
-        raise HTTPException(status_code=400, detail="No scenes found in project")
+    # Count eligible scenes — chapter-scoped when requested
+    if req.chapter_id:
+        from backend.services.chapters import scenes_in_chapter_tree
+        scenes = await scenes_in_chapter_tree(session, req.chapter_id)
+        logger.info(
+            f"Sequential auto-gen scoped to chapter {req.chapter_id}: "
+            f"{len(scenes)} scenes"
+        )
+        if not scenes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Chapter {req.chapter_id} has no scenes",
+            )
+    else:
+        scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+        scenes_result = await session.execute(scenes_stmt)
+        scenes = list(scenes_result.scalars().all())
+        if not scenes:
+            raise HTTPException(status_code=400, detail="No scenes found in project")
 
     # Cancel any stale PENDING jobs from previous auto-gen runs for this project.
     # The dispatch loop processes ALL pending jobs regardless of origin, so leftover
@@ -2143,6 +2160,7 @@ async def start_sequential_auto_gen(
             lipsync_enabled=req.lipsync_enabled,
             vocals_only_for_lipsync=req.vocals_only_for_lipsync,
             batch_run_id=batch_run_id,
+            chapter_id=req.chapter_id,
         )
     )
 
@@ -2884,6 +2902,7 @@ async def _run_sequential_auto_gen(
     lipsync_enabled: bool = True,
     vocals_only_for_lipsync: bool = False,
     batch_run_id: str | None = None,
+    chapter_id: Optional[UUID] = None,
 ):
     """Background task: process scenes sequentially or via continuous dispatch.
 
@@ -2925,9 +2944,22 @@ async def _run_sequential_auto_gen(
             lyrics_words: list[dict] = lyrics_record.words if lyrics_record else []
             user_lyrics_text: str = (getattr(lyrics_record, "initial_text", "") or "").strip() if lyrics_record else ""
 
-            scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
-            scenes_result = await session.execute(scenes_stmt)
-            scenes = list(scenes_result.scalars().all())
+            # Chapter scope: if chapter_id was passed, restrict the working
+            # scene set to scenes inside that chapter's tree. Otherwise full
+            # project. This MUST mirror the handler's eligibility filter or
+            # the background task will silently process more scenes than the
+            # user asked for.
+            if chapter_id is not None:
+                from backend.services.chapters import scenes_in_chapter_tree
+                scenes = await scenes_in_chapter_tree(session, chapter_id)
+                logger.info(
+                    f"[bg] Sequential auto-gen scoped to chapter {chapter_id}: "
+                    f"{len(scenes)} scenes"
+                )
+            else:
+                scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+                scenes_result = await session.execute(scenes_stmt)
+                scenes = list(scenes_result.scalars().all())
 
             # Set up LLM enhancer
             enhancer = None
@@ -2979,20 +3011,31 @@ async def _run_sequential_auto_gen(
         # Ensures each scene has a unique storyboard idea before generation
         if llm_api_key and llm_provider:
             async with session_factory() as flow_session:
-                # Re-load project and scenes for flow generation
+                # Re-load project and scenes for flow generation. When
+                # chapter-scoped, only flow-gen + re-read scenes inside the
+                # chapter tree — running flow gen for the entire project
+                # would be both wasteful and surprising to the user.
                 flow_project = await flow_session.get(Project, project_id)
-                flow_scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
-                flow_scenes_result = await flow_session.execute(flow_scenes_stmt)
-                flow_scenes = list(flow_scenes_result.scalars().all())
+                if chapter_id is not None:
+                    from backend.services.chapters import scenes_in_chapter_tree
+                    flow_scenes = await scenes_in_chapter_tree(flow_session, chapter_id)
+                else:
+                    flow_scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+                    flow_scenes_result = await flow_session.execute(flow_scenes_stmt)
+                    flow_scenes = list(flow_scenes_result.scalars().all())
                 generated = await _ensure_video_flow(
                     flow_project, flow_scenes, flow_session, llm_provider, llm_api_key, llm_model
                 )
                 if generated:
                     _seq_auto_jobs[pid]["current_step"] = "generated video flow"
-                    # Re-read scenes with updated flow ideas
-                    scenes_stmt2 = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
-                    scenes_result2 = await flow_session.execute(scenes_stmt2)
-                    scenes = list(scenes_result2.scalars().all())
+                    # Re-read scenes with updated flow ideas (same scope)
+                    if chapter_id is not None:
+                        from backend.services.chapters import scenes_in_chapter_tree
+                        scenes = await scenes_in_chapter_tree(flow_session, chapter_id)
+                    else:
+                        scenes_stmt2 = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+                        scenes_result2 = await flow_session.execute(scenes_stmt2)
+                        scenes = list(scenes_result2.scalars().all())
 
         # ── Mode validation guard ─────────────────────────────────────
         # Reject unknown modes up front so the run can't silently "complete"

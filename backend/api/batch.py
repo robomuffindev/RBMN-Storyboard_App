@@ -877,8 +877,28 @@ async def _process_single_item(
             cache_dir=str(project_path / "cache" / "audio_analysis")
         )
         initial_text = config.lyrics_text.strip() or ""
-        # B-7: 1h hard cap so a wedged Whisper can't hang the batch item
-        # indefinitely.  Demucs has its own 30-min subprocess timeout.
+        # Narration batches feed pure-speech audio — skip Demucs to save
+        # ~30 min / item and avoid phase artifacts from stem separation.
+        _skip_demucs = config.render_type in ("narration_video", "narration_images")
+        if _skip_demucs:
+            logger.info(
+                f"Batch item: skipping Demucs for narration render type "
+                f"({config.render_type})"
+            )
+        # B-7 (rev): per-item budget now SCALES with audio length so
+        # hour-long narrations don't get killed prematurely.  Floor at
+        # 1h (matches the old hard cap), then add 4× audio runtime for
+        # Whisper + 2× for Demucs on slow machines.  Cap at 8h for safety.
+        from backend.services.audio.analysis import _get_audio_duration_seconds
+        _audio_dur = _get_audio_duration_seconds(str(audio_dest))
+        _whisper_budget = int(_audio_dur * 4)            # 4× real time
+        _demucs_budget = 0 if _skip_demucs else int(_audio_dur * 2)
+        _budget = max(3600, _whisper_budget + _demucs_budget, 1800)
+        _budget = min(_budget, 8 * 3600)
+        logger.info(
+            f"Batch item analysis budget: {_budget // 60} min "
+            f"(audio ~{_audio_dur:.0f}s, skip_demucs={_skip_demucs})"
+        )
         try:
             analysis_result = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -890,8 +910,9 @@ async def _process_single_item(
                     initial_text=initial_text,
                     whisper_model=whisper_model,
                     whisper_language=whisper_language,
+                    skip_demucs=_skip_demucs,
                 ),
-                timeout=3600,
+                timeout=_budget,
             )
         except asyncio.TimeoutError:
             raise RuntimeError(

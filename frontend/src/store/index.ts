@@ -44,6 +44,21 @@ interface AppState {
   // modal, which is the one wired to the bottom-of-screen status bar.
   autoGenOpen: boolean;
 
+  // ── Chapter scope ──────────────────────────────────────────────────
+  // When the URL is /project/:id/c/:short_code, AppLayout populates
+  // chapterScope so chapter-aware components (Timeline, SceneList,
+  // Auto-Gen modal, Export modal) can filter by it.  Null = no scope =
+  // show everything (main project view).
+  chapterScope: {
+    chapterId: string;
+    shortCode: string;
+    name: string;
+    color: string;
+    sceneIds: Set<string>;
+    startTime: number;
+    endTime: number;
+  } | null;
+
   // Actions
   setProject: (project: Project | null) => void;
   setScenes: (scenes: Scene[]) => void;
@@ -70,6 +85,9 @@ interface AppState {
 
   // Auto-gen modal
   setAutoGenOpen: (open: boolean) => void;
+
+  // Chapter scope
+  setChapterScope: (scope: AppState['chapterScope']) => void;
 
   // Job management
   addJob: (job: Job) => void;
@@ -137,6 +155,7 @@ export const useAppStore = create<AppState>((set) => ({
   batchPreviewVisible: false,
   batchPreviewEnabled: false,
   autoGenOpen: false,
+  chapterScope: null,
 
   // Setters
   setProject: (project) => set({ currentProject: project }),
@@ -161,6 +180,7 @@ export const useAppStore = create<AppState>((set) => ({
   setBatchPreviewVisible: (visible) => set({ batchPreviewVisible: visible }),
   setBatchPreviewEnabled: (enabled) => set({ batchPreviewEnabled: enabled }),
   setAutoGenOpen: (open) => set({ autoGenOpen: open }),
+  setChapterScope: (scope) => set({ chapterScope: scope }),
 
   // Jobs
   addJob: (job) => set((s) => ({ jobs: pruneJobs([...s.jobs, job]) })),

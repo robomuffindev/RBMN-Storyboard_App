@@ -26,7 +26,7 @@ export default function ChapterBreadcrumb({
     return (
       <div className="flex items-center gap-2 text-sm text-gray-400">
         <Link
-          to={`/projects/${projectId}`}
+          to={`/project/${projectId}`}
           className="text-purple-300 hover:text-purple-200 transition-colors"
         >
           ← {projectName}
@@ -41,7 +41,7 @@ export default function ChapterBreadcrumb({
       aria-label="Chapter breadcrumb"
     >
       <Link
-        to={`/projects/${projectId}`}
+        to={`/project/${projectId}`}
         className="text-purple-300 hover:text-purple-200 transition-colors"
       >
         ← {projectName}
@@ -55,7 +55,7 @@ export default function ChapterBreadcrumb({
               <span className="text-gray-200 font-medium">{ch.name}</span>
             ) : (
               <Link
-                to={`/projects/${projectId}/c/${ch.short_code}`}
+                to={`/project/${projectId}/c/${ch.short_code}`}
                 className="text-purple-300 hover:text-purple-200 transition-colors"
               >
                 {ch.name}

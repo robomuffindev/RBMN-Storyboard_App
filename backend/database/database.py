@@ -422,6 +422,18 @@ async def init_db() -> None:
             except Exception as e:
                 logger.debug(f"Migration (chapters) idx skipped: {e}")
 
+        # New: chapter creative-direction fields
+        for col_sql in (
+            "ALTER TABLE chapters ADD COLUMN description TEXT DEFAULT ''",
+            "ALTER TABLE chapters ADD COLUMN character_focus JSON DEFAULT '[]'",
+            "ALTER TABLE chapters ADD COLUMN style_notes TEXT DEFAULT ''",
+        ):
+            try:
+                await conn.execute(text(col_sql))
+                logger.info(f"Migration (chapters): {col_sql}")
+            except Exception:
+                pass
+
         logger.info("Migration (chapters): schema patches complete")
 
         # 6. Backfill — runs only for projects/assets that don't yet have shortcodes.

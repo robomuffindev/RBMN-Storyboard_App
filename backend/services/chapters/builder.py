@@ -88,6 +88,10 @@ class ChapterTreeNode:
     start_time: float
     end_time: float
     tags: List[str]
+    # Chapter-level creative direction (Phase 2)
+    description: str
+    character_focus: List[str]
+    style_notes: str
     scene_count: int
     scene_ids: List[str]
     children: List["ChapterTreeNode"] = field(default_factory=list)
@@ -198,10 +202,27 @@ async def _create_chapters_from_headers(
         await session.delete(c)
 
     # Delete all auto-generated chapters (they'll be recreated by auto-split
-    # after header chapters are placed)
-    for c in existing_chapters:
+    # after header chapters are placed).  See _create_auto_chapters for
+    # the same FK-safe ordering: scenes first, then chapters depth-DESC.
+    _pid_hex = project_id.hex
+    for c in list(existing_chapters):
         if c.source == "auto":
-            await session.delete(c)
+            try:
+                session.expunge(c)
+            except Exception:
+                pass
+    await session.execute(
+        text("UPDATE scenes SET chapter_id = NULL WHERE project_id = :pid"),
+        {"pid": _pid_hex},
+    )
+    for d in range(settings_.max_depth, -1, -1):
+        await session.execute(
+            text(
+                "DELETE FROM chapters "
+                "WHERE project_id = :pid AND source = 'auto' AND depth = :d"
+            ),
+            {"pid": _pid_hex, "d": d},
+        )
     await session.flush()
 
     # Create / update chapter rows from headers
@@ -291,10 +312,36 @@ async def _create_auto_chapters(
     if not scenes:
         return []
 
-    # Wipe auto-generated chapters
-    for c in existing_chapters:
+    # ── Wipe auto-generated chapters ─────────────────────────────────
+    # Order is critical for SQLite FK enforcement:
+    #   1. NULL out scenes.chapter_id (scenes reference chapters)
+    #   2. DELETE depth-DESC (sub-chapters reference parents)
+    # Otherwise either step fails: a chapter can't be deleted while
+    # scenes point at it, and parents can't be deleted while subs do.
+    project_id = scenes[0].project_id
+    _pid_hex = project_id.hex
+    # Expunge cached ORM objects so we don't re-flush stale copies.
+    for c in list(existing_chapters):
         if c.source == "auto":
-            await session.delete(c)
+            try:
+                session.expunge(c)
+            except Exception:
+                pass
+    # Step 1: unbind scenes from any chapter (we'll re-bind after the new
+    # chapter tree is built).
+    await session.execute(
+        text("UPDATE scenes SET chapter_id = NULL WHERE project_id = :pid"),
+        {"pid": _pid_hex},
+    )
+    # Step 2: delete auto chapters deepest-first so sub→parent FK holds.
+    for d in range(settings_.max_depth, -1, -1):
+        await session.execute(
+            text(
+                "DELETE FROM chapters "
+                "WHERE project_id = :pid AND source = 'auto' AND depth = :d"
+            ),
+            {"pid": _pid_hex, "d": d},
+        )
     await session.flush()
 
     # Group scenes into batches
@@ -580,6 +627,9 @@ def build_chapter_tree_response(
             start_time=c.start_time,
             end_time=c.end_time,
             tags=list(c.tags or []),
+            description=getattr(c, "description", "") or "",
+            character_focus=list(getattr(c, "character_focus", []) or []),
+            style_notes=getattr(c, "style_notes", "") or "",
             scene_count=len(sids),
             scene_ids=[str(s) for s in sids],
         )

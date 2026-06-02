@@ -23,7 +23,13 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
   const setPlaybackPosition = useAppStore(s => s.setPlaybackPosition);
   const togglePlay = useAppStore(s => s.togglePlay);
   const activeScene = useAppStore(s => s.activeScene);
-  const scenes = useAppStore(s => s.scenes);
+  const allScenes = useAppStore(s => s.scenes);
+  const chapterScope = useAppStore(s => s.chapterScope);
+  // When drilled into a chapter, filter the visible scene list down to
+  // that chapter's scenes only.  Main project view → unchanged.
+  const scenes = chapterScope
+    ? allScenes.filter((s: any) => chapterScope.sceneIds.has(String(s.id)))
+    : allScenes;
   const currentProject = useAppStore(s => s.currentProject);
   const scenesLocked = useAppStore(s => s.scenesLocked);
   const setScenesLocked = useAppStore(s => s.setScenesLocked);
@@ -104,6 +110,12 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
       if (res.data.length > 0) {
         store.setActiveScene(res.data[0]);
       }
+      // Broadcast so any mounted chapter-aware component (AppLayout's
+      // Chapters tab, the timeline overlay, the export-modal picker)
+      // refetches the freshly-built chapter tree.
+      window.dispatchEvent(new CustomEvent('rbmn:chapters:invalidate', {
+        detail: { projectId: currentProject.id },
+      }));
     } catch (err: any) {
       const detail = err?.response?.data?.detail || 'Failed to suggest timeline';
       alert(`Error: ${detail}`);

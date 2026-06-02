@@ -594,3 +594,33 @@ Day 14    Polish + acceptance tests + docs + CHANGELOG entry.
 5. Pick whether **Phase 0 alone** can ship first (foundation, no UI), or whether we should bundle Phases 0+1 into one release.
 
 Reply with answers and I'll start with Phase 0 and check in for review before Phase 1.
+
+---
+
+## STATUS UPDATE — 2026-06-02 (shipped in 1.8.0)
+
+**Phase 0 + Phase 1 + Phase 2 Direction Panel: SHIPPED.**
+
+What's live:
+- ✅ Chapter / ShortcodeCounter tables, scene.chapter_id, asset.short_code, AppSettings limits
+- ✅ Idempotent migration with backfill (auto default chapter + shortcodes for existing rows)
+- ✅ Script header parser (Markdown `#`/`##`/`###`) with diff-based reconciliation
+- ✅ Auto-split by scene count with natural-pause boundary detection
+- ✅ Chapter REST API + `POST /generate-description` LLM endpoint (with dual-style OpenAI param fallback)
+- ✅ `GET /api/shortcode/{code}` universal resolver + `/s/{code}` frontend redirect
+- ✅ Per-chapter scope on `/concept/flow/generate?chapter_id=...` (description + characters + style folded into the LLM concept block)
+- ✅ ChapterScopeBanner with description / characters / style editor + ✨ Generate + prev/next nav
+- ✅ ChapterDirectionPanel on Chapters tab (per-card description + Generate description + Generate Story Flow + Generate ALL batch)
+- ✅ ChapterOverlay on timeline, ChapterTree, ChapterPicker for export
+- ✅ Zustand chapterScope slice → Timeline filters scenes by chapter
+- ✅ Export modal defaults to single-chapter when opened in chapter view
+- ✅ Suggest Timeline auto-runs chapter resolver, emits `rbmn:chapters:invalidate` event
+- ✅ Debug snapshot + diag CLI for chapter state
+
+**Still in Phase 1.5 / Phase 2 punch list (optional polish):**
+- 🔄 Chapter overlay bars rescale with timeline zoom (thread zoom factor through ChapterOverlay)
+- 🔄 Auto-Gen modal pre-defaulting to chapter scope when opened from drilldown
+- 🔄 Sub-chapter shortcode preservation across re-runs (currently top-level only)
+- 🔄 Series / cross-project asset reuse (Phase 3, deferred)
+
+Chapter-as-mini-project loop is end-to-end functional. Hour-long narrations now break into 14-card workflow with one ✨ Generate ALL batch creating all chapter directions, then per-chapter 🎬 Generate Story Flow building scene-level prompts that honor the chapter's creative direction.

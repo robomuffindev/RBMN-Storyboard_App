@@ -241,6 +241,10 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
           if (res.data.length > 0) {
             store.setActiveScene(res.data[0]);
           }
+          // Trigger chapter tree refetch in the AppLayout
+          window.dispatchEvent(new CustomEvent('rbmn:chapters:invalidate', {
+            detail: { projectId },
+          }));
         } catch (e) {
           console.warn('Auto-suggest timeline failed:', e);
         }

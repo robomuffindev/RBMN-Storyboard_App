@@ -22,9 +22,11 @@ import { useBackingTrackPlayer } from '@/hooks/useBackingTrackPlayer';
 import type { BackingTrackData } from '@/hooks/useBackingTrackPlayer';
 import { parseBackendDate } from '@/utils/time';
 import ChapterOverlay from '@/components/Chapters/ChapterOverlay';
-import ChapterBreadcrumb from '@/components/Chapters/ChapterBreadcrumb';
-import ChapterTree from '@/components/Chapters/ChapterTree';
+// ChapterBreadcrumb is rolled into ChapterScopeBanner now
+// ChapterTree is now wrapped inside ChapterDirectionPanel
 import ChapterPicker from '@/components/Chapters/ChapterPicker';
+import ChapterScopeBanner from '@/components/Chapters/ChapterScopeBanner';
+import ChapterDirectionPanel from '@/components/Chapters/ChapterDirectionPanel';
 
 const EMPTY_ARRAY: never[] = [];
 
@@ -65,16 +67,46 @@ export default function AppLayout() {
   const [chapterRebuilding, setChapterRebuilding] = useState<boolean>(false);
 
   const reloadChapters = useCallback(async () => {
-    if (!id) return;
+    if (!id) {
+      console.info('[chapters] reloadChapters: no project id yet');
+      return;
+    }
+    console.info('[chapters] reloadChapters: GET /api/projects/' + id + '/chapters/');
     try {
-      const { data } = await import('@/api/client').then(m => m.getChapters(id));
-      setChapterTree(data.chapters || []);
-    } catch (err) {
-      console.warn('[chapters] failed to load tree:', err);
+      const mod = await import('@/api/client');
+      const resp = await mod.getChapters(id);
+      const payload = resp.data;
+      const count = payload?.chapter_count ?? (payload?.chapters?.length ?? 0);
+      console.info('[chapters] reloadChapters OK:', count, 'chapter(s), top-level:', payload?.chapters?.length ?? 0);
+      setChapterTree(payload?.chapters || []);
+    } catch (err: any) {
+      const msg = err?.response?.status
+        ? `HTTP ${err.response.status}: ${err.response.data?.detail || err.message}`
+        : (err?.message || String(err));
+      console.warn('[chapters] reloadChapters FAILED:', msg, err);
     }
   }, [id]);
 
-  useEffect(() => { reloadChapters(); }, [reloadChapters]);
+  useEffect(() => {
+    console.info('[chapters] mount/id-change effect — id =', id);
+    reloadChapters();
+  }, [reloadChapters]);
+
+  // ── Cross-component chapter refresh bus ──────────────────────────
+  // Suggest Timeline (and other actions that change the chapter tree)
+  // dispatch `rbmn:chapters:invalidate` on window so this listener
+  // refetches.  No prop-drilling required.
+  useEffect(() => {
+    if (!id) return;
+    const handler = (ev: Event) => {
+      const det = (ev as CustomEvent).detail as { projectId?: string } | undefined;
+      // If a project id is provided, only refetch when it matches ours.
+      if (det?.projectId && det.projectId !== id) return;
+      reloadChapters();
+    };
+    window.addEventListener('rbmn:chapters:invalidate', handler);
+    return () => window.removeEventListener('rbmn:chapters:invalidate', handler);
+  }, [id, reloadChapters]);
 
   // Flatten chapter tree → map by short_code (for lookup)
   const chapterByShortCode = useMemo(() => {
@@ -97,26 +129,7 @@ export default function AppLayout() {
   // (chapter scene-id filter will land in Phase 1.5 once Timeline /
   //  SceneList accept a scope prop — see BLUEPRINT_CHAPTERS_v1.md §6.4)
 
-  // Ancestry for breadcrumb (root → leaf)
-  const activeChapterAncestry = useMemo<import('@/types').Chapter[]>(() => {
-    if (!activeChapter) return [];
-    const arr: import('@/types').Chapter[] = [];
-    // Walk parents
-    const byId = new Map<string, import('@/types').ChapterTreeNode>();
-    const collect = (nodes: import('@/types').ChapterTreeNode[]) => {
-      for (const n of nodes) {
-        byId.set(n.id, n);
-        if (n.children?.length) collect(n.children);
-      }
-    };
-    collect(chapterTree);
-    let cur: import('@/types').ChapterTreeNode | undefined = activeChapter;
-    while (cur) {
-      arr.unshift(cur);
-      cur = cur.parent_chapter_id ? byId.get(cur.parent_chapter_id) : undefined;
-    }
-    return arr;
-  }, [activeChapter, chapterTree]);
+  // activeChapterAncestry is now rendered inside ChapterScopeBanner
 
   const handleReparseChapters = useCallback(async (forceAuto: boolean = false) => {
     if (!id) return;
@@ -603,6 +616,34 @@ export default function AppLayout() {
     setScenes(stableScenes as Scene[]);
   }, [stableScenes, setScenes]);
 
+  // ── Push chapter scope into the Zustand store ─────────────────────
+  // Timeline / SceneList read store.chapterScope to filter what they
+  // render.  Null when on the main project URL.
+  const setChapterScopeAction = useAppStore((s) => s.setChapterScope);
+  useEffect(() => {
+    if (!activeChapter || !id) {
+      setChapterScopeAction(null);
+      return;
+    }
+    // Collect every scene id belonging to this chapter or any descendant
+    const sceneIds = new Set<string>();
+    const walk = (n: import('@/types').ChapterTreeNode) => {
+      n.scene_ids?.forEach((sid) => sceneIds.add(sid));
+      n.children?.forEach(walk);
+    };
+    walk(activeChapter);
+    setChapterScopeAction({
+      chapterId: activeChapter.id,
+      shortCode: activeChapter.short_code,
+      name: activeChapter.name,
+      color: activeChapter.color,
+      sceneIds,
+      startTime: activeChapter.start_time,
+      endTime: activeChapter.end_time,
+    });
+    return () => setChapterScopeAction(null);
+  }, [activeChapter, id, setChapterScopeAction]);
+
   useEffect(() => {
     setSections(stableSections as any[]);
   }, [stableSections, setSections]);
@@ -978,7 +1019,7 @@ export default function AppLayout() {
               {isNarrationProject ? 'Story Flow' : 'Video Flow'}
             </button>
             <button
-              onClick={() => setSelectedPanel('chapters')}
+              onClick={() => { setSelectedPanel('chapters'); reloadChapters(); }}
               className={`flex-1 px-2 py-1 rounded text-xs font-medium transition-colors flex items-center justify-center gap-1 ${
                 selectedPanel === 'chapters'
                   ? 'bg-purple-600 text-white'
@@ -1005,50 +1046,13 @@ export default function AppLayout() {
             ) : selectedPanel === 'flow' ? (
               <VideoFlowPanel projectId={id!} />
             ) : selectedPanel === 'chapters' ? (
-              <div className="h-full flex flex-col p-2 overflow-y-auto">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="text-xs text-gray-400 font-medium">Chapters</div>
-                  <button
-                    type="button"
-                    onClick={() => handleReparseChapters(false)}
-                    disabled={chapterRebuilding}
-                    title="Re-derive chapters from the script (preserves manual rename / color)"
-                    className="text-[10px] px-2 py-0.5 rounded bg-purple-700/40 text-purple-200 hover:bg-purple-700/70 disabled:opacity-50"
-                  >
-                    {chapterRebuilding ? 'Re-parsing…' : 'Re-parse'}
-                  </button>
-                </div>
-                {id && (
-                  <ChapterTree
-                    projectId={id}
-                    chapters={chapterTree}
-                    activeChapterShortCode={chapterShortCode || null}
-                    onAction={(ch, action) => {
-                      if (action === 'rename') {
-                        const name = prompt('New chapter name:', ch.name);
-                        if (name && name.trim()) {
-                          import('@/api/client').then(m => m.updateChapter(id, ch.id, { name: name.trim() })).then(reloadChapters);
-                        }
-                      } else if (action === 'recolor') {
-                        const color = prompt('New hex color (e.g. #7c3aed):', ch.color);
-                        if (color && /^#[0-9a-fA-F]{6}$/.test(color.trim())) {
-                          import('@/api/client').then(m => m.updateChapter(id, ch.id, { color: color.trim() })).then(reloadChapters);
-                        }
-                      } else if (action === 'merge') {
-                        if (confirm(`Merge "${ch.name}" with its next sibling?`)) {
-                          import('@/api/client').then(m => m.mergeChapterWithNext(id, ch.id)).then(reloadChapters);
-                        }
-                      } else if (action === 'split') {
-                        alert('Split: pick a scene in the chapter view → use Scene context menu → Split chapter here. (UI Phase 2)');
-                      }
-                    }}
-                  />
-                )}
-                <div className="mt-3 text-[10px] text-gray-500 leading-snug">
-                  Add <code>#</code> headings to your script (Audio &gt; Script) to define chapters automatically.
-                  Without headings the project is split by scene count (configurable in Settings &gt; LLM Batching).
-                </div>
-              </div>
+              <ChapterDirectionPanel
+                projectId={id!}
+                chapters={chapterTree}
+                onChange={reloadChapters}
+                onReparse={handleReparseChapters}
+                reparseBusy={chapterRebuilding}
+              />
             ) : (
               <AssetManager />
             )}
@@ -1291,11 +1295,28 @@ export default function AppLayout() {
           </div>
         )}
 
-        {/* Chapter breadcrumb (only when drilled into a chapter) */}
+        {/* Chapter scope banner — name, color, description, prev/next nav.
+            Only shows when drilled into a chapter (URL /c/<short_code>). */}
         {activeChapter && id && (
-          <div className="px-3 py-1.5 bg-gray-900/70 border-b border-gray-800">
-            <ChapterBreadcrumb projectId={id} projectName={project?.name} ancestry={activeChapterAncestry} />
-          </div>
+          <ChapterScopeBanner
+            projectId={id}
+            projectName={project?.name}
+            chapter={activeChapter}
+            flatChapters={(() => {
+              // Flatten tree in playback order for prev/next
+              const out: import('@/types').ChapterTreeNode[] = [];
+              const walk = (nodes: import('@/types').ChapterTreeNode[]) => {
+                for (const n of nodes) {
+                  out.push(n);
+                  if (n.children?.length) walk(n.children);
+                }
+              };
+              walk(chapterTree);
+              out.sort((a, b) => a.start_time - b.start_time);
+              return out;
+            })()}
+            onChange={reloadChapters}
+          />
         )}
         {/* Chapter overlay — colored bars row above the waveform */}
         {project && id && chapterTree.length > 0 && (
@@ -1602,7 +1623,16 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   // Chapter scope — defaults to 'all'.  When set to single/multiple
   // the export pipeline filters scenes, slices audio, and shifts
   // backing tracks + subtitle word timestamps.
-  const [chapterSelection, setChapterSelection] = useState<import('@/types').ChapterSelection>({ mode: 'all', chapter_ids: [] });
+  // ── Chapter-scope-aware default for the export modal ───────────────
+  // When the user opens Export from inside a chapter view, default the
+  // scope to "single chapter" pre-selecting THIS chapter.  No mode →
+  // sentinel from Zustand store.
+  const _chapterScopeFromStore = useAppStore((s) => s.chapterScope);
+  const [chapterSelection, setChapterSelection] = useState<import('@/types').ChapterSelection>(
+    _chapterScopeFromStore
+      ? { mode: 'single', chapter_ids: [_chapterScopeFromStore.chapterId] }
+      : { mode: 'all', chapter_ids: [] }
+  );
   const [chapterTreeForPicker, setChapterTreeForPicker] = useState<import('@/types').ChapterTreeNode[]>([]);
   const [reExportOpen, setReExportOpen] = useState(false);
   const [phase, setPhase] = useState<'config' | 'exporting' | 'done' | 'failed' | 'cancelled'>('config');
@@ -3030,19 +3060,45 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
     setStatusMsg(null);
 
     try {
+      // Forward chapter scope from Zustand FIRST so we can also pass it
+      // through to the pre-step story-flow call (otherwise that call
+      // generates ideas for all 328 scenes when the user only asked for
+      // 23 in this chapter).
+      const _zScope = useAppStore.getState().chapterScope;
+      const _scopeForRun = _zScope?.chapterId ?? undefined;
+
       // Generate video flow first if useStoryFlow is on and we're producing
-      // video — the per-scene enhance picks it up from project state.
+      // video — but ONLY if there's actually work to do.  When every scene
+      // in scope already has a flow_idea, regenerating is pure waste and
+      // overwrites edits the user may have made.
       if (useStoryFlow && (mode.includes('video') || mode === 'all_images')) {
-        setStatusMsg(isNarration ? 'Generating story flow ideas...' : 'Generating video flow ideas...');
-        try {
-          await generateVideoFlow(projectId);
-        } catch (e) {
-          console.warn('Story/video flow generation failed, continuing with existing flow data:', e);
+        const _allScenes = useAppStore.getState().scenes || [];
+        const _inScope: any[] = _zScope
+          ? _allScenes.filter((s: any) => _zScope.sceneIds.has(String(s.id)))
+          : _allScenes;
+        const _missingFlow = _inScope.some((s: any) => {
+          const flow = ((s.parameters || {}).flow_idea || '').trim();
+          return !flow;
+        });
+        if (_missingFlow) {
+          const _label = _zScope ? `chapter "${_zScope.name}"` : 'project';
+          setStatusMsg(
+            (isNarration ? 'Generating story flow ideas' : 'Generating video flow ideas')
+            + ` for ${_label}...`
+          );
+          try {
+            await generateVideoFlow(projectId, _scopeForRun);
+          } catch (e) {
+            console.warn('Story/video flow generation failed, continuing with existing flow data:', e);
+          }
+        } else {
+          console.info(
+            `[AutoGen] Skipping flow gen — all ${_inScope.length} ${_zScope ? 'chapter ' : ''}scenes already have flow_idea`
+          );
         }
       }
 
       setStatusMsg('Queuing generation jobs...');
-
       await startSequentialAutoGen(
         projectId,
         mode,
@@ -3053,6 +3109,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
         useStoryFlow,
         lipsyncEnabled,
         vocalsOnlyForLipsync,
+        _scopeForRun,
       );
 
       setStatusMsg(null);

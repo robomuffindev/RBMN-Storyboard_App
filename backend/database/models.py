@@ -457,6 +457,12 @@ class Chapter(SQLModel, table=True):
     chapter_metadata: dict[str, Any] = Field(
         default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON))
     )
+    # ── Chapter-level creative direction ──
+    description: str = Field(default="")  # chapter-level concept, drives scene generation
+    character_focus: list[str] = Field(
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
+    )  # list of character names featured in this chapter
+    style_notes: str = Field(default="")  # visual / tonal cues specific to this chapter
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

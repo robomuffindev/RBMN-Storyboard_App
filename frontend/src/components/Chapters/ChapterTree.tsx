@@ -67,7 +67,7 @@ function ChapterRow({
           title={ch.short_code}
         />
         <Link
-          to={`/projects/${projectId}/c/${ch.short_code}`}
+          to={`/project/${projectId}/c/${ch.short_code}`}
           className={`flex-1 truncate ${isActive ? 'text-purple-200 font-medium' : 'text-gray-200'} hover:text-purple-300`}
           title={`${ch.name} (${ch.short_code})`}
         >

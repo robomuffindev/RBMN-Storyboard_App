@@ -62,7 +62,7 @@ export default function ChapterOverlay({
     if (onChapterClick) {
       onChapterClick(ch);
     } else {
-      navigate(`/projects/${projectId}/c/${ch.short_code}`);
+      navigate(`/project/${projectId}/c/${ch.short_code}`);
     }
   };
 
