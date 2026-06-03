@@ -84,6 +84,10 @@ RBMF - Storyboard Blueprint.md
 RBMF - Storyboard Blueprint.pdf
 CLAUDE.md
 
+# ---------- Website / marketing assets (personal, not for public repo) ----------
+website-product-page.html
+website-*.html
+
 # ---------- Alembic (unused — migrations are inline in database.py) ----------
 alembic.ini
 alembi
