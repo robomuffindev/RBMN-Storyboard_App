@@ -2051,6 +2051,28 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     mutationFn: async () => {
       if (!activeScene || !currentProject) return;
 
+      // ── Start-image pre-flight ──────────────────────────────────
+      // Almost every LTX workflow except V2V-extend needs a start
+      // image. Without one, the backend would create a job that
+      // ComfyUI silently swallows (4xx on the missing image upload,
+      // then a hollow "complete" with no rendered output). Catch
+      // it here with a clear popup so the user can fix it before
+      // a single token is spent.
+      const sceneParams = activeScene.parameters || {};
+      const vModePre = sceneParams.video_mode || 'single';
+      const isV2VExtend = vModePre === 'v2v_extend';
+      const hasChosenImage = !!sceneParams.chosen_image_path;
+      const hasPrevLfRef = !!sceneParams.use_prev_lf_as_ff;
+      if (!isV2VExtend && !hasChosenImage && !hasPrevLfRef) {
+        const msg =
+          'This scene has no start image set yet.\n\n'
+          + 'Generate or select an image on the Image tab first, then try '
+          + 'generating the video again. (Only V2V-extend workflows can '
+          + 'run without a start image.)';
+        alert(msg);
+        throw new Error('Video generation aborted: no start image set for this scene');
+      }
+
       // Save video prompt + seed override to scene parameters for persistence
       const paramUpdates = {
         ...activeScene.parameters,
@@ -2062,7 +2084,6 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
       // Look up asset IDs for first/last frame images and audio
       const storeAssets = useAppStore.getState().assets;
-      const sceneParams = activeScene.parameters || {};
 
       // Find first frame asset by chosen_image_path
       const ffPath = sceneParams.chosen_image_path;
@@ -2117,6 +2138,21 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           retry_count: 0,
         });
       }
+    },
+    onError: (err: any) => {
+      // The pre-flight guard above already alerts and throws before we
+      // hit the network, so its Error gets re-surfaced here as a no-op
+      // (the alert already fired). For BACKEND-raised errors (400 from
+      // the start-image guard, 5xx, etc.), surface the detail so the
+      // user sees the same kind of popup whether the rejection came
+      // from the client guard or the server guard.
+      const aborted = String(err?.message || '').startsWith('Video generation aborted:');
+      if (aborted) return; // already shown via client-side alert()
+      const detail =
+        err?.response?.data?.detail
+        || err?.message
+        || 'Video generation failed. Check the backend log for details.';
+      alert(`Video generation failed:\n\n${detail}`);
     },
   });
 

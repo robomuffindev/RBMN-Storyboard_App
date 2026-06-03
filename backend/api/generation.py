@@ -390,7 +390,40 @@ async def generate_video(
     """
     try:
         await _get_project_or_404(project_id, session)
-        await _get_scene_or_404(req.scene_id, project_id, session)
+        scene = await _get_scene_or_404(req.scene_id, project_id, session)
+
+        # ── Start-image guard ─────────────────────────────────────────
+        # Almost every LTX workflow except v2v needs a start image.  If the
+        # request has no first_frame_asset_id AND the scene has no
+        # chosen_image_path, the dispatcher would proceed anyway, ComfyUI
+        # would silently swallow the malformed prompt, and the job would
+        # report "completed" with nothing rendered (plus a 404 in the
+        # worker log for the missing image upload).  Catch it here and
+        # tell the user clearly.
+        _wt = (req.workflow_type or "").lower()
+        _v2v_workflows = {"ltx_v2v_extend", "ltx_seq_v2v"}
+        _needs_first_frame = _wt not in _v2v_workflows
+        if _needs_first_frame:
+            _has_explicit = req.first_frame_asset_id is not None
+            _scene_params = scene.parameters or {}
+            _has_chosen = bool(_scene_params.get("chosen_image_path"))
+            _has_prev_lf_ref = bool(_scene_params.get("use_prev_lf_as_ff"))
+            if not (_has_explicit or _has_chosen or _has_prev_lf_ref):
+                logger.warning(
+                    f"Video gen rejected for scene {req.scene_id} (workflow={_wt!r}): "
+                    f"no first_frame_asset_id in request, no chosen_image_path on scene, "
+                    f"and no use_prev_lf_as_ff. Pre-flight guard blocked silent failure."
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "This scene has no start image set. Generate or select an "
+                        "image on the Image tab first, then try generating the video "
+                        "again. (Workflows of type "
+                        f"'{req.workflow_type}' need a start frame; only V2V-extend "
+                        "workflows can run without one.)"
+                    ),
+                )
 
         # Resolve seed with fallback chain
         resolved_seed = await _resolve_seed(
