@@ -1341,7 +1341,7 @@ export default function SettingsPage() {
                 onChange={(e) => setSettings((prev) => ({ ...prev, export_transition_type: e.target.value }))}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm"
               >
-                <option value="none">None (hard cut)</option>
+                <option value="none">None (Use Per Scene Preference)</option>
                 <option value="crossfade">Crossfade</option>
                 <option value="dissolve">Dissolve</option>
                 <option value="wipe_left">Wipe Left</option>

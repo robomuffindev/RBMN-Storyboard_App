@@ -1925,7 +1925,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
                     onChange={(e) => setTransitionType(e.target.value)}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500"
                   >
-                    <option value="none">None (Hard Cut)</option>
+                    <option value="none">None (Use Per Scene Preference)</option>
                     <option value="crossfade">Crossfade</option>
                     <option value="dissolve">Dissolve</option>
                   </select>

@@ -815,6 +815,11 @@ class AutoGenerateRequest(BaseModel):
     """Request model for auto generation."""
 
     mode: str  # all_images, empty_only, enhanced_all, enhanced_missing
+    # Optional chapter scope: when set, the scene list passed to the
+    # generation loop is restricted to scenes inside this chapter's tree
+    # (including descendant sub-chapters). Mirrors SeqAutoGenRequest so
+    # callers wired to /auto don't silently leak across all chapters.
+    chapter_id: Optional[UUID] = None
 
 
 class AutoGenerateResponse(BaseModel):
@@ -1584,20 +1589,34 @@ async def auto_generate(
     try:
         project = await _get_project_or_404(project_id, session)
 
-        # Load all scenes sorted by order
-        scenes_stmt = (
-            select(Scene)
-            .where(Scene.project_id == project_id)
-            .order_by(Scene.order_index)
-        )
-        scenes_result = await session.execute(scenes_stmt)
-        scenes = list(scenes_result.scalars().all())
-
-        if not scenes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No scenes found in project",
+        # Load scenes sorted by order — chapter-scoped when req.chapter_id
+        # is provided.  Without this branch, /auto would silently process
+        # every project scene even though the caller asked for a single
+        # chapter (matches the leak we fixed in /auto-sequential).
+        if req.chapter_id is not None:
+            from backend.services.chapters import scenes_in_chapter_tree
+            scenes = await scenes_in_chapter_tree(session, req.chapter_id)
+            logger.info(
+                f"/auto: scoped to chapter {req.chapter_id} -> {len(scenes)} scenes"
             )
+            if not scenes:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Chapter {req.chapter_id} has no scenes",
+                )
+        else:
+            scenes_stmt = (
+                select(Scene)
+                .where(Scene.project_id == project_id)
+                .order_by(Scene.order_index)
+            )
+            scenes_result = await session.execute(scenes_stmt)
+            scenes = list(scenes_result.scalars().all())
+            if not scenes:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No scenes found in project",
+                )
 
         # Load settings for LLM access and model types
         settings_stmt = select(AppSettings).where(AppSettings.id == 1)

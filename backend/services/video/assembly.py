@@ -13,10 +13,12 @@ Performance optimizations (v1.6.0):
 - Tmpfs intermediate files: /dev/shm on Linux for RAM-backed I/O
 """
 
+import json
 import logging
 import os
 import shutil
 import subprocess
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
@@ -111,22 +113,42 @@ def _video_cache_key(
 
 
 def _export_cache_dir(output_path: str) -> Path:
-    """Cache lives alongside the output, hidden from gallery listing."""
+    """Root cache dir, lives alongside the output, hidden from gallery listing.
+
+    Each export scope (full project, chapter A, chapter B, etc.) gets its own
+    subdirectory keyed by the export cache key — see ``_export_cache_slot``.
+    The root dir is what ``_clear_export_cache`` wipes for force_recreate.
+    """
     return Path(output_path).parent / ".export_cache"
+
+
+def _export_cache_slot(output_path: str, key: str) -> Path:
+    """Per-scope cache subdirectory.
+
+    Before keying by scope, exporting chapter A then chapter B then chapter A
+    again overwrote A's concat.mp4 when B saved, forcing a full re-render on
+    every scope switch and breaking the audio-only-remix feature in
+    multi-chapter projects.  Nesting under ``<key>/`` gives each scope a
+    durable cache slot.
+    """
+    return _export_cache_dir(output_path) / key
 
 
 def _load_cached_concat(
     output_path: str, expected_key: str
 ) -> Optional[Path]:
     """Return path to cached concat.mp4 if and only if the manifest matches."""
-    cdir = _export_cache_dir(output_path)
-    concat = cdir / "concat.mp4"
-    manifest = cdir / "manifest.json"
+    slot = _export_cache_slot(output_path, expected_key)
+    concat = slot / "concat.mp4"
+    manifest = slot / "manifest.json"
     if not concat.exists() or not manifest.exists():
         return None
     try:
         m = json.loads(manifest.read_text())
         if m.get("video_cache_key") != expected_key:
+            # Key mismatch on a key-named directory shouldn't happen, but
+            # if the on-disk manifest was rewritten by hand or by an older
+            # build, be defensive.
             return None
         if not concat.stat().st_size > 0:
             return None
@@ -138,16 +160,16 @@ def _load_cached_concat(
 def _save_concat_to_cache(
     output_path: str, concat_path: Path, key: str, scene_count: int
 ) -> None:
-    """Copy the merged silent video into the cache + write manifest.
+    """Copy the merged silent video into a per-key cache slot + write manifest.
 
     Best-effort: failures are logged but don't break the export.
     """
     try:
-        cdir = _export_cache_dir(output_path)
-        cdir.mkdir(parents=True, exist_ok=True)
-        target = cdir / "concat.mp4"
+        slot = _export_cache_slot(output_path, key)
+        slot.mkdir(parents=True, exist_ok=True)
+        target = slot / "concat.mp4"
         shutil.copy2(str(concat_path), str(target))
-        (cdir / "manifest.json").write_text(json.dumps({
+        (slot / "manifest.json").write_text(json.dumps({
             "video_cache_key": key,
             "scene_count": scene_count,
             "saved_at": datetime.utcnow().isoformat() + "Z",
@@ -158,7 +180,7 @@ def _save_concat_to_cache(
 
 
 def _clear_export_cache(output_path: str) -> None:
-    """Wipe the cache directory entirely (used by force_recreate)."""
+    """Wipe the entire cache root (all scopes) — used by force_recreate."""
     cdir = _export_cache_dir(output_path)
     if cdir.exists():
         try:
