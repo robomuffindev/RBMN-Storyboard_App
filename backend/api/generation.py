@@ -518,6 +518,22 @@ async def enhance_prompt(
     try:
         project = await _get_project_or_404(project_id, session)
 
+        # ── Narration-images mode guard ─────────────────────────────
+        # Reject video-prompt enhancement for narration_images projects.
+        # No video will ever be rendered for these scenes; running the
+        # video system prompt (camera vocab + Director multi-segment)
+        # is pure waste. Image-prompt requests pass through normally.
+        if getattr(req, "is_video", False) and getattr(project, "mode", None) == "narration_images":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Cannot enhance a VIDEO prompt for a Narration Images "
+                    "project — there is no video to render. Enhance the "
+                    "image prompt instead, or switch the project to "
+                    "Narration Video mode."
+                ),
+            )
+
         # Get settings for the specified provider
         settings_stmt = select(AppSettings).where(AppSettings.id == 1)
         settings_result = await session.execute(settings_stmt)
@@ -1021,12 +1037,27 @@ async def _ensure_video_flow(
 
     Only generates if:
     - LLM is configured
+    - Project is not narration_images mode (the system prompt produces
+      video-motion text that's wasted for a Ken Burns slideshow)
     - No scenes already have a flow_idea set
 
     Returns True if flow was generated, False if skipped.
     """
     if not llm_provider or not llm_api_key:
         logger.info("Auto-flow: No LLM configured, skipping video flow generation")
+        return False
+
+    # Skip in narration_images mode — the existing system prompt is video
+    # direction ("camera movement, action, mood, composition") which is
+    # pure waste for a Ken Burns slideshow.  Image enhancement falls back
+    # to the scene's narration text + concept block when flow_idea is
+    # empty, so this skip degrades nothing.
+    if getattr(project, "mode", None) == "narration_images":
+        logger.info(
+            "Auto-flow: project is narration_images mode — skipping flow gen "
+            "(video-direction prompt would waste tokens for slideshow output; "
+            "image enhance uses scene narration + concept instead)"
+        )
         return False
 
     # Check if any scene already has a flow idea
@@ -1639,6 +1670,23 @@ async def auto_generate(
     try:
         project = await _get_project_or_404(project_id, session)
 
+        # ── Narration-images mode guard ─────────────────────────────
+        # The enhanced_* modes run a video-prompt LLM call per scene and
+        # queue video jobs that the export would discard anyway. Reject
+        # them up front for narration_images projects to avoid wasted
+        # tokens + jobs. Allow plain image modes (all_images, empty_only).
+        _AUTO_IMAGE_ONLY = {"all_images", "empty_only"}
+        if getattr(project, "mode", None) == "narration_images" and req.mode not in _AUTO_IMAGE_ONLY:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "This project is in Narration Images mode (slideshow output), "
+                    "so video-producing Auto-Gen modes are disabled. Use "
+                    "'all_images' or 'empty_only', or switch the project to "
+                    "Narration Video mode to use enhanced/video modes."
+                ),
+            )
+
         # Load scenes sorted by order — chapter-scoped when req.chapter_id
         # is provided.  Without this branch, /auto would silently process
         # every project scene even though the caller asked for a single
@@ -2133,6 +2181,29 @@ async def start_sequential_auto_gen(
     """
     project = await _get_project_or_404(project_id, session)
     pid = str(project_id)
+
+    # ── Narration-images mode guard ─────────────────────────────────────
+    # Reject video-producing modes when the project is narration_images.
+    # The deliverable is a Ken-Burns slideshow; generating videos here
+    # produces leftover artifacts that the export pipeline now ignores
+    # but the UI still surfaces.  Reject up front so the user gets a
+    # clear error instead of "videos generated then silently ignored."
+    _IMAGE_ONLY_MODES = {"all_images", "missing_images_independent"}
+    if getattr(project, "mode", None) == "narration_images" and req.mode not in _IMAGE_ONLY_MODES:
+        logger.warning(
+            f"Auto-gen rejected: project {project_id} is narration_images mode but "
+            f"requested mode={req.mode!r} would generate video. Allowed modes: "
+            f"{sorted(_IMAGE_ONLY_MODES)}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"This project is in Narration Images mode (slideshow output), so "
+                f"video-generating Auto-Gen modes are disabled. Please pick "
+                f"'All Images' or 'Missing Images', or switch the project to "
+                f"Narration Video mode to use video modes."
+            ),
+        )
 
     # Don't start if already running
     existing = _seq_auto_jobs.get(pid)

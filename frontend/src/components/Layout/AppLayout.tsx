@@ -2993,7 +2993,14 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const navigate = useNavigate();
   const currentProject = useAppStore((s) => s.currentProject);
   const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
-  const [mode, setMode] = useState<AutoGenMode>('all_video_fflf');
+  // Narration Images mode produces a slideshow — video-generating modes
+  // would create artifacts that the export then has to ignore.  Filter
+  // them out of the picker, and default to an image mode.
+  const isNarrationImages = currentProject?.mode === 'narration_images';
+  const visibleOptions = isNarrationImages
+    ? AUTO_GEN_OPTIONS.filter(o => o.value === 'all_images' || o.value === 'missing_images_independent')
+    : AUTO_GEN_OPTIONS;
+  const [mode, setMode] = useState<AutoGenMode>(isNarrationImages ? 'missing_images_independent' : 'all_video_fflf');
   const [isStarting, setIsStarting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -3291,7 +3298,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
 
             {/* Mode selection */}
             <div className="flex flex-col gap-2 mb-4">
-              {AUTO_GEN_OPTIONS.map((opt) => (
+              {visibleOptions.map((opt) => (
                 <label
                   key={opt.value}
                   className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${

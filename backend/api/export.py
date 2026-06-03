@@ -427,12 +427,30 @@ async def _build_scene_dicts(
     kb_allowed_raw = override_kb_allowed if override_kb_allowed is not None else proj_settings.get("ken_burns_allowed_effects", [])
     kb_pool = kb_allowed_raw if kb_allowed_raw else ALL_KEN_BURNS_EFFECTS
 
+    # ── Narration-images mode lock ─────────────────────────────────────
+    # When the project is in narration_images mode, the deliverable is a
+    # Ken-Burns slideshow. Any chosen_video_path on a scene is leftover
+    # from a misclick / older bug and would silently produce a video clip
+    # in what should be an all-images export. Force the per-scene source
+    # type to "image" here so the export honors the mode regardless of
+    # what's persisted on the scene.
+    _force_images_only = bool(project and getattr(project, "mode", None) == "narration_images")
+    if _force_images_only:
+        logger.info(
+            "Project is in narration_images mode — forcing scene_source_type='image' "
+            "on every scene for this export (any chosen_video_path will be ignored)."
+        )
+
     # Build scene list for assembly — only include scenes that have content
     scene_dicts: List[Dict[str, Any]] = []
     for sc in scenes:
         sc_params = sc.parameters or {}
         source_type = sc_params.get("scene_source_type", "image")
+        if _force_images_only:
+            source_type = "image"
         video_path = sc_params.get("chosen_video_path")
+        if _force_images_only:
+            video_path = None  # ignore any stored video so it can't be picked
         image_path = sc_params.get("chosen_image_path")
         logger.info(
             f"Scene {sc.order_index}: source_type={source_type}, "
