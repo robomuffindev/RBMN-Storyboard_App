@@ -62,6 +62,30 @@ type FrameSubTab = 'first' | 'last';
 import { handleImgError } from '@/utils/brokenImage';
 import { parseBackendDate } from '@/utils/time';
 
+// ─── Workflow → human-readable model label ────────────────────────────
+// The dispatcher writes the *actual* workflow_type used (after Z-Image
+// redirect) into the job's parameters and the GenerationHistory row.
+// So `version.parameters.workflow_type` is the ground truth for which
+// model produced an image, regardless of what the user originally asked
+// for.  Use this everywhere we surface model identity in the UI.
+function labelWorkflow(wt: string | undefined | null): string {
+  if (!wt) return 'Unknown';
+  switch (wt) {
+    case 'z_image_turbo':
+      return 'Z-Image Turbo';
+    case 'klein_t2i':
+      return 'Klein T2I';
+    case 'klein_1ref':
+    case 'klein_2ref':
+    case 'klein_3ref':
+    case 'klein_4ref':
+    case 'klein_5ref':
+      return `Klein ${wt.slice(6, 7)}-ref`;
+    default:
+      return wt;
+  }
+}
+
 // ─── Lightbox Component ───────────────────────────────────────────────
 function ImageLightbox({
   versions,
@@ -149,12 +173,30 @@ function ImageLightbox({
         </button>
 
         {imageUrl ? (
-          <img
-            src={imageUrl}
-            alt={`Generation ${index + 1}`}
-            style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain', borderRadius: '8px' }}
-            onError={handleImgError}
-          />
+          <>
+            <img
+              src={imageUrl}
+              alt={`Generation ${index + 1}`}
+              style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain', borderRadius: '8px' }}
+              onError={handleImgError}
+            />
+            {/* Model badge — pinned top-left over the image */}
+            {version?.parameters?.workflow_type && (
+              <div
+                style={{
+                  position: 'absolute', top: '24px', left: '32px',
+                  backgroundColor: 'rgba(59,130,246,0.9)', color: 'white',
+                  padding: '4px 10px', borderRadius: '4px', fontSize: '11px',
+                  fontWeight: 600, letterSpacing: '0.02em',
+                  pointerEvents: 'none', zIndex: 11,
+                }}
+                title="The actual model that produced this image (from generation_history.parameters)"
+              >
+                {labelWorkflow(version.parameters.workflow_type)}
+                {version.parameters.two_pass_phase === 'composite' && ' · Pass 2'}
+              </div>
+            )}
+          </>
         ) : (
           <div style={{ color: '#6b7280', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
             <ImageIcon size={48} />
@@ -754,7 +796,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const [firstFrameRefs, setFirstFrameRefs] = useState<ReferenceState>(emptyRefs);
   const [lastFrameRefs, setLastFrameRefs] = useState<ReferenceState>(emptyRefs);
   const activeRefs = frameSubTab === 'first' ? firstFrameRefs : lastFrameRefs;
-  const setActiveRefs = frameSubTab === 'first' ? setFirstFrameRefs : setLastFrameRefs;
+  const setActiveRefsLocal = frameSubTab === 'first' ? setFirstFrameRefs : setLastFrameRefs;
 
   const activeScene = useAppStore(s => s.activeScene);
   const currentProject = useAppStore(s => s.currentProject);
@@ -1015,6 +1057,29 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     };
     await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
+
+  // ─── Persist reference-picker changes to DB immediately ──────────────
+  // Before this wrapper, only Generate clicks wrote image_refs_first/last
+  // to the DB.  If the user removed a character ref and navigated away
+  // without clicking Generate, the next backend two-pass run could still
+  // try to use Klein with the stale ref.  Now every reference picker
+  // tick persists the new state immediately via the cache-coherent path.
+  const setActiveRefs = useCallback(
+    (newRefs: ReferenceState) => {
+      // 1) local React state for UI snappiness
+      setActiveRefsLocal(newRefs);
+      // 2) write through to DB + React Query + Zustand
+      if (!activeScene || !currentProject) return;
+      const key = frameSubTab === 'first' ? 'image_refs_first' : 'image_refs_last';
+      const newParams = { ...activeScene.parameters, [key]: newRefs };
+      // Fire-and-forget — failures are surfaced via the centralized error path
+      updateSceneAndSync(activeScene.id, { parameters: newParams }).catch((e) =>
+        console.warn('[refs] auto-save failed:', e),
+      );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeScene, currentProject, frameSubTab, setActiveRefsLocal, updateSceneAndSync],
+  );
 
   const { data: workflows = [] } = useQuery({
     queryKey: ['workflows'],
@@ -2315,6 +2380,57 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 </label>
               )}
 
+              {/* ─── Model indicator badge ────────────────────────────
+                  Predicts which model(s) the backend will actually run
+                  given the current ref count + two-pass toggle + global
+                  single_image_generator setting.  Mirrors the dispatcher
+                  logic so the UI never lies about what produced the
+                  image.  When two-pass is on but no refs are selected,
+                  shows the "downgrades to single-pass" warning.
+              */}
+              {(() => {
+                const _refCount =
+                  (activeRefs?.characterIndices?.length || 0) +
+                  (activeRefs?.extras?.length || 0);
+                const _zimgPref = appSettings?.single_image_generator === 'z_image_turbo';
+                const _modelLabel = (n: number, forceZimg: boolean) => {
+                  if (forceZimg) return 'Z-Image Turbo';
+                  if (n === 0) return _zimgPref ? 'Z-Image Turbo' : 'Klein T2I';
+                  return `Klein ${n}-ref`;
+                };
+                // Effective two-pass: backend downgrades to single when no refs
+                const _effTwoPass = twoPass && _refCount > 0;
+                const _willDowngrade = twoPass && _refCount === 0;
+                return (
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
+                    <span className="text-gray-500 uppercase tracking-wide">Will render with:</span>
+                    {_effTwoPass ? (
+                      <>
+                        <span className="px-1.5 py-0.5 rounded bg-purple-900/50 text-purple-200 border border-purple-700/40">
+                          Pass 1: {_modelLabel(0, true)}
+                        </span>
+                        <span className="text-gray-500">→</span>
+                        <span className="px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-200 border border-blue-700/40">
+                          Pass 2: {_modelLabel(_refCount, false)}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded bg-gray-800 text-gray-200 border border-gray-700">
+                        {_modelLabel(_refCount, false)}
+                      </span>
+                    )}
+                    {_willDowngrade && (
+                      <span
+                        title="Two-pass needs reference images. Add a character ref or extra image, or this run will fall back to single-pass."
+                        className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-200 border border-amber-700/40"
+                      >
+                        ⚠ no refs — single-pass
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Reference indicator for Last Frame tab */}
               {frameSubTab === 'last' && (
                 <div className="flex items-center gap-3 p-2.5 bg-gray-800/60 rounded border border-gray-700">
@@ -3416,15 +3532,19 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   value={transitionIn}
                   onChange={(e) => {
                     setTransitionIn(e.target.value);
-                    // Auto-save on change
+                    // Auto-save on change — use updateSceneAndSync so the
+                    // React Query cache and Zustand store stay in sync;
+                    // a raw updateScene leaves the cache stale and the
+                    // AppLayout mirror can revert the change later.
                     if (activeScene && currentProject) {
                       const newParams = {
                         ...activeScene.parameters,
                         transition_in: e.target.value !== 'none' ? { type: e.target.value, duration: transitionInDuration } : null,
                         transition_out: transitionOut !== 'none' ? { type: transitionOut, duration: transitionOutDuration } : null,
                       };
-                      updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                      updateSceneAndSync(activeScene.id, { parameters: newParams }).catch((err) =>
+                        console.warn('[transition_in] auto-save failed:', err),
+                      );
                     }
                   }}
                   className="w-full bg-gray-800 text-white rounded px-3 py-2 text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
@@ -3475,15 +3595,16 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   value={transitionOut}
                   onChange={(e) => {
                     setTransitionOut(e.target.value);
-                    // Auto-save on change
+                    // Auto-save on change (cache-coherent path)
                     if (activeScene && currentProject) {
                       const newParams = {
                         ...activeScene.parameters,
                         transition_in: transitionIn !== 'none' ? { type: transitionIn, duration: transitionInDuration } : null,
                         transition_out: e.target.value !== 'none' ? { type: e.target.value, duration: transitionOutDuration } : null,
                       };
-                      updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                      useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                      updateSceneAndSync(activeScene.id, { parameters: newParams }).catch((err) =>
+                        console.warn('[transition_out] auto-save failed:', err),
+                      );
                     }
                   }}
                   className="w-full bg-gray-800 text-white rounded px-3 py-2 text-sm border border-gray-700 focus:border-blue-500 focus:outline-none"
@@ -3872,9 +3993,22 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
               style={{ maxWidth: '90vw', maxHeight: '85vh', objectFit: 'contain', borderRadius: '8px' }}
               onError={handleImgError}
             />
-            <div style={{ position: 'absolute', top: '12px', left: '12px', backgroundColor: 'rgba(79,70,229,0.9)', color: 'white', padding: '4px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}>
-              Pass 1 — Scene Only (Before Character Compositing)
-            </div>
+            {(() => {
+              // Resolve the actual model used for Pass 1 via the base asset's
+              // meta.workflow_type. Ground truth — if backend deviates from
+              // "Z-Image always for Pass 1", the label shows the real model.
+              const _baseAssetId = activeScene.parameters.two_pass_base_asset_id;
+              const _baseAsset = _baseAssetId
+                ? (assets as any[]).find((a: any) => a?.id === _baseAssetId)
+                : null;
+              const _wt = _baseAsset?.meta?.workflow_type as string | undefined;
+              const _modelLabel = _wt ? labelWorkflow(_wt) : 'Z-Image Turbo';
+              return (
+                <div style={{ position: 'absolute', top: '12px', left: '12px', backgroundColor: 'rgba(79,70,229,0.9)', color: 'white', padding: '4px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}>
+                  Pass 1 · {_modelLabel} — Scene Only (Before Character Compositing)
+                </div>
+              );
+            })()}
             <button
               onClick={() => setTwoPassBaseViewOpen(false)}
               style={{ position: 'absolute', top: '12px', right: '12px', backgroundColor: 'rgba(0,0,0,0.6)', color: 'white', border: 'none', borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' }}

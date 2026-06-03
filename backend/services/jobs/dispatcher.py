@@ -1181,28 +1181,49 @@ class JobDispatcher:
         async def _try_zimage_redirect(
             _params: dict, _seed: int, _job_id: str | None
         ):
-            """Attempt Z-Image Turbo redirect for text-to-image (no refs)."""
+            """Attempt Z-Image Turbo redirect for text-to-image (no refs).
+
+            Z-Image is FORCED when this job is the Pass 1 (base) of a
+            two-pass run, regardless of the AppSettings.single_image_generator
+            preference.  Rationale: Pass 1 paints the scene without any
+            character refs, then Pass 2 composites the characters in — there
+            is no reason to ever run Pass 1 through Klein (which is slower
+            and would benefit from refs it does not receive).  For non-
+            two-pass T2I jobs, fall through to the user setting.
+            """
+            _is_two_pass_base = _params.get("two_pass_phase") == "base"
             try:
-                async with self._session_factory() as zig_session:
-                    from backend.database.models import AppSettings as ZigAppSettings
-                    zig_stmt = sfw_select(ZigAppSettings).where(ZigAppSettings.id == 1)
-                    zig_result = await zig_session.execute(zig_stmt)
-                    zig_settings = zig_result.scalars().first()
-                    if zig_settings and zig_settings.single_image_generator == "z_image_turbo":
-                        wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
-                        p_text = _params.get("prompt", "")
-                        # Z-Image has no negative prompt node — don't pass or store negative prompt
-                        _params["effective_negative_prompt"] = ""
-                        anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-                        _params["submitted_image_prompt"] = (p_text + anti_text_suffix) if p_text else p_text
-                        logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo (no reference images, negative prompt ignored — unsupported)")
-                        return prepare_zimage_workflow(
-                            workflow_path=wf_path,
-                            prompt=p_text,
-                            width=_params.get("width", 1024),
-                            height=_params.get("height", 1024),
-                            seed=_seed,
-                        )
+                use_zimage = False
+                if _is_two_pass_base:
+                    use_zimage = True
+                else:
+                    async with self._session_factory() as zig_session:
+                        from backend.database.models import AppSettings as ZigAppSettings
+                        zig_stmt = sfw_select(ZigAppSettings).where(ZigAppSettings.id == 1)
+                        zig_result = await zig_session.execute(zig_stmt)
+                        zig_settings = zig_result.scalars().first()
+                        if zig_settings and zig_settings.single_image_generator == "z_image_turbo":
+                            use_zimage = True
+                if use_zimage:
+                    wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
+                    p_text = _params.get("prompt", "")
+                    # Z-Image has no negative prompt node — don't pass or store negative prompt
+                    _params["effective_negative_prompt"] = ""
+                    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+                    _params["submitted_image_prompt"] = (p_text + anti_text_suffix) if p_text else p_text
+                    _why = (
+                        "two-pass Pass 1 (forced — characters added in Pass 2)"
+                        if _is_two_pass_base
+                        else "user setting + no reference images"
+                    )
+                    logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo ({_why}, negative prompt ignored — unsupported)")
+                    return prepare_zimage_workflow(
+                        workflow_path=wf_path,
+                        prompt=p_text,
+                        width=_params.get("width", 1024),
+                        height=_params.get("height", 1024),
+                        seed=_seed,
+                    )
             except Exception as e:
                 logger.debug(f"Could not check single_image_generator: {e} — using Klein")
             return None

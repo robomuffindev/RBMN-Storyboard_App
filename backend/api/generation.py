@@ -254,6 +254,10 @@ async def generate_image(
         # Two-pass mode: Pass 1 generates scene without character refs,
         # Pass 2 (auto-chained by dispatcher) composites characters into the scene.
         # Character refs may come from the request OR be resolved from project concept data.
+        # Track whether two-pass actually applies after ref resolution — if no
+        # refs end up resolvable, we downgrade to single-pass below.
+        _two_pass_effective = bool(req.two_pass)
+        char_ref_ids: list[str] = []
         if req.two_pass:
             # Collect character ref IDs: from request first, then fall back to concept data
             char_ref_ids = [str(aid) for aid in req.reference_asset_ids] if req.reference_asset_ids else []
@@ -277,7 +281,20 @@ async def generate_image(
                                 char_ref_ids.append(str(asset.id))
                     if char_ref_ids:
                         logger.info(f"Two-pass: resolved {len(char_ref_ids)} character ref IDs from concept data")
+            # ── No-refs guard ───────────────────────────────────────────
+            # If after request + concept-fallback there are STILL no refs,
+            # downgrade to single-pass.  Pass 2 has nothing to composite,
+            # so running it would be wasted work and the result would not
+            # match what the user expects from a "two-pass" generation.
+            if not char_ref_ids:
+                logger.info(
+                    f"Two-pass requested for scene {req.scene_id} but no reference images "
+                    f"resolvable (request refs={len(req.reference_asset_ids or [])}, "
+                    f"concept characters with images=0). Downgrading to single-pass."
+                )
+                _two_pass_effective = False
 
+        if _two_pass_effective:
             job = Job(
                 project_id=project_id,
                 scene_id=req.scene_id,
