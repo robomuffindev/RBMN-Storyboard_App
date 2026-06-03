@@ -62,6 +62,22 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
   const scenes = useAppStore(s => s.scenes);
   const playbackPosition = useAppStore(s => s.playbackPosition);
   const isPlaying = useAppStore(s => s.isPlaying);
+  // Narration Images mode: the deliverable is a still-image slideshow.
+  // Even if a scene has a leftover chosen_video_path from before the
+  // mode lock, the preview must show the image, not the video — matches
+  // what export will actually render.
+  //
+  // Defensive default: while `currentProject` is still null (one render
+  // tick before the AppLayout effect sets it), treat the mode as
+  // "unknown but probably image-safe" — i.e. don't allow video playback
+  // until we're certain we're NOT in narration_images mode.  This
+  // prevents a one-frame race where a narration_images project briefly
+  // plays a leftover video on mount.
+  const currentProject = useAppStore(s => s.currentProject);
+  const projectLoaded = !!currentProject;
+  const forceImagesOnly = projectLoaded
+    ? currentProject?.mode === 'narration_images'
+    : true;
 
   // ─── Scene resolution ──────────────────────────────────────────
   const sceneAtPlayhead = useMemo(() => {
@@ -74,8 +90,13 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
   const displayScene = sceneAtPlayhead || activeScene;
 
   // ─── Determine what to display ──────────────────────────────────
-  const sourceType = displayScene?.parameters?.scene_source_type || 'image';
-  const chosenVideoPath = displayScene?.parameters?.chosen_video_path;
+  // In narration_images mode, force image regardless of what's stored
+  // on the scene — leftover video paths from before the mode lock
+  // should not appear in the preview because they won't appear in the
+  // export either.
+  const rawSourceType = displayScene?.parameters?.scene_source_type || 'image';
+  const sourceType = forceImagesOnly ? 'image' : rawSourceType;
+  const chosenVideoPath = forceImagesOnly ? null : displayScene?.parameters?.chosen_video_path;
   const videoUrl = sourceType === 'video' && chosenVideoPath ? `/api/files/${chosenVideoPath}` : '';
 
   // Image paths
@@ -184,6 +205,8 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
 
   // ─── Find the NEXT scene that has a video ──────────────────────────
   const nextVideoScene = useMemo(() => {
+    // In narration_images mode there are no video scenes to preload.
+    if (forceImagesOnly) return null;
     if (!displayScene || !scenes) return null;
     const currentIdx = scenes.findIndex(s => s.id === displayScene.id);
     if (currentIdx < 0) return null;
@@ -194,7 +217,7 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
       }
     }
     return null;
-  }, [displayScene, scenes]);
+  }, [displayScene, scenes, forceImagesOnly]);
 
   // ─── Double-buffer: load current video + swap if preloaded ─────────
   useEffect(() => {

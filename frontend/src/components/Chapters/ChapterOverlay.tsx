@@ -58,6 +58,38 @@ export default function ChapterOverlay({
   const byDepth = flattenByDepth(chapters);
   const depths = Array.from(byDepth.keys()).sort((a, b) => a - b);
 
+  // Number top-level chapters in playback order so the overlay reads
+  // "1 · Chapter Name" / "2 · Chapter Name" instead of just the name.
+  // Sub-chapters get their parent's label with a letter suffix at
+  // depth 1 (1a, 1b), then numeric at depth 2 (1a1, 1a2), then letters
+  // again at depth 3 (1a1a) — recursive so the labeling holds at any
+  // future tree depth.  Suffixes wrap at 26 (a..z) by falling back to
+  // 1-indexed numbers for the 27th sibling onward.
+  const topLevel = [...(byDepth.get(0) ?? [])].sort((a, b) => a.start_time - b.start_time);
+  const chapterNumber = new Map<string, string>();
+  const subSuffix = (i: number) =>
+    i < 26 ? String.fromCharCode(97 + i) : String(i + 1);
+  const assignNumbers = (nodes: ChapterTreeNode[], prefix: string, depth: number) => {
+    const sorted = [...nodes].sort((a, b) => a.start_time - b.start_time);
+    sorted.forEach((ch, i) => {
+      // depth 0: "1", "2", ...
+      // depth 1: "1a", "1b", ... (letters)
+      // depth 2: "1a1", "1a2", ... (numbers)
+      // depth 3: "1a1a", ... (letters) — alternates
+      const segment = depth === 0
+        ? String(i + 1)
+        : depth % 2 === 1
+          ? subSuffix(i)
+          : String(i + 1);
+      const label = prefix + segment;
+      chapterNumber.set(ch.id, label);
+      if (ch.children?.length) {
+        assignNumbers(ch.children, label, depth + 1);
+      }
+    });
+  };
+  assignNumbers(topLevel, '', 0);
+
   const handleClick = (ch: ChapterTreeNode) => {
     if (onChapterClick) {
       onChapterClick(ch);
@@ -96,6 +128,11 @@ export default function ChapterOverlay({
                 }}
               >
                 <span className="text-[10px] font-medium truncate">
+                  {chapterNumber.get(ch.id) && (
+                    <span className="font-mono mr-1 opacity-80">
+                      {chapterNumber.get(ch.id)} ·
+                    </span>
+                  )}
                   {ch.name}
                 </span>
               </button>
