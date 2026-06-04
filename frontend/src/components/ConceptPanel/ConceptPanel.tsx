@@ -158,6 +158,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       });
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
+      // ALSO invalidate the project query so AppLayout.currentProject.settings
+      // picks up the freshly saved global_color_override (and any other
+      // settings the Scene Editor / dispatcher read from project.settings).
+      // Without this, saves persist server-side but the SceneEditor's
+      // "use project Default Color Palette" inheritance message keeps
+      // showing the stale "(no project default set)" until full page reload.
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
     },
   });
 
@@ -170,6 +177,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
     onSuccess: () => {
       // Refresh concept data to pick up the new characters
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
+      // ALSO invalidate the project query so AppLayout.currentProject.settings
+      // picks up the freshly saved global_color_override (and any other
+      // settings the Scene Editor / dispatcher read from project.settings).
+      // Without this, saves persist server-side but the SceneEditor's
+      // "use project Default Color Palette" inheritance message keeps
+      // showing the stale "(no project default set)" until full page reload.
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
     },
   });
 
@@ -234,6 +248,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
     onSuccess: () => {
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
+      // ALSO invalidate the project query so AppLayout.currentProject.settings
+      // picks up the freshly saved global_color_override (and any other
+      // settings the Scene Editor / dispatcher read from project.settings).
+      // Without this, saves persist server-side but the SceneEditor's
+      // "use project Default Color Palette" inheritance message keeps
+      // showing the stale "(no project default set)" until full page reload.
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
     },
   });
 
@@ -284,7 +305,12 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         transition_lora_strength: transitionLoraStrength,
         random_ken_burns: randomKenBurns,
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
-      }).then(() => queryClient.invalidateQueries({ queryKey: ['concept', projectId] }));
+      }).then(() => {
+        queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
+        // Refresh project query too so currentProject.settings picks up
+        // the saved global_color_override (Scene Editor inherits from it).
+        queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      });
     } else {
       // Editing existing character
       const updated = [...characters];
@@ -310,7 +336,12 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         transition_lora_strength: transitionLoraStrength,
         random_ken_burns: randomKenBurns,
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
-      }).then(() => queryClient.invalidateQueries({ queryKey: ['concept', projectId] }));
+      }).then(() => {
+        queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
+        // Refresh project query too so currentProject.settings picks up
+        // the saved global_color_override (Scene Editor inherits from it).
+        queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      });
     }
   }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, projectId, queryClient]);
 
@@ -868,6 +899,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                     ken_burns_allowed_effects: kenBurnsAllowedEffects,
                   }).then(() => {
                     queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
+      // ALSO invalidate the project query so AppLayout.currentProject.settings
+      // picks up the freshly saved global_color_override (and any other
+      // settings the Scene Editor / dispatcher read from project.settings).
+      // Without this, saves persist server-side but the SceneEditor's
+      // "use project Default Color Palette" inheritance message keeps
+      // showing the stale "(no project default set)" until full page reload.
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
                     setCreatorOpen({ index: newIndex, character: newChar });
                   });
                 }}

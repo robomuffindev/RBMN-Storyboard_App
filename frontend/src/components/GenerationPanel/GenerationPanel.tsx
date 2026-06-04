@@ -59,6 +59,41 @@ export default function GenerationPanel() {
     }
   };
 
+  // Resolve the dispatched workflow_type to a human-friendly model badge.
+  // The workflow_type is the ground truth of what actually went out to
+  // ComfyUI (after Pass-1 Z-Image redirects, etc.) — so this badge
+  // reflects what the worker is REALLY running, not just what the user
+  // configured in Settings.
+  const getModelBadge = (job: Job): { label: string; cls: string } | null => {
+    const wf = (job.parameters?.workflow_type as string | undefined) || '';
+    if (!wf) return null;
+    // Z-Image Turbo (always wins for Pass 1 and for T2I when configured)
+    if (wf === 'z_image_turbo') {
+      return { label: 'Z-Image Turbo', cls: 'bg-emerald-700 text-emerald-50' };
+    }
+    // Klein 9B — reference-conditioned or T2I fallback
+    if (wf.startsWith('klein_')) {
+      // Show the ref count for refs workflows so a `klein_5ref` job is
+      // visibly distinct from a `klein_t2i` job at a glance.
+      const refMatch = /^klein_(\d)ref$/.exec(wf);
+      if (refMatch) {
+        return { label: `Klein 9B · ${refMatch[1]}REF`, cls: 'bg-amber-700 text-amber-50' };
+      }
+      if (wf === 'klein_t2i') {
+        return { label: 'Klein 9B · T2I', cls: 'bg-amber-700 text-amber-50' };
+      }
+      return { label: 'Klein 9B', cls: 'bg-amber-700 text-amber-50' };
+    }
+    // LTX video family
+    if (wf.startsWith('ltx_')) {
+      // ltx_fflf / ltx_i2v / ltx_v2v_extend / ltx_v2v_pass{1,2} / ltx_transition / ltx_seq_*
+      const tail = wf.replace(/^ltx_/, '').toUpperCase().replace(/_/g, ' ');
+      return { label: `LTX 2.3 · ${tail}`, cls: 'bg-purple-700 text-purple-50' };
+    }
+    // Unknown — show raw so it's debuggable
+    return { label: wf, cls: 'bg-gray-700 text-gray-200' };
+  };
+
   const cancelMutation = useMutation({
     mutationFn: async (jobId: string) => {
       await cancelJob(jobId);
@@ -130,6 +165,7 @@ export default function GenerationPanel() {
     const sceneName = getSceneName(job.scene_id);
     const workerLabel = getWorkerLabel(job.worker_url);
     const twoPassPhase = job.parameters?.two_pass_phase;
+    const modelBadge = getModelBadge(job);
 
     return (
     <div className="p-3 bg-gray-800 rounded mb-2 border border-gray-700">
@@ -137,11 +173,24 @@ export default function GenerationPanel() {
         <div className="flex items-center gap-2 flex-1 min-w-0">
           {getStatusIcon(job.status)}
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium truncate capitalize flex items-center gap-2">
+            <p className="text-sm font-medium truncate capitalize flex items-center gap-2 flex-wrap">
               {job.job_type} Generation
               {twoPassPhase && (
-                <span className="text-[10px] font-semibold bg-blue-600 text-white px-2 py-0.5 rounded whitespace-nowrap">
+                <span
+                  className="text-[10px] font-semibold bg-blue-600 text-white px-2 py-0.5 rounded whitespace-nowrap"
+                  title={twoPassPhase === 'base'
+                    ? 'Pass 1 — scene composition only (Z-Image Turbo)'
+                    : 'Pass 2 — character compositing on top of Pass 1 (Klein 9B)'}
+                >
                   {twoPassPhase === 'base' ? 'Pass 1/2' : 'Pass 2/2'}
+                </span>
+              )}
+              {modelBadge && (
+                <span
+                  className={`text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap font-mono ${modelBadge.cls}`}
+                  title={`Workflow type: ${job.parameters?.workflow_type}`}
+                >
+                  {modelBadge.label}
                 </span>
               )}
             </p>
