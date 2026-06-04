@@ -145,7 +145,7 @@
         "lora": "anime2real-semi.safetensors",
         "strength": 1
       },
-      "➕ Add Lora": "",
+      "\u2795 Add Lora": "",
       "model": [
         "78",
         0
@@ -192,7 +192,7 @@
   },
   "460": {
     "inputs": {
-      "upscale_method": "lanczos",
+      "upscale_method": "nearest-exact",
       "megapixels": 1,
       "resolution_steps": 1,
       "image": [
@@ -248,7 +248,7 @@
   },
   "447:446": {
     "inputs": {
-      "upscale_method": "lanczos",
+      "upscale_method": "nearest-exact",
       "megapixels": 1,
       "resolution_steps": 1,
       "image": [
@@ -279,7 +279,7 @@
   },
   "515:503": {
     "inputs": {
-      "steps": 20,
+      "steps": 4,
       "width": [
         "302",
         0
@@ -491,7 +491,7 @@
   },
   "516:502": {
     "inputs": {
-      "cfg": 5,
+      "cfg": 1,
       "model": [
         "307",
         0
@@ -557,7 +557,7 @@
   },
   "516:512": {
     "inputs": {
-      "steps": 20,
+      "steps": 4,
       "width": [
         "516:506",
         0
