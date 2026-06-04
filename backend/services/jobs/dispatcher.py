@@ -1807,6 +1807,24 @@ class JobDispatcher:
             logger.warning(f"[{job_id_str}] Two-pass Pass 1 complete but no character ref IDs stored — skipping Pass 2")
             return
 
+        # Klein ships KLEIN_EDIT_ULTRA_WORKFLOW_1REF.json ..._5REF.json —
+        # there is no 6REF workflow.  Pass 2 always claims slot 1 for the
+        # generated scene image, so the character refs are capped at 4
+        # (5 total).  Any extras are dropped here with a warning so the
+        # job doesn't crash with "Unknown workflow type: klein_6ref"
+        # when a scene has 5+ character refs assigned.
+        MAX_CHARS_IN_COMPOSITE = 4
+        char_ref_ids_str = list(char_ref_ids_str)
+        if len(char_ref_ids_str) > MAX_CHARS_IN_COMPOSITE:
+            dropped = char_ref_ids_str[MAX_CHARS_IN_COMPOSITE:]
+            char_ref_ids_str = char_ref_ids_str[:MAX_CHARS_IN_COMPOSITE]
+            logger.warning(
+                f"[{job_id_str}] Two-pass composite has {len(dropped)} extra "
+                f"character ref(s) beyond the {MAX_CHARS_IN_COMPOSITE}-character "
+                f"limit (Klein ships up to 5REF and slot 1 is the scene image) "
+                f"— dropping: {dropped}"
+            )
+
         # Build ref list: scene image (slot 1) + character refs (slots 2+)
         all_ref_ids = [str(base_asset.id)] + list(char_ref_ids_str)
 

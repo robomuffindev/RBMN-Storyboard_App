@@ -922,12 +922,18 @@ def _apply_two_pass_to_job_params(
     params: dict,
     two_pass: bool,
     ref_ids: list[str],
+    character_only_ids: list[str] | None = None,
 ) -> dict:
     """Transform image job parameters for two-pass mode.
 
     When two_pass is enabled and there are character reference IDs:
     - Changes workflow to klein_t2i (no refs)
-    - Stores original char refs in two_pass_character_ref_ids
+    - Stores ONLY character refs in two_pass_character_ref_ids — extras
+      (location/prop/style refs the user attached to the FF picker) are
+      intentionally dropped here because Pass 2 is for character identity
+      compositing; loading 5+ refs into Pass 2 would (a) exceed the Klein
+      5REF ceiling and (b) blend non-character image colors into the
+      character composite.
     - Sets two_pass=True, two_pass_phase="base"
     - Clears reference_asset_ids (Pass 1 has no refs)
 
@@ -936,7 +942,12 @@ def _apply_two_pass_to_job_params(
     Args:
         params: Original job parameters dict
         two_pass: Whether two-pass mode is enabled
-        ref_ids: The original reference asset IDs (character refs)
+        ref_ids: The full reference asset ID list (chars + extras).
+            Used only to decide whether two-pass is applicable here.
+        character_only_ids: When provided, the character-asset-only
+            subset of ``ref_ids`` (no extras).  This is what gets stored
+            for Pass 2.  When ``None`` (legacy callers), falls back to
+            ``ref_ids`` for backward compatibility.
 
     Returns:
         Modified params dict (or original if two-pass not applicable)
@@ -944,11 +955,17 @@ def _apply_two_pass_to_job_params(
     if not two_pass or not ref_ids:
         return params
 
+    pass2_refs = list(character_only_ids) if character_only_ids is not None else list(ref_ids)
+    if not pass2_refs:
+        # Two-pass requested but no character refs — downgrade to single-pass
+        # rather than firing a composite with nothing to composite.
+        return params
+
     # Transform for Pass 1: no refs, scene composition only
     params = dict(params)  # Don't mutate the original
     params["two_pass"] = True
     params["two_pass_phase"] = "base"
-    params["two_pass_character_ref_ids"] = list(ref_ids)
+    params["two_pass_character_ref_ids"] = pass2_refs
     params["two_pass_original_workflow"] = params.get("workflow_type", "klein_t2i")
     params["workflow_type"] = "klein_t2i"
     params["reference_asset_ids"] = []
@@ -2722,7 +2739,7 @@ async def _run_windowed_batch(
                         "frame_type": "first",
                         "auto_save_preview": True,
                     }
-                    img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                    img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=char_asset_ids)
                     await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
                     img_job = Job(
                         project_id=project_id,
@@ -2858,7 +2875,7 @@ async def _run_windowed_batch(
                     "frame_type": "first",
                     "auto_save_preview": True,
                 }
-                img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=char_asset_ids)
                 eligible.append({
                     "scene_id": scene.id,
                     "scene_name": scene_name,
@@ -3503,7 +3520,7 @@ async def _run_sequential_auto_gen(
                         "frame_type": "first",
                         "auto_save_preview": True,
                     }
-                    img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                    img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
                     await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
                     job = Job(
                         project_id=project_id,
@@ -3567,7 +3584,7 @@ async def _run_sequential_auto_gen(
                             "frame_type": "first",
                             "auto_save_preview": True,
                         }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
                         await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
                         job = Job(
                             project_id=project_id,
@@ -3697,7 +3714,7 @@ async def _run_sequential_auto_gen(
                             "frame_type": "first",
                             "auto_save_preview": True,
                         }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
                         await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
                         job = Job(
                             project_id=project_id,
@@ -3769,7 +3786,7 @@ async def _run_sequential_auto_gen(
                                     "frame_type": "first",
                                     "auto_save_preview": True,
                                 }
-                                img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                                img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
                                 await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
                                 job = Job(
                                     project_id=project_id,
@@ -3903,7 +3920,7 @@ async def _run_sequential_auto_gen(
                             "frame_type": "first",
                             "auto_save_preview": True,
                         }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids)
+                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
                         await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
                         job = Job(
                             project_id=project_id,
