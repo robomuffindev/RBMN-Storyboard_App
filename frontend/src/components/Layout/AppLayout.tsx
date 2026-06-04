@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp, Film } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks, listExports, deleteExportFile } from '@/api/client';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks, listExports, deleteExportFile, convertToNarrationVideo } from '@/api/client';
 import type { ExportFileInfo } from '@/api/client';
 import { useAppStore } from '@/store';
 import type { Scene } from '@/types/index';
@@ -905,6 +905,39 @@ export default function AppLayout() {
                   <Pencil size={14} />
                   Edit Project Name
                 </button>
+                {project?.mode === 'narration_images' && (
+                  <button
+                    onClick={async () => {
+                      setToolsMenuOpen(false);
+                      const proceed = window.confirm(
+                        `Convert "${project.name}" to Narration Video?\n\n`
+                        + `This creates a NEW project named "${project.name} (Video)" `
+                        + `with the same scenes, chapters, lyrics, concept, and existing images. `
+                        + `Your current Narration Images project will be left untouched.\n\n`
+                        + `On the new project you'll be able to generate videos from the images you already have.`,
+                      );
+                      if (!proceed) return;
+                      try {
+                        const res = await convertToNarrationVideo(id!);
+                        const newId = (res.data as any)?.id;
+                        if (newId) {
+                          // Navigate into the new project so the user can start generating videos.
+                          navigate(`/project/${newId}`);
+                        } else {
+                          alert('Convert finished but no new project ID was returned. Refresh and check your project list.');
+                        }
+                      } catch (e: any) {
+                        const detail = e?.response?.data?.detail || e?.message || String(e);
+                        alert(`Convert failed:\n\n${detail}`);
+                      }
+                    }}
+                    title="Duplicate this Narration Images project as a new Narration Video project. The original stays intact; the duplicate inherits scenes, chapters, lyrics, and existing images so you can start generating videos right away."
+                    className="w-full px-4 py-3 text-sm text-gray-200 hover:bg-gray-700 text-left transition-colors border-t border-gray-700 flex items-center gap-2"
+                  >
+                    <span aria-hidden>🎬</span>
+                    Convert to Narration Video
+                  </button>
+                )}
               </div>
             )}
           </div>

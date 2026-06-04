@@ -41,6 +41,10 @@ export const deleteProject = (id: string) => api.delete(`/projects/${id}`);
 export const duplicateProject = (id: string) =>
   api.post<Project>(`/projects/${id}/duplicate`);
 
+/** Deep-copy a narration_images project as a new narration_video project. */
+export const convertToNarrationVideo = (id: string) =>
+  api.post<Project>(`/projects/${id}/convert-to-narration-video`);
+
 // ===== Scenes =====
 export const getScenes = (projectId: string) =>
   api.get<Scene[]>(`/projects/${projectId}/scenes`);

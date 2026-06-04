@@ -11,7 +11,11 @@ interface AudioSetupProps {
 
 type AnalysisStage = 'idle' | 'uploading' | 'separating_stems' | 'transcribing' | 'detecting_sections' | 'complete' | 'error';
 
-const stageLabels: Record<AnalysisStage, string> = {
+// Music-video labels (default).  Narration projects skip Demucs and
+// the "song sections" concept, so we override the relevant labels via
+// a mode-aware getter below.  Keeping a Record here so the union type
+// stays exhaustive at compile time.
+const stageLabelsMusic: Record<AnalysisStage, string> = {
   idle: 'Ready to analyze',
   uploading: 'Uploading audio file...',
   separating_stems: 'Separating stems with Demucs (vocals, drums, bass, other)...',
@@ -20,6 +24,22 @@ const stageLabels: Record<AnalysisStage, string> = {
   complete: 'Analysis complete!',
   error: 'Analysis failed',
 };
+
+// Narration-mode overrides — Demucs is skipped (audio is already speech)
+// and we transcribe a script rather than song lyrics.  Empty stage =
+// the music label is used.
+const stageLabelsNarration: Partial<Record<AnalysisStage, string>> = {
+  separating_stems: 'Preparing audio (stem separation skipped for narration)...',
+  transcribing: 'Transcribing narration with WhisperX...',
+  detecting_sections: 'Detecting narration segments...',
+};
+
+function stageLabelFor(stage: AnalysisStage, isNarration: boolean): string {
+  if (isNarration && stage in stageLabelsNarration) {
+    return stageLabelsNarration[stage]!;
+  }
+  return stageLabelsMusic[stage];
+}
 
 /**
  * Known section tags to KEEP when cleaning lyrics for Whisper.
@@ -602,7 +622,7 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
                 return (
                   <div key={s} className={`flex items-center gap-2 text-xs ${isCurrent ? 'text-blue-400' : isDone ? 'text-green-400' : 'text-gray-500'}`}>
                     {isDone ? <CheckCircle size={14} /> : isCurrent ? <Loader size={14} className="animate-spin" /> : <div className="w-3.5 h-3.5 rounded-full border border-gray-600" />}
-                    {stageLabels[s]}
+                    {stageLabelFor(s, isNarration)}
                   </div>
                 );
               })}
