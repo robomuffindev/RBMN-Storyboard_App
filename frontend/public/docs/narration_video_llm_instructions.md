@@ -58,6 +58,15 @@ You will receive a JSON payload that follows the schema described below. **Do no
 
 Each entry has just `name` and `description`. Descriptions should be physical/character details an image generator can render: age, build, clothing, hair, distinguishing features, demeanor. Keep them 1–3 sentences. Do not describe their image path.
 
+**Character lifecycle on import (important):**
+
+- `image_path` is intentionally **never** exported. Character reference images live as files inside the project folder and aren't portable across projects.
+- When you add a **new** character (a `name` the project doesn't already have), import creates it with `image_path: null`. The user must generate the reference image in-app afterward (Concept tab → "Auto-generate Characters" or the per-character ✨ button). Until they do, any scene that references that character cannot run two-pass — the dispatcher silently downgrades to single-pass.
+- When you update an **existing** character's description, their existing `image_path` is preserved. Description changes do NOT auto-regenerate the image — the user keeps full control over when reference images are remade. If your edits materially change the character's appearance, mention it in the import notes so they know to manually regenerate.
+- `name` is the join key (case-insensitive, whitespace-trimmed). Renaming a character via import is not supported — it would orphan the old image and break scene references. To rename, the user must do it in-app.
+- Deleting characters via import is not supported. Omitting a character from the payload does NOT remove it; it simply isn't touched.
+- For two-pass character compositing to actually fire on a scene, every name listed in `character_refs_first` / `character_refs_last` must (a) exist in `characters[]` and (b) have a non-null `image_path` in the project. The first condition is your responsibility; the second is the user's after-import step.
+
 ### `chapters[]`
 
 Each entry:

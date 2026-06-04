@@ -55,7 +55,16 @@ You will receive a JSON payload that follows the schema described below. **Do no
 
 ### `characters[]`
 
-`name` + `description`. Descriptions are 1–3 sentences of renderable physical detail.
+`name` + `description`. Descriptions are 1–3 sentences of renderable physical detail (age, build, signature clothing, hair, distinguishing features, performance demeanor).
+
+**Character lifecycle on import (important):**
+
+- `image_path` is intentionally **never** exported. Character reference images are project-internal files and aren't portable.
+- Adding a **new** character creates it with `image_path: null`. The user must generate the reference image in-app (Concept tab → "Auto-generate Characters" or per-character ✨ button) before any scene can two-pass composite them.
+- Updating an **existing** character's description preserves their existing `image_path`. The image is NOT auto-regenerated — the user decides when. If your description change is major (different outfit, new look), flag it in your import notes so they know to remake the reference.
+- `name` is the join key (case-insensitive, whitespace-trimmed). Rename via import is unsupported (would orphan the existing image and break scene references); the user must rename in-app.
+- Deletion via import is unsupported — omitting a character does not remove it.
+- For two-pass to fire on a scene, every name in `character_refs_first` / `character_refs_last` must exist in `characters[]` AND have a non-null `image_path` in the project. The first is your job; the second is the user's post-import step.
 
 ### `chapters[]`
 
