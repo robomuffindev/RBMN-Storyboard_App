@@ -1097,55 +1097,93 @@ async def _ensure_video_flow(
 
     # Build scene list with per-scene lyrics
     scene_lines = []
+    # Mode-aware: narration projects label per-scene text as NARRATION,
+    # music_video as LYRICS.  Same downstream rendering.
+    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images")
+    _label = "NARRATION" if _is_narration_proj else "LYRICS"
+    _gap = "(no narration in this segment)" if _is_narration_proj else "(instrumental / no vocals)"
     for i, sc in enumerate(scenes):
         scene_lyrics = _get_scene_lyrics(sc, lyrics_words, lyrics_text=full_lyrics) if lyrics_words else ""
         line = f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
         if scene_lyrics:
-            line += f"\n    LYRICS: \"{scene_lyrics}\""
+            line += f"\n    {_label}: \"{scene_lyrics}\""
         else:
-            line += "\n    LYRICS: (instrumental / no vocals)"
+            line += f"\n    {_label}: {_gap}"
         scene_lines.append(line)
     scene_list = "\n".join(scene_lines)
 
-    system_prompt = (
-        "You are a creative director for AI-generated music videos and narration videos. "
-        "Given a video concept, visual style, characters, LYRICS for each scene, and a list of scenes with timings, "
-        "generate a cohesive storyboard idea for each scene. Each idea should describe what happens "
-        "visually in that scene — camera movement, action, mood, composition — so that an AI image/video "
-        "generator can produce compelling frames that tell a SEQUENTIAL STORY.\n\n"
-        "CRITICAL — LYRICS ARE YOUR PRIMARY CREATIVE DRIVER:\n"
-        "The lyrics for each scene are the #1 source of creative direction. Your storyboard ideas MUST:\n"
-        "1. VISUALLY DEPICT specific objects, people, actions, and settings mentioned in the lyrics. "
-        "If the lyrics say 'red car', 'broken mirror', 'dancing in the rain', 'walking through fire' — "
-        "those elements MUST appear in your scene description. Do NOT abstract them into vague mood.\n"
-        "2. FOLLOW THE NARRATIVE ORDER of the lyrics. Events described first in the song happen first "
-        "in the video. The visual story should track the lyrical story beat by beat.\n"
-        "3. For instrumental/no-vocal scenes: use the overall concept and surrounding lyrical context "
-        "to create transitional or atmospheric visuals that bridge the narrative.\n"
-        "4. Translate metaphors into compelling visuals — 'heart on fire' could be a character with "
-        "glowing embers around their chest, 'drowning in sorrow' could be a character submerged in "
-        "dark water. Make abstract lyrics VISUALLY CONCRETE.\n\n"
-        "CRITICAL: Each scene MUST be visually DISTINCT from the others. Vary the composition, "
-        "camera angle, subject position, action, and environment across scenes.\n\n"
-        "Note: This app supports character reference images (up to 5 characters) that maintain visual "
-        "consistency across scenes. When characters are defined, reference them by name "
-        "in your scene descriptions — their appearance stays consistent automatically.\n\n"
-        "Keep each idea under 100 words.\n\n"
-        "IMPORTANT: Return ONLY a JSON array of strings, one per scene, in order. "
-        "No markdown, no labels, no explanation — just the JSON array."
-    )
+    if _is_narration_proj:
+        system_prompt = (
+            "You are a creative director for AI-generated narration videos and narration slideshows. "
+            "Given a production concept, visual style, characters, NARRATION TEXT for each scene, and a list of scenes with timings, "
+            "generate a cohesive storyboard idea for each scene. Each idea should describe what happens "
+            "visually in that scene — camera movement, action, mood, composition — so that an AI image/video "
+            "generator can produce compelling frames that tell a SEQUENTIAL STORY.\n\n"
+            "CRITICAL — THE NARRATION SCRIPT IS YOUR PRIMARY CREATIVE DRIVER:\n"
+            "The narrated text for each scene is the #1 source of creative direction. Your storyboard ideas MUST:\n"
+            "1. VISUALLY DEPICT specific people, places, objects, and actions mentioned in the narration. "
+            "If the narrator says 'a stone altar at dusk', 'a child holding a lantern', 'a crowded marketplace' — "
+            "those elements MUST appear in your scene description. Do NOT abstract them into vague mood.\n"
+            "2. FOLLOW THE NARRATIVE ORDER of the script. Events described first happen first "
+            "in the video. The visual story should track the spoken story beat by beat.\n"
+            "3. For silent / between-segment scenes: use the overall concept and surrounding context "
+            "to create transitional or atmospheric visuals that bridge the narrative.\n"
+            "4. Visualize abstractions concretely — 'a long journey' could be a winding road at dawn, "
+            "'doubt crept in' could be a face half-lit at a window. Translate spoken concepts into VISUAL ANCHORS.\n"
+            "5. Period accuracy: when the narration references a historical period, geography, religion, or "
+            "culture, honor that setting in clothing, architecture, props, and lighting. Do NOT contemporize.\n\n"
+            "CRITICAL: Each scene MUST be visually DISTINCT from the others. Vary the composition, "
+            "camera angle, subject position, action, and environment across scenes.\n\n"
+            "Note: This app supports character reference images (up to 5 characters) that maintain visual "
+            "consistency across scenes. When characters are defined, reference them by name "
+            "in your scene descriptions — their appearance stays consistent automatically.\n\n"
+            "Keep each idea under 100 words.\n\n"
+            "IMPORTANT: Return ONLY a JSON array of strings, one per scene, in order. "
+            "No markdown, no labels, no explanation — just the JSON array."
+        )
+    else:
+        system_prompt = (
+            "You are a creative director for AI-generated music videos. "
+            "Given a video concept, visual style, characters, LYRICS for each scene, and a list of scenes with timings, "
+            "generate a cohesive storyboard idea for each scene. Each idea should describe what happens "
+            "visually in that scene — camera movement, action, mood, composition — so that an AI image/video "
+            "generator can produce compelling frames that tell a SEQUENTIAL STORY.\n\n"
+            "CRITICAL — LYRICS ARE YOUR PRIMARY CREATIVE DRIVER:\n"
+            "The lyrics for each scene are the #1 source of creative direction. Your storyboard ideas MUST:\n"
+            "1. VISUALLY DEPICT specific objects, people, actions, and settings mentioned in the lyrics. "
+            "If the lyrics say 'red car', 'broken mirror', 'dancing in the rain', 'walking through fire' — "
+            "those elements MUST appear in your scene description. Do NOT abstract them into vague mood.\n"
+            "2. FOLLOW THE NARRATIVE ORDER of the lyrics. Events described first in the song happen first "
+            "in the video. The visual story should track the lyrical story beat by beat.\n"
+            "3. For instrumental/no-vocal scenes: use the overall concept and surrounding lyrical context "
+            "to create transitional or atmospheric visuals that bridge the narrative.\n"
+            "4. Translate metaphors into compelling visuals — 'heart on fire' could be a character with "
+            "glowing embers around their chest, 'drowning in sorrow' could be a character submerged in "
+            "dark water. Make abstract lyrics VISUALLY CONCRETE.\n\n"
+            "CRITICAL: Each scene MUST be visually DISTINCT from the others. Vary the composition, "
+            "camera angle, subject position, action, and environment across scenes.\n\n"
+            "Note: This app supports character reference images (up to 5 characters) that maintain visual "
+            "consistency across scenes. When characters are defined, reference them by name "
+            "in your scene descriptions — their appearance stays consistent automatically.\n\n"
+            "Keep each idea under 100 words.\n\n"
+            "IMPORTANT: Return ONLY a JSON array of strings, one per scene, in order. "
+            "No markdown, no labels, no explanation — just the JSON array."
+        )
 
     lyrics_block = ""
     if full_lyrics:
-        lyrics_block = f"\nFull Song Lyrics (for overall narrative arc):\n{full_lyrics}\n"
+        if _is_narration_proj:
+            lyrics_block = f"\nFull Narration Script (for overall narrative arc):\n{full_lyrics}\n"
+        else:
+            lyrics_block = f"\nFull Song Lyrics (for overall narrative arc):\n{full_lyrics}\n"
 
     user_prompt = (
-        f"Video Concept: {concept_text or '(not set)'}\n"
+        f"{'Production Concept' if _is_narration_proj else 'Video Concept'}: {concept_text or '(not set)'}\n"
         f"Visual Style: {style_text or '(not set)'}\n"
         f"Characters: {char_block}\n"
         f"{lyrics_block}\n"
-        f"Scenes (with per-scene lyrics):\n{scene_list}\n\n"
-        "Generate a storyboard idea for each scene. The lyrics for each scene are your PRIMARY source "
+        f"Scenes (with per-scene {'narration text' if _is_narration_proj else 'lyrics'}):\n{scene_list}\n\n"
+        f"Generate a storyboard idea for each scene. The {'narration' if _is_narration_proj else 'lyrics'} for each scene are your PRIMARY source "
         "of visual direction — depict what they describe. Return a JSON array of strings."
     )
 
@@ -1189,16 +1227,23 @@ async def _ensure_video_flow(
             batch_scenes = scenes[batch_idx:batch_idx + batch_size]
             batch_scene_list = "\n".join(scene_lines[batch_idx:batch_idx + batch_size])
             bp = (
-                f"Video Concept: {concept_text or '(not set)'}\n"
+                f"{'Production Concept' if _is_narration_proj else 'Video Concept'}: {concept_text or '(not set)'}\n"
                 f"Visual Style: {style_text or '(not set)'}\n"
                 f"Characters: {char_block}\n"
             )
             if lyrics_summary:
-                bp += f"\nNarrative/Lyrics Summary:\n{lyrics_summary}\n"
+                _summary_label = (
+                    "Narration Summary"
+                    if _is_narration_proj
+                    else "Narrative/Lyrics Summary"
+                )
+                bp += f"\n{_summary_label}:\n{lyrics_summary}\n"
             bp += (
                 f"\nScenes {batch_idx + 1}–{batch_idx + len(batch_scenes)} "
-                f"(of {len(scenes)} total):\n{batch_scene_list}\n\n"
+                f"(of {len(scenes)} total, with per-scene "
+                f"{'narration text' if _is_narration_proj else 'lyrics'}):\n{batch_scene_list}\n\n"
                 f"Generate a storyboard idea for each of these {len(batch_scenes)} scenes. "
+                f"The {'narration' if _is_narration_proj else 'lyrics'} for each scene are your PRIMARY source of visual direction. "
                 f"Return a JSON array of {len(batch_scenes)} strings."
             )
             batch_prompts.append((batch_idx, len(batch_scenes), bp, max(1200, len(batch_scenes) * 150 + 300)))

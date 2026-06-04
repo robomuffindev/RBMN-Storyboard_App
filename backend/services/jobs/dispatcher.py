@@ -2442,8 +2442,28 @@ class JobDispatcher:
             project_path = app_settings.project_dir / str(project_id)
             stems_dir = project_path / "assets" / "stems"
 
+            # Narration projects skip Demucs — the "vocal stem" IS the
+            # master audio (and there's no instrumental to subtract).
+            # Returning None here makes the caller fall through to the
+            # scene's per-scene audio_clip_path, which is the speech
+            # sliced to scene boundaries.  Exactly what we want.
+            try:
+                from backend.database.models import Project as _Project
+                proj = await session.get(_Project, project_id)
+                if proj and getattr(proj, "mode", None) in ("narration_video", "narration_images"):
+                    logger.debug(
+                        f"Stem mix skipped for narration project {project_id} "
+                        f"(scene {scene.order_index}, vocals_only={vocals_only}) — "
+                        f"falling back to per-scene speech audio."
+                    )
+                    return None
+            except Exception:
+                # Defensive: if mode lookup fails for any reason, fall
+                # through to the normal stems-dir check below.
+                pass
+
             if not stems_dir.exists():
-                logger.warning(f"No stems directory for project {project_id}")
+                logger.debug(f"No stems directory for project {project_id} — falling back to full audio")
                 return None
 
             # Determine which stems to include

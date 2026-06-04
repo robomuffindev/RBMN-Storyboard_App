@@ -72,6 +72,36 @@ function flattenInOrder(chapters: ChapterTreeNode[]): ChapterTreeNode[] {
   return out;
 }
 
+/**
+ * Build a chapter.id → "1" / "1a" / "1a2" label map matching the
+ * ChapterOverlay numbering exactly.  Top-level in playback order get
+ * "1", "2", ...; sub-chapters alternate letters/numbers at each depth.
+ * This lets the Chapters tab show "Chapter 1", "Chapter 2", etc. as
+ * card headers using the same identifiers the user sees on the timeline.
+ */
+function buildChapterNumbers(chapters: ChapterTreeNode[]): Map<string, string> {
+  const numbers = new Map<string, string>();
+  const subSuffix = (i: number) =>
+    i < 26 ? String.fromCharCode(97 + i) : String(i + 1);
+  const assign = (nodes: ChapterTreeNode[], prefix: string, depth: number) => {
+    const sorted = [...nodes].sort((a, b) => a.start_time - b.start_time);
+    sorted.forEach((ch, i) => {
+      const segment = depth === 0
+        ? String(i + 1)
+        : depth % 2 === 1
+          ? subSuffix(i)
+          : String(i + 1);
+      const label = prefix + segment;
+      numbers.set(ch.id, label);
+      if (ch.children?.length) {
+        assign(ch.children, label, depth + 1);
+      }
+    });
+  };
+  assign(chapters, '', 0);
+  return numbers;
+}
+
 export default function ChapterDirectionPanel({
   projectId,
   chapters,
@@ -80,6 +110,10 @@ export default function ChapterDirectionPanel({
   reparseBusy = false,
 }: ChapterDirectionPanelProps) {
   const flat = useMemo(() => flattenInOrder(chapters), [chapters]);
+  // Same numbering as the timeline overlay so the card headers
+  // ("Chapter 1", "Chapter 1a", ...) match what the user sees on the
+  // colored bars above the waveform.  Map is keyed by chapter.id.
+  const chapterNumbers = useMemo(() => buildChapterNumbers(chapters), [chapters]);
   // Read scenes from Zustand so the flow-coverage indicator and the
   // batch flow button can skip chapters that are already fully covered.
   const scenes = useAppStore((s) => s.scenes);
@@ -280,6 +314,7 @@ export default function ChapterDirectionPanel({
               projectId={projectId}
               onChange={onChange}
               flowCov={coverageById.get(ch.id) || { done: 0, total: 0 }}
+              chapterNumber={chapterNumbers.get(ch.id) || ''}
             />
           ))}
         </div>
@@ -294,12 +329,15 @@ function ChapterCard({
   projectId,
   onChange,
   flowCov,
+  chapterNumber,
 }: {
   chapter: ChapterTreeNode;
   projectId: string;
   onChange?: () => void;
   /** Per-chapter Story Flow coverage — done/total scenes with flow_idea. */
   flowCov: { done: number; total: number };
+  /** Sequence label matching the timeline overlay ("1", "2", "1a", ...). */
+  chapterNumber: string;
 }) {
   const [description, setDescription] = useState(chapter.description || '');
   const [dirty, setDirty] = useState(false);
@@ -363,11 +401,24 @@ function ChapterCard({
   };
 
   return (
-    <div
-      className="rounded-lg border border-gray-800 bg-gray-900/50 overflow-hidden"
-      style={{ borderLeftWidth: 4, borderLeftColor: chapter.color }}
-    >
-      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-800">
+    <div className="flex flex-col gap-1">
+      {chapterNumber && (
+        <div
+          className="flex items-center gap-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400"
+          title={`Same identifier as the colored bar above the timeline (Chapter ${chapterNumber} = ${chapter.name})`}
+        >
+          <span
+            className="inline-block w-2 h-2 rounded-sm"
+            style={{ backgroundColor: chapter.color }}
+          />
+          Chapter {chapterNumber}
+        </div>
+      )}
+      <div
+        className="rounded-lg border border-gray-800 bg-gray-900/50 overflow-hidden"
+        style={{ borderLeftWidth: 4, borderLeftColor: chapter.color }}
+      >
+        <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-800">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Link
             to={`/project/${projectId}/c/${chapter.short_code}`}
@@ -481,6 +532,7 @@ function ChapterCard({
             </button>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

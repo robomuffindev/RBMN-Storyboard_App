@@ -548,6 +548,11 @@ export default function AppLayout() {
   const startAutoGenPolling = useCallback(() => {
     if (autoGenPollRef.current) clearInterval(autoGenPollRef.current);
     setAutoGenDismissed(false);
+    // Optimistically flip to 'running' before the first poll round-trip
+    // completes so the status bar appears the instant the user starts
+    // a run (was a visual gap that made users think the modal had
+    // dismissed without doing anything).
+    setAutoGenStatus((cur) => (cur === 'idle' ? 'running' : cur));
 
     const poll = async () => {
       if (!id) return;
@@ -1413,8 +1418,30 @@ export default function AppLayout() {
       {/* Auto Generate Modal */}
       {autoGenOpen && <AutoGenerateModal
         projectId={id!}
-        onClose={() => setAutoGenOpen(false)}
-        onMinimize={() => setAutoGenOpen(false)}
+        onClose={() => {
+          // Close = user dismissed pre-run; don't surface a status bar
+          // unless a run is actually active. If a run IS active, keep
+          // the status pill visible by going to minimized state.
+          setAutoGenOpen(false);
+          if (autoGenStatus === 'running' || autoGenStatus === 'pending') {
+            setAutoGenMinimized(true);
+            setAutoGenDismissed(false);
+          }
+        }}
+        onMinimize={() => {
+          // Explicit minimize: always show the status bar (as pill),
+          // regardless of whether the run has produced its first
+          // status-poll response yet.  This prevents a UX gap where
+          // the modal closes but the pill hasn't appeared.
+          setAutoGenOpen(false);
+          setAutoGenMinimized(true);
+          setAutoGenDismissed(false);
+          // Optimistically mark the run as starting so the pill renders
+          // immediately, even before the first status-poll round-trip.
+          if (autoGenStatus === 'idle') {
+            setAutoGenStatus('running');
+          }
+        }}
         onStarted={startAutoGenPolling}
         autoGenStatus={autoGenStatus}
         autoGenMode={autoGenMode}
