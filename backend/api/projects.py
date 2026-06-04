@@ -664,3 +664,68 @@ def _remap_asset_ids(params: dict, asset_map: dict) -> dict:
             return str_map[obj]
         return obj
     return walk(params)
+
+
+
+# ── Project Text Data Export / Import ─────────────────────────────────
+#
+# Two endpoints that wrap backend/services/project_text_io.py.  They
+# expose all editable text data (concept, characters, chapters, scenes,
+# prompts, story flow, transitions) as a single JSON payload suitable
+# for handing to an AI agent.  See public/docs/*.md for the LLM-facing
+# instructions.
+
+from pydantic import BaseModel as _PD_BaseModel
+from typing import Literal as _PD_Literal
+
+
+class TextImportRequest(_PD_BaseModel):
+    """Payload for POST /projects/{id}/text-import."""
+    json_payload: dict
+    import_mode: _PD_Literal["override", "fill_missing"] = "fill_missing"
+    accept_mode_mismatch: bool = False
+
+
+@router.get(
+    "/{project_id}/text-export",
+    summary="Export project text data as JSON",
+)
+async def text_export(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Build the canonical text-data export for a project."""
+    from backend.services.project_text_io import build_export
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return await build_export(project, session)
+
+
+@router.post(
+    "/{project_id}/text-import",
+    summary="Apply a text-data JSON payload to a project",
+)
+async def text_import(
+    project_id: UUID,
+    req: TextImportRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Apply an import payload.  See project_text_io.apply_import."""
+    from backend.services.project_text_io import apply_import, ImportError as _ImpErr
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    try:
+        stats = await apply_import(
+            project, session,
+            req.json_payload,
+            mode=req.import_mode,
+            accept_mode_mismatch=req.accept_mode_mismatch,
+        )
+        return {"ok": True, "stats": stats}
+    except _ImpErr as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Text import failed for {project_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Import failed: {e}")

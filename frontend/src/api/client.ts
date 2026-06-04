@@ -45,6 +45,20 @@ export const duplicateProject = (id: string) =>
 export const convertToNarrationVideo = (id: string) =>
   api.post<Project>(`/projects/${id}/convert-to-narration-video`);
 
+/** Export all editable text data for a project as a JSON payload. */
+export const exportProjectText = (id: string) =>
+  api.get<any>(`/projects/${id}/text-export`);
+
+/** Apply a text-data JSON payload back to a project. */
+export const importProjectText = (
+  id: string,
+  body: { json_payload: any; import_mode: 'override' | 'fill_missing'; accept_mode_mismatch?: boolean },
+) =>
+  api.post<{ ok: boolean; stats: Record<string, number> }>(
+    `/projects/${id}/text-import`,
+    body,
+  );
+
 // ===== Scenes =====
 export const getScenes = (projectId: string) =>
   api.get<Scene[]>(`/projects/${projectId}/scenes`);
@@ -390,6 +404,10 @@ export const getConcept = (projectId: string) =>
     characters: Array<{ name: string; description: string; image_path: string | null }>;
     resolution_width: number;
     resolution_height: number;
+    image_resolution_width?: number;
+    image_resolution_height?: number;
+    video_resolution_width?: number;
+    video_resolution_height?: number;
     project_fps: number;
     global_seed_enabled: boolean;
     global_seed: number;
@@ -412,6 +430,10 @@ export const saveConcept = (projectId: string, data: {
   characters: Array<{ name: string; description: string; image_path: string | null }>;
   resolution_width: number;
   resolution_height: number;
+  image_resolution_width?: number;
+  image_resolution_height?: number;
+  video_resolution_width?: number;
+  video_resolution_height?: number;
   project_fps: number;
   global_seed_enabled?: boolean;
   global_seed?: number;

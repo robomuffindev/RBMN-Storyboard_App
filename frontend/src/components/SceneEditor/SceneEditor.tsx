@@ -2515,50 +2515,96 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <label className="block text-sm font-medium mb-2">
                   Color Override
                   <span className="text-[10px] text-gray-500 ml-2 font-normal">
-                    Forces color palette on LLM + model
+                    Overrides project-level Default Color Palette for this scene only
                   </span>
                 </label>
-                <select
-                  value={activeScene?.parameters?.color_override || currentProject?.settings?.global_color_override || 'full_color'}
-                  onChange={async (e) => {
-                    if (!activeScene || !currentProject) return;
-                    const newParams: Record<string, any> = { ...activeScene.parameters, color_override: e.target.value };
-                    // Clear custom palette if switching away from custom
-                    if (e.target.value !== 'custom') {
-                      delete newParams.custom_color_palette;
-                    }
-                    await updateSceneAndSync(activeScene.id, { parameters: newParams });
-                  }}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
-                >
-                  <option value="full_color">Full Color (Default)</option>
-                  <option value="black_and_white">Black & White / Noir</option>
-                  <option value="high_contrast_bw">High Contrast B&W</option>
-                  <option value="sepia">Sepia Tone</option>
-                  <option value="monochrome_blue">Monochrome Blue</option>
-                  <option value="monochrome_red">Monochrome Red</option>
-                  <option value="desaturated">Desaturated / Muted</option>
-                  <option value="vintage_film">Vintage Film</option>
-                  <option value="neon_cyberpunk">Neon Cyberpunk</option>
-                  <option value="custom">Custom Palette...</option>
-                </select>
-                {(activeScene?.parameters?.color_override === 'custom') && (
-                  <textarea
-                    value={activeScene?.parameters?.custom_color_palette || ''}
-                    onChange={async (e) => {
-                      if (!activeScene || !currentProject) return;
-                      const newParams = { ...activeScene.parameters, custom_color_palette: e.target.value };
-                      await updateSceneAndSync(activeScene.id, { parameters: newParams });
-                    }}
-                    placeholder="Describe your color palette (e.g., 'only shades of green and gold', 'pastel pink and baby blue')"
-                    className="w-full mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-16 text-sm"
-                  />
-                )}
-                {activeScene?.parameters?.color_override && activeScene.parameters.color_override !== 'full_color' && (
-                  <p className="text-[10px] text-amber-400 mt-1">
-                    ⚠ Color override active — LLM prompts and model will enforce this palette
-                  </p>
-                )}
+                {(() => {
+                  // The select value reads "none" when this scene has no
+                  // per-scene override set.  In that case the backend falls
+                  // through to project.settings.global_color_override (the
+                  // value from the Concept tab's "Default Color Palette").
+                  // Picking anything else here writes a per-scene override
+                  // that takes priority for this scene only.
+                  const sceneOverride = activeScene?.parameters?.color_override;
+                  const selectValue = sceneOverride ? sceneOverride : 'none';
+                  const projectDefault = currentProject?.settings?.global_color_override || '';
+                  const projectDefaultLabel = (() => {
+                    const m: Record<string, string> = {
+                      'full_color': 'Full Color',
+                      'black_and_white': 'Black & White / Noir',
+                      'high_contrast_bw': 'High Contrast B&W',
+                      'sepia': 'Sepia Tone',
+                      'monochrome_blue': 'Monochrome Blue',
+                      'monochrome_red': 'Monochrome Red',
+                      'desaturated': 'Desaturated / Muted',
+                      'vintage_film': 'Vintage Film',
+                      'neon_cyberpunk': 'Neon Cyberpunk',
+                      'custom': 'Custom (see Concept tab)',
+                    };
+                    if (!projectDefault) return '— (no project default set)';
+                    return m[projectDefault] || projectDefault;
+                  })();
+                  return (
+                    <>
+                      <select
+                        value={selectValue}
+                        onChange={async (e) => {
+                          if (!activeScene || !currentProject) return;
+                          const val = e.target.value;
+                          const newParams: Record<string, any> = { ...activeScene.parameters };
+                          if (val === 'none') {
+                            // Drop both the override key AND the custom
+                            // palette so the backend falls through cleanly
+                            // to the project-level setting.
+                            delete newParams.color_override;
+                            delete newParams.custom_color_palette;
+                          } else {
+                            newParams.color_override = val;
+                            if (val !== 'custom') {
+                              delete newParams.custom_color_palette;
+                            }
+                          }
+                          await updateSceneAndSync(activeScene.id, { parameters: newParams });
+                        }}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                      >
+                        <option value="none">None — use project Default Color Palette ({projectDefaultLabel})</option>
+                        <option value="full_color">Full Color</option>
+                        <option value="black_and_white">Black & White / Noir</option>
+                        <option value="high_contrast_bw">High Contrast B&W</option>
+                        <option value="sepia">Sepia Tone</option>
+                        <option value="monochrome_blue">Monochrome Blue</option>
+                        <option value="monochrome_red">Monochrome Red</option>
+                        <option value="desaturated">Desaturated / Muted</option>
+                        <option value="vintage_film">Vintage Film</option>
+                        <option value="neon_cyberpunk">Neon Cyberpunk</option>
+                        <option value="custom">Custom Palette...</option>
+                      </select>
+                      {sceneOverride === 'custom' && (
+                        <textarea
+                          value={activeScene?.parameters?.custom_color_palette || ''}
+                          onChange={async (e) => {
+                            if (!activeScene || !currentProject) return;
+                            const newParams = { ...activeScene.parameters, custom_color_palette: e.target.value };
+                            await updateSceneAndSync(activeScene.id, { parameters: newParams });
+                          }}
+                          placeholder="Describe your color palette (e.g., 'only shades of green and gold', 'pastel pink and baby blue')"
+                          className="w-full mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 h-16 text-sm"
+                        />
+                      )}
+                      {sceneOverride && sceneOverride !== 'full_color' && (
+                        <p className="text-[10px] text-amber-400 mt-1">
+                          ⚠ Per-scene color override active — overrides the project Default Color Palette for this scene
+                        </p>
+                      )}
+                      {!sceneOverride && (
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          Inherits from Concept tab Default Color Palette ({projectDefaultLabel}). Pick a different option above to override just this scene.
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
 
               <div>
@@ -4001,17 +4047,6 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           onClose={() => setLightboxOpen(false)}
           onSave={handleSaveAsPreview}
           onDelete={handleDeleteVersion}
-        />,
-        document.body
-      )}
-
-      {/* Generation Details Modal — rendered via portal */}
-      {detailsVersion && createPortal(
-        <GenerationDetailsModal
-          version={detailsVersion}
-          onClose={() => setDetailsVersion(null)}
-          onRerun={handleRerunGeneration}
-          isRerunning={isRerunning}
         />,
         document.body
       )}

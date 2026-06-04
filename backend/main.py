@@ -87,31 +87,12 @@ async def lifespan(app: FastAPI):
             logger.info(f"Project directory from DB settings: {settings.project_dir}")
 
         if app_settings and app_settings.comfyui_urls:
+            from backend.services.comfyui.dispatcher import apply_user_caps
             server_caps = app_settings.comfyui_server_caps or {}
             for url in app_settings.comfyui_urls:
                 try:
                     worker = app.state.comfy_dispatcher.add_worker(url)
-                    # Apply user-configured capabilities if set
-                    caps_config = server_caps.get(url, {})
-                    if caps_config:
-                        # Preserve auto-discovered caps (inpaint, upscale, ...)
-                        # while letting the user's image/video checkboxes act
-                        # as authoritative overrides for klein / ltx
-                        # specifically.  A naive union (`caps | user_caps`)
-                        # cannot honour an unchecked state - a worker with
-                        # "video" unchecked must have `ltx` removed even if
-                        # auto-discovery found it.
-                        merged = set(worker.capabilities)
-                        if caps_config.get("image", True):
-                            merged.add("klein")
-                        else:
-                            merged.discard("klein")
-                        if caps_config.get("video", True):
-                            merged.add("ltx")
-                        else:
-                            merged.discard("ltx")
-                        worker.capabilities = merged
-                        logger.info(f"Applied user caps for {url}: {merged}")
+                    apply_user_caps(worker, server_caps.get(url, {}))
                     logger.info(f"Added ComfyUI worker: {url}")
                 except Exception as e:
                     logger.warning(f"Failed to add ComfyUI worker {url}: {e}")
@@ -180,7 +161,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Robomuffin Idea Factory",
     description="AI music video / narration video creation tool",
-    version="1.8.2",
+    version="1.8.3",
     lifespan=lifespan,
 )
 

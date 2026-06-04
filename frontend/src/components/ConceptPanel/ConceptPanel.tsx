@@ -57,6 +57,15 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [resWidth, setResWidth] = useState(1536);
   const [resHeight, setResHeight] = useState(864);
   const [resPresetKey, setResPresetKey] = useState('1536x864');
+  // Per-job-type overrides (1.8.x). 0 means "use the unified default
+  // above" so the backend falls through to resolution_width / _height.
+  // Allows users to render images at higher resolution for cleaner
+  // Klein composites in Pass 2 while keeping LTX video at a sensible
+  // size, since most workflows upscale video after generation anyway.
+  const [imgResWidth, setImgResWidth] = useState(0);
+  const [imgResHeight, setImgResHeight] = useState(0);
+  const [vidResWidth, setVidResWidth] = useState(0);
+  const [vidResHeight, setVidResHeight] = useState(0);
   const [projectFps, setProjectFps] = useState(24);
   const [imageDirection, setImageDirection] = useState('');
   const [customImageDirection, setCustomImageDirection] = useState('');
@@ -131,6 +140,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         characters,
         resolution_width: resWidth,
         resolution_height: resHeight,
+        image_resolution_width: imgResWidth,
+        image_resolution_height: imgResHeight,
+        video_resolution_width: vidResWidth,
+        video_resolution_height: vidResHeight,
         project_fps: projectFps,
         image_direction: imageDirection,
         custom_image_direction: customImageDirection,
@@ -172,6 +185,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setResWidth(w);
       setResHeight(h);
       setResPresetKey(findPresetKey(w, h));
+      setImgResWidth(conceptData.image_resolution_width || 0);
+      setImgResHeight(conceptData.image_resolution_height || 0);
+      setVidResWidth(conceptData.video_resolution_width || 0);
+      setVidResHeight(conceptData.video_resolution_height || 0);
       setProjectFps(conceptData.project_fps || 24);
       setImageDirection(conceptData.image_direction || '');
       setCustomImageDirection(conceptData.custom_image_direction || '');
@@ -197,6 +214,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         characters,
         resolution_width: resWidth,
         resolution_height: resHeight,
+        image_resolution_width: imgResWidth,
+        image_resolution_height: imgResHeight,
+        video_resolution_width: vidResWidth,
+        video_resolution_height: vidResHeight,
         project_fps: projectFps,
         image_direction: imageDirection,
         custom_image_direction: customImageDirection,
@@ -250,6 +271,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         characters: newChars,
         resolution_width: resWidth,
         resolution_height: resHeight,
+        image_resolution_width: imgResWidth,
+        image_resolution_height: imgResHeight,
+        video_resolution_width: vidResWidth,
+        video_resolution_height: vidResHeight,
         project_fps: projectFps,
         image_direction: imageDirection,
         custom_image_direction: customImageDirection,
@@ -272,6 +297,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         characters: updated,
         resolution_width: resWidth,
         resolution_height: resHeight,
+        image_resolution_width: imgResWidth,
+        image_resolution_height: imgResHeight,
+        video_resolution_width: vidResWidth,
+        video_resolution_height: vidResHeight,
         project_fps: projectFps,
         image_direction: imageDirection,
         custom_image_direction: customImageDirection,
@@ -565,7 +594,78 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           )}
 
           <div className="text-[10px] text-gray-600 mt-1">
-            Used as default for all image &amp; video generation. Override per-scene in editor tabs.
+            Used as default for all image &amp; video generation. Override per-type below or per-scene in editor tabs.
+          </div>
+
+          {/* Per-type overrides — separates Klein/Z-Image image jobs from
+              LTX video jobs since they typically benefit from different
+              sizes (larger images for cleaner character composites,
+              smaller videos that are upscaled afterward). */}
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <div className="border border-gray-800 rounded p-2">
+              <div className="text-[11px] font-semibold text-purple-300 mb-1">
+                Image Generation Size
+              </div>
+              <div className="text-[9px] text-gray-500 mb-1.5 leading-tight">
+                Klein / Z-Image. Leave at 0 to use the unified resolution above.
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-0.5">Width</label>
+                  <input
+                    type="number"
+                    value={imgResWidth}
+                    onChange={(e) => { setImgResWidth(parseInt(e.target.value) || 0); markDirty(); }}
+                    min="0" max="4096" step="64"
+                    placeholder={String(resWidth)}
+                    className="w-full px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs text-gray-100 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-0.5">Height</label>
+                  <input
+                    type="number"
+                    value={imgResHeight}
+                    onChange={(e) => { setImgResHeight(parseInt(e.target.value) || 0); markDirty(); }}
+                    min="0" max="4096" step="64"
+                    placeholder={String(resHeight)}
+                    className="w-full px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs text-gray-100 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="border border-gray-800 rounded p-2">
+              <div className="text-[11px] font-semibold text-blue-300 mb-1">
+                Video Generation Size
+              </div>
+              <div className="text-[9px] text-gray-500 mb-1.5 leading-tight">
+                LTX 2.3. Leave at 0 to use the unified resolution above.
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-0.5">Width</label>
+                  <input
+                    type="number"
+                    value={vidResWidth}
+                    onChange={(e) => { setVidResWidth(parseInt(e.target.value) || 0); markDirty(); }}
+                    min="0" max="4096" step="64"
+                    placeholder={String(resWidth)}
+                    className="w-full px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs text-gray-100 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] text-gray-500 mb-0.5">Height</label>
+                  <input
+                    type="number"
+                    value={vidResHeight}
+                    onChange={(e) => { setVidResHeight(parseInt(e.target.value) || 0); markDirty(); }}
+                    min="0" max="4096" step="64"
+                    placeholder={String(resHeight)}
+                    className="w-full px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs text-gray-100 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -753,6 +853,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                     characters: newChars,
                     resolution_width: resWidth,
                     resolution_height: resHeight,
+                    image_resolution_width: imgResWidth,
+                    image_resolution_height: imgResHeight,
+                    video_resolution_width: vidResWidth,
+                    video_resolution_height: vidResHeight,
                     project_fps: projectFps,
                     image_direction: imageDirection,
                     custom_image_direction: customImageDirection,

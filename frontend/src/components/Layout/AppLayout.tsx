@@ -17,6 +17,7 @@ import VideoFlowPanel from '@/components/VideoFlowPanel/VideoFlowPanel';
 import AutoGenStatusBar from '@/components/BatchMode/AutoGenStatusBar';
 import BackingTrackTimeline from '@/components/BackingTrackTimeline/BackingTrackTimeline';
 import AssetGeneratorModal from '@/components/AssetGenerator/AssetGeneratorModal';
+import ProjectTextIOModal from '@/components/Layout/ProjectTextIOModal';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { useBackingTrackPlayer } from '@/hooks/useBackingTrackPlayer';
 import type { BackingTrackData } from '@/hooks/useBackingTrackPlayer';
@@ -50,6 +51,7 @@ export default function AppLayout() {
   const [timelineHeight, setTimelineHeight] = useState(256); // default h-64 = 256px
   const [activeTimeline, setActiveTimeline] = useState<'scenes' | 'backing'>('scenes');
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [textIOOpen, setTextIOOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const [renameModalOpen, setRenameModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
@@ -938,6 +940,17 @@ export default function AppLayout() {
                     Convert to Narration Video
                   </button>
                 )}
+                <button
+                  onClick={() => {
+                    setTextIOOpen(true);
+                    setToolsMenuOpen(false);
+                  }}
+                  title="Export the project's editable text data (concept, characters, chapters, scenes, prompts, story flow, transitions) as JSON for an AI agent — or paste an edited JSON back in to apply changes."
+                  className="w-full px-4 py-3 text-sm text-gray-200 hover:bg-gray-700 text-left transition-colors border-t border-gray-700 flex items-center gap-2"
+                >
+                  <span aria-hidden>📤</span>
+                  Import / Export Project Text Details
+                </button>
               </div>
             )}
           </div>
@@ -1487,6 +1500,16 @@ export default function AppLayout() {
 
       {/* Asset Generator Modal */}
       {assetGenOpen && <AssetGeneratorModal projectId={id!} onClose={() => setAssetGenOpen(false)} />}
+
+      {/* Project Text Data Import / Export modal */}
+      {textIOOpen && id && project && (
+        <ProjectTextIOModal
+          projectId={id}
+          projectMode={String(project.mode)}
+          projectName={project.name}
+          onClose={() => setTextIOOpen(false)}
+        />
+      )}
 
       {/* Auto-gen Status Bar */}
       {autoGenStatus !== 'idle' && !autoGenDismissed && (

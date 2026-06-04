@@ -1772,6 +1772,14 @@ async def auto_generate(
         # Get project resolution
         res_w = project.settings.get("resolution_width", 1536)
         res_h = project.settings.get("resolution_height", 864)
+        # Per-job-type dimensions: image jobs (Klein / Z-Image) can use a
+        # different resolution than video jobs (LTX) since the optimal
+        # size differs by model.  Both default to the legacy unified
+        # resolution_* fields when the per-type keys are not set.
+        img_w = project.settings.get("image_resolution_width", res_w)
+        img_h = project.settings.get("image_resolution_height", res_h)
+        vid_w = project.settings.get("video_resolution_width", res_w)
+        vid_h = project.settings.get("video_resolution_height", res_h)
 
         # Load lyrics for enhance context
         lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
@@ -1907,8 +1915,8 @@ async def auto_generate(
                     parameters={
                         "workflow_type": wf_type,
                         "prompt": prompt,
-                        "width": res_w,
-                        "height": res_h,
+                        "width": img_w,
+                        "height": img_h,
                         "reference_asset_ids": ref_ids,
                         "frame_type": "first",
                         "auto_save_preview": True,  # Signal dispatcher to auto-set as chosen
@@ -1956,8 +1964,8 @@ async def auto_generate(
                         parameters={
                             "workflow_type": wf_type_lf,
                             "prompt": lf_prompt,
-                            "width": res_w,
-                            "height": res_h,
+                            "width": img_w,
+                            "height": img_h,
                             "reference_asset_ids": ref_ids_lf,
                             "frame_type": "last",
                             "auto_save_preview": True,
@@ -2005,8 +2013,8 @@ async def auto_generate(
                     parameters={
                         "workflow_type": vid_wf,
                         "prompt": video_prompt,
-                        "width": res_w,
-                        "height": res_h,
+                        "width": vid_w,
+                        "height": vid_h,
                         "duration": duration,
                         "framerate": 24,
                         "needs_scene_images": True,  # Signal: wait for this scene's images first
@@ -2552,6 +2560,13 @@ async def _run_windowed_batch(
     video_sys_override=None,
     res_w: int = 1536,
     res_h: int = 864,
+    # Per-job-type dimensions split out from the legacy unified res_w/res_h
+    # so image jobs (Klein / Z-Image) can use a different resolution than
+    # video jobs (LTX 2.3).  Defaults pass through the unified dims.
+    img_w: int | None = None,
+    img_h: int | None = None,
+    vid_w: int | None = None,
+    vid_h: int | None = None,
     vocals_only_audio: bool = False,
     skip_audio_mux: bool = False,
     two_pass: bool = False,
@@ -2574,6 +2589,18 @@ async def _run_windowed_batch(
     all_images → missing_images_independent with override).
     """
     lyrics_words = lyrics_words or []
+
+    # Default per-job-type dimensions to the legacy unified values if the
+    # caller didn't pass them.  Keeps backwards compat with any caller that
+    # still uses res_w/res_h only.
+    if img_w is None:
+        img_w = res_w
+    if img_h is None:
+        img_h = res_h
+    if vid_w is None:
+        vid_w = res_w
+    if vid_h is None:
+        vid_h = res_h
 
     # Determine window size from available workers
     job_type = "video" if mode == "missing_videos_single" else "image"
@@ -2690,7 +2717,7 @@ async def _run_windowed_batch(
                     img_params = {
                         "workflow_type": wf_type,
                         "prompt": prompt,
-                        "width": res_w, "height": res_h,
+                        "width": img_w, "height": img_h,
                         "reference_asset_ids": ref_ids,
                         "frame_type": "first",
                         "auto_save_preview": True,
@@ -2764,7 +2791,7 @@ async def _run_windowed_batch(
                     "parameters": {
                         "workflow_type": "ltx_i2v",
                         "prompt": video_prompt,
-                        "width": res_w, "height": res_h,
+                        "width": vid_w, "height": vid_h,
                         "duration": duration,
                         "framerate": 24,
                         "vocals_only_audio": vocals_only_audio,
@@ -2826,7 +2853,7 @@ async def _run_windowed_batch(
                 img_params = {
                     "workflow_type": wf_type,
                     "prompt": prompt,
-                    "width": res_w, "height": res_h,
+                    "width": vid_w, "height": vid_h,
                     "reference_asset_ids": ref_ids,
                     "frame_type": "first",
                     "auto_save_preview": True,
@@ -3041,6 +3068,72 @@ async def _run_windowed_batch(
         )
         total_failed += len(active_jobs)
 
+    # ── Drain follow-on jobs (two-pass composites, transition clips) ──
+    # When a Pass 1 image finishes the dispatcher synchronously marks it
+    # DONE and then auto-spawns Pass 2 (the Klein composite) as a NEW
+    # Job row that this loop never tracked in active_jobs.  If we flip
+    # status to "complete" the instant active_jobs empties, the last
+    # batch of Pass 2 jobs is still rendering in the background and the
+    # UI lies to the user.
+    #
+    # After the main dispatch loop, poll the DB for any PENDING/RUNNING
+    # jobs that belong to one of THIS batch's scenes and wait them out
+    # the same way we waited the originals.  Caps at the same per-job
+    # timeout so a wedged worker can't pin us forever.
+    scene_ids_in_batch = list({e["scene_id"] for e in eligible})
+    if scene_ids_in_batch and _seq_auto_jobs.get(pid, {}).get("status") == "running":
+        drain_elapsed = 0.0
+        drain_round = 0
+        # Same per-job timeout as the main loop; we restart it whenever
+        # progress happens.
+        while drain_elapsed < batch_timeout:
+            if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+                break  # user cancelled
+            async with session_factory() as session:
+                stmt = (
+                    select(Job)
+                    .where(Job.project_id == project_id)
+                    .where(Job.scene_id.in_(scene_ids_in_batch))  # type: ignore
+                    .where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]))  # type: ignore
+                )
+                pending_or_running = list(
+                    (await session.execute(stmt)).scalars().all()
+                )
+            if not pending_or_running:
+                if drain_round > 0:
+                    logger.info(
+                        f"Auto-gen drain: all follow-on jobs finished after "
+                        f"{drain_round} poll(s)"
+                    )
+                break
+            # Surface the wait in the status so the UI shows "Finishing
+            # last N jobs..." instead of flipping straight to complete.
+            n_pending = len(pending_or_running)
+            phase_breakdown: dict[str, int] = {}
+            for j in pending_or_running:
+                ph = (j.parameters or {}).get("two_pass_phase") or j.job_type
+                phase_breakdown[str(ph)] = phase_breakdown.get(str(ph), 0) + 1
+            label = ", ".join(f"{n} × {ph}" for ph, n in phase_breakdown.items())
+            if pid in _seq_auto_jobs:
+                _seq_auto_jobs[pid]["current_step"] = (
+                    f"finishing follow-on jobs ({n_pending} remaining: {label})"
+                )
+                _seq_auto_jobs[pid]["current_scene_name"] = None
+            if drain_round == 0:
+                logger.info(
+                    f"Auto-gen drain: {n_pending} follow-on job(s) still active "
+                    f"after main loop ({label}) — waiting"
+                )
+            await asyncio.sleep(2)
+            drain_elapsed += 2
+            drain_round += 1
+        else:
+            # while-else: ran out of time
+            logger.warning(
+                f"Auto-gen drain: {batch_timeout}s timeout — leaving "
+                f"follow-on jobs to finish in the background"
+            )
+
     # Done
     if total_failed > 0:
         _seq_auto_jobs[pid]["status"] = "done"
@@ -3122,6 +3215,14 @@ async def _run_sequential_auto_gen(
 
             res_w = project.settings.get("resolution_width", 1536)
             res_h = project.settings.get("resolution_height", 864)
+            # Per-job-type dimensions: image jobs (Klein / Z-Image) can use a
+            # different resolution than video jobs (LTX) since the optimal
+            # size differs by model.  Both default to the legacy unified
+            # resolution_* fields when the per-type keys are not set.
+            img_w = project.settings.get("image_resolution_width", res_w)
+            img_h = project.settings.get("image_resolution_height", res_h)
+            vid_w = project.settings.get("video_resolution_width", res_w)
+            vid_h = project.settings.get("video_resolution_height", res_h)
 
             lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
             lyrics_result = await session.execute(lyrics_stmt)
@@ -3280,6 +3381,7 @@ async def _run_sequential_auto_gen(
                 image_sys_override=image_sys_override,
                 video_sys_override=video_sys_override,
                 res_w=res_w, res_h=res_h,
+                img_w=img_w, img_h=img_h, vid_w=vid_w, vid_h=vid_h,
                 vocals_only_audio=vocals_only_audio,
                 skip_audio_mux=skip_audio_mux,
                 two_pass=two_pass,
@@ -3396,7 +3498,7 @@ async def _run_sequential_auto_gen(
                     img_params = {
                         "workflow_type": wf_type,
                         "prompt": prompt,
-                        "width": res_w, "height": res_h,
+                        "width": img_w, "height": img_h,
                         "reference_asset_ids": ref_ids,
                         "frame_type": "first",
                         "auto_save_preview": True,
@@ -3460,7 +3562,7 @@ async def _run_sequential_auto_gen(
                         img_params = {
                             "workflow_type": wf_type,
                             "prompt": prompt,
-                            "width": res_w, "height": res_h,
+                            "width": img_w, "height": img_h,
                             "reference_asset_ids": ref_ids,
                             "frame_type": "first",
                             "auto_save_preview": True,
@@ -3535,7 +3637,7 @@ async def _run_sequential_auto_gen(
                         parameters={
                             "workflow_type": "ltx_i2v",
                             "prompt": video_prompt,
-                            "width": res_w, "height": res_h,
+                            "width": vid_w, "height": vid_h,
                             "duration": duration,
                             "framerate": 24,
                             "skip_audio_mux": skip_audio_mux,
@@ -3590,7 +3692,7 @@ async def _run_sequential_auto_gen(
                         img_params = {
                             "workflow_type": wf_type,
                             "prompt": prompt,
-                            "width": res_w, "height": res_h,
+                            "width": vid_w, "height": vid_h,
                             "reference_asset_ids": ref_ids,
                             "frame_type": "first",
                             "auto_save_preview": True,
@@ -3662,7 +3764,7 @@ async def _run_sequential_auto_gen(
                                 img_params = {
                                     "workflow_type": wf_type,
                                     "prompt": prompt,
-                                    "width": res_w, "height": res_h,
+                                    "width": img_w, "height": img_h,
                                     "reference_asset_ids": ref_ids,
                                     "frame_type": "first",
                                     "auto_save_preview": True,
@@ -3744,7 +3846,7 @@ async def _run_sequential_auto_gen(
                         parameters={
                             "workflow_type": "ltx_i2v",
                             "prompt": video_prompt,
-                            "width": res_w, "height": res_h,
+                            "width": vid_w, "height": vid_h,
                             "duration": duration,
                             "framerate": 24,
                             "skip_audio_mux": skip_audio_mux,
@@ -3796,7 +3898,7 @@ async def _run_sequential_auto_gen(
                         img_params = {
                             "workflow_type": wf_type,
                             "prompt": prompt,
-                            "width": res_w, "height": res_h,
+                            "width": vid_w, "height": vid_h,
                             "reference_asset_ids": ref_ids,
                             "frame_type": "first",
                             "auto_save_preview": True,
@@ -3872,7 +3974,7 @@ async def _run_sequential_auto_gen(
                         parameters={
                             "workflow_type": vid_wf,
                             "prompt": video_prompt,
-                            "width": res_w, "height": res_h,
+                            "width": vid_w, "height": vid_h,
                             "duration": duration,
                             "framerate": 24,
                             "skip_audio_mux": skip_audio_mux,
@@ -3993,8 +4095,8 @@ async def _run_sequential_auto_gen(
                         parameters={
                             "workflow_type": "ltx_transition",
                             "prompt": "smooth cinematic transition between scenes, zhuanchang",
-                            "width": res_w,
-                            "height": res_h,
+                            "width": vid_w,
+                            "height": vid_h,
                             "duration": transition_duration,
                             "framerate": project_fps,
                             "transition_first_frame": first_frame_src,

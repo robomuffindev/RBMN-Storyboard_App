@@ -1,0 +1,116 @@
+{
+  "rbmn_format_version": "1.0",
+  "project_mode": "narration_video",
+  "project_name": "The Stoneworker's Apprentice",
+  "concept": {
+    "production_title": "The Stoneworker's Apprentice",
+    "concept_text": "A documentary-style short following a 14th-century French apprentice stonemason as he learns his craft over the course of one cathedral's construction season. The visuals follow his hands, his master's lessons, and the slow rise of a single buttress from foundation to first cornice.",
+    "style_text": "Painterly documentary realism: warm tungsten and northern window light, dust motes in beams, hand-tool textures, slate-grey and ochre palette. Lean toward Vermeer rather than Hollywood — natural framing, restrained motion, period-accurate clothing and props.",
+    "image_direction": "documentary_painterly",
+    "custom_image_direction": "",
+    "global_color_override": "full_color",
+    "custom_color_palette": ""
+  },
+  "resolution": {
+    "resolution_width": 1536,
+    "resolution_height": 864,
+    "image_resolution_width": 1920,
+    "image_resolution_height": 1080,
+    "video_resolution_width": 1280,
+    "video_resolution_height": 720
+  },
+  "characters": [
+    { "name": "Pierre", "description": "Young apprentice stonemason, ~16 years old, lean build, weathered linen tunic over wool hose, hands already calloused. Brown hair, hazel eyes, quiet attentiveness." },
+    { "name": "Master Henri", "description": "Master mason in his fifties, grey-streaked beard, broad shoulders, leather apron over a dark wool coat. Carries a measuring rod and chalk. Patient demeanor, precise gestures." }
+  ],
+  "chapters": [
+    {
+      "order": 1,
+      "name": "Foundations",
+      "color": "#7c3aed",
+      "description": "Pierre's first day at the lodge: meeting Master Henri, learning the names of the tools, observing the marking of the foundation stones.",
+      "character_focus": ["Pierre", "Master Henri"],
+      "style_notes": "Cool morning light, blue-grey shadows, focus on hand-tool surfaces and chalk lines on stone.",
+      "depth": 0,
+      "parent_chapter_order": null,
+      "start_time": 0,
+      "end_time": 180
+    },
+    {
+      "order": 2,
+      "name": "Shaping the First Block",
+      "color": "#0ea5e9",
+      "description": "Master Henri demonstrates the dressing of a sandstone block. Pierre attempts, fails, watches again, attempts again.",
+      "character_focus": ["Pierre", "Master Henri"],
+      "style_notes": "Warmer afternoon light, dust motes prominent, tighter close-ups on chisel-and-mallet rhythm.",
+      "depth": 0,
+      "parent_chapter_order": null,
+      "start_time": 180,
+      "end_time": 360
+    }
+  ],
+  "scenes": [
+    {
+      "order_index": 0,
+      "name": "Opening — Cathedral Yard at Dawn",
+      "start_time": 0.0,
+      "end_time": 12.0,
+      "chapter_order": 1,
+      "narration_text": "Before stone could become cathedral, it had to become language — a vocabulary of cuts, of angles, of shadows learned by the hand long before the mind could name them.",
+      "image_prompt": "Wide establishing shot of a medieval cathedral construction yard at dawn, stacked sandstone blocks under canvas tarpaulins, scaffolding rising into morning mist, a single lantern still burning by the master mason's stool. Cool blue-grey light, painterly composition reminiscent of 17th-century Dutch landscape painting. Natural exposure, deep shadows, no overblown highlights. No characters in frame.",
+      "negative_prompt": "modern construction equipment, electric lights, hi-vis clothing, contemporary tools, glass facades",
+      "flow_idea": "Open on the cathedral yard before the workers arrive. Hold on the silence. The viewer should feel the cold air and the weight of the day ahead.",
+      "character_refs_first": [],
+      "character_refs_last": [],
+      "two_pass_enabled": false,
+      "color_override": null,
+      "custom_color_palette": null,
+      "image_movement": null,
+      "use_story_flow": true,
+      "override_resolution": false,
+      "width": null,
+      "height": null,
+      "video_prompt": "Slow dolly push-in toward the lantern by the master mason's stool. Dust motes drift through cool morning light. Camera holds. No human action.",
+      "last_frame_prompt": "",
+      "last_frame_negative_prompt": "",
+      "video_mode": "single",
+      "lipsync_enabled": false,
+      "vocals_only_for_lipsync": false,
+      "transition_in": null,
+      "transition_out": { "type": "crossfade", "duration": 0.8 }
+    },
+    {
+      "order_index": 1,
+      "name": "Pierre Arrives",
+      "start_time": 12.0,
+      "end_time": 28.0,
+      "chapter_order": 1,
+      "narration_text": "Pierre came to the lodge at fourteen. He carried nothing of his own except a wool scarf his mother had woven for him the winter before, and a small leather pouch containing his entire inheritance: a single iron file.",
+      "image_prompt": "Medium shot of Pierre, a young apprentice stonemason approaching the lodge entrance through an arched stone doorway. He wears a weathered linen tunic over wool hose, carries a small leather pouch in one hand. Soft side-light from a narrow window catches one side of his face. Background out of focus — work benches, hanging tools. Painterly composition, natural northern light. No overexposure.",
+      "negative_prompt": "modern clothing, sunglasses, smiling at camera, watermark",
+      "flow_idea": "Introduce Pierre. Frame him small in the doorway to convey new arrival and uncertainty. Hand-feel on the leather pouch.",
+      "character_refs_first": ["Pierre"],
+      "character_refs_last": [],
+      "two_pass_enabled": true,
+      "color_override": null,
+      "custom_color_palette": null,
+      "image_movement": null,
+      "use_story_flow": true,
+      "override_resolution": false,
+      "width": null,
+      "height": null,
+      "video_prompt": "Pierre takes one slow step into the lodge, glances toward the master's stool, then looks down at his pouch. Camera tracks slightly with him. Natural daylight; no movement of dust or smoke other than what the air already does.",
+      "last_frame_prompt": "",
+      "last_frame_negative_prompt": "",
+      "video_mode": "single",
+      "lipsync_enabled": false,
+      "vocals_only_for_lipsync": false,
+      "transition_in": { "type": "crossfade", "duration": 0.8 },
+      "transition_out": null
+    }
+  ],
+  "lyrics_source": {
+    "initial_text": "Before stone could become cathedral, it had to become language — a vocabulary of cuts, of angles, of shadows learned by the hand long before the mind could name them.\n\nPierre came to the lodge at fourteen. He carried nothing of his own except a wool scarf his mother had woven for him the winter before, and a small leather pouch containing his entire inheritance: a single iron file.",
+    "language": "en"
+  }
+}

@@ -709,10 +709,42 @@ export default function SettingsPage() {
           <div className="space-y-3 mb-4">
             {(settings.comfyui_urls || []).map((url, index) => {
               const caps = (settings as any).comfyui_server_caps?.[url] || { image: true, video: true };
-              const setCap = (field: string, val: boolean) => {
+              const setCap = (field: string, val: any) => {
                 const newCaps = { ...(settings as any).comfyui_server_caps || {} };
                 newCaps[url] = { ...caps, [field]: val };
                 setSettings((prev) => ({ ...prev, comfyui_server_caps: newCaps } as any));
+              };
+
+              // Build the model option pools the multiselects draw from.
+              // Image pool = ref-based + single-image presets, deduped.
+              // The user's own custom model strings (when set in Settings
+              // below) are also offered so a custom value isn't a dead end.
+              const imageModelPool = Array.from(new Set([
+                ...IMAGE_MODEL_PRESETS,
+                ...SINGLE_IMAGE_PRESETS,
+                ...(settings.image_model_type && !IMAGE_MODEL_PRESETS.includes(settings.image_model_type) ? [settings.image_model_type] : []),
+                ...(settings.single_image_generator && !SINGLE_IMAGE_PRESETS.includes(settings.single_image_generator) ? [settings.single_image_generator] : []),
+              ]));
+              const videoModelPool = Array.from(new Set([
+                ...VIDEO_MODEL_PRESETS,
+                ...(settings.video_model_type && !VIDEO_MODEL_PRESETS.includes(settings.video_model_type) ? [settings.video_model_type] : []),
+              ]));
+
+              // selectedImage/selectedVideo: empty array (or undefined) = ALL.
+              const selectedImage: string[] = Array.isArray(caps.image_models) ? caps.image_models : [];
+              const selectedVideo: string[] = Array.isArray(caps.video_models) ? caps.video_models : [];
+
+              const toggleModel = (kind: 'image_models' | 'video_models', model: string) => {
+                const current: string[] = Array.isArray(caps[kind]) ? caps[kind] : [];
+                const next = current.includes(model)
+                  ? current.filter((m: string) => m !== model)
+                  : [...current, model];
+                setCap(kind, next);
+              };
+              const setAll = (kind: 'image_models' | 'video_models') => {
+                // "ALL" is represented as an empty array (or absence) so the
+                // backend's apply_user_caps treats the slot as unconstrained.
+                setCap(kind, []);
               };
               return (
               <div key={index} className="p-3 bg-gray-800 rounded border border-gray-700">
@@ -742,25 +774,101 @@ export default function SettingsPage() {
                     <Trash2 size={16} />
                   </button>
                 </div>
-                <div className="flex items-center gap-4 mt-2 ml-1">
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={caps.image !== false}
-                      onChange={(e) => setCap('image', e.target.checked)}
-                      className="w-3.5 h-3.5 accent-emerald-500"
-                    />
-                    <span className="text-xs text-gray-400">Images (Klein)</span>
-                  </label>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={caps.video !== false}
-                      onChange={(e) => setCap('video', e.target.checked)}
-                      className="w-3.5 h-3.5 accent-purple-500"
-                    />
-                    <span className="text-xs text-gray-400">Video (LTX)</span>
-                  </label>
+                <div className="flex flex-col gap-3 mt-2 ml-1">
+                  {/* Image checkbox + multiselect */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={caps.image !== false}
+                        onChange={(e) => setCap('image', e.target.checked)}
+                        className="w-3.5 h-3.5 accent-emerald-500"
+                      />
+                      <span className="text-xs text-gray-400">Images (Klein)</span>
+                    </label>
+                    {caps.image !== false && (
+                      <div className="ml-5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-1">Models:</span>
+                        <button
+                          type="button"
+                          onClick={() => setAll('image_models')}
+                          className={`px-2 py-0.5 text-[11px] rounded border transition-colors ${
+                            selectedImage.length === 0
+                              ? 'bg-emerald-600 border-emerald-500 text-white'
+                              : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'
+                          }`}
+                          title="Worker handles every image model (default)"
+                        >
+                          ALL
+                        </button>
+                        {imageModelPool.map((m) => {
+                          const on = selectedImage.includes(m);
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => toggleModel('image_models', m)}
+                              className={`px-2 py-0.5 text-[11px] rounded border transition-colors font-mono ${
+                                on
+                                  ? 'bg-emerald-600 border-emerald-500 text-white'
+                                  : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'
+                              }`}
+                              title={on ? `Click to remove ${m}` : `Route ${m} jobs to this worker`}
+                            >
+                              {m}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  {/* Video checkbox + multiselect */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={caps.video !== false}
+                        onChange={(e) => setCap('video', e.target.checked)}
+                        className="w-3.5 h-3.5 accent-purple-500"
+                      />
+                      <span className="text-xs text-gray-400">Video (LTX)</span>
+                    </label>
+                    {caps.video !== false && (
+                      <div className="ml-5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-1">Models:</span>
+                        <button
+                          type="button"
+                          onClick={() => setAll('video_models')}
+                          className={`px-2 py-0.5 text-[11px] rounded border transition-colors ${
+                            selectedVideo.length === 0
+                              ? 'bg-purple-600 border-purple-500 text-white'
+                              : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'
+                          }`}
+                          title="Worker handles every video model (default)"
+                        >
+                          ALL
+                        </button>
+                        {videoModelPool.map((m) => {
+                          const on = selectedVideo.includes(m);
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => toggleModel('video_models', m)}
+                              className={`px-2 py-0.5 text-[11px] rounded border transition-colors font-mono ${
+                                on
+                                  ? 'bg-purple-600 border-purple-500 text-white'
+                                  : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'
+                              }`}
+                              title={on ? `Click to remove ${m}` : `Route ${m} jobs to this worker`}
+                            >
+                              {m}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
               );

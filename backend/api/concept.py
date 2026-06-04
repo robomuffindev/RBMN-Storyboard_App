@@ -40,6 +40,14 @@ class ConceptData(BaseModel):
     characters: list[CharacterModel] = []
     resolution_width: int = 1536
     resolution_height: int = 864
+    # Per-job-type dimensions (added 1.8.x).  When set, image jobs (Klein /
+    # Z-Image) use image_resolution_* and video jobs (LTX) use
+    # video_resolution_*.  When 0/unset both fall back to the unified
+    # resolution_width / resolution_height above.
+    image_resolution_width: int = 0
+    image_resolution_height: int = 0
+    video_resolution_width: int = 0
+    video_resolution_height: int = 0
     project_fps: int = 24
     global_seed_enabled: bool = False
     global_seed: int = 0
@@ -47,6 +55,12 @@ class ConceptData(BaseModel):
     transition_lora_strength: float = 1.0
     random_ken_burns: bool = False
     ken_burns_allowed_effects: list[str] = []  # empty = all effects allowed
+    # Default color palette: preset key (e.g. "full_color", "black_and_white",
+    # "sepia", "noir", "custom") that gets enforced by the LLM prompt
+    # enhancer as a MANDATORY COLOR PALETTE OVERRIDE on every scene.
+    # Per-scene override on Scene.parameters.color_override wins.
+    global_color_override: str = ""
+    custom_color_palette: str = ""  # free text when global_color_override == "custom"
 
 
 class SceneFlowIdea(BaseModel):
@@ -111,6 +125,10 @@ async def get_concept(
         characters=[CharacterModel(**c) for c in s.get("characters", [])],
         resolution_width=s.get("resolution_width", 1536),
         resolution_height=s.get("resolution_height", 864),
+        image_resolution_width=s.get("image_resolution_width", 0),
+        image_resolution_height=s.get("image_resolution_height", 0),
+        video_resolution_width=s.get("video_resolution_width", 0),
+        video_resolution_height=s.get("video_resolution_height", 0),
         project_fps=s.get("project_fps", 24),
         global_seed_enabled=s.get("global_seed_enabled", False),
         global_seed=s.get("global_seed", 0),
@@ -118,6 +136,8 @@ async def get_concept(
         transition_lora_strength=s.get("transition_lora_strength", 1.0),
         random_ken_burns=s.get("random_ken_burns", False),
         ken_burns_allowed_effects=s.get("ken_burns_allowed_effects", []),
+        global_color_override=s.get("global_color_override", "") or "",
+        custom_color_palette=s.get("custom_color_palette", "") or "",
     )
 
 
@@ -138,6 +158,24 @@ async def save_concept(
     settings["characters"] = [c.model_dump() for c in req.characters]
     settings["resolution_width"] = req.resolution_width
     settings["resolution_height"] = req.resolution_height
+    # Persist per-type dimensions only when set (0 means "use the legacy
+    # unified value" — keep the key absent so the read-side fallback fires).
+    if req.image_resolution_width:
+        settings["image_resolution_width"] = req.image_resolution_width
+    elif "image_resolution_width" in settings:
+        settings.pop("image_resolution_width")
+    if req.image_resolution_height:
+        settings["image_resolution_height"] = req.image_resolution_height
+    elif "image_resolution_height" in settings:
+        settings.pop("image_resolution_height")
+    if req.video_resolution_width:
+        settings["video_resolution_width"] = req.video_resolution_width
+    elif "video_resolution_width" in settings:
+        settings.pop("video_resolution_width")
+    if req.video_resolution_height:
+        settings["video_resolution_height"] = req.video_resolution_height
+    elif "video_resolution_height" in settings:
+        settings.pop("video_resolution_height")
     settings["project_fps"] = req.project_fps
     settings["global_seed_enabled"] = req.global_seed_enabled
     settings["global_seed"] = req.global_seed
@@ -145,6 +183,8 @@ async def save_concept(
     settings["transition_lora_strength"] = req.transition_lora_strength
     settings["random_ken_burns"] = req.random_ken_burns
     settings["ken_burns_allowed_effects"] = req.ken_burns_allowed_effects
+    settings["global_color_override"] = req.global_color_override
+    settings["custom_color_palette"] = req.custom_color_palette
     project.settings = settings
     await session.commit()
     await session.refresh(project)
@@ -404,8 +444,19 @@ async def autogenerate_characters(
     concept_text = s.get("concept_text", "")
     style_text = s.get("style_text", "")
     song_title = s.get("song_title", "")
-    resolution_w = s.get("resolution_width", 1024)
-    resolution_h = s.get("resolution_height", 1024)
+    # Character image jobs are IMAGE jobs (Klein / Z-Image), so respect
+    # the image-resolution split when set.  Falls back to the unified
+    # resolution_width/height when image_resolution_* is 0/unset.
+    resolution_w = (
+        s.get("image_resolution_width")
+        or s.get("resolution_width", 1024)
+        or 1024
+    )
+    resolution_h = (
+        s.get("image_resolution_height")
+        or s.get("resolution_height", 1024)
+        or 1024
+    )
 
     # Fetch lyrics
     lyrics_stmt = select(LyricsModel).where(LyricsModel.project_id == project_id)

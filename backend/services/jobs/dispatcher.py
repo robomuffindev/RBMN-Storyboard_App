@@ -679,7 +679,25 @@ class JobDispatcher:
                 # by _build_workflow (e.g. klein_t2i → z_image_turbo redirect)
                 _effective_wf_type = params.get("workflow_type", "")
                 required_caps = self._get_required_caps(_effective_wf_type)
-                required_models = self._get_required_models(_effective_wf_type)
+                # Resolve the user-facing model name for this workflow so
+                # routing honors the per-worker multiselect under each
+                # Image/Video checkbox on the Settings screen.  When a
+                # worker has no models declared, the dispatcher treats
+                # it as accepting any model in its enabled category
+                # (ALL).
+                _app_settings_for_models = None
+                try:
+                    async with self._session_factory() as _ams_session:
+                        from backend.database.models import AppSettings as _AMSAppSettings
+                        from sqlmodel import select as _ams_select
+                        _ams_stmt = _ams_select(_AMSAppSettings).where(_AMSAppSettings.id == 1)
+                        _ams_result = await _ams_session.execute(_ams_stmt)
+                        _app_settings_for_models = _ams_result.scalars().first()
+                except Exception as _ams_err:
+                    logger.debug(f"[{job_id_str}] AppSettings lookup for model routing failed: {_ams_err}")
+                required_models = self._get_required_models(
+                    _effective_wf_type, _app_settings_for_models
+                )
                 worker = self.comfy_dispatcher.select_worker(
                     required_caps, required_models, exclude_runpod=True, reserve=True,
                 )
@@ -1147,6 +1165,16 @@ class JobDispatcher:
                 color_override = style_project.settings.get("global_color_override", "")
 
             if color_override and color_override != "full_color":
+                # Pass 2 composites need an extra-strong palette tail because
+                # Klein blends color from BOTH the scene ref and the (usually
+                # color-photo) character refs.  A plain "black and white"
+                # suffix can be overpowered by the character ref color
+                # signal at CFG=5.  Extra emphasis prevents the composite
+                # from drifting back toward color.
+                _is_pass2_composite = (
+                    params.get("two_pass")
+                    and params.get("two_pass_phase") == "composite"
+                )
                 if color_override == "custom":
                     # Read custom palette text
                     custom_palette = ""
@@ -1160,18 +1188,38 @@ class JobDispatcher:
                         custom_palette = style_project.settings.get("custom_color_palette", "")
                     if custom_palette:
                         color_suffix = f", {custom_palette}"
+                        if _is_pass2_composite:
+                            color_suffix += (
+                                f", the entire composite strictly in this palette, "
+                                f"characters re-rendered to match, no colors from the character reference photos"
+                            )
                         prompt_val = params.get("prompt", "")
                         if prompt_val:
                             params = dict(params)
                             params["prompt"] = prompt_val + color_suffix
-                            logger.info(f"[{job.id if job else 'N/A'}] Injected custom color palette override")
+                            logger.info(
+                                f"[{job.id if job else 'N/A'}] Injected custom color palette override"
+                                f"{' (pass2-strong)' if _is_pass2_composite else ''}"
+                            )
                 elif color_override in COLOR_SUFFIXES:
                     color_suffix = COLOR_SUFFIXES[color_override]
+                    if _is_pass2_composite:
+                        # Re-state the constraint in active terms after the
+                        # base suffix so it lands closest to the end of the
+                        # prompt where Klein weighs the latest tokens most.
+                        color_suffix += (
+                            ", the entire composite strictly matches the first reference image palette, "
+                            "characters re-rendered to match the scene palette, "
+                            "ignore any colors from the character reference photos"
+                        )
                     prompt_val = params.get("prompt", "")
                     if prompt_val:
                         params = dict(params)
                         params["prompt"] = prompt_val + color_suffix
-                        logger.info(f"[{job.id if job else 'N/A'}] Injected color override: {color_override}")
+                        logger.info(
+                            f"[{job.id if job else 'N/A'}] Injected color override: {color_override}"
+                            f"{' (pass2-strong)' if _is_pass2_composite else ''}"
+                        )
         except Exception as e:
             logger.debug(f"Could not inject color override: {e}")
 
@@ -1852,10 +1900,14 @@ class JobDispatcher:
             project = await session.get(Project, project_id)
             characters = project.settings.get("characters", []) if project and project.settings else []
 
-            # Build character descriptions for context
-            # Resolve each char_ref_id (Asset UUID) to its rel_path, then match against character image_paths
+            # Build character descriptions for context.
+            # Character refs are IDENTITY/POSE only — their original colors and
+            # lighting must be ignored.  We flag this explicitly to the LLM so
+            # color-bearing character description text (e.g. "blue eyes",
+            # "brown leather jacket") doesn't pull the composite away from the
+            # base scene's palette.
             char_descriptions = []
-            ref_labels = ["second", "third", "fourth"]
+            ref_labels = ["second", "third", "fourth", "fifth"]
             for i, char_ref_id in enumerate(char_ref_ids):
                 label = ref_labels[i] if i < len(ref_labels) else f"reference {i + 2}"
                 char_desc = f"Character reference {i + 1}"
@@ -1875,13 +1927,28 @@ class JobDispatcher:
 
                 char_descriptions.append(
                     f"The {label} reference image is {char_desc}. "
-                    f"Place this character naturally into the scene."
+                    f"Use this reference ONLY for the character's facial identity, body type, and clothing silhouette. "
+                    f"IGNORE the lighting, color cast, skin tone, and clothing colors of the reference photo — "
+                    f"re-render the character under the FIRST reference image's lighting and palette."
                 )
 
-            # Build context
+            # Build context — lead with the style-preservation directive so
+            # the LLM treats the base scene as the visual baseline before it
+            # even sees the scene/character details.  Klein blends color
+            # signals from all references, so the prompt MUST explicitly lock
+            # the output to the first image's palette.
             context_parts = [
+                "═══ STYLE PRESERVATION CONTRACT ═══",
+                "The FIRST reference image is the AUTHORITATIVE visual baseline. "
+                "Its color palette, lighting direction, exposure, contrast, "
+                "color grade, and atmosphere ARE the look of the composite. "
+                "The character reference images (second and onward) are for "
+                "IDENTITY and POSE only — their colors, skin tones, and "
+                "lighting must be re-rendered to match the first image. Your "
+                "prompt MUST explicitly state the base scene's lighting and "
+                "palette and instruct the model to preserve them.",
+                "════════════════════════════════════",
                 f"BASE SCENE PROMPT (the first reference image was generated from this): {base_prompt}",
-                "The first reference image is the base scene composition. All characters should be placed INTO this scene.",
             ]
             context_parts.extend(char_descriptions)
 
@@ -1890,16 +1957,73 @@ class JobDispatcher:
                 concept = project.settings.get("concept_text", "")
                 style = project.settings.get("style_text", "")
                 if concept:
-                    context_parts.append(f"Video concept: {concept}")
+                    context_parts.append(f"Production concept: {concept}")
                 if style:
                     context_parts.append(f"Visual style: {style}")
 
-            # Get scene for flow idea
+                # Image direction (art style / film grade) — without this,
+                # Pass 2's LLM had no aesthetic anchor and tended to drift
+                # toward "cinematic, bright, vivid" descriptors that Klein
+                # then rendered washed out / overexposed (narration_video
+                # symptom reported by users).  Surface the same direction
+                # we feed into single-pass image enhance.
+                image_direction = project.settings.get("image_direction", "")
+                if image_direction and image_direction != "none":
+                    if image_direction == "custom":
+                        custom_dir = project.settings.get("custom_image_direction", "")
+                        if custom_dir:
+                            context_parts.append(f"Image direction / art style: {custom_dir}")
+                    else:
+                        dir_label = image_direction.replace("_", " ").title()
+                        context_parts.append(f"Image direction / art style: {dir_label}")
+
+            # Get scene for flow idea + per-scene color override
             scene = await session.get(Scene, scene_id)
             if scene and scene.parameters:
                 flow_idea = scene.parameters.get("flow_idea", "")
                 if flow_idea:
                     context_parts.append(f"Scene storyboard: {flow_idea}")
+
+                # Color override — strict palette enforcement, mirrors the
+                # single-pass image enhance.  Per-scene wins, falls back to
+                # project-level global_color_override.
+                color_override = (
+                    scene.parameters.get("color_override", "")
+                    or (project.settings or {}).get("global_color_override", "")
+                )
+                if color_override and color_override != "full_color":
+                    from backend.api.generation import COLOR_OVERRIDE_DESCRIPTIONS
+                    # Pass 2 character composites need an EXTRA-STRONG palette
+                    # lock because Klein blends color signals from BOTH the
+                    # scene reference and the character reference photos.  The
+                    # character photos are usually full-color, so without
+                    # explicit instruction the composite drifts back toward
+                    # color even when the scene reference is monochrome.
+                    pass2_color_emphasis = (
+                        " IMPORTANT FOR THIS COMPOSITE: the character reference "
+                        "photos may be in full color, but the final composite MUST "
+                        "use ONLY the palette above — re-render the characters' "
+                        "skin tones, clothing, hair, and eyes in this palette only."
+                    )
+                    if color_override == "custom":
+                        custom_palette = (
+                            scene.parameters.get("custom_color_palette", "")
+                            or (project.settings or {}).get("custom_color_palette", "")
+                        )
+                        if custom_palette:
+                            context_parts.append(
+                                f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {custom_palette}. "
+                                f"You MUST strictly follow this color palette. Every visual element — "
+                                f"lighting, materials, clothing, environment, skin, hair, eyes — must conform."
+                                f"{pass2_color_emphasis}"
+                            )
+                    elif color_override in COLOR_OVERRIDE_DESCRIPTIONS:
+                        context_parts.append(
+                            f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): "
+                            f"{COLOR_OVERRIDE_DESCRIPTIONS[color_override]} "
+                            f"This is NON-NEGOTIABLE — every visual element must conform."
+                            f"{pass2_color_emphasis}"
+                        )
 
             context = "\n".join(context_parts)
 
@@ -3168,27 +3292,63 @@ class JobDispatcher:
         return caps_map.get(workflow_type, set())
 
     @staticmethod
-    def _get_required_models(workflow_type: str) -> set:
-        """Get required models for a workflow type."""
-        models_map = {
-            "klein_1ref": {"FLUX"},
-            "klein_2ref": {"FLUX"},
-            "klein_3ref": {"FLUX"},
-            "klein_4ref": {"FLUX"},
-            "klein_5ref": {"FLUX"},
-            "klein_t2i": {"FLUX"},
-            "z_image_turbo": set(),
-            "ltx_fflf": {"LTX"},
-            "ltx_i2v": {"LTX"},
-            "ltx_v2v_extend": {"LTX"},
-            "ltx_v2v_pass1": {"LTX"},
-            "ltx_v2v_pass2": {"LTX"},
-            "ltx_transition": {"LTX"},
-            "ltx_seq_i2v": {"LTX"},
-            "ltx_seq_fflf": {"LTX"},
-            "ltx_seq_v2v": {"LTX"},
-        }
-        return models_map.get(workflow_type, set())
+    def _get_required_models(workflow_type: str, app_settings=None) -> set:
+        """Get required user-facing model name(s) for a workflow type.
+
+        Each workflow_type family is associated with one of the model
+        slots configured on the Settings screen (image_model_type,
+        single_image_generator, video_model_type).  Whatever string the
+        user has selected for that slot is treated as the required
+        model and matched against `worker.models` in
+        ``ComfyDispatcher.select_worker``.  Workers with no models
+        declared are universal and pass the filter automatically — so
+        a worker that hasn't opted into a multiselect (i.e. user kept
+        the default "ALL") still receives every job in its enabled
+        category.
+
+        When AppSettings cannot be loaded (early startup, DB lock), we
+        fall back to the historical ``FLUX`` / ``LTX`` markers so
+        existing behavior is preserved.
+
+        Args:
+            workflow_type: The workflow_type string from job parameters.
+            app_settings: AppSettings row, or None to fall back.
+
+        Returns:
+            Set of user-facing model name(s) the worker must declare,
+            or empty set when no constraint applies.
+        """
+        # Resolve the user-selected model for each slot, with safe
+        # fallbacks matching the column defaults so we never accidentally
+        # require an empty string.
+        img_model = (
+            (app_settings.image_model_type if app_settings else None)
+            or "flux2_klein_dev_9b"
+        )
+        single_img_model = (
+            (app_settings.single_image_generator if app_settings else None)
+            or "z_image_turbo"
+        )
+        vid_model = (
+            (app_settings.video_model_type if app_settings else None)
+            or "ltx_2.3"
+        )
+
+        if workflow_type in (
+            "klein_1ref", "klein_2ref", "klein_3ref",
+            "klein_4ref", "klein_5ref", "klein_t2i",
+        ):
+            return {img_model}
+        if workflow_type == "z_image_turbo":
+            return {single_img_model}
+        if workflow_type in (
+            "ltx_fflf", "ltx_i2v",
+            "ltx_v2v_extend", "ltx_v2v_pass1", "ltx_v2v_pass2",
+            "ltx_transition",
+            "ltx_seq_i2v", "ltx_seq_fflf", "ltx_seq_v2v",
+        ):
+            return {vid_model}
+        return set()
 
     @staticmethod
     def _extract_output_files(history: dict) -> list[dict]:
@@ -4192,48 +4352,6 @@ class JobDispatcher:
 
             # Auto-set chosen path
             if media_type == "video" and scene_id:
-                scene = await session.get(Scene, scene_id)
-                if scene:
-                    scene_params = dict(scene.parameters or {})
-                    scene_params["chosen_video_path"] = rel_path
-                    scene_params["scene_source_type"] = "video"
-                    # Store the final submitted video prompt (with all dispatch-time suffixes)
-                    submitted_video = params.get("submitted_video_prompt")
-                    if submitted_video:
-                        scene_params["submitted_video_prompt"] = submitted_video
-                    scene.parameters = scene_params
-                    logger.info(f"[{job_id_str}] VHS fallback: set chosen_video_path")
-
-                # Extract last frame
-                try:
-                    from backend.services.video.ffmpeg import extract_frame, get_media_info, _ensure_frame_dimensions
-
-                    lf_filename = Path(filename).stem + "_lastframe.png"
-                    lf_path = output_dir / lf_filename
-                    target_w = params.get("width", 0)
-                    target_h = params.get("height", 0)
-
-                    info = await asyncio.to_thread(get_media_info, str(local_path))
-                    vid_duration = info.get("duration", 0)
-                    vid_fps = info.get("fps", 24)
-                    extract_time = max(0, vid_duration - (1.0 / vid_fps))
-
-                    await asyncio.to_thread(extract_frame, str(local_path), str(lf_path), extract_time)
-
-                    if target_w > 0 and target_h > 0:
-                        await asyncio.to_thread(_ensure_frame_dimensions, str(lf_path), target_w, target_h)
-
-                    lf_rel_path = str(lf_path.relative_to(app_cfg.project_dir))
-                    scene = await session.get(Scene, scene_id)
-                    if scene:
-                        scene_params = dict(scene.parameters or {})
-                        scene_params["video_last_frame_path"] = lf_rel_path
-                        scene.parameters = scene_params
-                        logger.info(f"[{job_id_str}] VHS fallback: extracted last frame")
-                except Exception as e:
-                    logger.warning(f"[{job_id_str}] VHS fallback: last frame extraction failed: {e}")
-
-            elif media_type == "image" and scene_id:
                 scene = await session.get(Scene, scene_id)
                 if scene:
                     scene_params = dict(scene.parameters or {})

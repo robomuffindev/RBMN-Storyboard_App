@@ -16,6 +16,73 @@ from .client import ComfyUIClient, ComfyUIConnectionError, ComfyUIVRAMError, Com
 logger = logging.getLogger(__name__)
 
 
+def apply_user_caps(worker: "ComfyWorker", caps_config: dict) -> None:
+    """Apply user-configured per-worker capability and model overrides.
+
+    Shared between startup (main.py lifespan) and runtime resync
+    (api/settings.py PUT handler) so both paths interpret the JSON in
+    `app_settings.comfyui_server_caps` the same way.
+
+    JSON shape per URL:
+      {
+        "image": bool,                         # default True — enables 'klein' cap
+        "video": bool,                         # default True — enables 'ltx'   cap
+        "image_models": list[str] | None,      # user-facing model names; empty/missing = ALL
+        "video_models": list[str] | None,      # empty/missing = ALL
+      }
+
+    Semantics:
+    - The image/video checkboxes are AUTHORITATIVE overrides for the
+      `klein` / `ltx` capability tags.  Unchecked must remove the cap
+      even if auto-discovery added it (a naive `caps | user_caps` union
+      cannot honor an unchecked state).
+    - Auto-discovered side capabilities (inpaint, upscale, ...) are
+      preserved.
+    - `image_models` and `video_models` populate `worker.models` so
+      `select_worker(required_models=...)` can route jobs to the worker
+      the user specifically assigned for a given model.  An empty list
+      means "ALL" — the worker accepts every model in its enabled
+      category — and is represented by NOT adding anything to
+      `worker.models` for that category (the select_worker filter
+      treats workers with no declared models as universal).
+    """
+    if not caps_config:
+        return
+    # ── Capability tags (image/video checkboxes) ─────────────────────
+    merged_caps = set(worker.capabilities)
+    if caps_config.get("image", True):
+        merged_caps.add("klein")
+    else:
+        merged_caps.discard("klein")
+    if caps_config.get("video", True):
+        merged_caps.add("ltx")
+    else:
+        merged_caps.discard("ltx")
+    worker.capabilities = merged_caps
+
+    # ── Model assignment (multiselect under each checkbox) ──────────
+    # Only add models when the corresponding category is enabled AND
+    # the user specified an explicit list.  Empty list / missing = ALL
+    # → leave that category unconstrained.
+    user_models: set[str] = set()
+    if caps_config.get("image", True):
+        img_models = caps_config.get("image_models") or []
+        if img_models:
+            user_models |= {str(m) for m in img_models if m}
+    if caps_config.get("video", True):
+        vid_models = caps_config.get("video_models") or []
+        if vid_models:
+            user_models |= {str(m) for m in vid_models if m}
+    # Preserve any models the dispatcher's discover_capabilities() set
+    # that are NOT in our known multiselect options (future-proofing).
+    # User selection takes precedence for image/video model names.
+    worker.models = user_models if user_models else set()
+    logger.info(
+        f"Applied user caps for {worker.url}: capabilities={merged_caps}, "
+        f"models={worker.models or 'ALL'}"
+    )
+
+
 @dataclass
 class ComfyWorker:
     """Represents a ComfyUI worker instance."""

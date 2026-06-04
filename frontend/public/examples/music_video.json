@@ -1,0 +1,74 @@
+{
+  "rbmn_format_version": "1.0",
+  "project_mode": "music_video",
+  "project_name": "Atlas (Music Video)",
+  "concept": {
+    "song_title": "Atlas",
+    "concept_text": "A young woman drifts through a city at night carrying invisible weight — relationships, memories, expectations. Each scene visualizes the burden through an object she encounters: a heavy door, a stacked tray, a child on her shoulders, a globe in a shop window. The chorus is the release.",
+    "style_text": "Neon-drenched after-rain cinematography: wet pavement reflections, sodium-yellow and electric-cyan, shallow depth of field, 35mm grain, handheld at intimate distance, locked-off at wide. Carmen Vidal meets Wong Kar-wai.",
+    "image_direction": "cinematic",
+    "custom_image_direction": "",
+    "global_color_override": "full_color",
+    "custom_color_palette": ""
+  },
+  "resolution": {
+    "resolution_width": 1536,
+    "resolution_height": 864,
+    "image_resolution_width": 1920,
+    "image_resolution_height": 1080,
+    "video_resolution_width": 1280,
+    "video_resolution_height": 720
+  },
+  "characters": [
+    { "name": "Maya", "description": "Mid-twenties, dark curls, oversized cream coat, scuffed black boots, gold hoop earrings, tired but resolute eyes. Carries a leather satchel." }
+  ],
+  "chapters": [
+    {
+      "order": 1,
+      "name": "Verse 1 — Weights",
+      "color": "#7c3aed",
+      "description": "Maya moves through the city carrying objects that grow heavier each scene. The lyrics map directly to what she's holding.",
+      "character_focus": ["Maya"],
+      "style_notes": "Wet pavement, sodium-yellow street light, intimate handheld framing on the objects.",
+      "depth": 0,
+      "parent_chapter_order": null,
+      "start_time": 0,
+      "end_time": 45
+    }
+  ],
+  "scenes": [
+    {
+      "order_index": 0,
+      "name": "V1 — Door",
+      "start_time": 0.0,
+      "end_time": 8.0,
+      "chapter_order": 1,
+      "lyrics_text": "Push the door, feel the weight, every hinge a hesitation",
+      "image_prompt": "Medium close-up of Maya leaning her shoulder into a heavy brass-handled apartment door, breath visible in the cold air. Hallway light spills across her face. Wet street visible through the open door behind her — reflections of neon signs in pavement puddles. 35mm grain, shallow depth of field.",
+      "negative_prompt": "smiling, modern phone in hand, text on signs",
+      "flow_idea": "Open on the resistance of the door. The lyric is literal — show the weight of opening.",
+      "character_refs_first": ["Maya"],
+      "character_refs_last": [],
+      "two_pass_enabled": true,
+      "color_override": null,
+      "custom_color_palette": null,
+      "image_movement": null,
+      "use_story_flow": true,
+      "override_resolution": false,
+      "width": null,
+      "height": null,
+      "video_prompt": "Maya pushes the door open one quarter of the way, pauses, then leans her full weight into it. Camera handheld, intimate distance.",
+      "last_frame_prompt": "",
+      "last_frame_negative_prompt": "",
+      "video_mode": "single",
+      "lipsync_enabled": true,
+      "vocals_only_for_lipsync": true,
+      "transition_in": null,
+      "transition_out": { "type": "crossfade", "duration": 0.5 }
+    }
+  ],
+  "lyrics_source": {
+    "initial_text": "[Verse 1]\nPush the door, feel the weight, every hinge a hesitation\nCarry it home, carry it slow, every step a conversation\n\n[Chorus]\nAtlas, set it down\nAtlas, set it down\nThe sky won't fall without you\nAtlas, set it down",
+    "language": "en"
+  }
+}

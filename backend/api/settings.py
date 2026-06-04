@@ -691,26 +691,14 @@ async def update_settings(
                     except Exception as add_err:
                         logger.warning(f"Failed to add ComfyUI worker {url}: {add_err}")
 
-                # Update capabilities on all current workers.
-                # Preserve auto-discovered caps (inpaint, upscale, …) and use
-                # the user's image/video checkboxes as overrides for the
-                # klein / ltx slots only.  See main.py lifespan for rationale.
+                # Update capabilities AND user model assignments on all
+                # current workers.  Shared helper in comfyui.dispatcher
+                # keeps startup (main.py) and resync (here) in lock-step.
+                from backend.services.comfyui.dispatcher import apply_user_caps
                 for url in new_urls:
                     worker = comfy_dispatcher.workers.get(url)
                     if worker:
-                        caps_config = server_caps.get(url, {})
-                        if caps_config:
-                            merged = set(worker.capabilities)
-                            if caps_config.get("image", True):
-                                merged.add("klein")
-                            else:
-                                merged.discard("klein")
-                            if caps_config.get("video", True):
-                                merged.add("ltx")
-                            else:
-                                merged.discard("ltx")
-                            worker.capabilities = merged
-                            logger.info(f"Updated caps for {url}: {merged}")
+                        apply_user_caps(worker, server_caps.get(url, {}))
 
                 logger.info(
                     f"ComfyUI dispatcher synced: {len(comfy_dispatcher.workers)} workers"
