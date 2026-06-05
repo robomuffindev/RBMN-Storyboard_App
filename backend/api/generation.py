@@ -2127,6 +2127,11 @@ class SeqAutoGenRequest(BaseModel):
     # Auto-Gen modal from a chapter drilldown and run jobs only for that
     # mini-project.  When None, runs against every scene in the project.
     chapter_id: Optional[UUID] = None
+    # When True, scenes that already have a non-placeholder prompt are
+    # NOT re-enhanced — auto-gen just renders them with the existing
+    # text.  Blank scenes still get a fresh enhancement so this is safe
+    # to leave on for repeated runs against a partially-edited project.
+    skip_existing_prompts: bool = False
 
 
 class SeqAutoGenStatusResponse(BaseModel):
@@ -2145,7 +2150,7 @@ class SeqAutoGenStatusResponse(BaseModel):
 _seq_auto_jobs: dict[str, dict] = {}
 
 
-async def _evict_seq_auto_job(pid: str, delay: float = 300.0):
+async def _evict_seq_auto_job(pid: str, delay: float = 1800.0):
     """Remove finished auto-gen entry after `delay` seconds to prevent memory leak."""
     await asyncio.sleep(delay)
     _seq_auto_jobs.pop(pid, None)

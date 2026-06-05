@@ -3109,6 +3109,21 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const isBackendFailed = autoGenStatus === 'failed';
   const isBackendCancelled = autoGenStatus === 'cancelled';
   const isBackendTerminal = isBackendDone || isBackendFailed || isBackendCancelled;
+
+  // Latch: once we've ever seen a run in this modal session, we should
+  // never silently revert to the setup form just because the backend's
+  // per-project tracking dict got evicted (it does so 5 min after
+  // terminal).  Without this latch the user sees the status panel
+  // vanish and the setup form reappear while videos are still rendering
+  // on the workers (the eviction can race with the "really done" state
+  // if the drain phase fires too early in a flaky run).  Also pins the
+  // progress view in place across transient polling errors.
+  const [sessionHasStarted, setSessionHasStarted] = useState(false);
+  useEffect(() => {
+    if (isBackendRunning || isBackendTerminal) {
+      setSessionHasStarted(true);
+    }
+  }, [isBackendRunning, isBackendTerminal]);
   const progressPct = autoGenTotal > 0 ? Math.round((autoGenCompleted / autoGenTotal) * 100) : 0;
 
   // Reset elapsed timer when a new batch run starts
@@ -3238,8 +3253,13 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
     }
   };
 
-  // Show progress view when backend is running or terminal
-  const showProgress = isBackendRunning || isBackendTerminal;
+  // Show progress view when backend is running or terminal — OR when
+  // we've seen a run start in this modal session and the dict has
+  // since been evicted (status === 'idle').  The latch protects the
+  // user from "the status box disappeared mid-run" — once they kicked
+  // off a run, they keep the progress view until they explicitly
+  // close the modal.
+  const showProgress = isBackendRunning || isBackendTerminal || sessionHasStarted;
 
   return (
     <div
