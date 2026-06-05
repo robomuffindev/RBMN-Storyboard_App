@@ -886,6 +886,12 @@ class AutoGenerateRequest(BaseModel):
     # (including descendant sub-chapters). Mirrors SeqAutoGenRequest so
     # callers wired to /auto don't silently leak across all chapters.
     chapter_id: Optional[UUID] = None
+    # When True, scenes that already have a non-placeholder prompt
+    # are NOT re-enhanced — auto-gen just renders them with the
+    # existing text.  Blank scenes still get a fresh enhancement
+    # so this is safe to leave on for repeated runs against a
+    # partially-edited project.
+    skip_existing_prompts: bool = False
 
 
 class AutoGenerateResponse(BaseModel):
@@ -916,6 +922,34 @@ def _auto_workflow_type(ref_count: int) -> str:
     """Map reference image count to workflow type."""
     mapping = {0: "klein_t2i", 1: "klein_1ref", 2: "klein_2ref", 3: "klein_3ref", 4: "klein_4ref", 5: "klein_5ref"}
     return mapping.get(min(ref_count, 5), "klein_t2i")
+
+
+
+def _should_enhance(skip_existing: bool, current: str | None) -> bool:
+    """Decide whether the auto-gen LLM enhance step should run.
+
+    When ``skip_existing`` is True and the scene already has a
+    non-placeholder prompt, return False so the existing prompt is
+    preserved verbatim and no LLM tokens are spent regenerating it.
+
+    "Placeholder" matches the fallback strings auto-gen uses when a
+    scene has no real prompt yet: ``Scene N`` and ``Cinematic scene N``
+    (the exact templates seeded at the top of every enhance block).  A
+    placeholder is treated as no prompt so the user still gets a real
+    enhancement for blank scenes even when skip_existing is on.
+    """
+    if not skip_existing:
+        return True
+    if not current:
+        return True
+    s = current.strip()
+    if not s:
+        return True
+    if s.startswith("Scene ") or s.startswith("Cinematic scene"):
+        return True
+    if s.startswith("- last frame") or s.endswith(" - last frame"):
+        return True
+    return False
 
 
 def _apply_two_pass_to_job_params(
@@ -1909,11 +1943,12 @@ async def auto_generate(
                         context = await _build_auto_enhance_context(
                             project, scene, scene_lyrics, "first", image_model, prev_scene
                         )
-                        prompt = await asyncio.to_thread(
-                            enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                            False, image_sys_override, image_model, "first",
-                            image_prompt_guidance_text or None,
-                        )
+                        if _should_enhance(skip_existing_prompts, prompt):
+                            prompt = await asyncio.to_thread(
+                                enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
+                                False, image_sys_override, image_model, "first",
+                                image_prompt_guidance_text or None,
+                            )
                         enhanced_count += 1
                     except Exception as e:
                         logger.warning(f"Auto-enhance failed for scene {scene.order_index}: {e}")
@@ -1958,11 +1993,12 @@ async def auto_generate(
                             context = await _build_auto_enhance_context(
                                 project, scene, scene_lyrics, "last", image_model, prev_scene
                             )
-                            lf_prompt = await asyncio.to_thread(
-                                enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
-                                False, image_sys_override, image_model, "last",
-                                image_prompt_guidance_text or None,
-                            )
+                            if _should_enhance(skip_existing_prompts, lf_prompt):
+                                lf_prompt = await asyncio.to_thread(
+                                    enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
+                                    False, image_sys_override, image_model, "last",
+                                    image_prompt_guidance_text or None,
+                                )
                             enhanced_count += 1
                         except Exception as e:
                             logger.warning(f"Auto-enhance LF failed for scene {scene.order_index}: {e}")
@@ -2003,12 +2039,13 @@ async def auto_generate(
                         vid_context = await _build_video_enhance_context(
                             project, scene, scene_lyrics, video_model, prev_scene
                         )
-                        video_prompt = await asyncio.to_thread(
-                            enhancer.enhance, video_prompt, vid_context, llm_provider, llm_api_key, llm_model,
-                            True, video_sys_override, video_model,
-                            None,  # frame_type (not applicable for video)
-                            video_prompt_guidance_text or None,
-                        )
+                        if _should_enhance(skip_existing_prompts, video_prompt):
+                            video_prompt = await asyncio.to_thread(
+                                enhancer.enhance, video_prompt, vid_context, llm_provider, llm_api_key, llm_model,
+                                True, video_sys_override, video_model,
+                                None,  # frame_type (not applicable for video)
+                                video_prompt_guidance_text or None,
+                            )
                         enhanced_count += 1
                     except Exception as e:
                         logger.warning(f"Auto-enhance video failed for scene {scene.order_index}: {e}")
@@ -2371,6 +2408,7 @@ async def start_sequential_auto_gen(
             vocals_only_for_lipsync=req.vocals_only_for_lipsync,
             batch_run_id=batch_run_id,
             chapter_id=req.chapter_id,
+            skip_existing_prompts=req.skip_existing_prompts,
         )
     )
 
@@ -2594,6 +2632,7 @@ async def _run_windowed_batch(
     vocals_only_for_lipsync: bool = True,
     image_prompt_guidance: str = "",
     video_prompt_guidance: str = "",
+    skip_existing_prompts: bool = False,
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
 
@@ -2724,7 +2763,8 @@ async def _run_windowed_batch(
                                 image_prompt_guidance or None)
                             if two_pass and ref_ids:
                                 enhance_args += ("base",)
-                            prompt = await asyncio.to_thread(*enhance_args)
+                            if _should_enhance(skip_existing_prompts, prompt):
+                                prompt = await asyncio.to_thread(*enhance_args)
                         except Exception as e:
                             logger.warning(f"Windowed batch: enhance FF failed scene {i}: {e}")
 
@@ -2785,12 +2825,13 @@ async def _run_windowed_batch(
                         vid_ctx = await _build_video_enhance_context(
                             project_fresh, scene, scene_lyrics, video_model, prev_scene_for_ctx
                         )
-                        video_prompt = await asyncio.to_thread(
-                            enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
-                            True, video_sys_override, video_model,
-                            None,  # frame_type (not applicable for video)
-                            video_prompt_guidance or None,
-                        )
+                        if _should_enhance(skip_existing_prompts, video_prompt):
+                            video_prompt = await asyncio.to_thread(
+                                enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                True, video_sys_override, video_model,
+                                None,  # frame_type (not applicable for video)
+                                video_prompt_guidance or None,
+                            )
                     except Exception as e:
                         logger.warning(f"Windowed batch: enhance video failed scene {i}: {e}")
 
@@ -2854,7 +2895,8 @@ async def _run_windowed_batch(
                             image_prompt_guidance or None)
                         if two_pass and ref_ids:
                             enhance_args += ("base",)
-                        prompt = await asyncio.to_thread(*enhance_args)
+                        if _should_enhance(skip_existing_prompts, prompt):
+                            prompt = await asyncio.to_thread(*enhance_args)
                     except Exception as e:
                         logger.warning(f"Windowed batch: enhance failed scene {i}: {e}")
 
@@ -3198,6 +3240,7 @@ async def _run_sequential_auto_gen(
     vocals_only_for_lipsync: bool = False,
     batch_run_id: str | None = None,
     chapter_id: Optional[UUID] = None,
+    skip_existing_prompts: bool = False,
 ):
     """Background task: process scenes sequentially or via continuous dispatch.
 
@@ -3409,6 +3452,7 @@ async def _run_sequential_auto_gen(
                 vocals_only_for_lipsync=vocals_only_for_lipsync,
                 image_prompt_guidance=image_prompt_guidance_text,
                 video_prompt_guidance=video_prompt_guidance_text,
+                skip_existing_prompts=skip_existing_prompts,
             )
             return
 
@@ -3499,7 +3543,8 @@ async def _run_sequential_auto_gen(
                                 False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                             if two_pass and ref_ids:
                                 enhance_args += ("base",)
-                            prompt = await asyncio.to_thread(*enhance_args)
+                            if _should_enhance(skip_existing_prompts, prompt):
+                                prompt = await asyncio.to_thread(*enhance_args)
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance failed scene {i}: {e}")
 
@@ -3568,7 +3613,8 @@ async def _run_sequential_auto_gen(
                                     False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                 if two_pass and ref_ids:
                                     enhance_args += ("base",)
-                                prompt = await asyncio.to_thread(*enhance_args)
+                                if _should_enhance(skip_existing_prompts, prompt):
+                                    prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
                                 logger.warning(f"Sequential auto-gen: enhance FF failed scene {i}: {e}")
 
@@ -3627,12 +3673,13 @@ async def _run_sequential_auto_gen(
                             vid_ctx = await _build_video_enhance_context(
                                 project, scene, scene_lyrics, video_model, prev_scene
                             )
-                            video_prompt = await asyncio.to_thread(
-                                enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
-                                True, video_sys_override, video_model,
-                                None,  # frame_type
-                                video_prompt_guidance_text or None,
-                            )
+                            if _should_enhance(skip_existing_prompts, video_prompt):
+                                video_prompt = await asyncio.to_thread(
+                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                    True, video_sys_override, video_model,
+                                    None,  # frame_type
+                                    video_prompt_guidance_text or None,
+                                )
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance video failed scene {i}: {e}")
 
@@ -3698,7 +3745,8 @@ async def _run_sequential_auto_gen(
                                     False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                 if two_pass and ref_ids:
                                     enhance_args += ("base",)
-                                prompt = await asyncio.to_thread(*enhance_args)
+                                if _should_enhance(skip_existing_prompts, prompt):
+                                    prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
                                 logger.warning(f"Sequential auto-gen: enhance FF scene 1 failed: {e}")
 
@@ -3770,7 +3818,8 @@ async def _run_sequential_auto_gen(
                                             False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                         if two_pass and ref_ids:
                                             enhance_args += ("base",)
-                                        prompt = await asyncio.to_thread(*enhance_args)
+                                        if _should_enhance(skip_existing_prompts, prompt):
+                                            prompt = await asyncio.to_thread(*enhance_args)
                                     except Exception as e:
                                         logger.warning(f"Sequential auto-gen: enhance FF fallback failed: {e}")
 
@@ -3836,12 +3885,13 @@ async def _run_sequential_auto_gen(
                             vid_ctx = await _build_video_enhance_context(
                                 project, scene, scene_lyrics, video_model, prev_scene
                             )
-                            video_prompt = await asyncio.to_thread(
-                                enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
-                                True, video_sys_override, video_model,
-                                None,  # frame_type
-                                video_prompt_guidance_text or None,
-                            )
+                            if _should_enhance(skip_existing_prompts, video_prompt):
+                                video_prompt = await asyncio.to_thread(
+                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                    True, video_sys_override, video_model,
+                                    None,  # frame_type
+                                    video_prompt_guidance_text or None,
+                                )
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen: enhance video failed scene {i}: {e}")
 
@@ -3905,7 +3955,8 @@ async def _run_sequential_auto_gen(
                                     False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
                                 if two_pass and ref_ids:
                                     enhance_args += ("base",)
-                                prompt = await asyncio.to_thread(*enhance_args)
+                                if _should_enhance(skip_existing_prompts, prompt):
+                                    prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
                                 logger.warning(f"Sequential auto-gen V2V: enhance FF scene 1 failed: {e}")
 
@@ -3962,12 +4013,13 @@ async def _run_sequential_auto_gen(
                             vid_ctx = await _build_video_enhance_context(
                                 project, scene, scene_lyrics, video_model, prev_scene
                             )
-                            video_prompt = await asyncio.to_thread(
-                                enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
-                                True, video_sys_override, video_model,
-                                None,  # frame_type
-                                video_prompt_guidance_text or None,
-                            )
+                            if _should_enhance(skip_existing_prompts, video_prompt):
+                                video_prompt = await asyncio.to_thread(
+                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                    True, video_sys_override, video_model,
+                                    None,  # frame_type
+                                    video_prompt_guidance_text or None,
+                                )
                         except Exception as e:
                             logger.warning(f"Sequential auto-gen V2V: enhance video failed scene {i}: {e}")
 

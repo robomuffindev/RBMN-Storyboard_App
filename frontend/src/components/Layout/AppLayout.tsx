@@ -3097,6 +3097,11 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const [lipsyncEnabled, setLipsyncEnabled] = useState(true);
   const [vocalsOnlyForLipsync, setVocalsOnlyForLipsync] = useState(false);
   const [skipAudioMux, setSkipAudioMux] = useState(false);
+  // When true, scenes that already have a non-placeholder prompt are
+  // NOT re-enhanced — auto-gen renders them with the existing text.
+  // Useful for "just render what's ready" runs and avoids wasting LLM
+  // tokens regenerating prompts the user already curated.
+  const [skipExistingPrompts, setSkipExistingPrompts] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const isBackendRunning = autoGenStatus === 'running';
@@ -3200,6 +3205,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
         lipsyncEnabled,
         vocalsOnlyForLipsync,
         _scopeForRun,
+        skipExistingPrompts,
       );
 
       setStatusMsg(null);
@@ -3423,6 +3429,15 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
                   <div>
                     <span className="text-sm text-gray-200">Override \u2014 Regenerate Full Set</span>
                     <p className="text-xs text-gray-500">For "Missing" modes: regenerate every scene instead of only the missing ones. Prior versions remain in the gallery.</p>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input type="checkbox" checked={skipExistingPrompts} onChange={e => setSkipExistingPrompts(e.target.checked)} disabled={isStarting}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-emerald-500" />
+                  <div>
+                    <span className="text-sm text-gray-200">Use Existing Prompts \u2014 Just Render</span>
+                    <p className="text-xs text-gray-500">Skip the LLM enhance step for any scene that already has a prompt. Blank scenes still get a fresh enhancement. Useful for re-runs after you've curated prompts manually \u2014 saves LLM tokens and preserves your edits.</p>
                   </div>
                 </label>
 

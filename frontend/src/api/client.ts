@@ -217,6 +217,7 @@ export const startSequentialAutoGen = (
   lipsyncEnabled: boolean = true,
   vocalsOnlyForLipsync: boolean = false,
   chapterId?: string,
+  skipExistingPrompts: boolean = false,
 ) =>
   api.post<{
     status: string;
@@ -236,6 +237,7 @@ export const startSequentialAutoGen = (
     lipsync_enabled: lipsyncEnabled,
     vocals_only_for_lipsync: vocalsOnlyForLipsync,
     chapter_id: chapterId ?? null,
+    skip_existing_prompts: skipExistingPrompts,
   });
 
 export const getSequentialAutoGenStatus = (projectId: string) =>
