@@ -2429,11 +2429,70 @@ async def get_sequential_auto_gen_status(
     project_id: UUID,
     session: AsyncSession = Depends(get_session),
 ) -> SeqAutoGenStatusResponse:
-    """Poll the status of a sequential auto-generation run."""
-    await _get_project_or_404(project_id, session)
+    """Poll the status of a sequential auto-generation run.
+
+    The status lives primarily in the in-memory ``_seq_auto_jobs`` dict
+    while a run is actively executing.  When that dict has no entry
+    (e.g. the entry has been evicted after a completed run, or the
+    backend process restarted while a run was active), we fall back to
+    the latest ``BatchRun`` row for this project — that's the
+    persisted source of truth across browser sessions and backend
+    restarts, so reopening the project after closing the browser still
+    shows the live status of any in-flight or recently-finished run.
+
+    The endpoint does a single indexed read on ``batch_runs`` only
+    when the in-memory check misses, so the polling hot path stays
+    DB-free during active runs (which avoids the SQLite contention
+    that previously serialized polls against dispatcher writes).
+    """
     pid = str(project_id)
     info = _seq_auto_jobs.get(pid)
-    if not info:
+    if info:
+        return SeqAutoGenStatusResponse(**info)
+
+    # Fall back to the most recent BatchRun for this project.  Lets
+    # users close the browser tab mid-run, come back later, and still
+    # see the live status.
+    try:
+        from backend.database.models import BatchRun as _BR, BatchRunStatus as _BRS
+        from sqlmodel import select as _br_select
+        stmt = (
+            _br_select(_BR)
+            .where(_BR.project_id == pid)
+            .order_by(_BR.created_at.desc())  # type: ignore
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        br = result.scalars().first()
+        if br is None:
+            return SeqAutoGenStatusResponse(status="idle")
+        # Map BatchRun status → frontend status string.  The frontend
+        # treats "running"/"pending" as "still working" and anything
+        # else as terminal.  BatchRun uses RUNNING/COMPLETED/etc, so
+        # the lowercase string values already match what the modal
+        # expects (sessionHasStarted latch picks up any terminal
+        # state).
+        br_status = str(br.status or "").lower()
+        # "completed" gets reported as "done" so the existing modal
+        # logic (which checks for "done"/"completed") shows the
+        # "Completed!" panel correctly.
+        if br_status == "completed":
+            br_status = "done"
+        return SeqAutoGenStatusResponse(
+            status=br_status or "idle",
+            mode=br.mode or None,
+            total_scenes=int(br.total_scenes or 0),
+            completed_scenes=int(br.completed_scenes or 0),
+            current_scene_name=br.current_scene_name,
+            current_step=br.current_step,
+            error=None,
+            batch_run_id=br.id,
+        )
+    except Exception as e:
+        # Any DB read error should not break the polling endpoint.
+        # Idle is a safe fallback — the worst case is "looks like
+        # nothing is running" until the next poll.
+        logger.debug(f"BatchRun fallback failed for status poll {pid}: {e}")
         return SeqAutoGenStatusResponse(status="idle")
     return SeqAutoGenStatusResponse(**info)
 

@@ -619,6 +619,53 @@ export default function BatchRunDetail() {
                   </div>
                 )}
 
+                {/* Live per-job render progress — shows that a long
+                    LTX render is actually progressing instead of
+                    looking stuck.  Hidden when nothing in flight. */}
+                {isRunning && (run.active_jobs?.length ?? 0) > 0 && (
+                  <div className="border-t border-blue-500/20 bg-gray-950/50 px-3 py-2 space-y-2">
+                    <div className="text-[10px] uppercase tracking-wider text-gray-500">
+                      Active workers ({run.active_jobs?.length ?? 0})
+                    </div>
+                    {(run.active_jobs ?? []).map((aj) => {
+                      const pct = Math.max(0, Math.min(100, Math.round(aj.progress_percent || 0)));
+                      const worker = aj.worker_url
+                        ? (() => { try { const u = new URL(aj.worker_url!); return u.hostname + (u.port ? ':' + u.port : ''); } catch { return aj.worker_url!; } })()
+                        : null;
+                      return (
+                        <div key={aj.job_id} className="text-xs text-gray-300 space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="capitalize font-medium text-gray-200">{aj.job_type}</span>
+                            {aj.two_pass_phase && (
+                              <span className="text-[10px] font-semibold bg-blue-600/30 text-blue-200 px-1.5 py-0.5 rounded">
+                                {aj.two_pass_phase === 'base' ? 'Pass 1/2' : 'Pass 2/2'}
+                              </span>
+                            )}
+                            {aj.workflow_type && (
+                              <span className="text-[10px] font-mono text-gray-500">{aj.workflow_type}</span>
+                            )}
+                            {aj.scene_name && (
+                              <span className="text-[10px] text-purple-300/80 truncate">{aj.scene_name}</span>
+                            )}
+                            {worker && (
+                              <span className="text-[10px] text-cyan-300/70 ml-auto">{worker}</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] text-gray-400 w-10 text-right tabular-nums">{pct}%</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <div ref={feedEndRef} />
               </div>
             </div>

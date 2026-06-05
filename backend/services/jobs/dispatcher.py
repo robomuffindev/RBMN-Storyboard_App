@@ -86,6 +86,30 @@ job_event_broadcaster = JobEventBroadcaster()
 # Keep backward-compatible name for imports in jobs.py
 job_event_queue = job_event_broadcaster
 
+
+# ── Live job progress snapshot ─────────────────────────────────────────
+# Per-job last-known progress info so the batch-run detail endpoint can
+# answer "what's the in-flight job doing RIGHT NOW" without a separate
+# SSE channel.  Without this, a 5-minute LTX video render shows a static
+# `current_step` for minutes and the batch screen looks frozen even
+# when work is happening.  Entries are written by the dispatcher's
+# progress callback and cleared on job completion/failure.
+#
+# Shape: { job_id_str: {percent: float, current_node: str | None,
+#                       last_update: iso-timestamp} }
+_live_job_progress: dict[str, dict] = {}
+
+
+def get_live_job_progress(job_id: str) -> dict | None:
+    """Public accessor — returns last-known progress for an active job."""
+    return _live_job_progress.get(str(job_id))
+
+
+def clear_live_job_progress(job_id: str) -> None:
+    """Drop a job's live-progress entry on terminal completion."""
+    _live_job_progress.pop(str(job_id), None)
+
+
 # ── Color override suffix mapping ──────────────────────────────────────
 # Used at dispatch time to inject a color constraint directly into the
 # prompt text sent to ComfyUI, ensuring the image/video model honors
@@ -887,11 +911,21 @@ class JobDispatcher:
             elif msg_type == "progress":
                 value = msg.get("data", {}).get("value", 0)
                 max_val = msg.get("data", {}).get("max", 1)
+                pct = (value / max_val * 100) if max_val > 0 else 0
+                # Stash live progress so the batch-run detail endpoint
+                # can answer "what % is the in-flight render at?"
+                # without needing the SSE stream.  Updated on every WS
+                # progress event during execution.
+                _live_job_progress[job_id_str] = {
+                    "percent": pct,
+                    "current_node": str(msg.get("data", {}).get("node") or "") or None,
+                    "last_update": datetime.utcnow().isoformat(),
+                }
                 self.on_progress(job_id_str, {
                     "event": "progress",
                     "value": value,
                     "max": max_val,
-                    "percent": (value / max_val * 100) if max_val > 0 else 0,
+                    "percent": pct,
                 })
 
         try:

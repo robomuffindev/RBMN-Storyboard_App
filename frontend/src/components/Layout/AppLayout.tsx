@@ -582,7 +582,12 @@ export default function AppLayout() {
     };
 
     poll(); // immediate first check
-    autoGenPollRef.current = setInterval(poll, 3000);
+    // 5 s polling — was 3 s, but combined with the backend status
+    // endpoint hitting the DB on every call it contributed to SQLite
+    // lock contention with the auto-gen dispatcher.  The status
+    // endpoint is now DB-free so 5 s is plenty responsive and gives
+    // workers + asset writers room to breathe under heavy load.
+    autoGenPollRef.current = setInterval(poll, 5000);
   }, [id]);
 
   // On mount, check if auto-gen is already running for this project

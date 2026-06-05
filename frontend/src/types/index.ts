@@ -471,11 +471,31 @@ export interface BatchRunStepEntry {
   type: 'scene_start' | 'scene_prepare' | 'scene_complete' | 'scene_failed' | 'step_change' | 'info';
 }
 
+/** Snapshot of one currently-running job, embedded in BatchRun detail
+ *  so the batch screen can show live render % without a separate SSE
+ *  channel.  Empty when nothing is in flight. */
+export interface ActiveJobInfo {
+  job_id: string;
+  job_type: string;          // "image" | "video"
+  scene_id?: string | null;
+  scene_name?: string | null;
+  worker_url?: string | null;
+  workflow_type?: string | null;
+  progress_percent: number;  // 0–100, from ComfyUI WS progress
+  current_node?: string | null;
+  started_at?: string | null;
+  two_pass_phase?: string | null;  // "base" | "composite" | null
+}
+
 export interface PersistentBatchRunDetail extends PersistentBatchRunSummary {
   scene_results: Record<string, any>;
   error_log: Array<{ scene_id?: string; scene_name?: string; step?: string; error: string; timestamp?: string }>;
   run_settings: Record<string, any>;
   step_log: BatchRunStepEntry[];
+  /** Live snapshot of in-flight jobs in the same project.  Populated
+   *  on every detail fetch so the batch screen's normal poll picks up
+   *  per-job render progress. */
+  active_jobs?: ActiveJobInfo[];
 }
 
 // ── Chapters ───────────────────────────────────────────────────────

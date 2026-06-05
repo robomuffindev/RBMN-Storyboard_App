@@ -157,6 +157,13 @@ class JobQueue:
             await session.commit()
             await session.refresh(job)
 
+            # Drop any live-progress entry — job is no longer in flight
+            try:
+                from backend.services.jobs.dispatcher import clear_live_job_progress
+                clear_live_job_progress(str(job_id))
+            except Exception:
+                pass
+
             logger.info(f"Job {job_id} marked DONE")
             return job
 
@@ -184,6 +191,12 @@ class JobQueue:
             session.add(job)
             await session.commit()
             await session.refresh(job)
+
+            try:
+                from backend.services.jobs.dispatcher import clear_live_job_progress
+                clear_live_job_progress(str(job_id))
+            except Exception:
+                pass
 
             logger.info(f"Job {job_id} marked FAILED: {error}")
             return job
