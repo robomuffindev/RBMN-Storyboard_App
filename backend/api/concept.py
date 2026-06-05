@@ -965,12 +965,20 @@ async def _generate_flow_inner(
     # Ollama local models have smaller context windows (4K-8K), so we process
     # scenes in small batches to avoid context overflow. Cloud providers can
     # handle more scenes at once but still benefit from batching on large projects.
+    #
+    # WHY 10 scenes for the cloud threshold (lowered from 20 in 2026-06-05):
+    # A single OpenAI / Anthropic call asking for 20 distinct flow ideas
+    # routinely runs 60-90s, which exceeds the frontend's 60s axios timeout
+    # and leaves the user staring at "Last flow error: timeout of 60000ms
+    # exceeded" while the LLM is actually still working in the background.
+    # Three concurrent batches of 10 finish in ~25-35s and produce identical
+    # quality output because each batch is self-contained.
     if provider == "ollama":
         batch_size = 5  # ~1500 tokens per batch (system + 5 scenes + output)
-    elif len(scenes) > 20:
-        batch_size = 10  # Even cloud models can struggle with 40+ scenes
+    elif len(scenes) > 10:
+        batch_size = 10  # Concurrent batches keep each call < 30s
     else:
-        batch_size = len(scenes)  # Small projects: send all at once
+        batch_size = len(scenes)  # Tiny projects (≤10 scenes): single call
 
     ideas_list: list[str] = []
 

@@ -473,7 +473,14 @@ export const getVideoFlow = (projectId: string) =>
 
 export const generateVideoFlow = (projectId: string, chapterId?: string) =>
   api.post<{ ideas: Array<{ scene_id: string; flow_idea: string }> }>(
-    `/projects/${projectId}/concept/flow/generate${chapterId ? `?chapter_id=${chapterId}` : ''}`
+    `/projects/${projectId}/concept/flow/generate${chapterId ? `?chapter_id=${chapterId}` : ''}`,
+    undefined,
+    // Flow generation can call OpenAI/Anthropic for many scenes; even with
+    // concurrent batching of 10 scenes per call, a large chapter can take
+    // a couple minutes.  Default 60s axios timeout was leaving users with
+    // "timeout of 60000ms exceeded" while the backend was still working.
+    // 5 min cap is well above any reasonable LLM round-trip.
+    { timeout: 300000 }
   );
 
 export const getFlowProgress = (projectId: string) =>
