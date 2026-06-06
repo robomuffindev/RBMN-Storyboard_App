@@ -3060,6 +3060,22 @@ async def _run_windowed_batch(
 
     _seq_auto_jobs[pid]["total_scenes"] = total_eligible
 
+    # Visible handoff from Phase 1 → Phase 2.  Previously the status
+    # text stayed at "preparing scene N/N" through the entire initial
+    # dispatch fill AND any time the Phase 2 main loop exited silently
+    # (cancellation check / DB error / etc), so users staring at a
+    # frozen Phase-1 string couldn't tell if anything was happening.
+    if pid in _seq_auto_jobs:
+        _seq_auto_jobs[pid]["current_step"] = (
+            f"dispatching ({total_eligible} scene{'s' if total_eligible != 1 else ''} ready, "
+            f"submitting first batch...)"
+        )
+        _seq_auto_jobs[pid]["current_scene_name"] = None
+    logger.info(
+        f"Windowed batch Phase 2 START: mode={mode}, eligible={total_eligible}, "
+        f"timeout={batch_timeout if False else 'TBD'}"
+    )
+
     # Active jobs: map job_id -> scene_name (for progress display)
     active_jobs: dict[UUID, str] = {}
     batch_timeout = _VIDEO_JOB_TIMEOUT if job_type == "video" else _IMAGE_JOB_TIMEOUT
@@ -3124,13 +3140,32 @@ async def _run_windowed_batch(
 
         return True
 
-    # Fill initial worker slots
+    # Fill initial worker slots.  Wrap in try/except so a transient
+    # DB lock or other oddity on one submission doesn't silently kill
+    # the entire run — the main loop below will still pick up jobs
+    # that DID make it into active_jobs, and any unsubmitted entries
+    # stay in `eligible[next_to_submit:]` for the main loop to retry.
     for _ in range(window_size):
         if next_to_submit >= total_eligible:
             break
         if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+            logger.warning(
+                f"Windowed batch initial fill: status flipped to "
+                f"{_seq_auto_jobs.get(pid, {}).get('status')!r} mid-fill "
+                f"({len(active_jobs)} submitted, {total_eligible - next_to_submit} remaining)"
+            )
             return
-        await _submit_next()
+        try:
+            await _submit_next()
+        except Exception as _sub_err:
+            logger.error(
+                f"Windowed batch initial fill: _submit_next failed for "
+                f"eligible[{next_to_submit - 1}]: {_sub_err}",
+                exc_info=True,
+            )
+            # Don't return — try the next slot.  The main loop will
+            # also try to fill freed slots later.
+            continue
 
     _seq_auto_jobs[pid]["current_step"] = (
         f"generating ({len(active_jobs)} active, "
@@ -3209,9 +3244,26 @@ async def _run_windowed_batch(
             del active_jobs[jid]
             # Reset elapsed timeout since we're making progress
             elapsed = 0.0
-            # Immediately fill the freed slot
+            # Immediately fill the freed slot.  Wrap in try/except so
+            # a transient DB lock here doesn't abort the entire run —
+            # leaving the user with a frozen "preparing..." status and
+            # the remaining scenes never dispatched.  We log + skip;
+            # the next iteration's status update will reflect the gap.
             if _seq_auto_jobs.get(pid, {}).get("status") == "running":
-                await _submit_next()
+                try:
+                    await _submit_next()
+                except Exception as _refill_err:
+                    logger.error(
+                        f"Windowed batch refill: _submit_next failed after job "
+                        f"{jid} completed: {_refill_err}",
+                        exc_info=True,
+                    )
+                    # next_to_submit was already incremented inside
+                    # _submit_next before the failing DB write — back
+                    # it out so the next refill attempt retries this
+                    # eligible entry instead of skipping it forever.
+                    if next_to_submit > 0 and len(active_jobs) < total_eligible - (next_to_submit - len(active_jobs)):
+                        next_to_submit -= 1
 
         # Update progress tracker
         if pid in _seq_auto_jobs:
@@ -3224,6 +3276,38 @@ async def _run_windowed_batch(
             _seq_auto_jobs[pid]["current_scene_name"] = (
                 ", ".join(active_names) if active_names else None
             )
+
+    # Self-heal: if the main loop exited with active_jobs empty BUT
+    # there are still un-submitted entries in `eligible[]`, retry them
+    # now.  This catches the silent-stall case where a refill failed
+    # and the loop's `while active_jobs:` condition went False before
+    # the next job could be submitted, leaving everything stuck.
+    if not active_jobs and next_to_submit < total_eligible:
+        unsubmitted = total_eligible - next_to_submit
+        logger.warning(
+            f"Continuous dispatch: main loop exited with {unsubmitted} eligible "
+            f"job(s) still un-submitted ({next_to_submit}/{total_eligible}) — "
+            f"running rescue submit pass"
+        )
+        if pid in _seq_auto_jobs:
+            _seq_auto_jobs[pid]["current_step"] = (
+                f"rescuing {unsubmitted} stalled job(s)..."
+            )
+        rescue_submitted = 0
+        for _ in range(unsubmitted):
+            if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+                break
+            try:
+                if await _submit_next():
+                    rescue_submitted += 1
+            except Exception as _rescue_err:
+                logger.error(f"Rescue submit failed: {_rescue_err}", exc_info=True)
+                break
+        if rescue_submitted:
+            logger.info(f"Continuous dispatch: rescue submitted {rescue_submitted} job(s); waiting them out")
+            # Wait them out via the drain phase below — which polls the
+            # DB for PENDING/RUNNING jobs in this batch's scenes — so we
+            # don't need to re-enter the main loop.
 
     # Handle timeout
     if active_jobs:

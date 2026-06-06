@@ -2542,7 +2542,7 @@ def burn_subtitles(video_path: str, ass_path: str, output_path: str) -> str:
     return output_path
 
 
-def normalize_audio(input_path: str, output_path: str, target_lufs: float = -16) -> str:
+def normalize_audio(input_path: str, output_path: str, target_lufs: float = -14) -> str:
     """Two-pass EBU R128 loudness normalization using FFmpeg loudnorm filter.
 
     Pass 1 measures the input loudness; Pass 2 applies linear normalization
@@ -2551,7 +2551,17 @@ def normalize_audio(input_path: str, output_path: str, target_lufs: float = -16)
     Args:
         input_path: Input audio/video path.
         output_path: Output audio path (normalized).
-        target_lufs: Target integrated loudness in LUFS (default -16).
+        target_lufs: Target integrated loudness in LUFS.  Default -14
+            matches the streaming standard used by Spotify, YouTube,
+            Apple Music, and TikTok — and is what most users now
+            "expect" loudness to feel like.  The previous default of
+            -16 LUFS is the broadcast/film standard and reliably
+            sounded ~2-4 dB quieter than the un-normalized mix,
+            triggering "normalization makes my narration super quiet"
+            reports.  Voice-heavy programs in particular suffer at -16
+            because integrated loudness drops further with the gaps
+            between speech.  -14 keeps the narration prominent while
+            still putting a ceiling on peaks via the -1.5 dBTP cap.
 
     Returns:
         The output_path.
