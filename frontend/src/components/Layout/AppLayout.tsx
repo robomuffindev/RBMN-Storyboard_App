@@ -1636,10 +1636,24 @@ function SceneList({ scenes, onAddScene, isAdding }: { scenes: Scene[]; onAddSce
             const isActive = activeScene?.id === scene.id;
             const isScenePlaying = playingSceneId === scene.id && isPlaying;
 
+            // Navigate to this scene in the timeline: select it as the
+            // active scene (which the SceneEditor follows) AND seek the
+            // playhead to its start.  Doesn't auto-play — that's still
+            // the per-scene play button.  This is what the row click,
+            // the title button, and the timecode all trigger now so
+            // every part of the row "takes you to the scene" instead
+            // of just selecting it abstractly.
+            const goToSceneInTimeline = () => {
+              setActiveScene(scene);
+              setPlaybackPosition(scene.start_time);
+              setIsPlaying(false);
+              setPlayingSceneId(null);
+            };
+
             return (
               <div
                 key={scene.id}
-                onClick={() => setActiveScene(scene)}
+                onClick={goToSceneInTimeline}
                 className={`p-2 rounded cursor-pointer transition-colors group ${
                   isActive
                     ? 'bg-blue-900/40 border border-blue-700'
@@ -1657,7 +1671,18 @@ function SceneList({ scenes, onAddScene, isAdding }: { scenes: Scene[]; onAddSce
                   </button>
 
                   <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium truncate">{scene.name || `Scene ${scene.order_index + 1}`}</div>
+                    {/* Title — its own button so its hover state and
+                        tooltip make "click here to jump to this scene
+                        in the timeline" explicit.  Whole row still
+                        works the same way for users who don't notice. */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); goToSceneInTimeline(); }}
+                      className="text-xs font-medium truncate text-left w-full hover:text-blue-300 transition-colors"
+                      title={`Go to ${scene.name || `Scene ${scene.order_index + 1}`} in the timeline`}
+                    >
+                      {scene.name || `Scene ${scene.order_index + 1}`}
+                    </button>
                     <div className="text-[10px] text-gray-400">
                       {formatTime(scene.start_time)} — {formatTime(scene.end_time)}
                     </div>

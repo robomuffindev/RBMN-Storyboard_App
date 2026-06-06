@@ -2607,6 +2607,71 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 })()}
               </div>
 
+              {/* ── FFmpeg post-process color filter (per-scene) ──
+                  Independent of the LLM Color Override above — runs
+                  FFmpeg over the generated image to force B&W /
+                  Grayscale / Sepia at the pixel level.  "Inherit"
+                  defers to the Concept tab's global setting. */}
+              <div>
+                <label className="block text-sm font-medium mb-2 text-gray-300">
+                  Force Color Filter (FFmpeg)
+                  <span className="text-[10px] font-normal text-gray-500 ml-2">deterministic pixel transform on every new image</span>
+                </label>
+                {(() => {
+                  const sceneFilter = (activeScene?.parameters?.image_color_filter as string | undefined) || '';
+                  const selectValue = sceneFilter ? sceneFilter : 'inherit';
+                  const projDefault = (currentProject?.settings?.global_image_color_filter as string | undefined) || '';
+                  const projLabel = ({
+                    bw: 'Black & White',
+                    grayscale: 'Grayscale',
+                    sepia: 'Sepia Tone',
+                  } as Record<string,string>)[projDefault] || 'Off';
+                  return (
+                    <>
+                      <select
+                        value={selectValue}
+                        onChange={async (e) => {
+                          if (!activeScene || !currentProject) return;
+                          const val = e.target.value;
+                          const newParams: Record<string, any> = { ...activeScene.parameters };
+                          if (val === 'inherit') {
+                            delete newParams.image_color_filter;
+                          } else if (val === 'off') {
+                            // Explicit "off" — overrides project default
+                            newParams.image_color_filter = 'off';
+                          } else {
+                            newParams.image_color_filter = val;
+                          }
+                          await updateSceneAndSync(activeScene.id, { parameters: newParams });
+                        }}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                      >
+                        <option value="inherit">Inherit from project ({projLabel})</option>
+                        <option value="off">Off — keep model's color output</option>
+                        <option value="bw">Black &amp; White (high contrast)</option>
+                        <option value="grayscale">Grayscale (desaturated)</option>
+                        <option value="sepia">Sepia Tone</option>
+                      </select>
+                      {sceneFilter && sceneFilter !== 'off' && (
+                        <p className="text-[10px] text-amber-400 mt-1">
+                          ⚠ Per-scene FFmpeg filter — applied to every new image for this scene only
+                        </p>
+                      )}
+                      {sceneFilter === 'off' && (
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          Overrides project default — this scene's images will keep the model's original color output.
+                        </p>
+                      )}
+                      {!sceneFilter && (
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          Following project setting from Concept tab ({projLabel}).
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+
               <div>
                 <label className="block text-sm font-medium mb-2 text-gray-500">
                   Negative Prompt

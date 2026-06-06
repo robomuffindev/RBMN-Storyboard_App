@@ -61,6 +61,13 @@ class ConceptData(BaseModel):
     # Per-scene override on Scene.parameters.color_override wins.
     global_color_override: str = ""
     custom_color_palette: str = ""  # free text when global_color_override == "custom"
+    # FFmpeg post-process color filter applied to every generated image
+    # AFTER the model produces it.  Independent of global_color_override
+    # (which only influences the LLM prompt).  Useful when you want a
+    # deterministic pixel-level conversion regardless of what the model
+    # produced.  Values: "" / "off" / "bw" / "grayscale" / "sepia".
+    # Per-scene Scene.parameters.image_color_filter overrides this.
+    global_image_color_filter: str = ""
 
 
 class SceneFlowIdea(BaseModel):
@@ -138,6 +145,7 @@ async def get_concept(
         ken_burns_allowed_effects=s.get("ken_burns_allowed_effects", []),
         global_color_override=s.get("global_color_override", "") or "",
         custom_color_palette=s.get("custom_color_palette", "") or "",
+        global_image_color_filter=s.get("global_image_color_filter", "") or "",
     )
 
 
@@ -185,6 +193,8 @@ async def save_concept(
     settings["ken_burns_allowed_effects"] = req.ken_burns_allowed_effects
     settings["global_color_override"] = req.global_color_override
     settings["custom_color_palette"] = req.custom_color_palette
+    # FFmpeg post-process color filter ("" / "bw" / "grayscale" / "sepia")
+    settings["global_image_color_filter"] = (req.global_image_color_filter or "").strip().lower()
     project.settings = settings
     await session.commit()
     await session.refresh(project)

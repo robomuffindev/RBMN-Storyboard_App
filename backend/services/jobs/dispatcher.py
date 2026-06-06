@@ -3627,6 +3627,50 @@ class JobDispatcher:
                     except Exception:
                         pass
 
+                    # ── Post-process color filter (B&W / Grayscale / Sepia)
+                    # Per-scene `image_color_filter` overrides project-level
+                    # `global_image_color_filter`.  Independent of the LLM
+                    # color_override (which influences the prompt, not the
+                    # pixels).  When both are off / unset, this is a no-op
+                    # and the original model output is preserved.
+                    try:
+                        _filter_mode = ""
+                        # Scene-level wins.  We avoid loading project unless
+                        # the scene has nothing — keeps the hot path quick.
+                        if job and job.scene_id:
+                            async with self._session_factory() as _cf_session:
+                                _cf_scene = await _cf_session.get(Scene, job.scene_id)
+                                if _cf_scene and _cf_scene.parameters:
+                                    _filter_mode = (
+                                        _cf_scene.parameters.get("image_color_filter", "") or ""
+                                    ).strip().lower()
+                        if not _filter_mode or _filter_mode == "none":
+                            async with self._session_factory() as _cf_session:
+                                _cf_project = await _cf_session.get(Project, job.project_id)
+                                if _cf_project and _cf_project.settings:
+                                    _filter_mode = (
+                                        (_cf_project.settings or {}).get("global_image_color_filter", "") or ""
+                                    ).strip().lower()
+                        if _filter_mode in ("bw", "grayscale", "sepia"):
+                            from backend.services.video.ffmpeg import apply_image_color_filter
+                            applied = await asyncio.to_thread(
+                                apply_image_color_filter,
+                                str(local_path), str(local_path), _filter_mode,
+                            )
+                            if applied:
+                                # Re-read bytes so the sha256 below matches
+                                # the post-filter file on disk.
+                                file_bytes = local_path.read_bytes()
+                                logger.info(
+                                    f"[{job_id_str}] Image color filter '{_filter_mode}' applied to {local_path.name}"
+                                )
+                    except Exception as _cf_err:
+                        # Filter failure must NOT lose the original image —
+                        # log and continue with the un-filtered file.
+                        logger.warning(
+                            f"[{job_id_str}] Image color filter failed (mode='{_filter_mode}'): {_cf_err}"
+                        )
+
                 # Compute hash
                 sha256 = hashlib.sha256(file_bytes).hexdigest()
 

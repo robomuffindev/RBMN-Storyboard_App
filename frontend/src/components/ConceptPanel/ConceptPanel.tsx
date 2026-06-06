@@ -77,6 +77,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [kenBurnsAllowedEffects, setKenBurnsAllowedEffects] = useState<string[]>([]);
   const [globalColorOverride, setGlobalColorOverride] = useState('');
   const [customColorPalette, setCustomColorPalette] = useState('');
+  // FFmpeg post-process color filter applied to every generated image
+  // AFTER the model produces it.  Independent of globalColorOverride
+  // (which only influences the LLM prompt).  Values: "" / "bw" /
+  // "grayscale" / "sepia".  Per-scene image_color_filter overrides.
+  const [globalImageColorFilter, setGlobalImageColorFilter] = useState('');
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
@@ -155,6 +160,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
+        global_image_color_filter: globalImageColorFilter,
       });
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
@@ -213,6 +219,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setRandomKenBurns(conceptData.random_ken_burns || false);
       setKenBurnsAllowedEffects(conceptData.ken_burns_allowed_effects || []);
       setGlobalColorOverride(conceptData.global_color_override || '');
+      setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
       setCustomColorPalette(conceptData.custom_color_palette || '');
       setDirty(false);
     }
@@ -243,6 +250,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
+        global_image_color_filter: globalImageColorFilter,
       });
     },
     onSuccess: () => {
@@ -343,7 +351,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       });
     }
-  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, projectId, queryClient]);
+  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, globalImageColorFilter, projectId, queryClient]);
 
   const handleImageUpload = async (index: number, file: File) => {
     try {
@@ -512,6 +520,29 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           {globalColorOverride && globalColorOverride !== 'full_color' && (
             <p className="text-[10px] text-amber-400/70 mt-1">Default for all scenes — override per-scene in Image tab</p>
           )}
+        </div>
+
+        {/* FFmpeg Post-Process Color Filter — applies a deterministic
+            pixel transform to every generated image AFTER the model
+            renders it.  Independent of Default Color Palette (which
+            only steers the LLM prompt).  Off by default. */}
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-1">
+            Force Color Filter on Generated Images (FFmpeg)
+          </label>
+          <select
+            value={globalImageColorFilter || ''}
+            onChange={(e) => { setGlobalImageColorFilter(e.target.value); markDirty(); }}
+            className="w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+          >
+            <option value="">Off — keep model's color output</option>
+            <option value="bw">Black &amp; White (high contrast)</option>
+            <option value="grayscale">Grayscale (desaturated)</option>
+            <option value="sepia">Sepia Tone</option>
+          </select>
+          <p className="text-[10px] text-gray-500 mt-1">
+            Runs FFmpeg over every newly-generated image. Per-scene override available on each Image tab.
+          </p>
         </div>
 
         {/* Global Seed Control */}

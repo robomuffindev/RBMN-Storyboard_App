@@ -1514,6 +1514,102 @@ def get_video_stream_duration(path: str) -> float:
         return 0.0
 
 
+def apply_image_color_filter(input_path: str, output_path: str, mode: str) -> bool:
+    """Apply an FFmpeg color filter to an image (post-process color grade).
+
+    Used by the per-scene / per-project Image Color Filter setting so a
+    user can force every generated image to be rendered in B&W,
+    Grayscale, or Sepia tone regardless of what the underlying model
+    output.  This runs AFTER image generation as a deterministic pixel
+    transform — independent of the LLM color override (which influences
+    the prompt, not the pixels).
+
+    Args:
+        input_path: Source image on disk.
+        output_path: Destination path.  Safe to be the same as input_path
+            (a temp file is used internally and atomically moved).
+        mode: One of "bw", "grayscale", "sepia".  Any other value
+            (including "off"/"none"/empty) is a no-op and returns False
+            without touching the image.
+
+    Returns:
+        True when the filter was applied and the output file written.
+        False when ``mode`` was off or invalid.
+
+    Raises:
+        RuntimeError: If FFmpeg failed and the input image was destroyed.
+    """
+    mode_clean = (mode or "").strip().lower()
+    # Filter strings — chosen for taste, not just correctness:
+    #   grayscale → zero-saturation desaturation, preserves natural luma
+    #   bw       → desaturate + boost contrast for cinematic noir feel
+    #   sepia    → standard ImageMagick-style sepia matrix
+    filter_map = {
+        "grayscale": "hue=s=0",
+        "bw": "hue=s=0,eq=contrast=1.25",
+        "sepia": (
+            "colorchannelmixer="
+            ".393:.769:.189:0:"
+            ".349:.686:.168:0:"
+            ".272:.534:.131:0"
+        ),
+    }
+    vf = filter_map.get(mode_clean)
+    if not vf:
+        return False  # off / unknown — no-op
+
+    import tempfile
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    in_path = _Path(input_path)
+    out_path = _Path(output_path)
+    if not in_path.exists():
+        raise RuntimeError(f"apply_image_color_filter: input does not exist: {input_path}")
+
+    # Always write to a tempfile then rename, so in-place mode is safe.
+    tmp_fd, tmp_name = tempfile.mkstemp(suffix=out_path.suffix or ".png", dir=str(out_path.parent))
+    import os as _os
+    _os.close(tmp_fd)
+    tmp_path = _Path(tmp_name)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(in_path),
+        "-vf", vf,
+        "-frames:v", "1",
+        # PNG/JPEG output — quality flag honored only on lossy codecs
+        "-q:v", "2",
+        str(tmp_path),
+    ]
+    logger.info(f"Applying image color filter '{mode_clean}': {in_path.name} -> {out_path.name}")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            tmp_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"FFmpeg color filter failed (mode={mode_clean}): "
+                f"{result.stderr[:500]}"
+            )
+    except subprocess.TimeoutExpired:
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"FFmpeg color filter timed out (mode={mode_clean})")
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    # Atomic replace
+    _shutil.move(str(tmp_path), str(out_path))
+    logger.info(f"Image color filter applied: mode={mode_clean}, output={out_path.name}")
+    return True
+
+
 def extract_frame(video_path: str, output_path: str, time_sec: float) -> None:
     """
     Extract single frame from video at specified time.

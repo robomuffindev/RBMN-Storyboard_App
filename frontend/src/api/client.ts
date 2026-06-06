@@ -419,6 +419,7 @@ export const getConcept = (projectId: string) =>
     ken_burns_allowed_effects: string[];
     global_color_override: string;
     custom_color_palette: string;
+    global_image_color_filter?: string;  // "" | "bw" | "grayscale" | "sepia"
   }>(
     `/projects/${projectId}/concept`
   );
@@ -445,6 +446,7 @@ export const saveConcept = (projectId: string, data: {
   ken_burns_allowed_effects?: string[];
   global_color_override?: string;
   custom_color_palette?: string;
+  global_image_color_filter?: string;  // "" | "bw" | "grayscale" | "sepia"
 }) =>
   api.put(`/projects/${projectId}/concept`, data);
 
