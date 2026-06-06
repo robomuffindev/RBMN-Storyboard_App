@@ -2734,13 +2734,32 @@ async def _run_windowed_batch(
     # (resolve images, enhance prompts — all prep work before submission)
     eligible: list[dict] = []  # Each entry has scene data + prepared job params
 
+    # Heartbeat for diagnosing future Phase-1 stalls: log every scene's
+    # entry time so the gap between two consecutive log lines tells you
+    # exactly how long any single scene's prep took.  Previously, a slow
+    # scene mid-loop was invisible — you only saw "preparing scene N/N"
+    # in the UI for the LAST scene because earlier ones zoomed past.
+    import time as _time_phase1
+    _phase1_start_t = _time_phase1.monotonic()
+
     for i, scene in enumerate(scenes):
         if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+            logger.warning(
+                f"Windowed batch Phase 1: exiting early at scene {i+1}/{len(scenes)} "
+                f"(status={_seq_auto_jobs.get(pid, {}).get('status')!r})"
+            )
             return
 
         scene_name = scene.name or f"Scene {scene.order_index + 1}"
         _seq_auto_jobs[pid]["current_scene_name"] = scene_name
         _seq_auto_jobs[pid]["current_step"] = f"preparing scene {i + 1}/{len(scenes)}"
+
+        _scene_enter_t = _time_phase1.monotonic()
+        _phase1_elapsed = _scene_enter_t - _phase1_start_t
+        logger.info(
+            f"Phase 1 [{i+1}/{len(scenes)}]: '{scene_name}' "
+            f"(elapsed={_phase1_elapsed:.1f}s total)"
+        )
 
         async with session_factory() as session:
             scene = await session.get(Scene, scene.id)
@@ -3244,26 +3263,15 @@ async def _run_windowed_batch(
             del active_jobs[jid]
             # Reset elapsed timeout since we're making progress
             elapsed = 0.0
-            # Immediately fill the freed slot.  Wrap in try/except so
-            # a transient DB lock here doesn't abort the entire run —
-            # leaving the user with a frozen "preparing..." status and
-            # the remaining scenes never dispatched.  We log + skip;
-            # the next iteration's status update will reflect the gap.
-            if _seq_auto_jobs.get(pid, {}).get("status") == "running":
-                try:
-                    await _submit_next()
-                except Exception as _refill_err:
-                    logger.error(
-                        f"Windowed batch refill: _submit_next failed after job "
-                        f"{jid} completed: {_refill_err}",
-                        exc_info=True,
-                    )
-                    # next_to_submit was already incremented inside
-                    # _submit_next before the failing DB write — back
-                    # it out so the next refill attempt retries this
-                    # eligible entry instead of skipping it forever.
-                    if next_to_submit > 0 and len(active_jobs) < total_eligible - (next_to_submit - len(active_jobs)):
-                        next_to_submit -= 1
+            # NOTE: refill is NOT done here anymore — it happens once
+            # per poll iteration in the top-up block below.  Doing it
+            # here gated on `_seq_auto_jobs[pid]["status"] == "running"`
+            # which caused the entire run to stall silently if that
+            # check ever evaluated False (e.g. transient eviction race
+            # or status-write reorder).  The top-up block is
+            # self-healing: it doesn't care WHY active_jobs has free
+            # capacity, it just refills until either `window_size` is
+            # reached or `eligible` is exhausted.
 
         # Update progress tracker
         if pid in _seq_auto_jobs:
@@ -3276,6 +3284,32 @@ async def _run_windowed_batch(
             _seq_auto_jobs[pid]["current_scene_name"] = (
                 ", ".join(active_names) if active_names else None
             )
+
+        # ── Self-healing top-up ──────────────────────────────────────
+        # Every poll iteration, refill any free slots from `eligible[]`
+        # until we hit `window_size` parallelism or run out of work.
+        # This runs UNCONDITIONALLY (no `status == "running"` gate)
+        # because the only way to drain `eligible[]` is to actually
+        # submit the jobs; if status flipped to non-running we'll exit
+        # at the top of the next iteration's check.  The top-up makes
+        # the loop self-correcting: even if a previous refill silently
+        # failed, the next 2-second tick will try again.
+        while len(active_jobs) < window_size and next_to_submit < total_eligible:
+            try:
+                ok = await _submit_next()
+                if not ok:
+                    break
+            except Exception as _topup_err:
+                logger.error(
+                    f"Continuous dispatch: top-up _submit_next failed "
+                    f"({next_to_submit}/{total_eligible}): {_topup_err}",
+                    exc_info=True,
+                )
+                # _submit_next bumps next_to_submit BEFORE writing,
+                # so back it out so the next tick retries this entry.
+                if next_to_submit > 0:
+                    next_to_submit -= 1
+                break  # don't hammer the DB if we just got an error
 
     # Self-heal: if the main loop exited with active_jobs empty BUT
     # there are still un-submitted entries in `eligible[]`, retry them
