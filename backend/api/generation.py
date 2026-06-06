@@ -1254,10 +1254,25 @@ async def _ensure_video_flow(
         # Single-shot
         flow_max_tokens = max(2000, len(scenes) * 150 + 500)
         try:
-            raw_text = await asyncio.to_thread(
-                _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, user_prompt,
-                max_tokens=flow_max_tokens,
+            # 180s timeout — prevents the auto-gen from wedging if the
+            # LLM provider stalls.  On timeout, we treat it as if no
+            # flow was generated and let downstream code proceed using
+            # raw scene prompts.  Previously this call had no timeout
+            # and would hang indefinitely while the auto-gen status
+            # showed "starting / 0/N" with no log output.
+            raw_text = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, user_prompt,
+                    max_tokens=flow_max_tokens,
+                ),
+                timeout=180.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Auto-flow: LLM call TIMED OUT after 180s for {len(scenes)} scenes — "
+                f"proceeding without auto-generated flow ideas"
+            )
+            return False
         except Exception as e:
             logger.warning(f"Auto-flow: LLM call failed: {e}")
             return False
@@ -1318,11 +1333,26 @@ async def _ensure_video_flow(
         async def _run_batch(b_idx: int, b_count: int, b_prompt: str, b_max_tokens: int) -> None:
             async with sem:
                 try:
-                    raw_text = await asyncio.to_thread(
-                        _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, b_prompt,
-                        max_tokens=b_max_tokens,
+                    # 180s timeout per batch — without this a single hung
+                    # LLM call wedged the entire auto-gen indefinitely
+                    # because asyncio.gather() waits for ALL batches to
+                    # complete.  On timeout, fall through to empty
+                    # ideas so the gather doesn't hang and the rest of
+                    # the run can proceed using the raw scene prompts.
+                    raw_text = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _call_llm, llm_provider, llm_api_key, llm_model, system_prompt, b_prompt,
+                            max_tokens=b_max_tokens,
+                        ),
+                        timeout=180.0,
                     )
                     ideas = _parse_flow_json_array(raw_text, b_count)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Auto-flow batch {b_idx // batch_size + 1} TIMED OUT after 180s — "
+                        f"falling back to empty ideas for these {b_count} scene(s)"
+                    )
+                    ideas = [""] * b_count
                 except Exception as e:
                     logger.warning(f"Auto-flow batch {b_idx // batch_size + 1} failed: {e}")
                     ideas = [""] * b_count
@@ -3578,8 +3608,15 @@ async def _run_sequential_auto_gen(
                 video_prompt_guidance_text = vid_guidance_entry if isinstance(vid_guidance_entry, str) else ""
 
         # ── Auto-generate video flow if missing ─────────────────────────
-        # Ensures each scene has a unique storyboard idea before generation
+        # Ensures each scene has a unique storyboard idea before generation.
+        # The status text is updated BEFORE the call so the user sees
+        # "checking story flow ideas..." instead of staring at "starting"
+        # while LLM batches run.  Wrapped in an outer 10-min timeout as a
+        # backstop — each batch already has a 180s timeout, but if the
+        # whole thing somehow hangs we still want auto-gen to proceed.
         if llm_api_key and llm_provider:
+            if pid in _seq_auto_jobs:
+                _seq_auto_jobs[pid]["current_step"] = "checking story flow ideas..."
             async with session_factory() as flow_session:
                 # Re-load project and scenes for flow generation. When
                 # chapter-scoped, only flow-gen + re-read scenes inside the
@@ -3593,9 +3630,35 @@ async def _run_sequential_auto_gen(
                     flow_scenes_stmt = select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
                     flow_scenes_result = await flow_session.execute(flow_scenes_stmt)
                     flow_scenes = list(flow_scenes_result.scalars().all())
-                generated = await _ensure_video_flow(
-                    flow_project, flow_scenes, flow_session, llm_provider, llm_api_key, llm_model
-                )
+                if pid in _seq_auto_jobs:
+                    _seq_auto_jobs[pid]["current_step"] = (
+                        f"generating story flow ideas for {len(flow_scenes)} scenes (LLM)..."
+                    )
+                try:
+                    # 10-minute backstop timeout.  Individual batches inside
+                    # _ensure_video_flow have 180s caps, but a stuck DB or
+                    # asyncio.gather hang would still wedge here.  This
+                    # ensures the auto-gen ALWAYS reaches Phase 1.
+                    generated = await asyncio.wait_for(
+                        _ensure_video_flow(
+                            flow_project, flow_scenes, flow_session,
+                            llm_provider, llm_api_key, llm_model,
+                        ),
+                        timeout=600.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Sequential auto-gen: _ensure_video_flow TIMED OUT after 10 min — "
+                        "proceeding to Phase 1 without auto-generated flow ideas"
+                    )
+                    generated = False
+                except Exception as _flow_err:
+                    logger.warning(
+                        f"Sequential auto-gen: _ensure_video_flow failed: {_flow_err} — "
+                        "proceeding to Phase 1 without auto-generated flow ideas",
+                        exc_info=True,
+                    )
+                    generated = False
                 if generated:
                     _seq_auto_jobs[pid]["current_step"] = "generated video flow"
                     # Re-read scenes with updated flow ideas (same scope)
@@ -4724,7 +4787,7 @@ async def rerun_pass2(
                 detail="Two-pass base image asset no longer exists.",
             )
 
-        # Resolve character ref IDs from project concept data
+# Resolve character ref IDs from project concept data
         project = await session.get(Project, project_id)
         char_ref_ids: list[str] = []
         if project and project.settings:
