@@ -3212,8 +3212,14 @@ async def _run_windowed_batch(
                 f"eligible[{next_to_submit - 1}]: {_sub_err}",
                 exc_info=True,
             )
-            # Don't return — try the next slot.  The main loop will
-            # also try to fill freed slots later.
+            # next_to_submit was incremented inside _submit_next BEFORE
+            # the failing DB write.  Roll it back so this eligible entry
+            # is retried later (either by the main loop's top-up or the
+            # rescue submit pass) — without this, a single transient
+            # failure during the initial fill PERMANENTLY skipped that
+            # scene and the run completed with N-1 of N jobs.
+            if next_to_submit > 0:
+                next_to_submit -= 1
             continue
 
     _seq_auto_jobs[pid]["current_step"] = (
@@ -3227,13 +3233,37 @@ async def _run_windowed_batch(
         f"{total_eligible} total (mode={mode})"
     )
 
-    # Poll loop: check for completions and immediately refill slots
-    while active_jobs and elapsed < batch_timeout:
+    # Poll loop: check for completions and immediately refill slots.
+    #
+    # IMPORTANT: the loop condition is `(active_jobs or work remaining)`
+    # NOT just `active_jobs`.  Previously, if `active_jobs` briefly went
+    # to 0 between a completion and a failed top-up dispatch, the loop
+    # would EXIT and the run would silently stall with N scenes still
+    # un-dispatched.  Now the loop keeps spinning as long as there's
+    # either work in flight OR unsubmitted eligible entries — the
+    # top-up at the bottom of each iteration will keep retrying.
+    _poll_tick = 0
+    while (active_jobs or next_to_submit < total_eligible) and elapsed < batch_timeout:
         await asyncio.sleep(2)
         elapsed += 2
+        _poll_tick += 1
+
+        # Heartbeat log every 10 ticks (~20s) so we can SEE the loop
+        # is alive in long-running renders.  Critical for diagnosing
+        # any future stall — silence in the log = loop is dead.
+        if _poll_tick % 10 == 0:
+            logger.info(
+                f"Windowed batch heartbeat: tick={_poll_tick}, "
+                f"active={len(active_jobs)}, submitted={next_to_submit}/{total_eligible}, "
+                f"done={total_succeeded + total_failed}, elapsed={elapsed:.0f}s"
+            )
 
         # Check cancellation
         if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+            logger.info(
+                f"Windowed batch: exiting poll loop — status flipped to "
+                f"{_seq_auto_jobs.get(pid, {}).get('status')!r}"
+            )
             return
 
         # Check which active jobs have completed
@@ -3316,30 +3346,42 @@ async def _run_windowed_batch(
             )
 
         # ── Self-healing top-up ──────────────────────────────────────
-        # Every poll iteration, refill any free slots from `eligible[]`
-        # until we hit `window_size` parallelism or run out of work.
-        # This runs UNCONDITIONALLY (no `status == "running"` gate)
-        # because the only way to drain `eligible[]` is to actually
-        # submit the jobs; if status flipped to non-running we'll exit
-        # at the top of the next iteration's check.  The top-up makes
-        # the loop self-correcting: even if a previous refill silently
-        # failed, the next 2-second tick will try again.
+        # Refill any free slots from `eligible[]` until we hit
+        # `window_size` parallelism or run out of work.  Runs every
+        # 2 seconds regardless of state.  CRITICAL fix vs prior round:
+        # on a _submit_next failure we now record it, back out the
+        # increment, AND continue trying the rest of the slots in
+        # this tick.  A single transient DB lock on one slot
+        # previously broke out of the inner while → exit outer while
+        # (active_jobs went to 0) → run silently stalled.
+        _topup_failures_this_tick = 0
         while len(active_jobs) < window_size and next_to_submit < total_eligible:
             try:
                 ok = await _submit_next()
                 if not ok:
-                    break
+                    break  # genuinely exhausted (no more eligible)
             except Exception as _topup_err:
+                _topup_failures_this_tick += 1
                 logger.error(
                     f"Continuous dispatch: top-up _submit_next failed "
                     f"({next_to_submit}/{total_eligible}): {_topup_err}",
                     exc_info=True,
                 )
-                # _submit_next bumps next_to_submit BEFORE writing,
-                # so back it out so the next tick retries this entry.
+                # _submit_next bumps next_to_submit BEFORE writing, so
+                # back it out so the NEXT TICK retries this entry.
                 if next_to_submit > 0:
                     next_to_submit -= 1
-                break  # don't hammer the DB if we just got an error
+                # Cap retries within a single tick to avoid hammering
+                # the DB if it's truly wedged.  3 failures = move on,
+                # the next 2-second tick will try again from scratch.
+                if _topup_failures_this_tick >= 3:
+                    logger.warning(
+                        f"Continuous dispatch: 3 top-up failures this tick — "
+                        f"giving up until next tick"
+                    )
+                    break
+                # Otherwise: small backoff and continue trying other slots.
+                await asyncio.sleep(0.5)
 
     # Self-heal: if the main loop exited with active_jobs empty BUT
     # there are still un-submitted entries in `eligible[]`, retry them
@@ -3358,15 +3400,39 @@ async def _run_windowed_batch(
                 f"rescuing {unsubmitted} stalled job(s)..."
             )
         rescue_submitted = 0
+        rescue_failures_total = 0
+        # Multi-fault tolerant: try every remaining eligible entry.  A
+        # single transient DB lock used to `break` and leave the rest
+        # un-submitted, but the next eligible entry might succeed on
+        # the same tick.  Tolerate up to ~5 failures (with backoff)
+        # before truly giving up — bigger than the top-up cap because
+        # this is the LAST chance to submit.
         for _ in range(unsubmitted):
             if _seq_auto_jobs.get(pid, {}).get("status") != "running":
                 break
             try:
                 if await _submit_next():
                     rescue_submitted += 1
+                else:
+                    break  # genuinely exhausted
             except Exception as _rescue_err:
-                logger.error(f"Rescue submit failed: {_rescue_err}", exc_info=True)
-                break
+                rescue_failures_total += 1
+                logger.error(
+                    f"Rescue submit failed (failure {rescue_failures_total}): {_rescue_err}",
+                    exc_info=True,
+                )
+                # Roll back next_to_submit so the failed entry is
+                # retried (same fix as the top-up path).  Without this
+                # the rescue pass would silently SKIP the entry.
+                if next_to_submit > 0:
+                    next_to_submit -= 1
+                if rescue_failures_total >= 5:
+                    logger.warning(
+                        "Rescue submit: 5 consecutive failures — giving up.  "
+                        "Remaining eligible entries will not be dispatched."
+                    )
+                    break
+                await asyncio.sleep(1.0)
         if rescue_submitted:
             logger.info(f"Continuous dispatch: rescue submitted {rescue_submitted} job(s); waiting them out")
             # Wait them out via the drain phase below — which polls the
@@ -4825,7 +4891,7 @@ async def rerun_pass2(
         width = scene_params.get("width", 1024)
         height = scene_params.get("height", 576)
 
-        # Get the original prompt used for this scene
+# Get the original prompt used for this scene
         original_prompt = scene_params.get("two_pass_original_prompt", scene.prompt or "")
 
         # Create Pass 2 job — the dispatcher will build the composite prompt via LLM
