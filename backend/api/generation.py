@@ -2568,18 +2568,18 @@ async def _wait_for_job(
     a longer timeout for video jobs (1800s recommended) to account for
     RunPod cold starts, LTX generation time, and post-processing (trim,
     color correction, last-frame extraction).
+
+    Heartbeat: logs the job's current DB state every 30 seconds so the
+    operator can SEE that the wait is progressing.  Silence in the log
+    for >30s = the poll loop itself died (rare, indicates pool
+    exhaustion or DB lock starvation).
     """
     elapsed = 0.0
+    last_heartbeat_at = 0.0
+    last_logged_status: str | None = None
     while elapsed < timeout:
         await asyncio.sleep(2)
         elapsed += 2
-
-        # Check if the auto-gen run was cancelled while we're waiting
-        # This allows cancel to take effect within 2s instead of up to 30 min
-        for pid_key, info in list(_seq_auto_jobs.items()):
-            if info.get("status") == "cancelled":
-                # If this job belongs to a cancelled run, abort early
-                pass  # Will be caught by status check below
 
         async with session_factory() as session:
             job = await session.get(Job, job_id)
@@ -2593,6 +2593,17 @@ async def _wait_for_job(
             if job.status in (JobStatus.CANCELLED, "cancelled"):
                 logger.warning(f"Sequential auto-gen: Job {job_id} was cancelled")
                 return False
+            current_status = str(job.status)
+
+        # Heartbeat every 30s — surfaces stalls where the job is sitting
+        # PENDING because the dispatcher isn't picking it up.
+        if elapsed - last_heartbeat_at >= 30 or current_status != last_logged_status:
+            logger.info(
+                f"_wait_for_job heartbeat: job={job_id} status={current_status} "
+                f"elapsed={elapsed:.0f}s/{timeout:.0f}s"
+            )
+            last_heartbeat_at = elapsed
+            last_logged_status = current_status
     logger.warning(f"Sequential auto-gen: Job {job_id} timed out after {timeout}s")
     return False
 
@@ -2935,11 +2946,56 @@ async def _run_windowed_batch(
                     await session.refresh(img_job)
                     job_queue.notify()
 
+                    # Surface the wait in the status text so the operator
+                    # can see which scene/job we're blocked on.  Previously
+                    # the status just showed "generating first frame for
+                    # scene N" with no indication of what comes next.
+                    if pid in _seq_auto_jobs:
+                        _seq_auto_jobs[pid]["current_step"] = (
+                            f"waiting for FF image of {scene_name} "
+                            f"(scene {i+1}/{len(scenes)})"
+                        )
+                    logger.info(
+                        f"Phase 1: dispatched FF image job {img_job.id} for "
+                        f"{scene_name} (scene {i+1}/{len(scenes)}) — waiting for completion"
+                    )
+
                     ok = await _wait_for_job(img_job.id, session_factory)
                     if not ok:
-                        _seq_auto_jobs[pid]["status"] = "failed"
-                        _seq_auto_jobs[pid]["error"] = f"FF image failed for {scene_name}"
-                        return
+                        # CRITICAL FIX: don't kill the entire 23-scene run
+                        # if one FF image times out or fails.  Log a warning,
+                        # skip this scene (it won't be added to `eligible`),
+                        # and let Phase 1 continue with the next scene.  The
+                        # other 22 scenes can still complete.  Previously,
+                        # a single hung image would set status="failed" and
+                        # the entire auto-gen would die — making this the
+                        # #1 reported "stuck" symptom.
+                        logger.warning(
+                            f"Windowed batch: FF image for {scene_name} failed/timed out "
+                            f"— SKIPPING this scene and continuing with the rest of the batch"
+                        )
+                        # Surface this in the status text so the operator can see WHY
+                        # the run skipped a scene.
+                        if pid in _seq_auto_jobs:
+                            _seq_auto_jobs[pid]["current_step"] = (
+                                f"skipped {scene_name} (FF image failed) — continuing..."
+                            )
+                        # Track scene-failure in BatchRun so the dashboard shows it.
+                        if batch_run_id:
+                            try:
+                                await _update_batch_run(
+                                    session_factory, batch_run_id,
+                                    error_entry={
+                                        "scene_id": str(scene.id),
+                                        "scene_name": scene_name,
+                                        "step": "FF image generation",
+                                        "error": "Image job failed or timed out",
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                    },
+                                )
+                            except Exception:
+                                pass  # Non-critical
+                        continue  # Move on to the next scene
 
                 # Prepare video job params — expire + re-read to pick up
                 # chosen_image_path set by dispatcher in a different session
