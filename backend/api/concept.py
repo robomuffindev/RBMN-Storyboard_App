@@ -28,6 +28,16 @@ class CharacterModel(BaseModel):
     name: str = ""
     description: str = ""
     image_path: Optional[str] = None  # relative path to character reference image
+    # Last prompt used to generate this character — persisted so the
+    # Character Edit modal can hydrate it on reopen and the user can
+    # tweak + regenerate without retyping.
+    last_prompt: str = ""
+    # Reference images attached during character generation
+    # ({asset_id, image_path, description}).  Persisted so the modal
+    # can re-load them when editing — without this, opening an
+    # already-generated character showed an empty reference list and
+    # any subsequent regenerate had to start from scratch.
+    reference_images: list[dict] = []
 
 
 class ConceptData(BaseModel):

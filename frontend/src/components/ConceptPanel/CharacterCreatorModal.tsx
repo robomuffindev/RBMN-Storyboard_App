@@ -46,6 +46,9 @@ interface CharacterData {
   name: string;
   description: string;
   image_path: string | null;
+  // Persisted across save/close so the modal hydrates on reopen.
+  last_prompt?: string;
+  reference_images?: ReferenceImage[];
 }
 
 interface ReferenceImage {
@@ -82,13 +85,18 @@ export default function CharacterCreatorModal({
 }: CharacterCreatorModalProps) {
   const queryClient = useQueryClient();
 
-  // Character fields
+  // Character fields — hydrated from the incoming character so that
+  // re-opening an already-created/edited character shows everything
+  // the user entered last time (prompt, references, description) and
+  // they can tweak + regenerate without re-typing.
   const [name, setName] = useState(character.name);
   const [description, setDescription] = useState(character.description);
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(character.last_prompt || '');
 
-  // Reference images (up to 4)
-  const [refImages, setRefImages] = useState<ReferenceImage[]>([]);
+  // Reference images (up to 4) — hydrated from character.reference_images
+  const [refImages, setRefImages] = useState<ReferenceImage[]>(
+    Array.isArray(character.reference_images) ? character.reference_images : []
+  );
 
   // Resolution
   const [resWidth, setResWidth] = useState(1024);
@@ -114,6 +122,38 @@ export default function CharacterCreatorModal({
     accept: 'image/*',
     imagesOnly: true,
     title: 'Add Character Reference',
+  });
+
+  // ── Asset/Upload picker for the CHARACTER'S MAIN IMAGE ──────────
+  // Lets the user skip generation entirely and either pick an
+  // existing image from the project's asset library OR upload one
+  // from disk.  Both paths end the same way: the chosen rel_path is
+  // pushed through setActiveMutation so it becomes the character's
+  // active image and gets persisted as character.image_path on save.
+  const handleActiveImageUpload = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('asset_type', 'character');
+    try {
+      const resp = await uploadAsset(projectId, formData);
+      const asset = resp.data;
+      // The newly-uploaded file is now an Asset on the project — set
+      // it as the character's active image so it shows up immediately
+      // and persists on save.
+      setActiveMutation.mutate(asset.rel_path);
+    } catch (err) {
+      console.error('Failed to upload character image:', err);
+    }
+  };
+  const { openPicker: openMainImagePicker, PickerModals: MainImagePickerModals } = useAssetPicker({
+    assets: assets || [],
+    onFileUpload: (file) => handleActiveImageUpload(file),
+    onAssetSelect: (asset: Asset) => {
+      setActiveMutation.mutate(asset.rel_path);
+    },
+    accept: 'image/*',
+    imagesOnly: true,
+    title: 'Set Character Image',
   });
 
   // Seed from editing existing character's last generation
@@ -242,9 +282,18 @@ export default function CharacterCreatorModal({
     setRefImages((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  // ── Save character data (name/description) back to parent ──
+  // ── Save character data back to parent ──
+  // Now also persists the last prompt + reference images so the next
+  // open of this character hydrates them and the user can keep
+  // tweaking the same setup instead of starting over.
   const handleSaveAndClose = () => {
-    onSave(characterIndex, { name, description, image_path: activeImagePath });
+    onSave(characterIndex, {
+      name,
+      description,
+      image_path: activeImagePath,
+      last_prompt: prompt,
+      reference_images: refImages,
+    });
     onClose();
   };
 
@@ -291,6 +340,7 @@ export default function CharacterCreatorModal({
 
   return (<>
     <RefPickerModals />
+    <MainImagePickerModals />
     {createPortal(
     <div style={overlay} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={modal} onClick={(e) => e.stopPropagation()}>
@@ -469,6 +519,43 @@ export default function CharacterCreatorModal({
             >
               {generateMutation.isPending ? 'Generating...' : '🎨 Generate'}
             </button>
+          </div>
+
+          {/* Use Existing Asset / Upload as the character's image —
+              alternative to generating from scratch.  Skips the LLM
+              entirely and uses the picked / uploaded file as the
+              active image for this character. */}
+          <div
+            style={{
+              ...sectionGap,
+              background: '#1f2937',
+              border: '1px solid #374151',
+              borderRadius: '0.5rem',
+              padding: '0.75rem',
+            }}
+          >
+            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#d1d5db', marginBottom: '0.5rem' }}>
+              Or use an existing image instead of generating
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                type="button"
+                onClick={() => openMainImagePicker()}
+                disabled={setActiveMutation.isPending}
+                style={{
+                  ...btnSecondary,
+                  flex: 1,
+                  fontSize: '0.75rem',
+                  opacity: setActiveMutation.isPending ? 0.6 : 1,
+                }}
+                title="Pick from the project's asset library or upload your own image"
+              >
+                {setActiveMutation.isPending ? 'Setting...' : '🖼️ Choose Asset / Upload'}
+              </button>
+            </div>
+            <div style={{ fontSize: '0.65rem', color: '#9ca3af', marginTop: '0.4rem', lineHeight: 1.35 }}>
+              Opens a picker — switch between the project's existing images and a file upload. The chosen image becomes this character's active reference.
+            </div>
           </div>
 
           {/* Image Gallery / Versions */}

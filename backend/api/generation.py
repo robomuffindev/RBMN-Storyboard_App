@@ -2752,6 +2752,22 @@ async def _run_windowed_batch(
             has_ff = _scene_has_first_frame(scene)
             has_video = bool(scene.parameters.get("chosen_video_path"))
 
+            # ── Early skip for "missing_*" modes ──────────────────
+            # When the scene already has the asset this mode would
+            # generate AND override is off, we have nothing to do for it.
+            # Skip BEFORE the prep DB writes below so a project with 87
+            # already-completed scenes doesn't redundantly commit 87
+            # times before getting to the one scene that actually
+            # needs work (which previously made "preparing scene N/N"
+            # status appear to hang while the loop slogged through
+            # writes for scenes 1..N-1).
+            if mode == "missing_videos_single" and has_video and not override_full_set:
+                logger.info(f"Windowed batch: Scene {i} already has video — skipping prep entirely")
+                continue
+            if mode == "missing_images_independent" and has_ff and not override_full_set:
+                logger.info(f"Windowed batch: Scene {i} already has FF image — skipping prep entirely")
+                continue
+
             # Collect reference IDs: character images + scene extras
             characters = (project_fresh.settings or {}).get("characters", []) if project_fresh else []
             char_asset_ids = await _resolve_character_asset_ids(
@@ -2819,6 +2835,7 @@ async def _run_windowed_batch(
                     prompt = scene.prompt or f"Scene {scene.order_index + 1}"
                     if enhancer and llm_api_key:
                         try:
+                            _seq_auto_jobs[pid]["current_step"] = f"enhancing FF prompt for scene {i + 1}/{len(scenes)}"
                             context = await _build_auto_enhance_context(
                                 project_fresh, scene, scene_lyrics, "first", image_model, None
                             )
@@ -2828,7 +2845,18 @@ async def _run_windowed_batch(
                             if two_pass and ref_ids:
                                 enhance_args += ("base",)
                             if _should_enhance(skip_existing_prompts, prompt):
-                                prompt = await asyncio.to_thread(*enhance_args)
+                                # 90-second cap — see video enhance below
+                                # for rationale.  Fall through to the raw
+                                # prompt if the LLM stalls.
+                                prompt = await asyncio.wait_for(
+                                    asyncio.to_thread(*enhance_args),
+                                    timeout=90.0,
+                                )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"Windowed batch: FF prompt enhance TIMED OUT after 90s for scene {i} "
+                                f"({scene_name}) — proceeding with un-enhanced prompt"
+                            )
                         except Exception as e:
                             logger.warning(f"Windowed batch: enhance FF failed scene {i}: {e}")
 
@@ -2890,12 +2918,26 @@ async def _run_windowed_batch(
                             project_fresh, scene, scene_lyrics, video_model, prev_scene_for_ctx
                         )
                         if _should_enhance(skip_existing_prompts, video_prompt):
-                            video_prompt = await asyncio.to_thread(
-                                enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
-                                True, video_sys_override, video_model,
-                                None,  # frame_type (not applicable for video)
-                                video_prompt_guidance or None,
+                            # 90-second cap on the LLM enhance.  Without
+                            # this a wedged/slow OpenAI call hung Phase 1
+                            # prep with the status frozen at "preparing
+                            # scene N/N" forever.  On timeout we fall
+                            # through to use the un-enhanced prompt so
+                            # generation still proceeds.
+                            video_prompt = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                    True, video_sys_override, video_model,
+                                    None,  # frame_type (not applicable for video)
+                                    video_prompt_guidance or None,
+                                ),
+                                timeout=90.0,
                             )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"Windowed batch: video prompt enhance TIMED OUT after 90s for scene {i} "
+                            f"({scene_name}) — proceeding with un-enhanced prompt"
+                        )
                     except Exception as e:
                         logger.warning(f"Windowed batch: enhance video failed scene {i}: {e}")
 

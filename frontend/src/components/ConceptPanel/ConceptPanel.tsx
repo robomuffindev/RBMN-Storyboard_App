@@ -11,6 +11,12 @@ interface Character {
   name: string;
   description: string;
   image_path: string | null;
+  // Persisted across save/close — see backend CharacterModel.
+  // Lets the Character Edit modal hydrate the prompt + reference
+  // images on reopen so users can tweak and regenerate without
+  // re-typing everything.
+  last_prompt?: string;
+  reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
 }
 
 // ── Resolution presets compatible with FLUX.2 Klein 9B & LTX 2.3 ────

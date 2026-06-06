@@ -403,7 +403,15 @@ export const getConcept = (projectId: string) =>
     style_text: string;
     image_direction: string;
     custom_image_direction: string;
-    characters: Array<{ name: string; description: string; image_path: string | null }>;
+    characters: Array<{
+      name: string;
+      description: string;
+      image_path: string | null;
+      // Persisted across save/close so the Character Edit modal
+      // hydrates the last prompt + reference image list on reopen.
+      last_prompt?: string;
+      reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
+    }>;
     resolution_width: number;
     resolution_height: number;
     image_resolution_width?: number;
@@ -430,7 +438,15 @@ export const saveConcept = (projectId: string, data: {
   style_text: string;
   image_direction?: string;
   custom_image_direction?: string;
-  characters: Array<{ name: string; description: string; image_path: string | null }>;
+  characters: Array<{
+      name: string;
+      description: string;
+      image_path: string | null;
+      // Persisted across save/close so the Character Edit modal
+      // hydrates the last prompt + reference image list on reopen.
+      last_prompt?: string;
+      reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
+    }>;
   resolution_width: number;
   resolution_height: number;
   image_resolution_width?: number;
@@ -463,7 +479,15 @@ export const baseOnLyrics = (projectId: string, data: {
 
 export const autogenerateCharacters = (projectId: string) =>
   api.post<{
-    characters: Array<{ name: string; description: string; image_path: string | null }>;
+    characters: Array<{
+      name: string;
+      description: string;
+      image_path: string | null;
+      // Persisted across save/close so the Character Edit modal
+      // hydrates the last prompt + reference image list on reopen.
+      last_prompt?: string;
+      reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
+    }>;
     job_ids: string[];
     message: string;
   }>(`/projects/${projectId}/concept/characters/autogenerate`, {}, { timeout: 180000 });
