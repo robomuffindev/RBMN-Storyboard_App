@@ -1759,6 +1759,18 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
+  // AV-native: let the model generate its own audio (speech / SFX / ambient)
+  // instead of being conditioned by the project's narration / backing track.
+  // Only active when project.settings.enable_model_audio is also ON; the
+  // checkbox tooltip explains the gate so the user can find the master toggle.
+  const useModelAudio = activeScene?.parameters?.use_model_audio || false;
+  const projectEnableModelAudio = Boolean((currentProject?.settings as any)?.enable_model_audio);
+  const handleSetUseModelAudio = async (enabled: boolean) => {
+    if (!activeScene || !currentProject) return;
+    const newParams = { ...activeScene.parameters, use_model_audio: enabled };
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
+  };
+
   const handleSetVideoMode = async (mode: 'single' | 'ff_lf' | 'v2v_extend') => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, video_mode: mode };
@@ -3364,6 +3376,34 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   </label>
                 )}
               </div>}
+
+              {/* AV-native: don't send project audio, let model render its own */}
+              {currentProject?.mode !== 'narration_images' && (
+                <label
+                  className={`flex items-center gap-2 px-3 py-2 rounded cursor-pointer text-sm transition-colors ${
+                    projectEnableModelAudio
+                      ? 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                      : 'bg-gray-800/40 text-gray-500 cursor-not-allowed'
+                  }`}
+                  title={
+                    projectEnableModelAudio
+                      ? 'Skip sending project audio to the video model — the model generates its own speech / SFX / ambient. Result is baked into the scene MP4 AND extracted as a sidecar WAV controlled by the Concept tab Model Audio mixer slider.'
+                      : 'Enable "Model-Generated Audio" on the Concept tab first to use this per-scene.'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={useModelAudio}
+                    disabled={!projectEnableModelAudio}
+                    onChange={(e) => handleSetUseModelAudio(e.target.checked)}
+                    className="w-4 h-4 accent-purple-500"
+                  />
+                  <span>Let model generate its own audio</span>
+                  <span className="text-xs text-gray-500 ml-auto">
+                    {projectEnableModelAudio ? '(skip timeline audio for this scene)' : '(enable on Concept tab)'}
+                  </span>
+                </label>
+              )}
 
               <div>
                 <div className="flex items-center gap-2 mb-1">

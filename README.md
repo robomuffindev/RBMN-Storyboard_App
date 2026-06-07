@@ -73,7 +73,14 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 - **Subtitle Burn-In** — Configurable ASS subtitle overlay (font, size, color, position, outline) burned into final export via FFmpeg for narration modes
 - **Subtitle Preview** — Live subtitle overlay synced to playback in the video preview panel
 - **Backing Track Timeline** — Add background music tracks below the main scene timeline with per-track volume sliders, drag-drop upload, and delete controls
-- **Audio Normalization** — Optional two-pass loudnorm normalization (target -16 LUFS) during export for consistent audio levels across narration and backing tracks
+- **Audio Normalization** — Optional two-pass loudnorm normalization (target -14 LUFS, the streaming-platform standard used by Spotify/YouTube/Apple Music) during export for consistent audio levels across narration and backing tracks
+- **FFmpeg Image Color Filter** — Concept tab dropdown ("Force Color Filter on Generated Images") applies B&W / Grayscale / Sepia via FFmpeg AFTER the model produces the image — deterministic pixel transform, independent of the LLM Color Override (which steers the prompt). Per-scene override on the Image tab can flip individual scenes back to Off or pick a different filter
+- **Per-Worker Model Assignment** — Settings → ComfyUI Servers lets each worker be restricted to a specific subset of models (e.g. one machine runs Klein, another runs LTX). Multi-select chips under Image / Video checkboxes, with ALL as the default. Dispatcher routes each job to a worker that can run it
+- **Generation Queue Model Badges** — Each in-flight job in the queue panel shows up to three chips: Pass 1/2 badge, model badge (Z-Image Turbo / Klein 9B · 3REF / LTX 2.3 · I2V etc.), and worker tag. So a long render queue tells you at a glance what's running where
+- **Live Active Workers Panel (Batch Detail)** — Per-job progress bars on the BatchRun detail screen update live with the current ComfyUI node + percentage. 5-minute LTX renders no longer look "stuck" — you see the percentage climb in real time
+- **Persistent Auto-Gen Status** — Reload the project page mid-run and the status pill + modal both repopulate from the BatchRun database row. No more losing visibility into a long auto-gen because of an accidental refresh
+- **Auto-Gen Resilience** — A single scene failing (FF image timeout, worker offline, etc.) no longer kills the run. The failed scene is logged with `SKIPPING` and recorded in the batch error log; the remaining scenes still process. Heartbeat logs every 20-30s tell you exactly which job is being waited on so a slow worker can't masquerade as a hang
+- **Model-Generated Audio (LTX 2.3 AV-native)** — Per-scene Video tab toggle ("Let model generate its own audio") that flips the scene from the standard I2V workflow to a new AV-native variant that drops the input-audio chain and lets LTX 2.3's native audio latent path produce speech / SFX / ambient in the same forward pass. Gated by a Concept tab master toggle ("Enable Model-Generated Audio") with a paired mixer-volume slider. The generated audio is baked into the scene MP4 (visible in per-scene preview immediately) and also extracted as a sidecar WAV next to the video so future mixer routing can control its level independently of narration + backing tracks
 - **Settings Import/Export** — Export all app settings to JSON and import on another machine for easy configuration sharing
 - **Project Directory** — Configure where project data is stored via Settings, with the option to move existing data to a new location
 - **Edit Project Name** — Rename projects via the toolbar menu (display name only — files and directories unchanged)
@@ -346,43 +353,4 @@ python tools/diag.py > diag.md
 That hits `/api/debug/snapshot` and writes a small markdown summary you can paste straight into chat instead of multi-MB log dumps. Useful flags:
 
 - `--logs 200` — include more recent log entries (default 40, max 500)
-- `--grep batch` — only log lines mentioning a substring
-- `--tail --tail-level ERROR` — just tail `rbmn.log` filtered to errors
-- `--json` — emit raw JSON for piping
-- `--host 127.0.0.1:8899` — override target host:port
-
-The endpoints (`GET /api/debug/snapshot` and `GET /api/debug/log/tail`) are always available — `diag.py` is just the friendly CLI wrapper.
-
-## Environment Variables
-
-See `.env.example` for the full list. Key variables:
-
-| Variable | Description |
-|----------|-------------|
-| `COMFYUI_URLS` | Comma-separated remote ComfyUI server URLs |
-| `WHISPER_MODE` | `local`, `remote` (Gradio), or `comfyui` |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | LLM API keys |
-| `OLLAMA_BASE_URL` / `OLLAMA_URLS` / `OLLAMA_MODEL` | Ollama server URL(s) and default model for local LLM |
-| `PROJECT_DIR` | Where project data is stored (default: `./project_data`) |
-| `APP_HOST` / `APP_PORT` | Bind host/port (defaults `127.0.0.1:8899`) |
-| `RBMN_PARALLEL_CLIPS` | Max number of clips to encode in parallel during export (default 1) |
-| `RBMN_TMPFS_DIR` | Override tmpfs/ramdisk path used for intermediate export files |
-| `RBMN_TMPFS_MIN_FREE` | Minimum free bytes required on tmpfs before using it (default 2 GB) |
-
-## Version
-
-See [VERSION](VERSION) for the current version (currently 1.6.3) and [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## Special Thanks
-
-**PagingMrHerman** — For tireless testing, bug hunting, and deep-diving into ComfyUI internals to track down issues like the INTConstant duration truncation bug. This project wouldn't be where it is without the testing.
-
-## Support
-
-<a href="https://ko-fi.com/robomuffinlabs" target="_blank">
-  <img src="Screenshots/ko-fi_button_robomuffin_labs_nobg_small.webp" alt="Support Robomuffin Labs on Ko-fi" height="48" />
-</a>
-
-## License
-
-This project is proprietary. All rights reserved.
+- `--grep batch` — only log 

@@ -161,6 +161,7 @@ def apply_color_correction(
     output_path: str,
     gains: Tuple[float, float, float],
     crf: int = 18,
+    keep_audio: bool = False,
 ) -> str:
     """Apply per-channel colour gains to a video via FFmpeg colorchannelmixer.
 
@@ -213,7 +214,10 @@ def apply_color_correction(
         "-bf", "0",
         "-video_track_timescale", str(fps * 1000),
         *frame_limit_flags,
-        "-an",
+        # AV-native: preserve the model-generated audio that lives in the
+        # source MP4.  Re-encode to AAC (we're already re-encoding video,
+        # so an extra audio re-encode is cheap) instead of -an strip.
+        *(["-c:a", "aac", "-b:a", "192k"] if keep_audio else ["-an"]),
         "-y",
         output_path,
     ]
@@ -227,6 +231,7 @@ def color_correct_video(
     video_path: str,
     reference_image_path: str,
     output_path: Optional[str] = None,
+    keep_audio: bool = False,
 ) -> Optional[str]:
     """Full pipeline: analyse reference vs video first frame, apply correction.
 
@@ -278,11 +283,11 @@ def color_correct_video(
             logger.info("Backed up original to %s", backup_path)
 
             corrected_tmp = str(Path(video_path).with_suffix("")) + "_cctmp" + Path(video_path).suffix
-            apply_color_correction(video_path, corrected_tmp, gains)
+            apply_color_correction(video_path, corrected_tmp, gains, keep_audio=keep_audio)
             shutil.move(corrected_tmp, video_path)
             return video_path
         else:
-            apply_color_correction(video_path, output_path, gains)
+            apply_color_correction(video_path, output_path, gains, keep_audio=keep_audio)
             return output_path
 
     finally:

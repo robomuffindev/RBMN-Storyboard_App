@@ -101,6 +101,12 @@ async def register_default_workflows(session: AsyncSession) -> None:
             "workflow_type": "video",
             "description": "LTX 2.3 AI-generated transition clips using Transition LoRA — creates smooth morphing transitions between scene A and scene B frames",
         },
+        {
+            "filename": "LTX-2-3_AV_NATIVE.json",
+            "name": "LTX 2.3 - AV Native (model generates audio)",
+            "workflow_type": "video",
+            "description": "LTX 2.3 image-to-video that generates its own audio (speech / SFX / ambient) in the same pass — no project audio is sent in. The model's audio comes back baked into the MP4 and is also extracted as a sidecar WAV so the mixer can route it to its own channel.",
+        },
     ]
 
     # Register each default workflow

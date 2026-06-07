@@ -1089,6 +1089,41 @@ class JobDispatcher:
 
         # Fall back to built-in workflow type
         workflow_type = params.get("workflow_type", "")
+
+        # AV-native routing: when the project has enable_model_audio AND the
+        # scene's parameters say use_model_audio, swap any I2V-flavored video
+        # workflow to ltx_av_native so the model generates its own audio in
+        # the same pass.  We do this here (in the dispatcher) rather than at
+        # every job-submission site so future code paths inherit the routing
+        # for free.  Only applies to image-to-video flavors; FF/LF, V2V, and
+        # sequencer flavors keep their own workflow_type — adding audio gen
+        # to those would require their own workflow JSON variants.
+        if workflow_type in ("ltx_i2v",) and job and job.scene_id:
+            try:
+                async with self._session_factory() as _av_session:
+                    _av_scene = await _av_session.get(Scene, job.scene_id)
+                    _av_project = await _av_session.get(Project, job.project_id) if job.project_id else None
+                    if _av_scene is None or _av_project is None:
+                        logger.debug(
+                            f"[{job.id}] AV-native routing skipped: "
+                            f"scene_found={_av_scene is not None}, "
+                            f"project_found={_av_project is not None} "
+                            f"(falling back to ltx_i2v)"
+                        )
+                    else:
+                        _scene_av = bool((_av_scene.parameters or {}).get("use_model_audio"))
+                        _proj_av = bool((_av_project.settings or {}).get("enable_model_audio"))
+                        if _scene_av and _proj_av:
+                            logger.info(
+                                f"[{job.id}] AV-native routing: swapping workflow_type "
+                                f"ltx_i2v -> ltx_av_native (project gate ON, scene opted in)"
+                            )
+                            workflow_type = "ltx_av_native"
+                            params["workflow_type"] = workflow_type
+                            params["skip_audio_mux"] = True
+            except Exception as _av_err:
+                logger.warning(f"AV-native routing check failed (continuing with original workflow_type): {_av_err}")
+
         return await self._build_builtin_workflow(workflow_type, params, job)
 
     async def _build_from_config(self, config_id: str, params: dict) -> dict:
@@ -1406,7 +1441,17 @@ class JobDispatcher:
             "ltx_seq_i2v": "LTX_SEQ_I2V.json",
             "ltx_seq_fflf": "LTX_SEQ_FFLF.json",
             "ltx_seq_v2v": "LTX_SEQ_V2V.json",
+            # AV-native: model generates its own audio (speech / SFX / ambient)
+            # in the same pass.  No project audio is sent in.  The resulting MP4
+            # has the model's audio baked in; after download we ALSO extract it
+            # to a sidecar WAV so the mixer can control its level independently.
+            "ltx_av_native": "LTX-2-3_AV_NATIVE.json",
         }
+
+        # AV-native auto-sets skip_audio_mux so the post-download "replace model
+        # audio with scene audio" step doesn't overwrite what we just generated.
+        if workflow_type == "ltx_av_native":
+            params["skip_audio_mux"] = True
 
         if workflow_type in ltx_map:
             workflow_path = str(workflows_dir / ltx_map[workflow_type])
@@ -1681,6 +1726,11 @@ class JobDispatcher:
                     distilled_lora_name=distilled_lora_name,
                 )
 
+            # AV-native: workflow has no "Load Audio" node (we deleted it so
+            # the model denoises audio from pure noise instead of being
+            # conditioned by project audio).  prepare_ltx_workflow only sets
+            # the audio path when `audio_path` is truthy — pass "" to skip.
+            effective_audio_path = "" if workflow_type == "ltx_av_native" else (audio_path or "")
             return prepare_ltx_workflow(
                 workflow_path=workflow_path,
                 prompt=params.get("prompt", ""),
@@ -1689,7 +1739,7 @@ class JobDispatcher:
                 duration=effective_duration,
                 framerate=params.get("framerate", 24),
                 seed=seed,
-                audio_path=audio_path or "",
+                audio_path=effective_audio_path,
                 first_frame=first_frame,
                 last_frame=effective_last_frame,
                 ltx_model_gguf=ltx_model_gguf,
@@ -3340,6 +3390,7 @@ class JobDispatcher:
             "ltx_seq_i2v": {"ltx"},
             "ltx_seq_fflf": {"ltx"},
             "ltx_seq_v2v": {"ltx"},
+            "ltx_av_native": {"ltx"},
         }
         return caps_map.get(workflow_type, set())
 
@@ -3398,6 +3449,7 @@ class JobDispatcher:
             "ltx_v2v_extend", "ltx_v2v_pass1", "ltx_v2v_pass2",
             "ltx_transition",
             "ltx_seq_i2v", "ltx_seq_fflf", "ltx_seq_v2v",
+            "ltx_av_native",
         ):
             return {vid_model}
         return set()
@@ -3848,7 +3900,15 @@ class JobDispatcher:
                                     uses_prev_lf = bool(sc_params.get("use_prev_lf_as_ff"))
                                     should_skip_ff = is_v2v or uses_prev_lf
 
-                                    # Trim to target duration
+                                    # Trim to target duration.  For AV-native
+                                    # videos the model generated its own audio
+                                    # which we MUST preserve — otherwise the
+                                    # sidecar WAV extraction below finds an
+                                    # audio-less MP4 and the model audio is
+                                    # silently lost.
+                                    keep_audio_for_trim = (
+                                        params.get("workflow_type") == "ltx_av_native"
+                                    )
                                     trimmed_tmp = output_dir / (Path(filename).stem + "_trimmed" + Path(filename).suffix)
                                     await asyncio.to_thread(
                                         trim_video,
@@ -3856,6 +3916,7 @@ class JobDispatcher:
                                         str(trimmed_tmp),
                                         trim_target,
                                         skip_first_frame=should_skip_ff,
+                                        keep_audio=keep_audio_for_trim,
                                     )
 
                                     # Replace original with trimmed version
@@ -3895,10 +3956,18 @@ class JobDispatcher:
                                         ref_image_abs = str(settings.project_dir / ref_image_rel)
                                         if Path(ref_image_abs).exists():
                                             from backend.services.video.color_correction import color_correct_video
+                                            # AV-native: preserve the model-generated
+                                            # audio that's currently baked into the
+                                            # MP4 (the sidecar extract below depends
+                                            # on it).  Other workflows can strip
+                                            # audio — export will re-mux master audio.
+                                            _cc_keep_audio = params.get("workflow_type") == "ltx_av_native"
                                             corrected = await asyncio.to_thread(
                                                 color_correct_video,
                                                 str(local_path),
                                                 ref_image_abs,
+                                                None,
+                                                _cc_keep_audio,
                                             )
                                             if corrected:
                                                 logger.info(f"[{job_id_str}] Color correction applied to video")
@@ -3918,6 +3987,45 @@ class JobDispatcher:
                     skip_mux = params.get("skip_audio_mux", False)
                     if skip_mux:
                         logger.info(f"[{job_id_str}] Skipping audio mux (skip_audio_mux=True) — keeping model-generated audio")
+                        # AV-native: extract the model audio to a sidecar WAV so
+                        # the export assembler and timeline playback can apply
+                        # the mixer "Model Audio" volume slider independently
+                        # of the muxed MP4.  We keep it baked into the MP4 too
+                        # for single-scene playback / preview convenience.
+                        if (
+                            media_type == "video"
+                            and scene_id
+                            and params.get("workflow_type") == "ltx_av_native"
+                        ):
+                            try:
+                                from backend.services.video.ffmpeg import extract_audio_track
+                                sidecar = local_path.with_suffix(".model_audio.wav")
+                                ok_extract = await asyncio.to_thread(
+                                    extract_audio_track,
+                                    str(local_path),
+                                    str(sidecar),
+                                )
+                                if ok_extract and sidecar.exists():
+                                    scene_av = await session.get(Scene, scene_id)
+                                    if scene_av:
+                                        sc_av_params = dict(scene_av.parameters or {})
+                                        sc_av_params["chosen_model_audio_path"] = str(
+                                            sidecar.relative_to(settings.project_dir)
+                                        )
+                                        scene_av.parameters = sc_av_params
+                                        logger.info(
+                                            f"[{job_id_str}] AV-native: extracted model audio sidecar "
+                                            f"-> {sidecar.name} (size={sidecar.stat().st_size}B)"
+                                        )
+                                else:
+                                    logger.warning(
+                                        f"[{job_id_str}] AV-native: extract_audio_track returned False "
+                                        f"— mixer slider will have no track to control for this scene"
+                                    )
+                            except Exception as _ex_av:
+                                logger.warning(
+                                    f"[{job_id_str}] AV-native sidecar extract failed (non-fatal): {_ex_av}"
+                                )
                     elif media_type == "video" and scene_id:
                         try:
                             scene = await session.get(Scene, scene_id)

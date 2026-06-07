@@ -78,6 +78,17 @@ class ConceptData(BaseModel):
     # produced.  Values: "" / "off" / "bw" / "grayscale" / "sepia".
     # Per-scene Scene.parameters.image_color_filter overrides this.
     global_image_color_filter: str = ""
+    # Model-generated audio (LTX 2.3 AV-native).  Global gate: when True,
+    # scenes whose Video tab has `use_model_audio` set are dispatched via
+    # the AV-native workflow that lets the model generate its own audio
+    # (speech / SFX / ambient).  The generated audio is extracted to a
+    # sidecar WAV next to the video and layered into the export at
+    # `model_audio_volume` on its own mixer channel, alongside narration
+    # and backing tracks.  When False, every scene generates as normal
+    # I2V / FF-LF (silent + project audio muxed in afterward).
+    enable_model_audio: bool = False
+    # Mixer level for the Model Audio channel.  0.0 = mute, 1.0 = unity.
+    model_audio_volume: float = 1.0
 
 
 class SceneFlowIdea(BaseModel):
@@ -156,6 +167,10 @@ async def get_concept(
         global_color_override=s.get("global_color_override", "") or "",
         custom_color_palette=s.get("custom_color_palette", "") or "",
         global_image_color_filter=s.get("global_image_color_filter", "") or "",
+        enable_model_audio=bool(s.get("enable_model_audio", False)),
+        # Symmetric clamp with the PUT side so a hand-edited DB value can't
+        # crash or distort the UI slider (range 0..2×).
+        model_audio_volume=max(0.0, min(2.0, float(s.get("model_audio_volume", 1.0)))),
     )
 
 
@@ -205,6 +220,9 @@ async def save_concept(
     settings["custom_color_palette"] = req.custom_color_palette
     # FFmpeg post-process color filter ("" / "bw" / "grayscale" / "sepia")
     settings["global_image_color_filter"] = (req.global_image_color_filter or "").strip().lower()
+    # Model-generated audio (LTX 2.3 AV-native) — global gate + mixer level
+    settings["enable_model_audio"] = bool(req.enable_model_audio)
+    settings["model_audio_volume"] = max(0.0, min(2.0, float(req.model_audio_volume)))
     project.settings = settings
     await session.commit()
     await session.refresh(project)

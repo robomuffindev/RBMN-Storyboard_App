@@ -1514,6 +1514,74 @@ def get_video_stream_duration(path: str) -> float:
         return 0.0
 
 
+def extract_audio_track(video_path: str, output_wav_path: str) -> bool:
+    """Extract the audio stream from a video to a 48k 16-bit PCM WAV.
+
+    Used by AV-native LTX 2.3 generation: the model produces an MP4 with
+    its own audio baked in.  We extract that audio to a sidecar WAV so
+    the mixer's "Model Audio" volume slider can control its level at
+    export and the timeline preview can layer it on its own channel
+    without having to demux the MP4 every frame.
+
+    Args:
+        video_path: Source MP4 with embedded audio.
+        output_wav_path: Destination .wav path.
+
+    Returns:
+        True if a non-empty WAV was written, False if the source had no
+        audio stream or ffmpeg failed (non-fatal — caller logs and moves
+        on; the mixer will just have no track to control for this scene).
+    """
+    import subprocess
+    from pathlib import Path
+
+    try:
+        # Quick probe: does this video actually have an audio stream?
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0", video_path,
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        if "audio" not in (probe.stdout or "").lower():
+            logger.info(f"extract_audio_track: no audio stream in {video_path}")
+            return False
+    except Exception as e:
+        logger.warning(f"extract_audio_track: probe failed for {video_path}: {e}")
+        # Fall through and try extraction anyway — probe missing isn't fatal
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn",                  # drop video
+                "-acodec", "pcm_s16le", # 16-bit PCM
+                "-ar", "48000",         # 48 kHz (matches narration/backing)
+                "-ac", "2",             # stereo
+                output_wav_path,
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                f"extract_audio_track: ffmpeg returned {result.returncode}: "
+                f"{(result.stderr or '')[-400:]}"
+            )
+            return False
+        out = Path(output_wav_path)
+        if not out.exists() or out.stat().st_size < 1024:
+            logger.warning(
+                f"extract_audio_track: output {output_wav_path} is empty / tiny — treating as no audio"
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"extract_audio_track: extraction failed for {video_path}: {e}")
+        return False
+
+
 def apply_image_color_filter(input_path: str, output_path: str, mode: str) -> bool:
     """Apply an FFmpeg color filter to an image (post-process color grade).
 
@@ -1855,6 +1923,7 @@ def trim_video(
     output_path: str,
     duration: float,
     skip_first_frame: bool = False,
+    keep_audio: bool = False,
 ) -> str:
     """Trim a video to exactly ``duration`` seconds via frame-exact re-encode.
 
@@ -1910,6 +1979,18 @@ def trim_video(
 
     vf_flags = ["-vf", ",".join(vf_filters)] if vf_filters else []
 
+    # Default: strip audio because the export muxes master audio at the end.
+    # When keep_audio=True (AV-native LTX 2.3 where the model generated the
+    # audio and we need it to survive into the sidecar WAV), trim the audio
+    # to match the video duration with -t and accurate-seek (-ss is not used
+    # here — we want the full leading region).  Encode to AAC so the result
+    # is a valid MP4 with both streams.
+    audio_flags = (
+        ["-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}"]
+        if keep_audio
+        else ["-an"]
+    )
+
     cmd = [
         "ffmpeg",
         *_gpu.get_decode_flags(),
@@ -1923,7 +2004,7 @@ def trim_video(
         "-g", str(fps),
         "-bf", "0",
         "-video_track_timescale", str(fps * 1000),
-        "-an",  # strip audio — export muxes master audio at the end
+        *audio_flags,
         "-y",
         output_path,
     ]

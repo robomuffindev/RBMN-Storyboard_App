@@ -88,6 +88,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   // (which only influences the LLM prompt).  Values: "" / "bw" /
   // "grayscale" / "sepia".  Per-scene image_color_filter overrides.
   const [globalImageColorFilter, setGlobalImageColorFilter] = useState('');
+  // Model-generated audio (LTX 2.3 AV-native).  Global gate: when ON,
+  // scenes whose Video tab has "Let model generate its own audio" set
+  // are dispatched via the AV-native workflow (no project audio in,
+  // model produces speech / SFX / ambient in the same pass).  Mixer
+  // slider controls level for the resulting model-audio channel.
+  const [enableModelAudio, setEnableModelAudio] = useState(false);
+  const [modelAudioVolume, setModelAudioVolume] = useState(1.0);
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
@@ -167,7 +174,9 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
-      });
+        enable_model_audio: enableModelAudio,
+        model_audio_volume: modelAudioVolume,
+      } as any);
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
       // ALSO invalidate the project query so AppLayout.currentProject.settings
@@ -226,6 +235,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setKenBurnsAllowedEffects(conceptData.ken_burns_allowed_effects || []);
       setGlobalColorOverride(conceptData.global_color_override || '');
       setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
+      setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
+      setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
       setCustomColorPalette(conceptData.custom_color_palette || '');
       setDirty(false);
     }
@@ -257,7 +268,9 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
-      });
+        enable_model_audio: enableModelAudio,
+        model_audio_volume: modelAudioVolume,
+      } as any);
     },
     onSuccess: () => {
       setDirty(false);
@@ -549,6 +562,52 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           <p className="text-[10px] text-gray-500 mt-1">
             Runs FFmpeg over every newly-generated image. Per-scene override available on each Image tab.
           </p>
+        </div>
+
+        {/* Model-Generated Audio (LTX 2.3 AV-native) — global gate + mixer level.
+            When ON, scenes whose Video tab opt in skip sending project audio
+            and let the model generate its own audio (speech / SFX / ambient).
+            The audio is baked into each scene's MP4 AND extracted as a
+            sidecar WAV next to the video so the mixer slider below can
+            control its level independently. */}
+        <div className="bg-gray-800/40 border border-gray-700/60 rounded p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <input
+              type="checkbox"
+              id="enable_model_audio"
+              checked={enableModelAudio}
+              onChange={(e) => { setEnableModelAudio(e.target.checked); markDirty(); }}
+              className="rounded border-gray-700 text-purple-500 focus:ring-purple-500"
+            />
+            <label htmlFor="enable_model_audio" className="text-xs font-medium text-gray-200">
+              Enable Model-Generated Audio (LTX 2.3 AV-native)
+            </label>
+          </div>
+          <p className="text-[10px] text-gray-500 mb-2">
+            When on, scenes with "Let model generate own audio" enabled on their Video tab will skip
+            project audio and let the model render speech / SFX / ambient itself. Useful for layering
+            model-generated SFX with your narration and backing tracks.
+          </p>
+          {enableModelAudio && (
+            <div>
+              <label className="block text-[10px] text-gray-400 mb-1">
+                Model Audio Mixer Volume: <span className="text-purple-300">{modelAudioVolume.toFixed(2)}×</span>
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.05"
+                value={modelAudioVolume}
+                onChange={(e) => { setModelAudioVolume(parseFloat(e.target.value)); markDirty(); }}
+                className="w-full accent-purple-500"
+              />
+              <p className="text-[10px] text-gray-600 mt-1">
+                Applied to the model-audio channel only — narration / backing tracks unchanged.
+                Set to 0 to mute the model audio without disabling generation.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Global Seed Control */}
