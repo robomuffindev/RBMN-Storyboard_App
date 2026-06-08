@@ -597,3 +597,59 @@ class WorkflowConfig(SQLModel, table=True):
     )  # list of WorkflowFieldMapping dicts
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+
+class GlobalCharacter(SQLModel, table=True):
+    """Global character library — reusable characters across projects.
+
+    When a user clicks 'Save As Asset' on a project character, the image,
+    description, prompt, and reference images are copied into the global
+    library folder (settings.project_dir / "_global_characters/{id}/") and
+    a row is created here.  'Add to project' COPIES the entry into the
+    target project's `project.settings["characters"]` list — once imported,
+    the project copy is independent from the library entry (copy semantics).
+    """
+
+    __tablename__ = "global_characters"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(index=True)
+    description: str = Field(default="")
+    image_path: str = Field(default="")
+    last_prompt: str = Field(default="")
+    reference_images: list[str] = Field(
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
+    )
+    tags: list[str] = Field(
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
+    )
+    source_project_id: Optional[UUID] = Field(
+        default=None,
+        foreign_key="projects.id",
+        index=True,
+        ondelete="SET NULL",
+    )
+    source_project_name: str = Field(default="")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GlobalCharacterVersion(SQLModel, table=True):
+    """Per-character version history in the global library."""
+
+    __tablename__ = "global_character_versions"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    global_character_id: UUID = Field(
+        foreign_key="global_characters.id",
+        index=True,
+        ondelete="CASCADE",
+    )
+    image_path: str = Field(default="")
+    prompt: str = Field(default="")
+    reference_images: list[str] = Field(
+        default_factory=list, sa_column=Column(MutableList.as_mutable(JSON))
+    )
+    note: str = Field(default="")
+    created_at: datetime = Field(default_factory=datetime.utcnow)

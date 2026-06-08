@@ -61,6 +61,59 @@ async def lifespan(app: FastAPI):
     async with async_session() as session:
         await register_default_workflows(session)
 
+    # ── Stale orphan job sweep ───────────────────────────────────────────
+    # `JobQueue.recover_running_jobs()` runs from the dispatch_loop on
+    # startup and handles the FRESH-restart case nicely: cancels PENDING
+    # jobs and RUNNING-without-prompt_id, but KEEPS RUNNING-with-prompt_id
+    # alive so the retry fast-path can reconnect to expensive in-flight
+    # ComfyUI renders that survived a graceful restart.
+    #
+    # That logic has one blind spot: a RUNNING-with-prompt_id job whose
+    # worker is gone (host shut down, ComfyUI history cleared, etc.)
+    # stays in RUNNING forever — recover keeps it alive expecting a
+    # reconnect that never happens.  Those rows then wedge:
+    #   • The auto-gen drain loop, which polls for PENDING/RUNNING jobs
+    #     on in-batch scene IDs and waits up to the 30-minute timeout
+    #     (the bug the user just hit — see the drain fix in generation.py
+    #     `_run_windowed_batch` for the per-run filter).
+    #   • The "active workers" panel + queue badges which keep showing
+    #     a job that died days ago.
+    #
+    # Cutoff: 1 hour.  Any PENDING/RUNNING job older than that is
+    # definitely orphaned — no real render takes that long without
+    # heartbeat, and a recently-started job from a graceful restart
+    # less than an hour ago is preserved for reconnect.
+    try:
+        from backend.database.models import Job, JobStatus
+        from sqlmodel import select as _orph_select
+        from datetime import datetime as _orph_dt, timedelta as _orph_td
+        _orph_cutoff = _orph_dt.utcnow() - _orph_td(hours=1)
+        async with async_session() as _orph_session:
+            _orph_stmt = _orph_select(Job).where(
+                Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),  # type: ignore
+                Job.created_at < _orph_cutoff,  # type: ignore
+            )
+            _orph_jobs = list((await _orph_session.execute(_orph_stmt)).scalars().all())
+            for _oj in _orph_jobs:
+                _oj.status = JobStatus.FAILED
+                _oj.error = (
+                    "Orphaned at startup — previous backend session left this "
+                    f"job in {_oj.status.value if hasattr(_oj.status, 'value') else _oj.status} "
+                    "state for >1h without progress."
+                )
+                _oj.completed_at = _orph_dt.utcnow()
+            if _orph_jobs:
+                await _orph_session.commit()
+                logger.warning(
+                    f"Orphan sweep: marked {len(_orph_jobs)} stale job(s) FAILED "
+                    f"(>1h old, left PENDING/RUNNING by a prior session). "
+                    f"recover_running_jobs() will handle any fresh in-flight rows."
+                )
+            else:
+                logger.info("Orphan sweep: no stale jobs (>1h old) found")
+    except Exception as _orph_err:
+        logger.error(f"Orphan sweep failed (non-fatal): {_orph_err}", exc_info=True)
+
     # Initialize services
     from backend.services.comfyui.dispatcher import ComfyDispatcher
     from backend.services.jobs.dispatcher import JobDispatcher
@@ -161,7 +214,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Robomuffin Idea Factory",
     description="AI music video / narration video creation tool",
-    version="1.8.5",
+    version="1.8.6",
     lifespan=lifespan,
 )
 
@@ -238,6 +291,10 @@ app.include_router(shortcodes_router)
 # Debug / diagnostics endpoints (snapshot + log tail)
 from backend.api.debug import router as debug_router
 app.include_router(debug_router)
+
+# Global character library — reusable characters across projects
+from backend.api.global_characters import router as global_characters_router
+app.include_router(global_characters_router)
 
 # Log registered routes for debugging
 _gen_routes = []

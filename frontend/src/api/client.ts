@@ -855,4 +855,57 @@ export const generateChapterDescription = (
 export const resolveShortcode = (code: string) =>
   api.get<ShortcodeResolution>(`/shortcode/${code}`);
 
+
+
+// ─── Global Character Library ────────────────────────────────────────────
+
+export interface GlobalCharacter {
+  id: string;
+  name: string;
+  description: string;
+  image_path: string;
+  last_prompt: string;
+  reference_images: string[];
+  tags: string[];
+  source_project_id: string | null;
+  source_project_name: string;
+  version_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GlobalCharacterCreate {
+  name: string;
+  description?: string;
+  image_path?: string;
+  last_prompt?: string;
+  reference_images?: string[];
+  tags?: string[];
+  source_project_id?: string | null;
+}
+
+export const listGlobalCharacters = (params?: {
+  search?: string;
+  tag?: string;
+  source_project_id?: string;
+}) => api.get<GlobalCharacter[]>('/global-characters', { params });
+
+export const listGlobalCharacterTags = () =>
+  api.get<string[]>('/global-characters/tags');
+
+export const createGlobalCharacter = (payload: GlobalCharacterCreate) =>
+  api.post<GlobalCharacter>('/global-characters', payload);
+
+export const deleteGlobalCharacter = (id: string) =>
+  api.delete<{ ok: boolean }>(`/global-characters/${id}`);
+
+export const importGlobalCharacterToProject = (
+  id: string,
+  projectId: string
+) =>
+  api.post<{ character_index: number; project_image_path: string }>(
+    `/global-characters/${id}/import`,
+    { project_id: projectId }
+  );
+
 export default api;

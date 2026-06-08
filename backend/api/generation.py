@@ -3516,6 +3516,13 @@ async def _run_windowed_batch(
     # the same way we waited the originals.  Caps at the same per-job
     # timeout so a wedged worker can't pin us forever.
     scene_ids_in_batch = list({e["scene_id"] for e in eligible})
+    # CRITICAL: filter by Job.created_at >= run start so the drain loop only
+    # waits on jobs THIS run created.  Without this filter, orphaned
+    # PENDING/RUNNING rows from previous aborted runs (e.g. backend restart
+    # killed dispatch mid-flight but left the row) for the same scene IDs
+    # would make the drain poll forever — the user sees "finishing follow-on
+    # jobs (1 remaining)" stuck for batch_timeout (30 min) until it gives up.
+    _drain_started_at = _seq_auto_jobs.get(pid, {}).get("_started_at") or datetime.utcnow()
     if scene_ids_in_batch and _seq_auto_jobs.get(pid, {}).get("status") == "running":
         drain_elapsed = 0.0
         drain_round = 0
@@ -3530,6 +3537,7 @@ async def _run_windowed_batch(
                     .where(Job.project_id == project_id)
                     .where(Job.scene_id.in_(scene_ids_in_batch))  # type: ignore
                     .where(Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]))  # type: ignore
+                    .where(Job.created_at >= _drain_started_at)  # type: ignore
                 )
                 pending_or_running = list(
                     (await session.execute(stmt)).scalars().all()

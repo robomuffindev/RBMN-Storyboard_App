@@ -38,6 +38,12 @@ class CharacterModel(BaseModel):
     # already-generated character showed an empty reference list and
     # any subsequent regenerate had to start from scratch.
     reference_images: list[dict] = []
+    # When this character was imported from the Global Character Library,
+    # this holds the source library entry's UUID so the UI can show an
+    # "imported from library" badge and offer a "Re-import / sync from
+    # library" affordance later.  Optional — None for ad-hoc characters
+    # that were created directly inside this project.
+    library_origin_id: Optional[str] = None
 
 
 class ConceptData(BaseModel):

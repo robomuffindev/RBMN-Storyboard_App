@@ -9,6 +9,7 @@ import {
   setCharacterActiveImage,
   enhancePrompt,
   uploadAsset,
+  createGlobalCharacter,
 } from '@/api/client';
 import { useAssetPicker } from '@/components/AssetManager/AssetPickerModal';
 import { useAppStore } from '@/store';
@@ -295,6 +296,42 @@ export default function CharacterCreatorModal({
       reference_images: refImages,
     });
     onClose();
+  };
+
+  // ── Save As Asset (Global Character Library) ──
+  const [saveAsAssetOpen, setSaveAsAssetOpen] = useState(false);
+  const [tagsInput, setTagsInput] = useState('');
+  const [savingAsAsset, setSavingAsAsset] = useState(false);
+
+  const handleSaveAsAsset = async () => {
+    if (!activeImagePath) {
+      alert('Pick or generate a main image first — Save As Asset needs an image to copy.');
+      return;
+    }
+    setSavingAsAsset(true);
+    try {
+      const tags = tagsInput.split(',').map((t) => t.trim()).filter((t) => t.length > 0);
+      const refPaths = refImages
+        .map((r: any) => r.path || r.image_path || r.asset_path)
+        .filter((p: any): p is string => typeof p === 'string' && p.length > 0);
+      await createGlobalCharacter({
+        name: name.trim() || 'Untitled',
+        description,
+        image_path: activeImagePath,
+        last_prompt: prompt,
+        reference_images: refPaths,
+        tags,
+        source_project_id: projectId,
+      });
+      setSaveAsAssetOpen(false);
+      setTagsInput('');
+      alert(`"${name || 'Character'}" saved to the global library.`);
+    } catch (err: any) {
+      console.error('Save As Asset failed:', err);
+      alert(`Save As Asset failed: ${err?.message || err}`);
+    } finally {
+      setSavingAsAsset(false);
+    }
   };
 
   const completedVersions = versions.filter((v) => v.status === 'completed' && v.output_path);
@@ -656,10 +693,54 @@ export default function CharacterCreatorModal({
         {/* Footer */}
         <div style={footer}>
           <button onClick={onClose} style={{ ...btnSecondary, flex: 1 }}>Cancel</button>
+          <button
+            onClick={() => setSaveAsAssetOpen(true)}
+            disabled={!activeImagePath}
+            title="Save this character to the global library so it can be re-used in other projects"
+            style={{ ...btnSecondary, flex: 1, background: '#7c3aed', color: '#fff', borderColor: '#7c3aed' }}
+          >
+            💾 Save As Asset
+          </button>
           <button onClick={handleSaveAndClose} style={{ ...btnPrimary, flex: 1, background: '#059669' }}>
             {isEditing ? 'Save & Close' : 'Create & Close'}
           </button>
         </div>
+
+        {saveAsAssetOpen && (
+          <div
+            style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
+            onClick={() => !savingAsAsset && setSaveAsAssetOpen(false)}
+          >
+            <div
+              style={{ background: '#1f2937', border: '1px solid #374151', borderRadius: '0.5rem', padding: '1.25rem', width: '420px', maxWidth: '90vw' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: '#f3f4f6', marginBottom: '0.25rem' }}>
+                Save "{name || 'Character'}" to library
+              </div>
+              <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginBottom: '0.75rem' }}>
+                Image, description, prompt, and {refImages.length} reference image{refImages.length === 1 ? '' : 's'} will be copied to the global library.
+              </div>
+              <label style={{ fontSize: '0.75rem', color: '#d1d5db', display: 'block', marginBottom: '0.25rem' }}>
+                Tags (comma-separated)
+              </label>
+              <input
+                type="text"
+                value={tagsInput}
+                onChange={(e) => setTagsInput(e.target.value)}
+                placeholder="e.g. protagonist, noir, fantasy"
+                style={{ width: '100%', padding: '0.5rem 0.625rem', background: '#111827', border: '1px solid #374151', borderRadius: '0.375rem', color: '#f3f4f6', fontSize: '0.875rem' }}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+                <button onClick={() => setSaveAsAssetOpen(false)} style={{ ...btnSecondary, flex: 1 }} disabled={savingAsAsset}>Cancel</button>
+                <button onClick={handleSaveAsAsset} style={{ ...btnPrimary, flex: 1, background: '#7c3aed' }} disabled={savingAsAsset}>
+                  {savingAsAsset ? 'Saving…' : 'Save to Library'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Lightbox */}

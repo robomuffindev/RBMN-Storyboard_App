@@ -5,6 +5,7 @@ import { Plus, Trash2, Save, Zap, User, ImageIcon, Monitor, Pencil, Music, Spark
 import { getConcept, saveConcept, uploadAsset, getLyrics, baseOnLyrics, autogenerateCharacters } from '@/api/client';
 import { handleImgError } from '@/utils/brokenImage';
 import CharacterCreatorModal from './CharacterCreatorModal';
+import { GlobalCharacterLibraryModal } from './GlobalCharacterLibraryModal';
 import { useAppStore } from '@/store';
 
 interface Character {
@@ -97,6 +98,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [modelAudioVolume, setModelAudioVolume] = useState(1.0);
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
+  // Global Character Library browse dialog
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
   const queryClient = useQueryClient();
 
@@ -1017,6 +1020,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                 <Plus size={12} />
                 Add
               </button>
+              <button
+                onClick={() => setLibraryOpen(true)}
+                className="flex items-center gap-1 px-2 py-1 bg-purple-800/40 hover:bg-purple-700/50 border border-purple-700/50 rounded text-xs text-purple-200 transition-colors"
+                title="Browse the global character library and import saved characters into this project"
+              >
+                🎭 Library
+              </button>
             </div>
           </div>
 
@@ -1129,6 +1139,14 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           character={creatorOpen.character}
           onClose={() => setCreatorOpen(null)}
           onSave={handleCreatorSave}
+        />
+      )}
+
+      {/* Global Character Library — browse + import */}
+      {libraryOpen && (
+        <GlobalCharacterLibraryModal
+          projectId={projectId}
+          onClose={() => setLibraryOpen(false)}
         />
       )}
 

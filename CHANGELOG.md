@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.8.6] - 2026-06-06
+
+### Added — Global Character Library (reusable across projects)
+
+For users building a series of related content (multiple music videos with the same protagonist, episodic narrations with recurring characters, etc.), characters can now be saved to a project-independent library and re-imported into any other project.
+
+- **"💾 Save As Asset" button** on the Character Edit modal (footer). Click → opens a small dialog where you optionally add comma-separated tags ("protagonist", "noir", "fantasy"), then "Save to Library". The character's main image, description, prompt, all reference images, and the source project's name are copied into the global library folder so the entry is fully portable. Disabled when the character has no main image yet.
+- **"🎭 Library" button** next to the Concept tab's "Add" character button. Opens a browse modal showing every saved character as a thumbnail grid with name, tags, and source-project attribution. Filter bar: name/description search + clickable tag chips ("All" + every distinct tag). When multiple source projects are represented, a left sidebar groups counts by project.
+- **"+ Add to project"** on each library card copies the character into the current project's `settings.characters` list. **Copy semantics** — once imported, the project copy is fully independent: editing it does NOT touch the library entry, and updating the library entry does NOT push changes into projects that already imported it. Matches how stock-photo / clipart libraries work; least surprising for users.
+- **Storage layout** — `{project_dir}/_global_characters/{id}/` holds the main image, plus `refs/` subfolder for reference images. The leading underscore prevents collision with user-named projects. Moving your `project_dir` brings the library along automatically.
+- **Source project attribution** — `source_project_id` (FK, nullable) + `source_project_name` (cached at save time). If the source project is deleted, the library entry keeps the cached name so attribution survives.
+
+### Added — backend API surface
+
+`/api/global-characters`:
+- `POST` — create from a payload (name, description, image_path, prompt, refs, tags, source_project_id). Copies files into the library folder.
+- `GET` — list with `?search=` / `?tag=` / `?source_project_id=` filters.
+- `GET /tags` — distinct tag list, sorted (for tag chip picker).
+- `GET /{id}` — detail.
+- `PUT /{id}` — update name / description / tags only.
+- `DELETE /{id}` — removes DB row, folder, and version history. Does NOT affect projects that already imported the character.
+- `GET /{id}/versions` — list version snapshots (frontend version-history UI is a follow-up).
+- `POST /{id}/import` — copy into a target project. Returns the new `character_index` so the UI can scroll to the imported entry.
+
+### Added — DB tables (auto-created on next backend start)
+
+- `global_characters` — id (UUID PK), name (indexed), description, image_path, last_prompt, reference_images (JSON list), tags (JSON list), source_project_id (FK → projects.id, nullable, indexed), source_project_name, created_at, updated_at.
+- `global_character_versions` — id (UUID PK), global_character_id (FK indexed), image_path, prompt, reference_images (JSON list), note, created_at. Populated when a library entry is regenerated (future "regenerate from library" flow).
+
+No migration needed — `SQLModel.metadata.create_all` adds the new tables idempotently on first startup after upgrade. Existing data is untouched.
+
+### Frontend
+
+- `frontend/src/api/client.ts` — new `GlobalCharacter` + `GlobalCharacterCreate` types; client methods for list/create/delete/import + tag list.
+- `frontend/src/components/ConceptPanel/CharacterCreatorModal.tsx` — Save As Asset button + tag-input sub-dialog.
+- `frontend/src/components/ConceptPanel/GlobalCharacterLibraryModal.tsx` — new browse + import modal (search, tag filter, project group sidebar, grid with thumbnail/name/tags/source, + Add to project / 🗑 delete buttons).
+- `frontend/src/components/ConceptPanel/ConceptPanel.tsx` — wires the 🎭 Library button + renders the modal.
+
+### Notes — what's NOT in this cut
+
+These were deliberately deferred to keep the v1 contained:
+- **Version-history UI** in the browse modal (backend stores versions; the modal doesn't expose them yet).
+- **"Regenerate from library"** — re-create variations using the saved prompt + refs.
+- **Re-sync** — push an updated library entry into a project that previously imported it.
+- **Folders** on top of tags — current organization is tag-based + auto-recorded source project.
+
+The DB schema already supports versioning + attribution, so adding the UI later is purely frontend work.
+
+### Changed
+
+- VERSION → 1.8.6, `pyproject.toml`, `backend/main.py` FastAPI version updated.
+
+---
+
 ## [1.8.5] - 2026-06-06
 
 ### Added — Model-Generated Audio (LTX 2.3 AV-native)
