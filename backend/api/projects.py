@@ -325,6 +325,35 @@ async def delete_project(
                 detail=f"Project {project_id} not found",
             )
 
+        # Pre-null Global Character Library FK references to this project.
+        # The model declares ondelete="SET NULL" but `metadata.create_all`
+        # doesn't ALTER existing tables — DBs created before that fix have
+        # the constraint without SET NULL behavior and would raise an
+        # IntegrityError (https://sqlalche.me/e/20/gkpj) on cascade.  We
+        # do this manually so deletion works on every schema variant.
+        # The cached `source_project_name` on each library row preserves
+        # attribution after the project is gone (matches the "Copy
+        # semantics — library entry outlives source project" design).
+        try:
+            from backend.database.models import GlobalCharacter as _GCDel
+            from sqlmodel import select as _gc_select
+            _gc_stmt = _gc_select(_GCDel).where(_GCDel.source_project_id == project_id)
+            _gc_result = await session.execute(_gc_stmt)
+            _gc_rows = list(_gc_result.scalars().all())
+            for _gc in _gc_rows:
+                _gc.source_project_id = None
+            if _gc_rows:
+                await session.commit()
+                logger.info(
+                    f"Nulled source_project_id on {len(_gc_rows)} GlobalCharacter "
+                    f"row(s) referencing project {project_id} before cascade delete"
+                )
+        except Exception as _gc_err:
+            # Non-fatal: log and proceed.  If the FK was already SET NULL
+            # by schema, the cascade handles it.  If it wasn't and the
+            # main delete still fails, the outer except will catch it.
+            logger.warning(f"GlobalCharacter pre-null on project delete failed: {_gc_err}")
+
         # Delete from database (cascade deletes scenes, assets, jobs, etc.)
         await session.delete(project)
         await session.commit()

@@ -263,12 +263,19 @@ class AudioAnalyzer:
                 )
                 transcription = _try_transcribe(vocal_stem, "vocal stem")
             if not _has_meaningful_words(transcription):
-                logger.warning(
-                    "Transcription produced no meaningful results — "
-                    "Whisper may not be able to transcribe this audio. "
-                    "Clearing garbage results."
+                # No meaningful Whisper output from EITHER full audio OR vocal stem.
+                # Don't silently set to [] — downstream code would happily proceed
+                # with empty transcription, exporting zero subtitles and giving
+                # the user no idea why.  Surface this loudly so they can retry
+                # with a different Whisper backend or check the audio.
+                _err_msg = (
+                    "Whisper transcription produced no meaningful results from either "
+                    "the full audio or the vocal stem. The audio may be silent, too "
+                    "noisy, or in a language Whisper can't handle. Try a different "
+                    "Whisper backend or check that the audio file is valid."
                 )
-                transcription = []
+                logger.error(_err_msg)
+                raise RuntimeError(_err_msg)
 
         # Step 3: Section detection (clear cache to force re-detection)
         audio_id = Path(audio_path).stem
@@ -358,11 +365,19 @@ class AudioAnalyzer:
                         else:
                             logger.debug(f"Demucs: {line}")
 
-            # Hard timeout — Demucs can wedge on disk I/O / OOM swap thrash
-            # and would otherwise hang the audio pipeline until app restart.
-            # 30-minute cap is generous for a single song on CPU.
+            # Hard timeout — Demucs can wedge on disk I/O / OOM swap thrash.
+            # Scale with audio length: long narrations need proportionally
+            # more time, so give 2x the source duration with a 30-min floor.
+            # 2-hour audio on CPU now gets 4 hours rather than failing at 30 min.
             try:
-                process.wait(timeout=1800)
+                _src_dur = 0.0
+                try:
+                    _src_dur = _get_audio_duration_seconds(audio_path)  # type: ignore[name-defined]
+                except Exception:
+                    pass
+                _demucs_timeout = max(1800, int(_src_dur * 2)) if _src_dur > 0 else 1800
+                logger.info(f"Demucs timeout: {_demucs_timeout}s (audio={_src_dur:.0f}s)")
+                process.wait(timeout=_demucs_timeout)
             except subprocess.TimeoutExpired:
                 process.kill()
                 try:

@@ -1,5 +1,106 @@
 # Changelog
 
+## [1.8.8] - 2026-06-07
+
+### Fixed — User-reported regressions
+
+**Project deletion failed with `sqlalche.me/e/20/gkpj` (IntegrityError)** — the GlobalCharacter table I added in 1.8.6 declares `source_project_id` with `ondelete="SET NULL"`, but `SQLModel.metadata.create_all` only creates MISSING tables, never alters existing ones. Users whose DB was created before that fix had the old constraint shape and FK enforcement blocked the project cascade delete.
+
+- **`backend/api/projects.py` `delete_project`** now pre-nulls `source_project_id` on every GlobalCharacter row referencing the project, BEFORE running the cascade delete. The cached `source_project_name` on each library entry preserves attribution after the project is gone (matches the "copy semantics — library entry outlives source project" design from 1.8.6). Works regardless of which DB schema variant the user is on.
+
+**Two "Enable Model-Generated Audio" checkboxes on the Concept tab** — leftover from the AV-native checkbox patch being re-applied during an Edit-tool truncation repair earlier in this session. ConceptPanel had two complete blocks; one had stale wording ("scenes whose Video tab opt in..." — outdated since the master toggle is now the source of truth).
+
+- **`frontend/src/components/ConceptPanel/ConceptPanel.tsx`** — removed the older duplicate block (2,329 chars). Single canonical Enable Model-Generated Audio toggle remains.
+
+**Full Pipeline Single Image autogen silently generated 2 images per scene** — the AutoGenerate modal's `twoPass` checkbox defaulted to ON, so every scene with character refs got Pass 1 (base) + Pass 2 (composite). User got 2× the rendering work without asking for it. Same default in BatchItemAddModal.
+
+- **`frontend/src/components/Layout/AppLayout.tsx:3125`** — `useState(true)` → `useState(false)`.
+- **`frontend/src/components/BatchMode/BatchItemAddModal.tsx:20`** — same change. Two-pass is now strictly opt-in.
+
+**"Drew an image without making a prompt for it first"** — auto-gen Phase 1's empty-prompt fallback chain was `scene.prompt or f"Scene {scene.order_index + 1}"`. When LLM enhance failed (timeout, misconfig, etc.) AND the scene had no prompt, the literal string `"Scene 7"` was sent to Klein and produced garbage. The `flow_idea` field generated earlier by `_ensure_video_flow` was being IGNORED in this fallback path.
+
+- **`backend/api/generation.py` `_run_windowed_batch` Phase 1** — new fallback chain:
+  1. `scene.prompt` (user-edited or successfully enhanced)
+  2. `scene.parameters.flow_idea` (from story flow generation)
+  3. SKIP the scene with a clear warning + status update if only the literal `"Scene N"` placeholder remains.
+
+  When skipped, the status text shows `"skipped {scene_name} (no prompt / flow idea, LLM enhance failed)"` so the user knows exactly why. Re-running after fixing LLM config or writing a manual prompt picks the scene up cleanly. Saves the user from a wasted render that would have produced an image of "Scene 7" rendered literally.
+
+### Changed
+
+- VERSION → 1.8.8. `pyproject.toml`, `backend/main.py` FastAPI version updated.
+
+### Verified
+
+- All backend Python files parse OK.
+- Frontend TypeScript compiles with zero new errors.
+- Concept tab now has exactly 1 `Enable Model-Generated Audio` occurrence (was 2).
+- Both `twoPass` defaults flipped to false; comment in source explains the opt-in rationale.
+- Empty-prompt skip path in generation.py has `_prompt_is_placeholder` guard + `flow_idea` fallback (4 mentions in code).
+
+---
+
+## [1.8.7] - 2026-06-07
+
+### Fixed — Auto-gen drain loop waited 30 min for ghost jobs
+
+User reported "auto-gen ran one video successfully then stopped, status panel kept polling." Root cause traced to the post-Phase-2 drain loop: it polled the DB for any `PENDING`/`RUNNING` jobs on the in-batch scene IDs and waited them out — but had no time filter, so it would happily wait on orphaned jobs from PREVIOUS sessions whose ComfyUI workers were long gone. The drain would only give up after the 30-min `batch_timeout` fired.
+
+- **`backend/api/generation.py` `_run_windowed_batch` drain query** now filters by `Job.created_at >= run_started_at`, so the drain only waits on jobs THIS run created. Two-pass composites and transition clips spawned during the main loop pass the filter; pre-existing orphans don't.
+- **`backend/main.py` lifespan startup** now sweeps PENDING/RUNNING jobs older than 1 hour and marks them FAILED. `recover_running_jobs()` still handles fresh-restart reconnect (keeps RUNNING-with-prompt_id alive); the new sweep only cleans up stale orphans that recover left behind.
+
+### Fixed — Image movement override discarded user's "static" choice
+
+User changed scenes from `zoom_in_center` to "static" in the UI; the change persisted to the DB; export still rendered Ken Burns. This wasn't a cache bug — even a force-recreate produced movement.
+
+- **`backend/api/export.py`** lines 607 + 641: removed the `"effect": effect if effect != "none" else "zoom_in_center"` override that was silently replacing the user's "none" choice with a default.
+- **`backend/services/video/assembly.py`** `to_common()`: when effect is "none" / empty, sets `effect = "static"` (new value) instead of coercing to `zoom_in_center` with `intensity=0` (which still ran zoompan and could produce subtle motion).
+- **`backend/services/video/ffmpeg.py`** `apply_kenburns()`: new static early-return path emits a clean image-to-video clip with NO zoompan filter — just `scale + pad + setsar + format` held for `duration` seconds, with explicit `-frames:v` for frame-exact splice timing.
+
+### Fixed — Project-wide "Enable Model-Generated Audio" toggle now actually project-wide
+
+User flipped the master AV-native toggle on the Concept tab, expecting every video in the project to use it. The dispatcher was requiring BOTH the project gate AND the per-scene checkbox.
+
+- **`backend/services/jobs/dispatcher.py`** `_build_workflow` AV-native routing: changed `if _scene_av and _proj_av` → `if _proj_av or _scene_av`. Master toggle is now the single source of truth; per-scene checkbox is a secondary opt-in when the master is off.
+- **`frontend/src/components/ConceptPanel/ConceptPanel.tsx`**: updated copy ("every I2V video render in this project will use AV-native") and added explanatory hint about per-scene fallback.
+- **`frontend/src/components/SceneEditor/SceneEditor.tsx`** Video tab: per-scene checkbox now renders in a purple highlighted box with a `🔒 forced ON by project setting` badge when the master is on. Tooltip explains the gate hierarchy.
+
+### Fixed — Auxiliary saveConcept calls were dropping 5 critical settings
+
+User reported settings "reverting" intermittently. Root cause: ConceptPanel had FIVE saveConcept call sites but only TWO included the full payload. The other three (auto-save after adding character, auto-save after editing character, auto-save after generating character image) omitted `global_color_override`, `custom_color_palette`, `global_image_color_filter`, `enable_model_audio`, `model_audio_volume`. Every character-related auto-save silently flipped the master AV-native toggle back to OFF and wiped color palette.
+
+- **`frontend/src/components/ConceptPanel/ConceptPanel.tsx`**: all 3 incomplete saveConcept call sites now include the 5 missing fields.
+- **`frontend/src/api/client.ts`** `saveConcept` type extended to include the new fields.
+
+### Fixed — Export cache key was missing color filter + per-scene dims
+
+User changed a per-scene color filter; export reused the stale concat.mp4 because the cache key didn't hash `color_filter`. Same bug pattern as the "static" override.
+
+- **`backend/services/video/assembly.py`** `_video_cache_key()`: scene payload now includes `cf` (color filter) + `iw`/`ih` (per-scene image dimensions). Changing any of these now correctly invalidates the cache and forces a fresh render.
+
+### Fixed — Multiple silent-failure paths from the deep audit
+
+**BLOCKING**
+
+- **Pass 2 commit rollback** (`dispatcher.py` `_download_and_save_outputs`): when `_create_two_pass_composite_job` raises after Pass 1 is already saved, scene now gets `two_pass_composite_failed=true` flag + truncated error so the UI can surface a "Pass 2 failed — retry?" affordance. Previously Pass 1 would show as completed with no indication that Pass 2 never ran.
+- **Whisper empty transcription raises instead of swallowing** (`backend/services/audio/analysis.py`): when both the full audio AND the vocal-stem fallback produce no meaningful words, the code now raises `RuntimeError` with actionable text. Previously it silently set `transcription = []` and the export would produce zero subtitles with no error.
+
+**HIGH**
+
+- **LLM calls wrapped in `asyncio.wait_for(timeout=180)`** in `backend/api/concept.py` (5 sites) + `backend/api/timeline.py` (1 site). Stalled LLM HTTP requests can no longer hang the request task forever.
+- **Demucs timeout scales with audio duration** (`analysis.py:365`): `_demucs_timeout = max(1800, int(audio_dur * 2))`. A 2-hour narration on CPU now gets 4 hours of timeout instead of failing at 30 minutes.
+- **Dispatch-time parameter validation** (`dispatcher.py` `_build_builtin_workflow`): raises `ValueError("Dispatch refused: ...")` BEFORE sending to ComfyUI when `width/height/duration <= 0`. Stops the silent 0-frame video / corrupt image output. Excludes `ltx_transition` (auto-derives dims).
+- **Audio-only remix duration check** (`assembly.py` `_load_cached_concat` site): when `audio_only_remix=True`, the cached concat's actual duration is probed via ffprobe and the cache is dropped if `abs(actual - expected) > 0.5s`. Protects against interrupted-write manifest mismatches.
+- **ConceptPanel unsaved-edits guard** (`ConceptPanel.tsx:213`): `useEffect([conceptData, dirty])` now only re-hydrates local state when `!dirty`. Background refetches (library import, etc.) no longer silently wipe in-progress user edits.
+
+### Notes
+
+- VERSION → 1.8.7. `pyproject.toml`, `backend/main.py` FastAPI version updated.
+- Backend Python files all parse OK; frontend TypeScript compiles with zero new errors.
+- All fixes are net-positive correctness with no behavior change for the happy path — they only kick in on the edge cases that previously failed silently.
+
+---
+
 ## [1.8.6] - 2026-06-06
 
 ### Added — Global Character Library (reusable across projects)
@@ -509,183 +610,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.0] - 2026-05-28
 
 ### Added
-- **Chunked Export Assembly** — Exports now render in batches of 25 scenes, producing intermediate chunk files that are concatenated at the end. Each chunk is viewable immediately via a gallery in the export modal. Boundary transitions (including AI transition clips) are correctly handled between chunks
-- **Resumable Exports** — If an export fails mid-way, a manifest JSON is saved with all completed work. The new "Resume" button re-starts the export and automatically skips already-rendered clips (clip-level checkpointing)
-- **Export Cancel** — Running exports can be cancelled via a "Cancel Export" button. Uses both asyncio.Task.cancel() and a flag checked between chunks for reliable cancellation
-- **Chunk Gallery with Lightbox** — Completed chunks appear as clickable cards under the export progress bar. Click any chunk to open a full-screen video lightbox for immediate preview. Gallery persists across done, failed, and cancelled states
-- **Export Phase Display** — Export modal now shows the current pipeline phase (Rendering clips, Merging chunks, Final assembly, Post-processing) and chunk progress (e.g., "Chunk 3 / 8")
-- **Color Override** — Per-scene and project-wide color palette enforcement for image and video generation. 10 preset modes: Full Color, Black & White / Noir, High Contrast B&W, Sepia Tone, Monochrome Blue, Monochrome Red, Desaturated / Muted, Vintage Film, Neon Cyberpunk, and Custom Palette (free-text). Three-layer enforcement: (1) LLM context injection with MANDATORY priority prefix in both image and video enhance pipelines, (2) Strengthened color palette enforcement rules in all 7 system prompts, (3) Belt-and-suspenders keyword suffix injection in dispatcher before ComfyUI submission. Per-scene override in SceneEditor Image tab with fallback to project-wide default in Concept panel
-- **5-Reference Klein Workflow** — Increased maximum reference images from 4 to 5 for Flux Klein 9B runs. New `KLEIN_EDIT_ULTRA_WORKFLOW_5REF.json` workflow with 5th ReferenceLatent chain link. Updated `_auto_workflow_type()`, dispatcher `klein_map`, `prepare_klein_workflow()`, Asset Generator modal (5 ref slots), and ReferenceSelector (first frame: 5 max, last frame: 4 max)
-
-### Fixed
-- **FFmpeg loudnorm crash on silent audio** — Export no longer crashes when audio normalization encounters silent or near-silent audio (measured_I=-inf). Detects -inf or <-70 LUFS values and skips normalization, copying the file unchanged
-
-## [1.4.5] - 2026-05-28
-
-### Added
-- **Seed in Preview Popup** — Generation seed is now displayed in the image lightbox footer bar, the inline image gallery info bar, and the video gallery info bar. Shown in purple monospace font for easy visibility when browsing generation history
-
-### Changed
-- **Negative Prompt Disabled for Unsupported Workflows** — Klein and Z-Image Turbo workflows have no negative prompt node. Scene-level negative prompt textarea is now disabled with an explanatory note. Settings page "Global Negative Prompt (Image Generation)" field is disabled with a note that current image workflows don't support it. The global video negative prompt remains active (used by LTX Sequencer via LTXDirector). Dispatcher correctly ignores negative prompts for Klein/Z-Image and only passes them to Sequencer workflows
-
-## [1.4.4] - 2026-05-28
-
-### Fixed
-- **Bug #1: Z-Image Turbo bypassed for ref workflows** — When Z-Image Turbo was selected as the single image generator, scenes with character references still used Klein T2I instead of Z-Image. Extracted `_try_zimage_redirect()` helper, added logging when Klein is forced due to refs, and added fallback re-check when all refs fail to resolve (effective_workflow == klein_t2i)
-- **Bug #2: "Ignore Previous Scene Image as Reference" not persistent** — Toggle was reset by auto-gen modes and overwritten by React Query cache races. Fixed auto-gen to preserve existing `ignore_prev_scene_ref` values instead of blindly resetting to False, and added `queryClient.setQueryData()` sync in the frontend toggle handler to prevent stale cache overwrites
-- **Bug #3: All image prompts start with "The subject"** — LLM few-shot examples in IMAGE_SYSTEM_PROMPT, NARRATION_IMAGE_SYSTEM_PROMPT, and TWO_PASS_COMPOSITE_SYSTEM_PROMPT all used "The subject..." as their example openers, creating a strong anchoring pattern. Diversified all examples to lead with environment, lighting, or action instead. Added explicit "VARY YOUR OPENING" instructions and color palette preservation rules to all three system prompts
-
-## [1.4.3] - 2026-05-27
-
-### Added
-- **Subtitle Bold Option** — Bold toggle added to subtitle style settings (font-weight: bold). Persisted to `project.settings.subtitle_style.bold` and applied in both SubtitleOverlay preview and FFmpeg ASS burn-in
-- **Subtitle Style Save Button** — Explicit Save button in subtitle settings panel persists font/size/color/position/outline/bold to project settings via API
-
-### Fixed
-- **SRT Subtitle Display Broken** — SRT subtitles would show the first line, then a random line, then nothing. Root cause: SQLAlchemy JSON column mutation detection. When `upload_srt` updated `existing_lyrics.words`, SQLAlchemy didn't detect the change to the JSON column, leaving old Whisper words (without `block` fields) in the DB. Fixed with `flag_modified()` from SQLAlchemy ORM. Additionally, the frontend SRT upload handler now uses the upload response data directly via `queryClient.setQueryData()` instead of `invalidateQueries()`, eliminating race conditions where refetch might return stale data
-- **Subtitle Style Settings Not Persisting on Refresh** — `ProjectResponse` was missing the `settings` field, causing all `project.settings` (including subtitle styles) to reset to defaults on page load. Fixed by adding `settings` to the Pydantic response model
-- **SRT Parser Windows Line Endings** — SRT files with `\r\n` line endings failed to parse. Added `\r\n` → `\n` normalization at the top of `_parse_srt_to_words()` plus UTF-8 BOM stripping and encoding fallback (utf-8-sig → utf-8 → latin-1) in the upload endpoint
-- **Audio Mixer Volumes Not Restoring on Refresh** — Saved narration/backing track volume levels were lost on page refresh due to missing settings field in ProjectResponse (same root cause as subtitle styles above)
-
-## [1.4.2] - 2026-05-27
-
-### Added
-- **Ken Burns on Export Modal** — Random Ken Burns toggle and effect subset picker now available on the Export modal, with override fields (`random_ken_burns`, `ken_burns_allowed_effects`) passed through `ExportRequest` → `_build_scene_dicts()` pipeline. Export overrides take priority over project.settings
-- **Ken Burns on Auto Gen Modal** — Random Ken Burns toggle and effect subset picker on the Auto Gen modal. Settings are persisted to `project.settings` before auto-gen starts so the export pipeline picks them up
-- **Per-Scene GGUF Model Override** — LTX Model (GGUF) dropdown on the Video tab allows per-scene model variant selection (Q8_0, Q6_K, Q5_K_S). Saved to `scene.parameters.ltx_model_gguf` and read by the dispatcher before falling back to global `AppSettings.ltx_model_gguf`. Works for both Sequencer and standard LTX workflow paths
-
-### Fixed
-- **Narration Images missing Transitions/Movement tabs** — `narration_images` mode was hiding transitions and movement (Ken Burns) tabs. Now only hides `video` and `stems` tabs, keeping transitions and movement visible since these are most useful for image narration projects
-- **Per-scene GGUF override lost on settings read failure** — If the sequencer settings DB read fails, the dispatcher now preserves the per-scene GGUF override instead of resetting to `None`
-- **Auto Gen Ken Burns not persisted** — `handleStart` in Timeline.tsx now saves Ken Burns settings to `project.settings` via `updateProject()` before kicking off auto-gen, so the export pipeline picks them up correctly
-
-## [1.4.1] - 2026-05-27
-
-### Added
-- **Ollama Multi-Server Pool** — Configure multiple Ollama server URLs with automatic round-robin dispatch across them during batch prompt generation. Similar to ComfyUI worker pool distribution. Frontend shows server count badge with "round-robin" label
-- **Ollama Local LLM Integration** — Full Ollama provider support: model listing across all servers, test connection scanning all URLs, OpenAI-compatible `/v1/chat/completions` API, optimized prompts for local models with shorter/simpler system instructions
-
-### Fixed
-- **Settings Export/Import Missing Fields** — `SettingsExportData` was missing 15+ fields added in recent releases: Ollama settings (base_url, urls, model), LTXDirector settings (guide_strength, audio_guidance, stitch, auto_image_desc, global_video_negative_prompt), video_fps, video_min_duration, global_negative_prompt, export_lfff_trim_enabled, image/video_prompt_guidance, gpu_acceleration_enabled. Also fixed `app_port` being passed to the export constructor without being declared in the schema (would crash the export endpoint)
-- **Startup crash on existing databases** — `sqlite3.OperationalError: no such column: app_settings.ollama_base_url` fixed by adding `ALTER TABLE` migrations for all four Ollama columns in `init_db()`
-
-## [1.4.0] - 2026-05-26
-
-### Added
-- **Narration Images Mode** — New project type for narration-driven still image slideshows. UI hides Video/Stems/Transitions tabs, forces image source type, and applies Ken Burns effects on export
-- **Narration Videos Mode** — New project type for narration-driven video generation. Full video pipeline with speech-optimized LLM prompts for documentary/storytelling content
-- **SRT Upload** — Upload .srt subtitle files (e.g., from ElevenLabs) as an alternative to Whisper transcription. Parses SRT into word-level timestamps and upserts into the lyrics system
-- **Subtitle Burn-In** — ASS subtitle generation from word timestamps with configurable font, size, color, position, and outline. FFmpeg `ass=` filter burns subtitles into final export
-- **Subtitle Preview** — Live subtitle overlay in VideoPreview component synced to playback position
-- **Backing Track Timeline** — New timeline area below the main scene timeline for adding background music/audio tracks. Drag-drop or upload audio files, colored track bars, inline volume sliders, delete controls
-- **Audio Mixer** — Per-track volume control (dB) for backing tracks with FFmpeg `amix` complex filter graph mixing during export
-- **Audio Normalization** — Optional two-pass FFmpeg `loudnorm` normalization (target -16 LUFS) during export for consistent audio levels
-- **Narration LLM Prompts** — Dedicated `NARRATION_IMAGE_SYSTEM_PROMPT` and `NARRATION_VIDEO_SYSTEM_PROMPT` with documentary/storytelling focus. Auto-selected when project mode is narration
-- **Narration Export Pipeline** — Full export assembly for narration modes with transitions (xfade), CRF quality, color matching, AI transition clips, backing track mixing, subtitle burn-in, and audio normalization
-- **Export Subtitle Controls** — Narration export modal includes subtitle toggle, font/size/color/position/outline settings, and normalize audio checkbox
-- **Auto Gen Modal Minimize** — Full Set auto-generation modal can now be minimized to a floating status pill, allowing navigation during long generation runs
-- **Random Ken Burns Effects** — Project-level setting (narration_images only) to randomize Ken Burns effects during export/preview. Configurable effect pool with 16 effects and per-effect checkbox filtering. Random intensity (30–70) and ease_in_out easing applied at `_build_scene_dicts()` time so both export and render preview share the same logic. Manual per-scene effects always take priority over random assignment
-
-## [1.3.3] - 2026-05-26
-
-### Fixed
-- **PowerLoraLoader class_type mismatch** — `_update_power_lora_distilled()` checked for `"PowerLoraLoader"` but the actual ComfyUI node class_type is `"Power Lora Loader (rgthree)"` (with spaces), so the function silently did nothing and every workflow always sent the hardcoded v1.1 LoRA regardless of user settings. Fixed string match to cover both formats. Also resolves OOM errors during "Generate All Missing – Use Previous Frame" auto-gen caused by LoRA cache thrashing
-
-## [1.3.2] - 2026-05-26
-
-### Added
-- **Per-Scene Lyrics Override** — Override button in the Lyrics tab opens an editable textarea with the scene's auto-detected lyrics. Save persists the override to scene parameters; Reset clears back to auto-detected. Yellow "Overridden" badge indicates manually edited scenes
-
-### Fixed
-- **Distilled LoRA not applied to non-Sequencer LTX workflows** — Standard I2V, FF/LF, V2V, and Transition workflows had the distilled LoRA filename hardcoded in `PowerLoraLoader` nodes. The Settings selector only worked for Sequencer workflows. Added `_update_power_lora_distilled()` helper that dynamically patches all `PowerLoraLoader` nodes, and wired the setting through the dispatcher for all LTX workflow paths
-
-## [1.3.1] - 2026-05-26
-
-### Fixed
-- **NVENC detection on Blackwell GPUs (RTX 5070+)** — Encoder capability test used 64×64 frames, below Blackwell's minimum encode size (~145×49). Bumped test resolution to 256×256, safe for all NVENC generations back to Kepler
-- **Instrumental track suggest_timeline 500 error** — The entire `valid_cuts` builder was inside `if word_timestamps:`, so instrumental tracks (no lyrics) got zero cut points. Added `else` branch that seeds cut points from section boundaries and fills long gaps with evenly-spaced instrumental splits
-- **LLM JSON parse failure on prose responses** — When the LLM returns reasoning text instead of raw JSON (common with zero cut points), the parser now attempts to extract a `[{…}]` array from within the prose before raising a 500
-- **Auto Gen modal not minimizable** — Modal can now be minimized during long generation runs
-- **gpu_acceleration_enabled migration** — Added idempotent `ALTER TABLE` migration so the column is created safely on first run without errors on subsequent starts
-
-### Added
-- **Ko-fi support button** — Added Ko-fi donation link to README
-
-## [1.3.0] - 2026-05-25
-
-### Added
-- **Batch Mode System** — Queue multiple audio files with per-item configuration (render type, video mode, two-pass, story flow, auto characters) and run them as a batch pipeline
-- **Persistent Batch Runs (Auto Gen Dashboard)** — All Auto Gen runs are persisted to the database with full tracking. New `/batches` dashboard shows all runs with status cards, progress bars, and filtering
-- **Batch Run Detail View** — Click any batch run card to see per-scene progress, live activity feed with step-by-step logging, image/video lightbox, and error details
-- **Live Activity Feed** — Real-time step log during batch processing with scene names, worker IPs, asset thumbnails, and timestamps
-- **Auto Character Generation in Batch** — Optional checkbox to auto-generate characters during batch processing using the concept/lyrics-based character autogeneration pipeline
-- **Concept Data Persistence in Batch** — Batch pipeline now reads and persists song_title, concept_text, and style_text from the base-on-lyrics LLM response to project settings
-- **Live Elapsed Timers** — Running batch cards on dashboard show live-ticking elapsed time computed from `started_at`; completed batches show final elapsed time
-- **Video Thumbnails on Dashboard** — Batch run cards display the last generated asset (image or video) as a thumbnail with video poster frame support via `<video preload="metadata">`
-- **Persistent Auto Gen Status Bar** — Active Auto Gen runs show a status bar in the project view with progress, current step, and link to batch detail
-
-### Fixed
-- Video autoplay disabled on batch detail screen — videos are present but require manual play
-- Broken video thumbnails on Batches dashboard when last asset is a video (now uses `<video>` tag with `#t=0.1` fragment)
-- Erratic elapsed timer on batch detail screen — now computed from `started_at` instead of stale `elapsed_ms` field
-- Live activity feed stopping auto-refresh after terminal state — added 5-second delayed poll stop
-- "Just now" showing on all activity feed timestamps — fixed UTC timestamp parsing (append 'Z' suffix for correct JS Date parsing)
-- Batch-created projects missing song_title and concept text — batch pipeline now persists base-on-lyrics response
-
-## [1.2.0] - 2026-05-24
-
-### Added
-- **LTXDirector Full Integration** — Settings UI for guide strength, audio guidance, stitch mode, auto image description, and video negative prompt. All parameters wired through dispatcher to ComfyUI workflow
-- **Per-Scene Lipsync System** — Toggle in Video tab (default ON) that boosts audio_guidance to 0.7+ for mouth-to-audio sync. Optional vocal stem isolation, wired into Auto Gen modal and manual generation
-- **Lipsync Default for New Projects** — "Enable Lipsync by Default" checkbox on New Project screen
-- **VIDEO_SYSTEM_PROMPT Rewrite** — Full LTXDirector awareness with multi-segment prompt documentation, keyframe image guidance, audio-reactive tips, and negative prompt delegation
-- **Image/Video Deletion Auto-Fallback** — Deleting chosen image/video auto-selects next available version
-- **Live Batch Preview PIP** — Floating draggable overlay during batch processing showing last generated asset with scene info
-- **Mobile Responsive Layout** — Full mobile support with bottom nav bar, panel toggling, and tablet breakpoint
-
-### Fixed
-- SceneEditor handler operation order (API-first pattern)
-- Lipsync default mismatch in manual generate_video
-- Missing vocals_only_for_lipsync in windowed batch mode
-
-## [1.1.0] - 2026-05-23
-
-### Added
-- **Three-Model Architecture** — Klein 9B (edit/reference), Z-Image Turbo (fast T2I), LTX 2.3 (video) with automatic workflow routing
-- **Distilled LoRA v1.1** — Updated to improved aesthetics and audio quality, 8-step generation
-- **LAN/WAN Network Access** — Settings toggle to allow remote access to the app
-- **Custom Port Setting** — Configurable app port in Settings
-
-### Fixed
-- Klein workflow CFG, steps, and upscale method audited against official templates
-- Per-scene transition persistence
-
-## [1.0.0] - 2026-05-19
-
-### Added
-- Full AI music video / narration video pipeline: audio analysis, image generation, video generation, export
-- ComfyUI integration with FLUX Klein 9B (images) and LTX 2.3 (video) via remote API
-- Multi-server ComfyUI worker pool with capability routing and least-loaded dispatch
-- First Frame / Last Frame image generation with per-frame references and prompts
-- Video-to-Video (V2V) extending with image-based conditioning for scene continuity
-- AI Transition clips via LTX Transition LoRA between scenes
-- Two-pass image generation: scene composition (Pass 1) then character insertion (Pass 2)
-- LLM-powered prompt enhancement (OpenAI, Anthropic, Gemini) with model-specific system prompts
-- Video Flow: LLM-generated per-scene storyboard ideas with location diversity
-- Concept panel: song title, concept text, style, characters, image direction presets
-- Character Creator with reference images, generation, version gallery
-- Auto Generate modes: sequential per-scene, parallel batch, V2V extend, missing-only
-- Whisper transcription (local WhisperX, remote Gradio, ComfyUI workflow)
-- Demucs stem separation with GPU acceleration
-- Audio section detection via librosa novelty analysis
-- Suggest Fresh Timeline with phrase-aware boundary snapping
-- Scene locking to prevent accidental boundary changes
-- Per-channel color correction with FFmpeg colorchannelmixer
-- Adjacent-clip color matching for export assembly
-- GPU-accelerated FFmpeg encoding and decoding (NVIDIA, AMD, Intel)
-- Export with crossfade transitions, Ken Burns effects, quality CRF control
-- Render Preview for quick 720p assembly
-- RunPod serverless GPU pod management
-- Settings import/export
-- Seed control: global seed, per-frame overrides
-- pywebview desktop wrapper with native window
+- **Chunked Export Assembly** — Exports now render in 

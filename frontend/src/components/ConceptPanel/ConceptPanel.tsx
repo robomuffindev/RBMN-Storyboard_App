@@ -211,7 +211,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
 
   // Sync from server
   useEffect(() => {
-    if (conceptData) {
+    // Re-hydrate from server ONLY when the user has no unsaved edits.
+    // Otherwise a background refetch (triggered by, e.g., importing a
+    // library character or any other invalidation of ['concept', projectId])
+    // would silently overwrite the user's in-progress text and unsaved
+    // toggle changes.  When dirty===true we leave local state alone; the
+    // next save will round-trip with the user's current values intact.
+    if (conceptData && !dirty) {
       setSongTitle(conceptData.song_title || '');
       setConceptText(conceptData.concept_text || '');
       setStyleText(conceptData.style_text || '');
@@ -238,12 +244,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
       setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
       setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
-      setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
-      setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
       setCustomColorPalette(conceptData.custom_color_palette || '');
       setDirty(false);
     }
-  }, [conceptData]);
+  }, [conceptData, dirty]);
 
   // Save mutation
   const saveMutation = useMutation({
@@ -335,6 +339,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         transition_lora_strength: transitionLoraStrength,
         random_ken_burns: randomKenBurns,
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
+        global_color_override: globalColorOverride,
+        custom_color_palette: customColorPalette,
+        global_image_color_filter: globalImageColorFilter,
+        enable_model_audio: enableModelAudio,
+        model_audio_volume: modelAudioVolume,
       }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
         // Refresh project query too so currentProject.settings picks up
@@ -366,6 +375,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         transition_lora_strength: transitionLoraStrength,
         random_ken_burns: randomKenBurns,
         ken_burns_allowed_effects: kenBurnsAllowedEffects,
+        global_color_override: globalColorOverride,
+        custom_color_palette: customColorPalette,
+        global_image_color_filter: globalImageColorFilter,
+        enable_model_audio: enableModelAudio,
+        model_audio_volume: modelAudioVolume,
       }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
         // Refresh project query too so currentProject.settings picks up
@@ -615,51 +629,6 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           )}
         </div>
 
-        {/* Model-Generated Audio (LTX 2.3 AV-native) — global gate + mixer level.
-            When ON, scenes whose Video tab opt in skip sending project audio
-            and let the model generate its own audio (speech / SFX / ambient).
-            The audio is baked into each scene's MP4 AND extracted as a
-            sidecar WAV next to the video so the mixer slider below can
-            control its level independently. */}
-        <div className="bg-gray-800/40 border border-gray-700/60 rounded p-3">
-          <div className="flex items-center gap-2 mb-1">
-            <input
-              type="checkbox"
-              id="enable_model_audio"
-              checked={enableModelAudio}
-              onChange={(e) => { setEnableModelAudio(e.target.checked); markDirty(); }}
-              className="rounded border-gray-700 text-purple-500 focus:ring-purple-500"
-            />
-            <label htmlFor="enable_model_audio" className="text-xs font-medium text-gray-200">
-              Enable Model-Generated Audio (LTX 2.3 AV-native)
-            </label>
-          </div>
-          <p className="text-[10px] text-gray-500 mb-2">
-            When on, scenes with "Let model generate own audio" enabled on their Video tab will skip
-            project audio and let the model render speech / SFX / ambient itself. Useful for layering
-            model-generated SFX with your narration and backing tracks.
-          </p>
-          {enableModelAudio && (
-            <div>
-              <label className="block text-[10px] text-gray-400 mb-1">
-                Model Audio Mixer Volume: <span className="text-purple-300">{modelAudioVolume.toFixed(2)}×</span>
-              </label>
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.05"
-                value={modelAudioVolume}
-                onChange={(e) => { setModelAudioVolume(parseFloat(e.target.value)); markDirty(); }}
-                className="w-full accent-purple-500"
-              />
-              <p className="text-[10px] text-gray-600 mt-1">
-                Applied to the model-audio channel only — narration / backing tracks unchanged.
-                Set to 0 to mute the model audio without disabling generation.
-              </p>
-            </div>
-          )}
-        </div>
 
         {/* Global Seed Control */}
         <div>
@@ -1044,6 +1013,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                     transition_lora_strength: transitionLoraStrength,
                     random_ken_burns: randomKenBurns,
                     ken_burns_allowed_effects: kenBurnsAllowedEffects,
+        global_color_override: globalColorOverride,
+        custom_color_palette: customColorPalette,
+        global_image_color_filter: globalImageColorFilter,
+        enable_model_audio: enableModelAudio,
+        model_audio_volume: modelAudioVolume,
                   }).then(() => {
                     queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
       // ALSO invalidate the project query so AppLayout.currentProject.settings

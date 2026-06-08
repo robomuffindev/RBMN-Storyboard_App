@@ -1161,6 +1161,32 @@ class JobDispatcher:
         from pathlib import Path
 
         workflows_dir = Path(__file__).parent.parent.parent.parent / "workflows"
+
+        # Guardrails: invalid dims / duration produce silently-broken ComfyUI
+        # output (0-frame video, corrupt image).  Catch them HERE rather than
+        # failing deep in the workflow execution.  Transition clips are not
+        # included since they auto-derive dims from the frames.
+        if workflow_type and workflow_type not in ("ltx_transition",):
+            _w = params.get("width", 0)
+            _h = params.get("height", 0)
+            if not isinstance(_w, int) or not isinstance(_h, int) or _w <= 0 or _h <= 0:
+                raise ValueError(
+                    f"Dispatch refused: workflow_type={workflow_type} has invalid "
+                    f"dimensions width={_w!r}, height={_h!r}. Both must be positive integers."
+                )
+            # Video jobs additionally need a positive duration
+            if workflow_type.startswith("ltx_"):
+                _dur = params.get("duration", 0)
+                try:
+                    _dur_f = float(_dur)
+                except (TypeError, ValueError):
+                    _dur_f = 0.0
+                if _dur_f <= 0:
+                    raise ValueError(
+                        f"Dispatch refused: workflow_type={workflow_type} has invalid "
+                        f"duration={_dur!r}. Must be positive (seconds)."
+                    )
+
         seed = params.get("seed") or random.randint(0, 2**32 - 1)
 
         # Check if SFW content restriction is enabled — append suffix to prompt
@@ -3841,7 +3867,24 @@ class JobDispatcher:
                                 job_id_str=job_id_str,
                             )
                         except Exception as e:
-                            logger.error(f"[{job_id_str}] Failed to create two-pass Pass 2 job: {e}")
+                            # Pass 2 creation failed — Pass 1 is already saved + DONE,
+                            # but the user wouldn't know Pass 2 never spawned without
+                            # a marker.  Flag the scene so the UI can render a
+                            # "Pass 2 failed — retry?" affordance and the export
+                            # logic knows to fall back to single-pass.
+                            logger.error(
+                                f"[{job_id_str}] Failed to create two-pass Pass 2 job: {e} "
+                                f"(Pass 1 asset {asset.id} kept; scene marked two_pass_composite_failed=true)"
+                            )
+                            try:
+                                _err_scene = await session.get(Scene, scene_id)
+                                if _err_scene:
+                                    _err_params = dict(_err_scene.parameters or {})
+                                    _err_params["two_pass_composite_failed"] = True
+                                    _err_params["two_pass_composite_error"] = str(e)[:500]
+                                    _err_scene.parameters = _err_params
+                            except Exception as _flag_err:
+                                logger.warning(f"[{job_id_str}] Could not flag scene for Pass 2 retry: {_flag_err}")
 
                     # Auto-set character image_path in project.settings
                     if is_character_gen and media_type == "image":

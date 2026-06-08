@@ -99,6 +99,14 @@ def _video_cache_key(
                 "tin": s.get("transition_in"),
                 "tout": s.get("transition_out"),
                 "tclip": s.get("transition_clip_path"),
+                # Per-scene color filter (image B&W / Grayscale / Sepia) +
+                # per-scene resolution overrides also affect concat output.
+                # Without these in the hash, changing a filter never busted
+                # the cache → export silently reused the old (un-filtered)
+                # concat.mp4.  Same bug pattern as the "static" override.
+                "cf": s.get("color_filter") or s.get("image_color_filter") or s.get("global_image_color_filter"),
+                "iw": s.get("image_width") or 0,
+                "ih": s.get("image_height") or 0,
             }
             for s in scenes
         ],
@@ -1481,6 +1489,25 @@ def assemble_narration_video(
         logger.info("force_recreate=True — clearing export cache before render")
         _clear_export_cache(output_path)
     _cached_concat_path: Optional[Path] = _load_cached_concat(output_path, _cache_key)
+    # Validate cached concat duration matches the current scene set when
+    # audio_only_remix=True.  Cache key is hash-based so this should rarely
+    # mismatch — but if a previous export was interrupted mid-write the
+    # manifest can record success while concat.mp4 has the wrong duration,
+    # producing a silent narration/video desync.  Probe + drop on mismatch.
+    if _cached_concat_path is not None and audio_only_remix:
+        try:
+            from backend.services.video.ffmpeg import get_media_info as _gmi
+            _expected_dur = sum(float(s.get("duration", 0)) for s in scenes)
+            _actual_info = _gmi(str(_cached_concat_path))
+            _actual_dur = float(_actual_info.get("duration") or 0)
+            if _expected_dur > 0 and abs(_actual_dur - _expected_dur) > 0.5:
+                logger.warning(
+                    f"Audio-only remix: cached concat duration {_actual_dur:.2f}s "
+                    f"!= expected {_expected_dur:.2f}s — dropping cache and re-rendering"
+                )
+                _cached_concat_path = None
+        except Exception as _vdcheck:
+            logger.warning(f"Audio-only remix cache duration check failed: {_vdcheck}")
     if audio_only_remix and _cached_concat_path is None:
         raise RuntimeError(
             "audio_only_remix requested but no matching cached video found. "

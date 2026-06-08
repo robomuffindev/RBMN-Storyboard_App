@@ -3122,7 +3122,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
 
   // Advanced options
   const [overrideFullSet, setOverrideFullSet] = useState(false);
-  const [twoPass, setTwoPass] = useState(true);
+  const [twoPass, setTwoPass] = useState(false);  // default OFF — two-pass doubles work per scene, opt-in only
   const [useStoryFlow, setUseStoryFlow] = useState(true);
   const [lipsyncEnabled, setLipsyncEnabled] = useState(true);
   const [vocalsOnlyForLipsync, setVocalsOnlyForLipsync] = useState(false);

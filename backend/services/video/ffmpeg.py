@@ -1167,6 +1167,7 @@ def apply_kenburns(
             "ffmpeg", "-y", "-loop", "1", "-i", image_path,
             "-vf", vf,
             "-t", f"{duration:.6f}",
+            "-frames:v", str(int(round(duration * fps))),  # frame-exact for concat splice timing
             *_gpu.get_encode_flags(crf=crf),
             "-pix_fmt", "yuv420p",
             "-force_key_frames", "expr:eq(n,0)",

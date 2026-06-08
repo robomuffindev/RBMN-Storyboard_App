@@ -423,8 +423,11 @@ async def base_on_lyrics(
     provider, api_key, model = resolve_llm_config(app_settings)
 
     try:
-        raw_text = await asyncio.to_thread(
-            _call_llm, provider, api_key, model, system_prompt, user_prompt
+        raw_text = await asyncio.wait_for(
+            asyncio.to_thread(
+                _call_llm, provider, api_key, model, system_prompt, user_prompt
+        ),
+            timeout=180.0,
         )
     except Exception as e:
         logger.error(f"LLM base-on-lyrics failed: {e}")
@@ -578,8 +581,11 @@ async def autogenerate_characters(
     provider, api_key, model = resolve_llm_config(app_settings)
 
     try:
-        raw_text = await asyncio.to_thread(
-            _call_llm, provider, api_key, model, system_prompt, user_prompt
+        raw_text = await asyncio.wait_for(
+            asyncio.to_thread(
+                _call_llm, provider, api_key, model, system_prompt, user_prompt
+        ),
+            timeout=180.0,
         )
     except Exception as e:
         logger.error(f"LLM autogenerate characters failed: {e}")
@@ -1036,9 +1042,12 @@ async def _generate_flow_inner(
         flow_max_tokens = max(2000, len(scenes) * 150 + 500)
         logger.info(f"Generating video flow for {len(scenes)} scenes in single call (max_tokens={flow_max_tokens})")
         try:
-            raw_text = await asyncio.to_thread(
-                _call_llm, provider, api_key, model, system_prompt, user_prompt,
+            raw_text = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _call_llm, provider, api_key, model, system_prompt, user_prompt,
                 max_tokens=flow_max_tokens,
+            ),
+                timeout=180.0,
             )
         except Exception as e:
             logger.error(f"LLM flow generation failed: {e}")
@@ -1127,9 +1136,12 @@ async def _generate_flow_inner(
             async with sem:
                 logger.info(f"  Batch {b_num}/{total_batches}: scenes {b_idx + 1}–{b_idx + b_count}")
                 try:
-                    raw_text = await asyncio.to_thread(
-                        _call_llm, provider, api_key, model, system_prompt, b_prompt,
+                    raw_text = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _call_llm, provider, api_key, model, system_prompt, b_prompt,
                         max_tokens=b_max_tokens,
+                    ),
+                        timeout=180.0,
                     )
                     ideas = _parse_flow_json_array(raw_text, b_count)
                 except Exception as e:
@@ -1196,9 +1208,12 @@ async def _generate_flow_inner(
             retry_prompt += "\nGenerate one vivid storyboard idea for this scene."
 
             try:
-                raw = await asyncio.to_thread(
-                    _call_llm, provider, api_key, model, retry_system, retry_prompt,
+                raw = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _call_llm, provider, api_key, model, retry_system, retry_prompt,
                     max_tokens=300,
+                ),
+                    timeout=180.0,
                 )
                 text = raw.strip().strip('"').strip("'")
                 if text:

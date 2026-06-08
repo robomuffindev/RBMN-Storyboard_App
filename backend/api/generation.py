@@ -2892,7 +2892,19 @@ async def _run_windowed_batch(
                 # If still no FF, generate one (sequential — must wait)
                 if not has_ff:
                     _seq_auto_jobs[pid]["current_step"] = f"generating first frame for scene {i + 1}"
-                    prompt = scene.prompt or f"Scene {scene.order_index + 1}"
+                    # Prompt fallback chain (in order of preference):
+                    #   1. scene.prompt (user-edited or LLM-enhanced)
+                    #   2. scene.parameters.flow_idea (from _ensure_video_flow)
+                    #   3. literal "Scene N" — BAD, produces garbage image
+                    # If neither 1 nor 2 exists AND LLM is unavailable to
+                    # enhance, SKIP this scene so we don't waste a render
+                    # on the literal "Scene 7" prompt.
+                    _flow_idea = (scene.parameters or {}).get("flow_idea", "") if scene.parameters else ""
+                    prompt = scene.prompt or _flow_idea or f"Scene {scene.order_index + 1}"
+                    _prompt_is_placeholder = (
+                        not scene.prompt
+                        and not _flow_idea
+                    )
                     if enhancer and llm_api_key:
                         try:
                             _seq_auto_jobs[pid]["current_step"] = f"enhancing FF prompt for scene {i + 1}/{len(scenes)}"
@@ -2919,6 +2931,26 @@ async def _run_windowed_batch(
                             )
                         except Exception as e:
                             logger.warning(f"Windowed batch: enhance FF failed scene {i}: {e}")
+
+                    # If we still have only the literal "Scene N" placeholder
+                    # (no user prompt, no flow_idea, no successful enhance),
+                    # SKIP this scene rather than dispatching a render that
+                    # will produce a meaningless image.  Surface in the
+                    # status text so the user knows why this scene was left
+                    # alone.  Re-running after fixing LLM config will pick
+                    # it up cleanly.
+                    if _prompt_is_placeholder and prompt == f"Scene {scene.order_index + 1}":
+                        logger.warning(
+                            f"Windowed batch: Scene {i+1} ({scene_name}) has no prompt, "
+                            f"no flow_idea, and prompt enhance failed — SKIPPING to avoid "
+                            f"wasting a render on the literal 'Scene N' placeholder. "
+                            f"Run flow generation or write a prompt manually and re-try."
+                        )
+                        if pid in _seq_auto_jobs:
+                            _seq_auto_jobs[pid]["current_step"] = (
+                                f"skipped {scene_name} (no prompt / flow idea, LLM enhance failed)"
+                            )
+                        continue
 
                     scene.prompt = prompt
                     await session.commit()

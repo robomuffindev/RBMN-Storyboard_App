@@ -3048,9 +3048,12 @@ async def suggest_timeline(
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            raw_text = await asyncio.to_thread(
-                _call_llm, provider, api_key, model, system_prompt, user_prompt,
+            raw_text = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _call_llm, provider, api_key, model, system_prompt, user_prompt,
                 max_tokens=llm_max_tokens,
+            ),
+                timeout=180.0,
             )
             break  # success
         except Exception as e:

@@ -17,7 +17,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
   const [renderType, setRenderType] = useState<'music_video' | 'narration_video'>('music_video');
   const [videoMode, setVideoMode] = useState<'i2v' | 'v2v' | 'fflf'>('fflf');
   const [imageMode, setImageMode] = useState<'missing' | 'all_with_refs'>('missing');
-  const [twoPass, setTwoPass] = useState(true);
+  const [twoPass, setTwoPass] = useState(false);  // default OFF — two-pass doubles work per scene, opt-in only
   const [useStoryFlow, setUseStoryFlow] = useState(true);
   const [autoCharacters, setAutoCharacters] = useState(false);
   const [lipsyncEnabled, setLipsyncEnabled] = useState(true);
