@@ -262,25 +262,68 @@ async def generate_image(
             # Collect character ref IDs: from request first, then fall back to concept data
             char_ref_ids = [str(aid) for aid in req.reference_asset_ids] if req.reference_asset_ids else []
             if not char_ref_ids:
-                # Resolve from project concept data — find characters with image_path
+                # Resolve from project concept data — find characters with image_path.
+                # Use forgiving lookup: exact rel_path match FIRST, then suffix
+                # match as a fallback so subtle path differences (leading
+                # slash, project_id prefix variants, whitespace) don't cause
+                # silent two-pass downgrades.  Matches what the frontend
+                # collectRefAssetIds() does via `rel_path.endsWith(image_path)`.
                 project = await session.get(Project, project_id)
                 if project and project.settings:
                     characters = project.settings.get("characters", [])
+                    _resolved_count = 0
+                    _missed_paths: list[str] = []
                     for char in characters:
-                        img_path = char.get("image_path", "")
-                        if img_path:
-                            # Find the Asset by rel_path to get its ID
-                            from sqlmodel import select
+                        img_path = (char.get("image_path", "") or "").strip()
+                        if not img_path:
+                            continue
+                        from sqlmodel import select
+                        # 1) Exact match
+                        stmt = select(Asset).where(
+                            Asset.project_id == project_id,
+                            Asset.rel_path == img_path,
+                        )
+                        asset = (await session.execute(stmt)).scalars().first()
+                        # 2) Suffix match (forgives leading slashes, prefix
+                        # variants).  Use LIKE with leading wildcard.
+                        if not asset:
                             stmt = select(Asset).where(
                                 Asset.project_id == project_id,
-                                Asset.rel_path == img_path,
+                                Asset.rel_path.like(f"%{img_path}"),  # type: ignore
                             )
-                            result = await session.execute(stmt)
-                            asset = result.scalars().first()
-                            if asset:
-                                char_ref_ids.append(str(asset.id))
+                            asset = (await session.execute(stmt)).scalars().first()
+                        # 3) Basename-only match (last resort — match the filename)
+                        if not asset:
+                            import os as _os
+                            _basename = _os.path.basename(img_path)
+                            if _basename and _basename != img_path:
+                                stmt = select(Asset).where(
+                                    Asset.project_id == project_id,
+                                    Asset.rel_path.like(f"%{_basename}"),  # type: ignore
+                                )
+                                asset = (await session.execute(stmt)).scalars().first()
+                        if asset:
+                            char_ref_ids.append(str(asset.id))
+                            _resolved_count += 1
+                        else:
+                            _missed_paths.append(img_path)
                     if char_ref_ids:
-                        logger.info(f"Two-pass: resolved {len(char_ref_ids)} character ref IDs from concept data")
+                        logger.info(
+                            f"Two-pass: resolved {len(char_ref_ids)} character ref IDs "
+                            f"from concept data (exact + suffix + basename matching)"
+                        )
+                    elif _missed_paths:
+                        # Loud warning so user sees WHY two-pass downgraded
+                        # to single-pass instead of just getting a scene with
+                        # no characters in it.
+                        logger.warning(
+                            f"Two-pass requested but ALL {len(_missed_paths)} character "
+                            f"image_path lookups failed.  Paths tried: {_missed_paths[:3]}"
+                            f"{'...' if len(_missed_paths) > 3 else ''}.  "
+                            f"Either the characters have no image_path, the Assets were "
+                            f"deleted, or the rel_path doesn't match.  Two-pass will "
+                            f"downgrade to single-pass and the image will have no characters."
+                        )
             # ── No-refs guard ───────────────────────────────────────────
             # If after request + concept-fallback there are STILL no refs,
             # downgrade to single-pass.  Pass 2 has nothing to composite,
@@ -1061,13 +1104,34 @@ async def _resolve_character_asset_ids(
         if not image_path:
             continue
 
-        # Look up the asset by rel_path
+        # Look up the asset by rel_path.  Try exact match first, then
+        # fall back to suffix match (handles leading slashes / prefix variants)
+        # so character->Asset resolution is as forgiving as the frontend's
+        # collectRefAssetIds() which uses endsWith semantics.
         stmt = select(Asset).where(
             Asset.project_id == project_id,
             Asset.rel_path == image_path,
         )
         result = await session.execute(stmt)
         asset = result.scalars().first()
+        if not asset:
+            stmt = select(Asset).where(
+                Asset.project_id == project_id,
+                Asset.rel_path.like(f"%{image_path}"),  # type: ignore
+            )
+            result = await session.execute(stmt)
+            asset = result.scalars().first()
+        if not asset:
+            # Last resort: match on filename only
+            import os as _os_basename
+            _bn = _os_basename.basename(image_path)
+            if _bn and _bn != image_path:
+                stmt = select(Asset).where(
+                    Asset.project_id == project_id,
+                    Asset.rel_path.like(f"%{_bn}"),  # type: ignore
+                )
+                result = await session.execute(stmt)
+                asset = result.scalars().first()
         if asset:
             asset_ids.append(str(asset.id))
         else:

@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.8.10] - 2026-06-07
+
+### Fixed — Two-pass silently downgraded to single-pass with no characters
+
+User reported: "toggled two-pass off, then back on, now scenes generate with nobody in them." Root cause traced through the pipeline:
+
+1. **SceneEditor** sends generate request with `two_pass: true` and `reference_asset_ids: []` (no per-scene character selection).
+2. **`backend/api/generation.py` `/generate-image`** falls back to concept characters: iterates `project.settings["characters"]`, looks up each character's `image_path` against `Asset.rel_path` with **strict equality**. Any subtle mismatch (leading slash, project_id prefix variant, whitespace) → lookup fails → `char_ref_ids` stays empty → `_two_pass_effective = False` → downgrades to single-pass.
+3. **Pass 1 job** is created as single-pass `klein_t2i` with no refs. The scene image generates without characters.
+4. **No log** told the user WHY two-pass downgraded — looked like the toggle just stopped working.
+
+This is a long-standing latent bug that the user's toggle-off-then-on sequence happened to expose. Same lookup pattern existed in `_resolve_character_asset_ids` used by auto-gen, so auto-gen could hit it too.
+
+### Fix — Forgiving 3-tier character asset lookup
+
+Both lookup sites (`/generate-image` concept fallback + `_resolve_character_asset_ids` for auto-gen) now try in order:
+
+1. **Exact `rel_path == image_path`** (fast path, matches frontend's primary lookup)
+2. **Suffix match `rel_path LIKE '%image_path'`** (forgives leading slashes, project_id prefix variants, path encoding differences — matches frontend's `endsWith()` fallback)
+3. **Basename-only match `rel_path LIKE '%filename'`** (last resort — if the path structure changed entirely but the filename is intact)
+
+If ALL characters fail to resolve, a **clear warning is logged** so the user can see why two-pass downgraded:
+
+```
+Two-pass requested but ALL N character image_path lookups failed.
+Paths tried: [...]. Either the characters have no image_path, the
+Assets were deleted, or the rel_path doesn't match. Two-pass will
+downgrade to single-pass and the image will have no characters.
+```
+
+### Verified
+
+- `backend/api/generation.py` parses OK.
+- Both code paths affected: `/generate-image` per-scene endpoint AND `_resolve_character_asset_ids` (auto-gen).
+- Frontend lookup semantics now match backend so refs survive the request boundary.
+- VERSION → 1.8.10. `pyproject.toml`, `backend/main.py` FastAPI version updated.
+
+### Notes
+
+- Existing scenes where the asset resolves successfully via exact match are completely unaffected (fast path unchanged).
+- If a user's character's image_path is genuinely missing from Assets (e.g., the asset was deleted), the warning surfaces that fact instead of silently producing a no-character image.
+- Combined with the 1.8.9 "respect per-scene characterIndices" change, the system now correctly handles all four combinations: scene-explicit refs, project-default refs, no refs at all, AND the edge case where concept characters have slightly mismatched image_paths.
+
+---
+
 ## [1.8.9] - 2026-06-07
 
 ### Fixed — Auto-gen no longer force-overrides per-scene character selection
