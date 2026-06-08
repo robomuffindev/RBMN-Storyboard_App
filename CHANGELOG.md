@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.8.9] - 2026-06-07
+
+### Fixed — Auto-gen no longer force-overrides per-scene character selection
+
+User reported that two-pass was firing on scenes that shouldn't need it. Root cause: auto-gen Phase 1 was unconditionally writing `image_refs_first.characterIndices = [0, 1]` (first 2 project chars) onto every scene before computing refs. This overwrote any per-scene character selection the user had made (including the legitimate "no characters on this scene" case = empty list), so every scene ended up with refs → every scene got two-pass → 2 image renders per scene whether the user wanted that or not.
+
+**`backend/api/generation.py`** in TWO auto-gen paths (`_run_windowed_batch` Phase 1 + the sequential auto-gen loop):
+
+- **Reads existing `image_refs_first.characterIndices` first.** If the user has an explicit per-scene selection — including an empty list meaning "no characters on this scene" — use ONLY those characters.
+- **Falls back to "first 2 project chars" only when the field is absent** (truly new scene with no prior selection). Brand-new scenes still get a sensible default.
+- **Stops overwriting `image_refs_first` on scenes that already have one.** The auto-gen no longer touches the field unless it's missing.
+
+End-to-end effect:
+
+| Scene state | Old behavior | New behavior |
+|---|---|---|
+| User selected 1 character on scene | overwritten to use first 2 → two-pass with 2 chars | uses 1 char → two-pass with 1 char ✓ |
+| User selected NO characters (empty list) | overwritten to use first 2 → two-pass | NO chars → no refs → **single-pass** ✓ |
+| Brand-new scene, no selection | uses first 2 → two-pass | uses first 2 → two-pass (unchanged) |
+| No project characters configured | empty refs → single-pass (unchanged) | empty refs → single-pass (unchanged) |
+
+This is the rule the user asked for: **"two-pass runs if the scene has references; if the scene has no references, no two-pass — regardless of the modal checkbox."** The two-pass checkbox is now an UPPER bound (turn it OFF to disable two-pass entirely), not an override that forces refs to appear.
+
+The downstream short-circuits in `_apply_two_pass_to_job_params` (`if not two_pass or not ref_ids: return params`) were already correct — the bug was that ref_ids was always non-empty due to the unconditional overwrite. Both layers now agree.
+
+### Changed
+
+- VERSION → 1.8.9. `pyproject.toml`, `backend/main.py` FastAPI version updated.
+
+### Verified
+
+- Backend Python parses OK; frontend TypeScript compiles clean.
+- Three patches applied: windowed-batch resolution, sequential-path resolution, both characterIndices override sites guarded with `"image_refs_first" not in scene_params`.
+
+---
+
 ## [1.8.8] - 2026-06-07
 
 ### Fixed — User-reported regressions

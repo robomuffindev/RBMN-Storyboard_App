@@ -214,7 +214,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Robomuffin Idea Factory",
     description="AI music video / narration video creation tool",
-    version="1.8.8",
+    version="1.8.9",
     lifespan=lifespan,
 )
 

@@ -2828,10 +2828,34 @@ async def _run_windowed_batch(
                 logger.info(f"Windowed batch: Scene {i} already has FF image — skipping prep entirely")
                 continue
 
-            # Collect reference IDs: character images + scene extras
+            # Collect reference IDs: character images + scene extras.
+            #
+            # IMPORTANT: respect per-scene character selection.  Previously,
+            # auto-gen FORCE-OVERWROTE every scene's image_refs_first with
+            # "first 2 project chars" — which meant every scene got two-pass
+            # using project characters even when the user wanted a scene to
+            # be character-free (e.g. landscapes, establishing shots).
+            #
+            # New rule:
+            #  • If scene has explicit `image_refs_first.characterIndices`
+            #    (even if []), use ONLY those.  Empty list = user said
+            #    "no characters on this scene" → no two-pass refs from chars.
+            #  • If field is absent (truly new scene), fall back to "first 2".
             characters = (project_fresh.settings or {}).get("characters", []) if project_fresh else []
+            _scene_params_read = dict(scene.parameters or {})
+            _existing_refs = _scene_params_read.get("image_refs_first", {})
+            _selected_indices = _existing_refs.get("characterIndices") if isinstance(_existing_refs, dict) else None
+            if _selected_indices is not None:
+                # User has an explicit selection (could be []).  Use it as-is.
+                _selected_chars = [
+                    characters[i] for i in _selected_indices
+                    if isinstance(i, int) and 0 <= i < len(characters)
+                ]
+            else:
+                # No explicit selection — sensible default of first 2 chars
+                _selected_chars = characters[:2]
             char_asset_ids = await _resolve_character_asset_ids(
-                characters, project_id, session, max_chars=2
+                _selected_chars, project_id, session, max_chars=2
             )
             extra_ref_ids = _collect_ref_asset_ids(scene, "first")
             ref_ids = char_asset_ids + extra_ref_ids  # Characters first = Image 1, Image 2
@@ -2846,11 +2870,13 @@ async def _run_windowed_batch(
             scene_params["use_prev_scene_last_frame"] = False
             # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
             scene_params["use_story_flow"] = use_story_flow
-            # Set character indices so UI shows them as selected
-            if characters:
+            # Only seed default character indices for scenes that have NO prior
+            # selection.  Scenes with an explicit selection (including []) are
+            # preserved so the user can keep a scene character-free.
+            if characters and "image_refs_first" not in scene_params:
                 scene_params["image_refs_first"] = {
                     "characterIndices": list(range(min(2, len(characters)))),
-                    "extras": scene_params.get("image_refs_first", {}).get("extras", []),
+                    "extras": [],
                 }
             scene.parameters = scene_params
             await session.commit()
@@ -3947,8 +3973,20 @@ async def _run_sequential_auto_gen(
 
                 # Include character image refs + scene extras
                 proj_chars = (project.settings or {}).get("characters", []) if project else []
+                # Respect per-scene character selection — same rule as the
+                # windowed-batch path above.  Empty characterIndices means
+                # "user wants no characters on this scene".
+                _seq_existing_refs = (scene.parameters or {}).get("image_refs_first", {})
+                _seq_selected_indices = _seq_existing_refs.get("characterIndices") if isinstance(_seq_existing_refs, dict) else None
+                if _seq_selected_indices is not None:
+                    _seq_selected_chars = [
+                        proj_chars[i] for i in _seq_selected_indices
+                        if isinstance(i, int) and 0 <= i < len(proj_chars)
+                    ]
+                else:
+                    _seq_selected_chars = proj_chars[:2]
                 seq_char_aids = await _resolve_character_asset_ids(
-                    proj_chars, project_id, session, max_chars=2
+                    _seq_selected_chars, project_id, session, max_chars=2
                 )
                 extra_ids = _collect_ref_asset_ids(scene, "first")
                 ref_ids = seq_char_aids + extra_ids
@@ -3962,10 +4000,13 @@ async def _run_sequential_auto_gen(
                 # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
                 scene_params["use_story_flow"] = use_story_flow
                 # Set character indices so UI shows them as selected
-                if proj_chars:
+                # Only seed default characterIndices on scenes with no prior
+                # selection — preserves user's explicit per-scene choice
+                # (including the "no characters" case via empty list).
+                if proj_chars and "image_refs_first" not in scene_params:
                     scene_params["image_refs_first"] = {
                         "characterIndices": list(range(min(2, len(proj_chars)))),
-                        "extras": scene_params.get("image_refs_first", {}).get("extras", []),
+                        "extras": [],
                     }
                 scene.parameters = scene_params
                 await session.commit()
