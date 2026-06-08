@@ -3377,6 +3377,33 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 )}
               </div>}
 
+              {/* AV-native: master is on Concept tab; per-scene only matters when master is off */}
+              {currentProject?.mode !== 'narration_images' && (
+                <label
+                  className={`flex items-center gap-2 px-3 py-2 rounded cursor-pointer text-sm transition-colors ${
+                    projectEnableModelAudio
+                      ? 'bg-purple-900/30 border border-purple-700/50 text-purple-200 cursor-default'
+                      : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                  }`}
+                  title={
+                    projectEnableModelAudio
+                      ? 'Forced ON by the project-wide "Enable Model-Generated Audio" toggle on the Concept tab. Every video in this project renders as AV-native.'
+                      : 'Per-scene opt-in: skip sending project audio to the video model for THIS scene only. Master toggle on Concept tab forces it for ALL scenes.'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={projectEnableModelAudio || useModelAudio}
+                    onChange={(e) => handleSetUseModelAudio(e.target.checked)}
+                    className="w-4 h-4 accent-purple-500"
+                  />
+                  <span>Let model generate its own audio</span>
+                  <span className={`text-xs ml-auto ${projectEnableModelAudio ? 'text-purple-300' : 'text-gray-500'}`}>
+                    {projectEnableModelAudio ? '🔒 forced ON by project setting' : '(scene-only opt-in)'}
+                  </span>
+                </label>
+              )}
+
               {/* AV-native: don't send project audio, let model render its own */}
               {currentProject?.mode !== 'narration_images' && (
                 <label

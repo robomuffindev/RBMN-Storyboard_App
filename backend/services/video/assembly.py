@@ -551,8 +551,9 @@ def _build_clip_task(
                 effect = scene.get("effect", "zoom_in_center")
                 intensity = 50
                 easing = "ease_in_out"
+            # Honor user "none" — render static without Ken Burns filter.
             if not effect or effect == "none":
-                effect = "zoom_in_center"
+                effect = "static"
                 intensity = 0
 
             common["type"] = "image"

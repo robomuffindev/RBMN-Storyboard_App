@@ -1098,26 +1098,25 @@ class JobDispatcher:
         # for free.  Only applies to image-to-video flavors; FF/LF, V2V, and
         # sequencer flavors keep their own workflow_type — adding audio gen
         # to those would require their own workflow JSON variants.
+        # AV-native routing: swap any I2V-flavored video workflow to
+        # ltx_av_native so the model generates its own audio in the same pass.
+        # Gate: project.settings.enable_model_audio is the MASTER switch — when
+        # ON, every I2V video in the project uses AV-native (no per-scene
+        # opt-in required).  Per-scene Scene.parameters.use_model_audio is
+        # still honored as a secondary opt-in when the master is OFF.
         if workflow_type in ("ltx_i2v",) and job and job.scene_id:
             try:
                 async with self._session_factory() as _av_session:
                     _av_scene = await _av_session.get(Scene, job.scene_id)
                     _av_project = await _av_session.get(Project, job.project_id) if job.project_id else None
-                    if _av_scene is None or _av_project is None:
-                        logger.debug(
-                            f"[{job.id}] AV-native routing skipped: "
-                            f"scene_found={_av_scene is not None}, "
-                            f"project_found={_av_project is not None} "
-                            f"(falling back to ltx_i2v)"
-                        )
+                    if _av_scene is None and _av_project is None:
+                        logger.debug(f"[{job.id}] AV-native routing skipped: neither scene nor project could be loaded")
                     else:
-                        _scene_av = bool((_av_scene.parameters or {}).get("use_model_audio"))
-                        _proj_av = bool((_av_project.settings or {}).get("enable_model_audio"))
-                        if _scene_av and _proj_av:
-                            logger.info(
-                                f"[{job.id}] AV-native routing: swapping workflow_type "
-                                f"ltx_i2v -> ltx_av_native (project gate ON, scene opted in)"
-                            )
+                        _scene_av = bool(((_av_scene.parameters or {}) if _av_scene else {}).get("use_model_audio"))
+                        _proj_av = bool(((_av_project.settings or {}) if _av_project else {}).get("enable_model_audio"))
+                        if _proj_av or _scene_av:
+                            _reason = ("project gate ON (forces all video to AV-native)" if _proj_av else "scene opted in (project gate OFF)")
+                            logger.info(f"[{job.id}] AV-native routing: swapping workflow_type ltx_i2v -> ltx_av_native — {_reason}")
                             workflow_type = "ltx_av_native"
                             params["workflow_type"] = workflow_type
                             params["skip_audio_mux"] = True

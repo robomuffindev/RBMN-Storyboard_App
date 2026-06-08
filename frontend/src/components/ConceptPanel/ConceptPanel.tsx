@@ -89,16 +89,14 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   // (which only influences the LLM prompt).  Values: "" / "bw" /
   // "grayscale" / "sepia".  Per-scene image_color_filter overrides.
   const [globalImageColorFilter, setGlobalImageColorFilter] = useState('');
-  // Model-generated audio (LTX 2.3 AV-native).  Global gate: when ON,
-  // scenes whose Video tab has "Let model generate its own audio" set
-  // are dispatched via the AV-native workflow (no project audio in,
-  // model produces speech / SFX / ambient in the same pass).  Mixer
-  // slider controls level for the resulting model-audio channel.
+  // Model-generated audio (LTX 2.3 AV-native).  When ON, every I2V video
+  // render in this project uses the AV-native workflow — no per-scene
+  // opt-in required.  Mixer slider controls level for the resulting
+  // model-audio channel layered with narration + backing tracks.
   const [enableModelAudio, setEnableModelAudio] = useState(false);
   const [modelAudioVolume, setModelAudioVolume] = useState(1.0);
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
-  // Global Character Library browse dialog
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
   const queryClient = useQueryClient();
@@ -238,6 +236,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setKenBurnsAllowedEffects(conceptData.ken_burns_allowed_effects || []);
       setGlobalColorOverride(conceptData.global_color_override || '');
       setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
+      setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
+      setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
       setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
       setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
       setCustomColorPalette(conceptData.custom_color_palette || '');
@@ -565,6 +565,54 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           <p className="text-[10px] text-gray-500 mt-1">
             Runs FFmpeg over every newly-generated image. Per-scene override available on each Image tab.
           </p>
+        </div>
+
+        {/* Model-Generated Audio (LTX 2.3 AV-native) — master toggle.
+            When ON, every I2V video render in the project uses AV-native
+            regardless of any per-scene toggle.  When OFF, scenes can opt in
+            individually via the Video tab checkbox. */}
+        <div className="bg-gray-800/40 border border-gray-700/60 rounded p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <input
+              type="checkbox"
+              id="enable_model_audio"
+              checked={enableModelAudio}
+              onChange={(e) => { setEnableModelAudio(e.target.checked); markDirty(); }}
+              className="rounded border-gray-700 text-purple-500 focus:ring-purple-500"
+            />
+            <label htmlFor="enable_model_audio" className="text-xs font-medium text-gray-200">
+              Enable Model-Generated Audio (LTX 2.3 AV-native)
+            </label>
+          </div>
+          <p className="text-[10px] text-gray-500 mb-1">
+            When on, <strong className="text-purple-200">every</strong> I2V video render in this project will use the AV-native LTX 2.3 workflow —
+            no per-scene opt-in required. The model generates its own speech / SFX / ambient and the result
+            is layered with your narration and backing tracks at the volume below.
+          </p>
+          <p className="text-[10px] text-gray-500 mb-2">
+            (You can still flip the per-scene "Let model generate own audio" checkbox on the Video tab to
+            opt a single scene in when this master toggle is off.)
+          </p>
+          {enableModelAudio && (
+            <div>
+              <label className="block text-[10px] text-gray-400 mb-1">
+                Model Audio Mixer Volume: <span className="text-purple-300">{modelAudioVolume.toFixed(2)}×</span>
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.05"
+                value={modelAudioVolume}
+                onChange={(e) => { setModelAudioVolume(parseFloat(e.target.value)); markDirty(); }}
+                className="w-full accent-purple-500"
+              />
+              <p className="text-[10px] text-gray-600 mt-1">
+                Applied to the model-audio channel only — narration / backing tracks unchanged.
+                Set to 0 to mute the model audio without disabling generation.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Model-Generated Audio (LTX 2.3 AV-native) — global gate + mixer level.
@@ -1027,6 +1075,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
               >
                 🎭 Library
               </button>
+              <button
+                onClick={() => setLibraryOpen(true)}
+                className="flex items-center gap-1 px-2 py-1 bg-purple-800/40 hover:bg-purple-700/50 border border-purple-700/50 rounded text-xs text-purple-200 transition-colors"
+                title="Browse the global character library and import saved characters into this project"
+              >
+                🎭 Library
+              </button>
             </div>
           </div>
 
@@ -1139,6 +1194,14 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           character={creatorOpen.character}
           onClose={() => setCreatorOpen(null)}
           onSave={handleCreatorSave}
+        />
+      )}
+
+      {/* Global Character Library — browse + import */}
+      {libraryOpen && (
+        <GlobalCharacterLibraryModal
+          projectId={projectId}
+          onClose={() => setLibraryOpen(false)}
         />
       )}
 

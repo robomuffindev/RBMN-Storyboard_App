@@ -1151,6 +1151,34 @@ def apply_kenburns(
     Raises:
         RuntimeError: If processing fails
     """
+    # Static path — user explicitly chose "no movement".  Emit a clean
+    # image-to-video clip with NO zoompan/pan filter so there is zero
+    # frame drift, zero subtle motion artifacts.  Just the image, scaled
+    # and padded to fit the target geometry, held for `duration` seconds.
+    if effect == "static" or (effect in (None, "", "none") and intensity == 0):
+        logger.info(f"Image clip STATIC (no movement): {duration}s @ {width}x{height}")
+        import subprocess
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,format=yuv420p,fps={fps}"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loop", "1", "-i", image_path,
+            "-vf", vf,
+            "-t", f"{duration:.6f}",
+            *_gpu.get_encode_flags(crf=crf),
+            "-pix_fmt", "yuv420p",
+            "-force_key_frames", "expr:eq(n,0)",
+            "-g", str(fps),
+            "-bf", "0",
+            "-an",
+            output_path,
+        ]
+        _run_ffmpeg(cmd, "apply_kenburns/static")
+        logger.info(f"Static image clip written: {output_path}")
+        return
+
     logger.info(f"Applying Ken Burns ({effect}, intensity={intensity}, easing={easing}): {duration}s @ {width}x{height}")
 
     # Scale intensity factor: 0-100 → 0.0-1.0

@@ -604,7 +604,7 @@ async def _build_scene_dicts(
                 "image_path": resolved_image,
                 "duration": sc.end_time - sc.start_time,
                 "scene_source_type": "image",
-                "effect": effect if effect != "none" else "zoom_in_center",
+                "effect": effect or "none",  # honor user choice — assembly renders static when effect is none
                 "image_movement": movement_dict,
                 "transition_clip_path": transition_clip_resolved,
                 "transition_in": scene_transition_in,
@@ -638,7 +638,7 @@ async def _build_scene_dicts(
                 "image_path": resolved_image,
                 "duration": sc.end_time - sc.start_time,
                 "scene_source_type": "image",
-                "effect": effect if effect != "none" else "zoom_in_center",
+                "effect": effect or "none",  # honor user choice — assembly renders static when effect is none
                 "image_movement": movement_dict,
                 "transition_clip_path": transition_clip_resolved,
                 "transition_in": scene_transition_in,
