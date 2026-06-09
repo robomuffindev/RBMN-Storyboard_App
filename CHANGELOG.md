@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.8.11] - 2026-06-08
+
+### Fixed — Chapter backfill failed for 4 projects at every startup
+
+User reported log spam at backend boot:
+```
+WARNING: Backfill default chapter for project ... skipped:
+(sqlite3.IntegrityError) NOT NULL constraint failed: chapters.description
+```
+…repeated for 4 different projects, every single startup. The user's affected projects had **no default chapter row at all** — broken chapter UI, no chapter scope filtering, no chapter-scoped Auto-Gen / Export for those projects.
+
+**Root cause** — the startup migration at `backend/services/shortcode.py:311-329` builds the default "Chapter 1" row with an INSERT that omits `description`, `character_focus`, and `style_notes`. These columns were added in 1.8.0 as part of the Chapter Direction Panel and the migration was `ALTER TABLE chapters ADD COLUMN description TEXT DEFAULT ''`. On some users' DBs the column ended up `NOT NULL` without an effective runtime default — likely because the column was first created by a `SQLModel.metadata.create_all` against a fresh DB on a version that already had the field in the model, where SQLModel translated `Field(default="")` to `NOT NULL` but the SQLite engine didn't always honor the Python-side default for inserts that omit the column. Result: `IntegrityError` every time the backfill ran, every startup forever.
+
+**Fix** — `backend/services/shortcode.py` — INSERT now includes the three fields explicitly:
+```sql
+INSERT INTO chapters (... description, character_focus, style_notes, ...)
+VALUES (... '', '[]', '', ...)
+```
+Works regardless of which schema variant the user's DB has. The 4 projects that have been failing for some time will now get their default chapter created on next backend start, unblocking their chapter UI.
+
+### Diagnostic — what the user's log was telling us
+
+For each affected project, the user was seeing:
+```
+WARNING: Backfill default chapter for project <pid> skipped:
+(sqlite3.IntegrityError) NOT NULL constraint failed: chapters.description
+```
+Translation: "Backend started. Tried to create a default Chapter 1 for project X. SQLite refused because the description column requires a value and we didn't provide one. Skipping — leaving project X without a chapter." Repeated every boot because the migration tries again every time. The fix makes the INSERT explicit so it succeeds.
+
+The other warnings/errors in the user's log were **expected and harmless**:
+- `Worker http://127.0.0.1:8188: Failed to connect ...` — local ComfyUI not running, fine if the user has remote workers (they do: `192.168.68.117:8188` + `192.168.68.106:8188` both connected successfully).
+- `Orphan sweep: no stale jobs (>1h old) found` — orphan sweep ran clean, nothing to do.
+- `Demucs GPU: CUDA available (NVIDIA GeForce RTX 5070)` — GPU detected, good.
+
+### Verified
+
+- `backend/services/shortcode.py` parses OK.
+- INSERT now contains `description, character_focus, style_notes` columns + empty defaults.
+- Existing INSERTs that already work (fresh DBs with the column defaults applied) continue to work — adding explicit values is always safe.
+- VERSION → 1.8.11. `pyproject.toml`, `backend/main.py` FastAPI version updated.
+
+---
+
+# Changelog
+
 ## [1.8.10] - 2026-06-07
 
 ### Fixed — Two-pass silently downgraded to single-pass with no characters

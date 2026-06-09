@@ -308,15 +308,26 @@ async def backfill_missing_shortcodes(
             tr = time_rows.fetchone()
             start_t = float(tr[0]) if tr and tr[0] is not None else 0.0
             end_t = float(tr[1]) if tr and tr[1] is not None else 0.0
+            # NOTE: include description, character_focus, style_notes
+            # explicitly even though they have DEFAULT '' / '[]' in newer
+            # schemas — some users' DBs have these columns as NOT NULL
+            # without an effective default (added in 1.8.0 as part of the
+            # Chapter Direction Panel), so omitting them causes
+            # IntegrityError("NOT NULL constraint failed: chapters.description")
+            # at backfill time and leaves the project with no default chapter
+            # (broken chapter UI for that project until manually created).
             await conn.execute(
                 text(
                     "INSERT INTO chapters "
                     "(id, project_id, parent_chapter_id, order_index, depth, "
                     " name, short_code, color, auto_generated, source, "
                     " start_time, end_time, tags, chapter_metadata, "
+                    " description, character_focus, style_notes, "
                     " created_at, updated_at) "
                     "VALUES (:id, :pid, NULL, 0, 0, :name, :sc, '#7c3aed', 1, 'auto', "
-                    " :st, :et, '[]', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    " :st, :et, '[]', '{}', "
+                    " '', '[]', '', "
+                    " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ),
                 {
                     "id": ch_id,
