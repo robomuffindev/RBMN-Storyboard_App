@@ -7,7 +7,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import selectinload
@@ -600,25 +600,115 @@ async def update_scene(
         )
 
 
+class SceneDeleteRequest(BaseModel):
+    """Body for DELETE /scenes/{id} — controls how the deleted time slot is
+    redistributed across neighboring scenes.
+
+    The default ("previous") matches the legacy AppLayout client-side
+    behavior so callers that don't send a body get the same result they
+    used to.  New callers can pass "next" to extend the following scene
+    backward, or "gap" to leave a hole in the timeline (export will
+    render a silent stretch on the previous scene's last frame).
+    """
+    merge_target: str = Field(default="previous")  # "previous" | "next" | "gap"
+
+
+async def _reslice_audio_for_scene(scene: Scene, project_id: UUID, session: AsyncSession) -> None:
+    """Best-effort: re-slice the master audio for a scene whose start/end
+    just changed (because the deleted scene's time slot was absorbed).
+    Failure is non-fatal — the scene still works, just without a
+    pre-sliced clip until the user re-runs audio analysis."""
+    try:
+        from sqlmodel import select as _audio_select
+        from backend.database.models import Asset, AssetType
+        from pathlib import Path
+        from backend.config import settings as app_settings
+        # Find the master audio asset
+        _stmt = (
+            _audio_select(Asset)
+            .where(Asset.project_id == project_id)
+            .where(Asset.asset_type.in_([AssetType.MUSIC, AssetType.NARRATION]))
+            .order_by(Asset.created_at.desc())  # type: ignore
+        )
+        master = (await session.execute(_stmt)).scalars().first()
+        if not master:
+            return
+        # Resolve master audio absolute path.  Asset.rel_path is usually
+        # already project-id-prefixed ("<pid>/uploads/x.wav") but legacy
+        # rows sometimes store it as just a filename.  Try both shapes
+        # so the function works regardless of how the row was created.
+        master_abs = app_settings.project_dir / master.rel_path
+        if not master_abs.exists():
+            master_abs = app_settings.project_dir / str(project_id) / master.rel_path
+        if not master_abs.exists():
+            return
+        # Output: audio_clips/scene_NNN_START_END.wav in the project dir
+        clips_dir = app_settings.project_dir / str(project_id) / "audio_clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        out_name = f"scene_{scene.order_index + 1:03d}_{scene.start_time:.2f}_{scene.end_time:.2f}.wav"
+        out_path = clips_dir / out_name
+        # Use ffmpeg to slice
+        import subprocess
+        dur = max(0.0, scene.end_time - scene.start_time)
+        if dur <= 0:
+            return
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{scene.start_time:.3f}", "-t", f"{dur:.3f}",
+             "-i", str(master_abs), "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2",
+             str(out_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0 and out_path.exists():
+            sc_params = dict(scene.parameters or {})
+            sc_params["audio_clip_path"] = str(out_path.relative_to(app_settings.project_dir))
+            scene.parameters = sc_params
+    except Exception as _audio_err:
+        logger.warning(f"Audio re-slice for scene {scene.id} failed (non-fatal): {_audio_err}")
+
+
 @router.delete(
     "/{scene_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete scene",
+    summary="Delete scene with merge-target control",
 )
 async def delete_scene(
     project_id: UUID,
     scene_id: UUID,
+    request: Optional[SceneDeleteRequest] = None,
     session: AsyncSession = Depends(get_session),
 ) -> None:
-    """Delete a scene and all associated data.
+    """Delete a scene and redistribute its time slot.
 
-    Args:
-        project_id: UUID of the project.
-        scene_id: UUID of the scene.
-        session: Database session.
+    Body (optional, JSON):
+        {"merge_target": "previous" | "next" | "gap"}
 
-    Raises:
-        HTTPException: If project or scene not found.
+    Behavior:
+        - "previous" (DEFAULT): previous scene's end_time is extended to
+          cover the deleted scene's time range.  Lyrics in that range
+          are absorbed automatically (Whisper words are stored separately
+          and queried by time range at export time).  Audio clip for the
+          previous scene is re-sliced from master audio.
+        - "next": next scene's start_time is moved backward to cover the
+          deleted scene's range.  Same audio re-slice + lyric absorption.
+        - "gap": just delete.  Other scenes are unchanged; a hole remains
+          in the timeline that the export pipeline renders as a silent
+          freeze-frame on the previous scene's last frame.
+
+    Edge cases:
+        - Deleting the FIRST scene with merge_target="previous" → auto
+          falls back to "next".
+        - Deleting the LAST scene with merge_target="next" → auto falls
+          back to "previous".
+        - Deleting the only scene → merge_target ignored (no neighbors).
+
+    After delete:
+        - order_index on remaining scenes is re-numbered contiguously
+          (0, 1, 2, ...) so the Scenes panel + Timeline render in stable
+          order without gaps in the index sequence.
+        - The deleted scene's generated assets (images, videos) are left
+          in the project's asset library — the user can re-use them.
+        - The export cache is invalidated by the cache-key dependency
+          on scene durations (no explicit wipe needed).
     """
     try:
         await _get_project_or_404(project_id, session)
@@ -630,17 +720,105 @@ async def delete_scene(
                 detail=f"Scene {scene_id} not found",
             )
 
+        merge_target = (request.merge_target if request else "previous").lower()
+        if merge_target not in ("previous", "next", "gap"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid merge_target {merge_target!r}. Use 'previous', 'next', or 'gap'.",
+            )
+
+        # Load all scenes for this project ordered by order_index so we
+        # can find the previous + next neighbors deterministically.
+        from sqlmodel import select as _del_select
+        _all_stmt = (
+            _del_select(Scene)
+            .where(Scene.project_id == project_id)
+            .order_by(Scene.order_index.asc())  # type: ignore
+        )
+        all_scenes = list((await session.execute(_all_stmt)).scalars().all())
+        idx = next((i for i, s in enumerate(all_scenes) if s.id == scene.id), -1)
+        prev_scene = all_scenes[idx - 1] if idx > 0 else None
+        next_scene = all_scenes[idx + 1] if 0 <= idx < len(all_scenes) - 1 else None
+
+        # Resolve merge target with auto-fallback at edges
+        effective_target = merge_target
+        if merge_target == "previous" and prev_scene is None:
+            effective_target = "next" if next_scene is not None else "gap"
+            logger.info(
+                f"Scene delete: merge_target=previous on first scene → falling back to {effective_target!r}"
+            )
+        elif merge_target == "next" and next_scene is None:
+            effective_target = "previous" if prev_scene is not None else "gap"
+            logger.info(
+                f"Scene delete: merge_target=next on last scene → falling back to {effective_target!r}"
+            )
+
+        # Apply the merge to the absorbing scene BEFORE deleting (so the
+        # foreign-key cascade can't interfere).
+        absorbing_scene: Optional[Scene] = None
+        if effective_target == "previous" and prev_scene is not None:
+            prev_scene.end_time = scene.end_time
+            sc_params = dict(prev_scene.parameters or {})
+            sc_params["extended_via_delete"] = True
+            sc_params["extended_at"] = (sc_params.get("extended_at", []) + [{
+                "from_scene_id": str(scene.id),
+                "from_scene_name": scene.name,
+                "absorbed_seconds": round(scene.end_time - scene.start_time, 3),
+            }])[-10:]  # keep last 10
+            prev_scene.parameters = sc_params
+            absorbing_scene = prev_scene
+            logger.info(
+                f"Scene delete: merged into previous scene {prev_scene.id} "
+                f"({prev_scene.name}) — new end_time={prev_scene.end_time:.2f}s"
+            )
+        elif effective_target == "next" and next_scene is not None:
+            next_scene.start_time = scene.start_time
+            sc_params = dict(next_scene.parameters or {})
+            sc_params["extended_via_delete"] = True
+            sc_params["extended_at"] = (sc_params.get("extended_at", []) + [{
+                "from_scene_id": str(scene.id),
+                "from_scene_name": scene.name,
+                "absorbed_seconds": round(scene.end_time - scene.start_time, 3),
+            }])[-10:]
+            next_scene.parameters = sc_params
+            absorbing_scene = next_scene
+            logger.info(
+                f"Scene delete: merged into next scene {next_scene.id} "
+                f"({next_scene.name}) — new start_time={next_scene.start_time:.2f}s"
+            )
+        else:
+            logger.info(f"Scene delete: leaving gap ({scene.end_time - scene.start_time:.2f}s)")
+
+        # Best-effort: re-slice audio for the absorbing scene so the
+        # pre-sliced clip on disk matches the new time range.
+        if absorbing_scene is not None:
+            await _reslice_audio_for_scene(absorbing_scene, project_id, session)
+
+        # Delete the scene (cascades to TimelinePosition, StemSelection,
+        # GenerationHistory, Job rows via the cascade_delete=True on the
+        # Scene model)
         await session.delete(scene)
+
+        # Re-number order_index on remaining scenes so the sequence is
+        # contiguous (0, 1, 2, ...).  Skip the just-deleted scene.
+        remaining = [s for s in all_scenes if s.id != scene_id]
+        for new_idx, s in enumerate(remaining):
+            if s.order_index != new_idx:
+                s.order_index = new_idx
+
         await session.commit()
 
-        logger.info(f"Deleted scene {scene_id}")
+        logger.info(
+            f"Deleted scene {scene_id} (merge_target={merge_target}, "
+            f"effective={effective_target}, remaining={len(remaining)})"
+        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting scene {scene_id}: {e}")
+        logger.error(f"Error deleting scene {scene_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete scene",
+            detail=f"Failed to delete scene: {e}",
         )
 
 

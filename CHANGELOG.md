@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.8.12] - 2026-06-08
+
+### Added — Scene delete dialog with merge-target selection
+
+User feedback: *"I think we def may want to think through what happens when you scene delete and ask the user if they want the time and lyric to move to the previous or next scene."*
+
+Before: clicking Delete on a scene fired a browser `window.confirm` and the AppLayout client did a quick "expand neighbor + delete" sequence in two API calls. No preview of what was about to be deleted, no choice of where the time slot should go, no re-numbering of `order_index`, no re-slicing of the absorbing scene's audio, no audit log on the absorbing scene.
+
+Now: a proper `SceneDeleteModal` opens with three radio choices.
+
+| Choice | Behavior |
+|---|---|
+| **Add to previous scene** (default) | `prev.end_time = deleted.end_time` — the previous scene absorbs the deleted time range. Lyrics that fell in the range are picked up automatically (Whisper words are time-anchored, not scene-anchored). |
+| **Add to next scene** | `next.start_time = deleted.start_time` — the next scene extends backward to cover the range. |
+| **Just delete (leave a gap)** | No neighbor changes. Export pipeline renders the gap as a silent freeze-frame on the previous scene's last frame. |
+
+First/last scene edge cases auto-disable the invalid option. Solo-scene case offers only "leave a gap" with a warning that the project will be scene-less.
+
+### Backend — atomic delete + merge in a single endpoint
+
+`backend/api/scenes.py` `DELETE /api/projects/{pid}/scenes/{sid}`:
+
+- New optional JSON body: `{"merge_target": "previous" | "next" | "gap"}` — defaults to `"previous"` so callers that don't send a body get the same merge semantics as before.
+- Loads the project's scenes ordered by `order_index`, finds the deleted scene's neighbors.
+- Edge auto-fallback: `previous` on the first scene falls through to `next`; `next` on the last scene falls through to `previous`; solo scene drops to `gap`.
+- When merging, the absorbing scene's `start_time`/`end_time` updates and gets two scene-parameter flags so the UI can show "this scene was extended":
+  - `extended_via_delete = true`
+  - `extended_at = [{from_scene_id, from_scene_name, absorbed_seconds}, ...]` (rolling last 10 entries)
+- Best-effort audio re-slice: ffmpeg subprocess cuts a fresh per-scene WAV at the new time range and updates `parameters.audio_clip_path`. Failure is non-fatal — logs a warning and the delete still succeeds; the user can re-run audio analysis to regenerate the clip.
+- Cascade delete via the Scene model relationships handles TimelinePosition, StemSelection, GenerationHistory, Job rows automatically.
+- After delete, `order_index` is re-numbered on the remaining scenes so the sequence is contiguous (0, 1, 2, …) — no gaps in the index even after multiple deletes.
+- All in one DB transaction — the merge, re-slice, delete, and re-number commit together so a failure rolls back atomically.
+
+### Frontend
+
+- **`frontend/src/api/client.ts`** — `deleteScene(projectId, sceneId, opts?: { merge_target })` with new `SceneMergeTarget` type. Defaults to `"previous"` so existing call sites without the new arg keep working.
+- **`frontend/src/components/SceneEditor/SceneDeleteModal.tsx`** — new component. Shows the scene's time range + duration, a lyric/narration preview for the deleted span (so the user can see what's about to be absorbed), three radio options with live previews of the resulting neighbor durations, and a note about the asset library + video-mismatch caveat.
+- **`frontend/src/components/Layout/AppLayout.tsx`** — `handleDeleteScene` now opens the modal instead of calling `window.confirm`. New `handleDeleteSceneConfirm` callback fires the single backend call with the chosen `merge_target`, then invalidates `['scenes', id]`, `['lyrics', id]`, and `['chapters', id]` so React Query refetches everything that could have been affected by the merge.
+
+### Mode-agnostic
+
+Works the same in `music_video`, `narration_video`, and `narration_images` — the merge logic only touches `start_time`/`end_time` and the per-scene audio clip. No mode-specific branches.
+
+### Verified
+
+- `backend/api/scenes.py` parses OK; one `delete_scene` async def, one `_reslice_audio_for_scene` helper (no duplicates).
+- Frontend TypeScript compiles clean.
+- The 3 cascade relationships on Scene (TimelinePosition, StemSelection, GenerationHistory, Job) handle child-row cleanup automatically — no manual DELETE statements needed.
+- Backward-compat: callers that don't send a body (and there's exactly one — `AppLayout.tsx`, which now always sends the body via the new modal) default to `merge_target="previous"` which matches the prior behavior.
+- Solo-scene delete handled (modal shows "leave a gap" with a warning; backend's `effective_target` falls through to `gap` regardless of input).
+- First-scene + last-scene edge cases handled both in modal (radio disable) and backend (auto-fallback).
+
+### Changed
+
+- VERSION → 1.8.12. `pyproject.toml`, `backend/main.py` FastAPI version updated.
+
+---
+
+# Changelog
+
 ## [1.8.11] - 2026-06-08
 
 ### Fixed — Chapter backfill failed for 4 projects at every startup

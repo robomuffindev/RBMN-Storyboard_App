@@ -5,6 +5,7 @@ import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, Gri
 import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks, listExports, deleteExportFile, convertToNarrationVideo } from '@/api/client';
 import type { ExportFileInfo } from '@/api/client';
 import { useAppStore } from '@/store';
+import SceneDeleteModal from '@/components/SceneEditor/SceneDeleteModal';
 import type { Scene } from '@/types/index';
 import Timeline from '@/components/Timeline/Timeline';
 import SceneEditor from '@/components/SceneEditor/SceneEditor';
@@ -457,51 +458,59 @@ export default function AppLayout() {
     }
   }, [id, queryClient]);
 
-  // Delete a scene and redistribute its time to the adjacent scene
-  const handleDeleteScene = useCallback(async () => {
+  // Scene-delete modal target (null when modal closed)
+  const [deleteTarget, setDeleteTarget] = useState<Scene | null>(null);
+
+  // Delete a scene — opens the SceneDeleteModal which lets the user pick
+  // how the deleted time slot is redistributed (merge into previous, next,
+  // or leave a gap).  The actual backend delete + merge + audio re-slice
+  // happens server-side inside the DELETE endpoint based on the
+  // merge_target body, so the frontend only needs to fire one API call
+  // and refresh queries.
+  const handleDeleteScene = useCallback(() => {
     if (!id) return;
     const store = useAppStore.getState();
     const scene = store.activeScene;
     if (!scene) return;
+    setDeleteTarget(scene);
+  }, [id]);
 
-    if (!window.confirm(`Delete scene "${scene.name || 'Untitled'}"? This is permanent and cannot be undone.`)) return;
-
+  // Confirmation callback from the modal — does the actual delete via the
+  // backend, which handles the merge atomically.  Then refresh state +
+  // pick a new active scene so the user isn't stranded on a deleted one.
+  const handleDeleteSceneConfirm = useCallback(async (
+    target: 'previous' | 'next' | 'gap',
+  ) => {
+    if (!id || !deleteTarget) return;
+    const store = useAppStore.getState();
     const sortedScenes = [...(stableScenes as Scene[])].sort((a, b) => a.order_index - b.order_index);
-    const idx = sortedScenes.findIndex(s => s.id === scene.id);
-    if (idx === -1) return;
-
+    const idx = sortedScenes.findIndex(s => s.id === deleteTarget.id);
     try {
-      // Expand the adjacent scene to fill the gap
-      if (sortedScenes.length > 1) {
-        if (idx > 0) {
-          // Expand the previous scene's end_time to cover deleted scene
-          const prev = sortedScenes[idx - 1];
-          await updateScene(id, prev.id, { end_time: scene.end_time });
-          store.updateSceneInStore(prev.id, { end_time: scene.end_time });
-        } else {
-          // Deleting first scene — expand the next scene's start_time
-          const next = sortedScenes[idx + 1];
-          await updateScene(id, next.id, { start_time: scene.start_time });
-          store.updateSceneInStore(next.id, { start_time: scene.start_time });
-        }
-      }
-
-      // Delete the scene
-      await deleteScene(id, scene.id);
-      store.removeScene(scene.id);
-
-      // Select the nearest scene
-      const remaining = sortedScenes.filter(s => s.id !== scene.id);
-      if (remaining.length > 0) {
+      // Backend handles: merge into neighbor, re-slice audio, re-number
+      // order_index, and the actual cascade delete.
+      await deleteScene(id, deleteTarget.id, { merge_target: target });
+      store.removeScene(deleteTarget.id);
+      // Pick a new active scene (nearest neighbor)
+      const remaining = sortedScenes.filter(s => s.id !== deleteTarget.id);
+      if (remaining.length > 0 && idx >= 0) {
         const newActive = remaining[Math.min(idx, remaining.length - 1)];
         store.setActiveScene(newActive);
+      } else {
+        store.setActiveScene(null);
       }
-
+      // Bust the scenes query so React Query refetches with the absorbed
+      // neighbor's new start/end times + the renumbered order_index.
       queryClient.invalidateQueries({ queryKey: ['scenes', id] });
+      // Lyrics + chapters may have been affected by the merge — refetch.
+      queryClient.invalidateQueries({ queryKey: ['lyrics', id] });
+      queryClient.invalidateQueries({ queryKey: ['chapters', id] });
+      setDeleteTarget(null);
     } catch (err) {
       console.error('Failed to delete scene:', err);
+      // Surface a brief error and keep the modal open so the user can retry
+      alert('Failed to delete scene. See console for details.');
     }
-  }, [id, stableScenes, queryClient]);
+  }, [id, deleteTarget, stableScenes, queryClient]);
 
   // Render Preview handler
   const handleRenderPreview = useCallback(async () => {
@@ -1390,6 +1399,24 @@ export default function AppLayout() {
         {/* Both timelines stay mounted (to preserve WaveSurfer playback state); CSS hides the inactive one */}
         <div className={`flex-1 overflow-hidden ${activeTimeline !== 'scenes' && project && project.mode !== 'music_video' && id ? 'hidden' : ''}`}>
           <Timeline onSplitScene={handleSplitScene} onBoundaryDrag={handleBoundaryDrag} onDeleteScene={handleDeleteScene} />
+          {deleteTarget && (
+            <SceneDeleteModal
+              scene={deleteTarget as any}
+              prevScene={(() => {
+                const sorted = [...(stableScenes as Scene[])].sort((a, b) => a.order_index - b.order_index);
+                const i = sorted.findIndex(s => s.id === deleteTarget.id);
+                return i > 0 ? (sorted[i - 1] as any) : null;
+              })()}
+              nextScene={(() => {
+                const sorted = [...(stableScenes as Scene[])].sort((a, b) => a.order_index - b.order_index);
+                const i = sorted.findIndex(s => s.id === deleteTarget.id);
+                return i >= 0 && i < sorted.length - 1 ? (sorted[i + 1] as any) : null;
+              })()}
+              allWords={(lyricsData as any)?.words || []}
+              onConfirm={handleDeleteSceneConfirm}
+              onCancel={() => setDeleteTarget(null)}
+            />
+          )}
         </div>
         {project && project.mode !== 'music_video' && id && (
           <div className={`flex-1 overflow-hidden ${activeTimeline !== 'backing' ? 'hidden' : ''}`}>

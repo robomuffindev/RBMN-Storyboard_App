@@ -72,8 +72,15 @@ export const getScene = (projectId: string, sceneId: string) =>
 export const updateScene = (projectId: string, sceneId: string, data: Partial<Scene>) =>
   api.put<Scene>(`/projects/${projectId}/scenes/${sceneId}`, data);
 
-export const deleteScene = (projectId: string, sceneId: string) =>
-  api.delete(`/projects/${projectId}/scenes/${sceneId}`);
+export type SceneMergeTarget = 'previous' | 'next' | 'gap';
+export const deleteScene = (
+  projectId: string,
+  sceneId: string,
+  opts: { merge_target?: SceneMergeTarget } = {},
+) =>
+  api.delete(`/projects/${projectId}/scenes/${sceneId}`, {
+    data: { merge_target: opts.merge_target || 'previous' },
+  });
 
 export const reorderScenes = (projectId: string, order: { scene_id: string; order_index: number }[]) =>
   api.put(`/projects/${projectId}/scenes/reorder`, order);
