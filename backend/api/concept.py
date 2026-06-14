@@ -95,6 +95,14 @@ class ConceptData(BaseModel):
     enable_model_audio: bool = False
     # Mixer level for the Model Audio channel.  0.0 = mute, 1.0 = unity.
     model_audio_volume: float = 1.0
+    # Master include/exclude for the final export.  When False, every
+    # AV-native scene's model audio is excluded from the rendered MP4
+    # even though `enable_model_audio` is on (so future video generations
+    # keep producing model audio, but the user can A/B their export
+    # without re-running anything).  Per-scene override on
+    # `Scene.parameters.include_model_audio_in_export` lets the user
+    # silence individual scenes.
+    include_model_audio_in_export: bool = True
 
 
 class SceneFlowIdea(BaseModel):
@@ -177,6 +185,9 @@ async def get_concept(
         # Symmetric clamp with the PUT side so a hand-edited DB value can't
         # crash or distort the UI slider (range 0..2×).
         model_audio_volume=max(0.0, min(2.0, float(s.get("model_audio_volume", 1.0)))),
+        # Default True so older projects (saved before this field existed)
+        # keep their model audio in exports — opt-out, not opt-in.
+        include_model_audio_in_export=bool(s.get("include_model_audio_in_export", True)),
     )
 
 
@@ -229,6 +240,7 @@ async def save_concept(
     # Model-generated audio (LTX 2.3 AV-native) — global gate + mixer level
     settings["enable_model_audio"] = bool(req.enable_model_audio)
     settings["model_audio_volume"] = max(0.0, min(2.0, float(req.model_audio_volume)))
+    settings["include_model_audio_in_export"] = bool(req.include_model_audio_in_export)
     project.settings = settings
     await session.commit()
     await session.refresh(project)

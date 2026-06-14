@@ -483,14 +483,19 @@ export default function AppLayout() {
   ) => {
     if (!id || !deleteTarget) return;
     const store = useAppStore.getState();
-    const sortedScenes = [...(stableScenes as Scene[])].sort((a, b) => a.order_index - b.order_index);
+    // Scope to the deleted scene's chapter so the post-delete "new active
+    // scene" pick stays inside the chapter the user was drilled into.
+    const targetChapterId = (deleteTarget as any).chapter_id ?? null;
+    const sortedScenes = (stableScenes as Scene[])
+      .filter(s => ((s as any).chapter_id ?? null) === targetChapterId)
+      .sort((a, b) => a.order_index - b.order_index);
     const idx = sortedScenes.findIndex(s => s.id === deleteTarget.id);
     try {
       // Backend handles: merge into neighbor, re-slice audio, re-number
       // order_index, and the actual cascade delete.
       await deleteScene(id, deleteTarget.id, { merge_target: target });
       store.removeScene(deleteTarget.id);
-      // Pick a new active scene (nearest neighbor)
+      // Pick a new active scene (nearest neighbor inside the same chapter)
       const remaining = sortedScenes.filter(s => s.id !== deleteTarget.id);
       if (remaining.length > 0 && idx >= 0) {
         const newActive = remaining[Math.min(idx, remaining.length - 1)];
@@ -1402,15 +1407,26 @@ export default function AppLayout() {
           {deleteTarget && (
             <SceneDeleteModal
               scene={deleteTarget as any}
+              // Neighbors must be scoped to the deleted scene's chapter so
+              // the modal preview matches what the backend will actually do
+              // (the backend filters by chapter_id too — keep these in sync).
               prevScene={(() => {
-                const sorted = [...(stableScenes as Scene[])].sort((a, b) => a.order_index - b.order_index);
-                const i = sorted.findIndex(s => s.id === deleteTarget.id);
-                return i > 0 ? (sorted[i - 1] as any) : null;
+                const target = deleteTarget as Scene;
+                const targetChapterId = (target as any).chapter_id ?? null;
+                const scoped = (stableScenes as Scene[])
+                  .filter(s => ((s as any).chapter_id ?? null) === targetChapterId)
+                  .sort((a, b) => a.order_index - b.order_index);
+                const i = scoped.findIndex(s => s.id === target.id);
+                return i > 0 ? (scoped[i - 1] as any) : null;
               })()}
               nextScene={(() => {
-                const sorted = [...(stableScenes as Scene[])].sort((a, b) => a.order_index - b.order_index);
-                const i = sorted.findIndex(s => s.id === deleteTarget.id);
-                return i >= 0 && i < sorted.length - 1 ? (sorted[i + 1] as any) : null;
+                const target = deleteTarget as Scene;
+                const targetChapterId = (target as any).chapter_id ?? null;
+                const scoped = (stableScenes as Scene[])
+                  .filter(s => ((s as any).chapter_id ?? null) === targetChapterId)
+                  .sort((a, b) => a.order_index - b.order_index);
+                const i = scoped.findIndex(s => s.id === target.id);
+                return i >= 0 && i < scoped.length - 1 ? (scoped[i + 1] as any) : null;
               })()}
               allWords={(lyricsData as any)?.words || []}
               onConfirm={handleDeleteSceneConfirm}

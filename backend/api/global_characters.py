@@ -26,6 +26,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import select
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings as app_settings
@@ -255,6 +256,21 @@ async def list_global_characters(
     result = await session.execute(stmt)
     rows = result.scalars().all()
 
+    # Single GROUP BY count for every character in the result set.  Beats
+    # the previous N+1 (load-and-len) loop both for query count and for
+    # memory — we no longer hydrate every GlobalCharacterVersion row just
+    # to throw it away.
+    count_stmt = (
+        select(
+            GlobalCharacterVersion.global_character_id,
+            func.count(GlobalCharacterVersion.id),
+        )
+        .group_by(GlobalCharacterVersion.global_character_id)
+    )
+    counts_by_id: dict[Any, int] = {
+        gid: int(cnt) for gid, cnt in (await session.execute(count_stmt)).all()
+    }
+
     out: list[GlobalCharacterRead] = []
     needle = (search or "").strip().lower()
     for c in rows:
@@ -262,9 +278,6 @@ async def list_global_characters(
             continue
         if tag and tag not in (c.tags or []):
             continue
-        # Cheap count of versions
-        vstmt = select(GlobalCharacterVersion).where(GlobalCharacterVersion.global_character_id == c.id)
-        vcount = len((await session.execute(vstmt)).scalars().all())
         out.append(
             GlobalCharacterRead(
                 id=c.id,
@@ -276,7 +289,7 @@ async def list_global_characters(
                 tags=c.tags,
                 source_project_id=c.source_project_id,
                 source_project_name=c.source_project_name,
-                version_count=vcount,
+                version_count=counts_by_id.get(c.id, 0),
                 created_at=c.created_at,
                 updated_at=c.updated_at,
             )
@@ -306,8 +319,12 @@ async def get_global_character(
     c = await session.get(GlobalCharacter, char_id)
     if not c:
         raise HTTPException(404, f"Global character {char_id} not found")
-    vstmt = select(GlobalCharacterVersion).where(GlobalCharacterVersion.global_character_id == c.id)
-    vcount = len((await session.execute(vstmt)).scalars().all())
+    # Aggregate count instead of fetching every version row.
+    vcount_stmt = (
+        select(func.count(GlobalCharacterVersion.id))
+        .where(GlobalCharacterVersion.global_character_id == c.id)
+    )
+    vcount = int((await session.execute(vcount_stmt)).scalar() or 0)
     return GlobalCharacterRead(
         id=c.id,
         name=c.name,

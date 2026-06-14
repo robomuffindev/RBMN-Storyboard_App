@@ -95,6 +95,10 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   // model-audio channel layered with narration + backing tracks.
   const [enableModelAudio, setEnableModelAudio] = useState(false);
   const [modelAudioVolume, setModelAudioVolume] = useState(1.0);
+  // Master include/exclude for the FINAL EXPORT.  Defaults to true so older
+  // projects continue to ship their model audio.  Flip OFF if you generated
+  // model audio you don't like and want to A/B without re-running anything.
+  const [includeModelAudioInExport, setIncludeModelAudioInExport] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [creatorOpen, setCreatorOpen] = useState<{ index: number; character: Character } | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -177,6 +181,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_image_color_filter: globalImageColorFilter,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
+        include_model_audio_in_export: includeModelAudioInExport,
       } as any);
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
@@ -244,6 +249,13 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
       setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
       setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
+      // Default ON when the field is absent (older projects) so existing
+      // exports of AV-native scenes keep their model audio.
+      setIncludeModelAudioInExport(
+        (conceptData as any).include_model_audio_in_export !== undefined
+          ? Boolean((conceptData as any).include_model_audio_in_export)
+          : true
+      );
       setCustomColorPalette(conceptData.custom_color_palette || '');
       setDirty(false);
     }
@@ -277,6 +289,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_image_color_filter: globalImageColorFilter,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
+        include_model_audio_in_export: includeModelAudioInExport,
       } as any);
     },
     onSuccess: () => {
@@ -344,6 +357,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_image_color_filter: globalImageColorFilter,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
+        include_model_audio_in_export: includeModelAudioInExport,
       }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
         // Refresh project query too so currentProject.settings picks up
@@ -380,6 +394,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_image_color_filter: globalImageColorFilter,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
+        include_model_audio_in_export: includeModelAudioInExport,
       }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
         // Refresh project query too so currentProject.settings picks up
@@ -625,6 +640,34 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                 Applied to the model-audio channel only — narration / backing tracks unchanged.
                 Set to 0 to mute the model audio without disabling generation.
               </p>
+
+              {/* Master include/exclude for the FINAL EXPORT.
+                  Lets the user A/B with-vs-without model audio in the
+                  rendered MP4 without disabling generation (which would
+                  force re-running every scene).  Per-scene exclude is on
+                  each Video tab when this is on. */}
+              <div className="mt-3 pt-3 border-t border-gray-700/40">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="include_model_audio_in_export"
+                    checked={includeModelAudioInExport}
+                    onChange={(e) => { setIncludeModelAudioInExport(e.target.checked); markDirty(); }}
+                    className="rounded border-gray-700 text-purple-500 focus:ring-purple-500"
+                  />
+                  <label htmlFor="include_model_audio_in_export" className="text-[11px] font-medium text-gray-200">
+                    Include model-generated audio in the final export
+                  </label>
+                </div>
+                <p className="text-[10px] text-gray-500 mt-1 ml-6">
+                  {includeModelAudioInExport
+                    ? 'Model audio from every AV-native scene is layered into the exported MP4.'
+                    : '⚠ Model audio is EXCLUDED from the export — your scenes still have it (preview plays it), but the rendered MP4 only contains narration + backing tracks.'}
+                </p>
+                <p className="text-[10px] text-gray-600 mt-1 ml-6 italic">
+                  Tip: toggle off if you generated everything and want to ship without model audio (or A/B test a version). The per-scene Video tab has its own "Include this scene's model audio in export" checkbox so you can exclude individual scenes too.
+                </p>
+              </div>
             </div>
           )}
         </div>
@@ -1018,6 +1061,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_image_color_filter: globalImageColorFilter,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
+        include_model_audio_in_export: includeModelAudioInExport,
                   }).then(() => {
                     queryClient.invalidateQueries({ queryKey: ['concept', projectId] });
       // ALSO invalidate the project query so AppLayout.currentProject.settings
@@ -1041,13 +1085,6 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
               >
                 <Plus size={12} />
                 Add
-              </button>
-              <button
-                onClick={() => setLibraryOpen(true)}
-                className="flex items-center gap-1 px-2 py-1 bg-purple-800/40 hover:bg-purple-700/50 border border-purple-700/50 rounded text-xs text-purple-200 transition-colors"
-                title="Browse the global character library and import saved characters into this project"
-              >
-                🎭 Library
               </button>
               <button
                 onClick={() => setLibraryOpen(true)}

@@ -441,6 +441,35 @@ async def _build_scene_dicts(
             "on every scene for this export (any chosen_video_path will be ignored)."
         )
 
+    # ── AV-native model audio gating ───────────────────────────────────
+    # The LTX 2.3 AV-native workflow generates audio alongside the video and
+    # we extract it to a sidecar WAV (chosen_model_audio_path on the scene).
+    # On export, three gates decide whether that audio is layered into the
+    # final mix:
+    #
+    #   1. proj_settings.enable_model_audio  → master "this project uses
+    #      model-generated audio at all"
+    #   2. proj_settings.include_model_audio_in_export  → master "ship it
+    #      in the rendered export" (default ON when enable_model_audio is
+    #      on; set to False if the user generated audio but doesn't like it)
+    #   3. scene.parameters.include_model_audio_in_export  → per-scene
+    #      override (default ON; set to False to exclude this one scene
+    #      without disabling the whole feature)
+    #
+    # We compute the master gate here; the per-scene gate is checked when
+    # we attach model_audio_path to the scene_dict below.
+    _model_audio_master_enabled = bool(proj_settings.get("enable_model_audio", False))
+    _model_audio_include_global = bool(
+        proj_settings.get("include_model_audio_in_export", True)
+    )
+    _model_audio_volume = float(proj_settings.get("model_audio_volume", 1.0) or 1.0)
+    _model_audio_export_on = _model_audio_master_enabled and _model_audio_include_global
+    if _model_audio_master_enabled and not _model_audio_include_global:
+        logger.info(
+            "AV-native: model audio is enabled but include_model_audio_in_export=False "
+            "→ excluding ALL model-generated audio from this export"
+        )
+
     # Build scene list for assembly — only include scenes that have content
     scene_dicts: List[Dict[str, Any]] = []
     for sc in scenes:
@@ -550,6 +579,26 @@ async def _build_scene_dicts(
         scene_transition_in = _t_in_raw if isinstance(_t_in_raw, dict) and _t_in_raw.get("type") and _t_in_raw.get("type") != "none" else None
         scene_transition_out = _t_out_raw if isinstance(_t_out_raw, dict) and _t_out_raw.get("type") and _t_out_raw.get("type") != "none" else None
 
+        # Model-generated audio (AV-native) — included only if the master gate
+        # is on AND this specific scene hasn't been excluded.  Default per-scene
+        # include is True so older projects continue to work.
+        scene_model_audio_path: Optional[str] = None
+        if _model_audio_export_on:
+            _ma_rel = sc_params.get("chosen_model_audio_path")
+            _ma_include_scene = bool(
+                sc_params.get("include_model_audio_in_export", True)
+            )
+            if _ma_rel and _ma_include_scene:
+                _ma_abs = _resolve(_ma_rel)
+                if Path(_ma_abs).exists():
+                    scene_model_audio_path = _ma_abs
+                else:
+                    logger.warning(
+                        f"Scene {sc.order_index}: chosen_model_audio_path set but file "
+                        f"not found: {_ma_abs} — model audio for this scene will be "
+                        f"silently skipped in the export"
+                    )
+
         # Validate resolved paths exist before adding to scene_dicts
         resolved_video = _resolve(video_source) if video_source else None
         resolved_image = _resolve(image_path) if image_path else None
@@ -579,6 +628,7 @@ async def _build_scene_dicts(
                 "transition_clip_path": transition_clip_resolved,
                 "transition_in": scene_transition_in,
                 "transition_out": scene_transition_out,
+                "model_audio_path": scene_model_audio_path,
             })
         elif source_type == "video" and not resolved_video:
             # Video source type but video file is missing — skip entirely.
@@ -621,6 +671,7 @@ async def _build_scene_dicts(
                 "transition_clip_path": transition_clip_resolved,
                 "transition_in": scene_transition_in,
                 "transition_out": scene_transition_out,
+                "model_audio_path": scene_model_audio_path,
             })
         elif resolved_image:
             # Last resort: source_type not explicitly set and only image exists
@@ -809,6 +860,22 @@ async def _run_export_task(
                 chapter_ids=_chap_ids,
             )
             transition_type, transition_dur, color_match = await _read_transition_settings(bg_session)
+
+            # ── Project-level AV-native mixer volume for the assembler ───
+            # The master include/exclude gate is already applied inside
+            # _build_scene_dicts (gated scenes have model_audio_path=None on
+            # their scene_dict).  This is just the mixer level for any model
+            # audio that survived gating.  Per-export override wins if set.
+            _proj_for_model_audio = await bg_session.get(Project, pid)
+            _proj_settings_for_model_audio = (
+                _proj_for_model_audio.settings if _proj_for_model_audio else {}
+            ) or {}
+            _proj_model_audio_volume = float(
+                export_params.get("model_audio_volume")
+                if export_params.get("model_audio_volume") is not None
+                else _proj_settings_for_model_audio.get("model_audio_volume", 1.0)
+                or 1.0
+            )
 
             # Apply per-export overrides if provided in request
             if export_params.get("transition_type") is not None:
@@ -1138,6 +1205,10 @@ async def _run_export_task(
                     audio_only_remix=bool(export_params.get("audio_only_remix")),
                     force_recreate=bool(export_params.get("force_recreate")),
                     export_stems=bool(export_params.get("export_stems")),
+                    # AV-native: model_audio mixed in at this volume.  Master
+                    # gate already applied in _build_scene_dicts (excluded
+                    # scenes have model_audio_path=None).
+                    model_audio_volume=_proj_model_audio_volume,
                 )
             else:
                 # ── Stems-only short-circuit for music mode ──
@@ -1223,6 +1294,10 @@ async def _run_export_task(
                     chunk_size=CHUNK_SIZE,
                     chunk_callback=on_chunk_complete,
                     cancel_check=is_cancelled,
+                    # AV-native: model_audio mixed in at this volume.  Master
+                    # gate already applied in _build_scene_dicts (excluded
+                    # scenes have model_audio_path=None).
+                    model_audio_volume=_proj_model_audio_volume,
                 )
 
             _export_progress[pid_s]["phase"] = "post"

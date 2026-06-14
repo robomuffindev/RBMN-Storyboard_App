@@ -736,9 +736,17 @@ async def delete_scene(
             .order_by(Scene.order_index.asc())  # type: ignore
         )
         all_scenes = list((await session.execute(_all_stmt)).scalars().all())
-        idx = next((i for i, s in enumerate(all_scenes) if s.id == scene.id), -1)
-        prev_scene = all_scenes[idx - 1] if idx > 0 else None
-        next_scene = all_scenes[idx + 1] if 0 <= idx < len(all_scenes) - 1 else None
+
+        # ── Chapter scope: neighbors MUST be in the same chapter as the
+        # deleted scene, otherwise the merge crosses chapter boundaries
+        # and lands the absorbed time on the wrong mini-project.  Treat
+        # `chapter_id=None` (unscoped) scenes as their own bucket so
+        # projects without chapters still behave correctly.
+        _del_chapter_id = scene.chapter_id
+        scenes_in_chapter = [s for s in all_scenes if s.chapter_id == _del_chapter_id]
+        idx = next((i for i, s in enumerate(scenes_in_chapter) if s.id == scene.id), -1)
+        prev_scene = scenes_in_chapter[idx - 1] if idx > 0 else None
+        next_scene = scenes_in_chapter[idx + 1] if 0 <= idx < len(scenes_in_chapter) - 1 else None
 
         # Resolve merge target with auto-fallback at edges
         effective_target = merge_target

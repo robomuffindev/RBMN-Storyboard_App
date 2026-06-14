@@ -206,6 +206,136 @@ def _safe_stem_name(name: str) -> str:
     return (out or "track").strip("_") or "track"
 
 
+def _build_model_audio_bus(
+    scenes: List[Dict[str, Any]],
+    work_dir: Path,
+    model_audio_volume: float = 1.0,
+) -> Optional[str]:
+    """Build a single timeline-wide WAV containing every scene's
+    AV-native model audio delayed to its cumulative timeline offset.
+
+    Scenes provide ``model_audio_path`` (already gated by the export
+    layer — None means "this scene's model audio is excluded") and
+    ``duration``.  We delay each input by the running sum of prior scene
+    durations (in milliseconds) and ``amix`` everything together.
+
+    Returns the path to the bus WAV, or ``None`` if no scene contributes
+    model audio.  Failure inside ffmpeg returns ``None`` and lets the
+    caller fall back to a plain master-only mux — model audio is a
+    "nice to have" that should never block the export.
+    """
+    if not scenes:
+        return None
+
+    entries: list[tuple[float, str]] = []  # (offset_sec, audio_path)
+    cumulative = 0.0
+    for sc in scenes:
+        ma_path = sc.get("model_audio_path")
+        dur = float(sc.get("duration") or 0.0)
+        if ma_path and Path(ma_path).exists():
+            entries.append((cumulative, str(ma_path)))
+        cumulative += max(0.0, dur)
+
+    if not entries:
+        return None
+
+    out_path = work_dir / "model_audio_bus.wav"
+
+    # Build the filter graph: one adelay per input, then amix.
+    inputs: list[str] = []
+    filters: list[str] = []
+    mix_inputs = ""
+    for idx, (offset_sec, path) in enumerate(entries):
+        inputs += ["-i", path]
+        delay_ms = int(round(max(0.0, offset_sec) * 1000.0))
+        # adelay needs N=channels values; "delay|delay" handles up to stereo.
+        filters.append(
+            f"[{idx}:a]adelay={delay_ms}|{delay_ms},aformat=sample_fmts=s16:channel_layouts=stereo[d{idx}]"
+        )
+        mix_inputs += f"[d{idx}]"
+
+    vol = max(0.0, float(model_audio_volume))
+    # Use longest so the bus is at least as long as the latest model-audio
+    # tail — the overlay step will clip to total timeline length anyway.
+    if len(entries) == 1:
+        # Single input: amix would be wasted overhead, just volume it
+        filter_complex = filters[0] + f";[d0]volume={vol:.4f}[out]"
+    else:
+        filter_complex = (
+            ";".join(filters)
+            + f";{mix_inputs}amix=inputs={len(entries)}:duration=longest:dropout_transition=0,volume={vol:.4f}[out]"
+        )
+
+    cmd = [
+        "ffmpeg", "-y",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[out]",
+        "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2",
+        str(out_path),
+    ]
+    import subprocess
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        logger.warning(f"Model-audio bus build failed (non-fatal): {e}")
+        return None
+    if result.returncode != 0 or not out_path.exists():
+        logger.warning(
+            f"Model-audio bus ffmpeg returned {result.returncode}; "
+            f"stderr={result.stderr[-400:] if result.stderr else ''}"
+        )
+        return None
+    logger.info(
+        f"Built model-audio bus with {len(entries)} scene(s) at volume={vol:.2f}: {out_path}"
+    )
+    return str(out_path)
+
+
+def _overlay_model_audio_onto_master(
+    master_audio_path: str,
+    model_audio_bus_path: str,
+    out_path: str,
+) -> bool:
+    """Mix the model-audio bus into the master narration/song audio.
+
+    Both inputs are treated as already-aligned with the timeline (the bus
+    is built with adelay offsets; the master is the song/narration with
+    its own zero point).  ``duration=first`` so the resulting track is
+    exactly as long as the master — model audio that runs past the end
+    is clipped, which matches how the user heard it in per-scene preview.
+
+    Returns True on success.  False (and a warning log) on failure so
+    the caller can fall back to muxing the master alone.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", master_audio_path,
+        "-i", model_audio_bus_path,
+        "-filter_complex",
+        "[0:a]aformat=sample_fmts=s16:channel_layouts=stereo[a0];"
+        "[1:a]aformat=sample_fmts=s16:channel_layouts=stereo[a1];"
+        "[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[out]",
+        "-map", "[out]",
+        "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2",
+        out_path,
+    ]
+    import subprocess
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except Exception as e:
+        logger.warning(f"Model-audio overlay failed (non-fatal): {e}")
+        return False
+    if result.returncode != 0 or not Path(out_path).exists():
+        logger.warning(
+            f"Model-audio overlay ffmpeg returned {result.returncode}; "
+            f"stderr={result.stderr[-400:] if result.stderr else ''}"
+        )
+        return False
+    logger.info(f"Overlaid model audio onto master: {out_path}")
+    return True
+
+
 def _export_audio_stems(
     output_path: str,
     narration_audio_path: str,
@@ -1028,6 +1158,7 @@ def assemble_music_video(
     chunk_size: int = 0,
     chunk_callback: Optional[Callable[[int, str, int, int], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    model_audio_volume: float = 1.0,
 ) -> None:
     """
     Assemble music video from scenes.
@@ -1343,8 +1474,22 @@ def assemble_music_video(
 
         # Step 3: Mux audio
         report("Muxing audio track...", 90)
-        logger.info(f"Muxing with master audio: {master_audio_path}")
-        mux_audio(str(concat_path), master_audio_path, output_path)
+        # AV-native: if any scene contributes model audio, overlay it onto
+        # the master before muxing.  Falls through to plain master mux on
+        # any failure so model audio is never load-bearing for the export.
+        _final_audio = master_audio_path
+        _ma_bus = _build_model_audio_bus(scenes, work_dir, model_audio_volume)
+        if _ma_bus:
+            _ma_master_mixed = str(work_dir / "master_with_model_audio.wav")
+            if _overlay_model_audio_onto_master(master_audio_path, _ma_bus, _ma_master_mixed):
+                _final_audio = _ma_master_mixed
+                temp_files.append(_ma_bus)
+                temp_files.append(_ma_master_mixed)
+                logger.info(
+                    "AV-native: model audio mixed into master track before mux"
+                )
+        logger.info(f"Muxing with master audio: {_final_audio}")
+        mux_audio(str(concat_path), _final_audio, output_path)
 
         report("Assembly complete!", 100)
         logger.info(f"Music video assembled: {output_path}")
@@ -1398,6 +1543,10 @@ def assemble_narration_video(
     audio_only_remix: bool = False,
     force_recreate: bool = False,
     export_stems: bool = False,
+    # AV-native: project-level mixer volume for layered model audio.  The
+    # master/per-scene include gates are applied in the export layer; any
+    # scene_dict whose model_audio_path is None is silently skipped here.
+    model_audio_volume: float = 1.0,
 ) -> None:
     """
     Assemble narration video from scenes with full feature parity to music video.
@@ -1892,6 +2041,21 @@ def assemble_narration_video(
 
         # ── Step 4: Mux audio ──
         report("Muxing audio track...", 88)
+        # AV-native: layer model audio onto the prepared narration+backing
+        # mix before mux.  Non-fatal on failure (falls through to the
+        # plain narration+backing mux).  Master/per-scene include gates
+        # are already applied upstream — scene_dicts whose model audio is
+        # excluded arrive here with model_audio_path=None.
+        _ma_bus = _build_model_audio_bus(scenes, work_dir, model_audio_volume)
+        if _ma_bus:
+            _ma_final = str(work_dir / "audio_with_model.wav")
+            if _overlay_model_audio_onto_master(audio_path, _ma_bus, _ma_final):
+                audio_path = _ma_final
+                temp_files.append(_ma_bus)
+                temp_files.append(_ma_final)
+                logger.info(
+                    "AV-native: model audio mixed into narration+backing track"
+                )
         logger.info(f"Muxing with audio: {audio_path}")
         mux_audio(str(concat_path), audio_path, output_path)
 

@@ -472,6 +472,7 @@ export const saveConcept = (projectId: string, data: {
   global_image_color_filter?: string;  // "" | "bw" | "grayscale" | "sepia"
   enable_model_audio?: boolean;
   model_audio_volume?: number;
+  include_model_audio_in_export?: boolean;
 }) =>
   api.put(`/projects/${projectId}/concept`, data);
 

@@ -2244,16 +2244,57 @@ class SeqAutoGenStatusResponse(BaseModel):
 _seq_auto_jobs: dict[str, dict] = {}
 
 
-async def _evict_seq_auto_job(pid: str, delay: float = 1800.0):
-    """Remove finished auto-gen entry after `delay` seconds to prevent memory leak."""
+async def _evict_seq_auto_job(pid: str, evict_id: str, delay: float = 1800.0):
+    """Remove finished auto-gen entry after `delay` seconds to prevent memory leak.
+
+    ``evict_id`` is the per-run token stamped on the entry at start time
+    (see ``_run_sequential_auto_gen``).  We only pop if (1) the entry
+    still exists, (2) the token matches (i.e. no newer run has replaced
+    this entry), AND (3) the entry is in a terminal state.
+
+    The token guard is the critical fix for a recurring bug where a
+    previous run's scheduled eviction would fire 30 minutes later and
+    silently pop the LIVE entry of a newly-started run on the same
+    project.  The live run's poll loop would then see
+    ``_seq_auto_jobs.get(pid, {}).get('status') == None`` and exit,
+    leaving Auto-Gen stuck at whatever progress it had reached (e.g.
+    "13 / 77 scenes") even though ComfyUI jobs continued executing
+    independently in the background.
+    """
     await asyncio.sleep(delay)
+    entry = _seq_auto_jobs.get(pid)
+    if entry is None:
+        return  # Already evicted by something else; nothing to do.
+    if entry.get("_evict_id") != evict_id:
+        # A newer run has replaced this entry — its own eviction will
+        # fire later.  Do NOT pop the live entry.
+        logger.debug(
+            f"Eviction for {pid} skipped — entry replaced by newer run "
+            f"(token {evict_id[:8]} != live {str(entry.get('_evict_id'))[:8]})"
+        )
+        return
+    if entry.get("status") not in ("done", "failed", "cancelled"):
+        # The same run somehow re-entered "running" state without
+        # rotating the token (shouldn't happen, but guard anyway).
+        logger.warning(
+            f"Eviction for {pid} skipped — entry still in non-terminal "
+            f"state {entry.get('status')!r} despite matching token"
+        )
+        return
     _seq_auto_jobs.pop(pid, None)
-    logger.debug(f"Evicted _seq_auto_jobs entry for project {pid}")
+    logger.debug(f"Evicted _seq_auto_jobs entry for project {pid} (token {evict_id[:8]})")
 
 
-def _schedule_eviction(pid: str):
-    """Schedule cleanup of a finished auto-gen tracking entry (5 min grace)."""
-    _track_task(_evict_seq_auto_job(pid), name=f"evict_seq_auto_job:{pid}")
+def _schedule_eviction(pid: str, evict_id: str):
+    """Schedule cleanup of a finished auto-gen tracking entry (30 min grace).
+
+    The ``evict_id`` token must be the one stamped on the entry at run
+    start so the eviction can verify it's still the right generation.
+    """
+    _track_task(
+        _evict_seq_auto_job(pid, evict_id),
+        name=f"evict_seq_auto_job:{pid}:{evict_id[:8]}",
+    )
 
 
 # ── BatchRun persistence helpers ────────────────────────────────────────────
@@ -2481,6 +2522,11 @@ async def start_sequential_auto_gen(
         run_settings=run_settings,
     )
 
+    # Per-run eviction token: stamped here, checked by the eviction task
+    # before popping.  Prevents a previous run's 30-min eviction from
+    # silently killing a newly-started run on the same project.
+    from uuid import uuid4 as _uuid4
+    _new_evict_id = str(_uuid4())
     _seq_auto_jobs[pid] = {
         "status": "running",
         "mode": req.mode,
@@ -2490,6 +2536,7 @@ async def start_sequential_auto_gen(
         "current_step": "starting",
         "error": None,
         "batch_run_id": batch_run_id,
+        "_evict_id": _new_evict_id,
     }
 
     _track_task(
@@ -4814,8 +4861,14 @@ async def _run_sequential_auto_gen(
                 except Exception:
                     pass  # Best-effort
 
-        # Schedule eviction of tracking dict to prevent memory leak (5 min grace)
-        _schedule_eviction(pid)
+        # Schedule eviction of tracking dict to prevent memory leak (30 min
+        # grace).  Pass the current entry's token so the eviction can
+        # verify it's still evicting the same run when it fires later.
+        # Without this guard, a stale eviction from a prior run would
+        # silently pop a newer run's entry, freezing Auto-Gen progress.
+        _evict_id_for_finally = _seq_auto_jobs.get(pid, {}).get("_evict_id")
+        if _evict_id_for_finally:
+            _schedule_eviction(pid, _evict_id_for_finally)
 
 
 async def _resume_sequential_auto_gen(
@@ -4858,7 +4911,9 @@ async def _resume_sequential_auto_gen(
         job_queue = app.state.job_queue
         comfy_dispatcher = app.state.comfy_dispatcher
 
-    # Set up in-memory tracking
+    # Set up in-memory tracking (with per-run eviction token — see comment
+    # on _evict_seq_auto_job for why this matters).
+    from uuid import uuid4 as _uuid4
     _seq_auto_jobs[pid] = {
         "status": "running",
         "mode": mode,
@@ -4868,6 +4923,7 @@ async def _resume_sequential_auto_gen(
         "current_step": "resuming...",
         "error": None,
         "batch_run_id": batch_run_id,
+        "_evict_id": str(_uuid4()),
     }
 
     # Extract settings from run_settings snapshot

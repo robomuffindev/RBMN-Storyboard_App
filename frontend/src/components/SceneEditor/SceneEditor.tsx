@@ -322,7 +322,11 @@ const CAMERA_ACTIONS = [
 ];
 
 // ─── Generation Details Modal ──────────────────────────────────────────
-function GenerationDetailsModal({
+// Not currently rendered — kept for an upcoming "rerun from version" UI.
+// Prefix-renamed to silence TS6133; safe to re-introduce when wired in.
+// @ts-expect-error TS6133: kept for future rerun-from-version UI
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _GenerationDetailsModal({
   version,
   onClose,
   onRerun,
@@ -758,8 +762,11 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const [allVersions, setAllVersions] = useState<any[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [savingPreview, setSavingPreview] = useState(false);
-  const [detailsVersion, setDetailsVersion] = useState<any>(null);
-  const [isRerunning, setIsRerunning] = useState(false);
+  // Reserved for the same "rerun from details modal" feature (see
+  // _GenerationDetailsModal above).  Underscore-prefixed to silence TS6133
+  // until the surrounding UI is wired back in.
+  const [_detailsVersion, setDetailsVersion] = useState<any>(null);
+  const [_isRerunning, setIsRerunning] = useState(false);
   const [twoPassBaseViewOpen, setTwoPassBaseViewOpen] = useState(false);
   const [rerunningPass2, setRerunningPass2] = useState(false);
 
@@ -1616,7 +1623,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   };
 
   // ─── Rerun generation from version details ──────────────────────────
-  const handleRerunGeneration = async (version: any) => {
+  // @ts-expect-error TS6133: kept for future rerun-from-version UI
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _handleRerunGeneration = async (version: any) => {
     if (!activeScene || !currentProject || !version?.parameters) return;
     setIsRerunning(true);
     try {
@@ -1768,6 +1777,23 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const handleSetUseModelAudio = async (enabled: boolean) => {
     if (!activeScene || !currentProject) return;
     const newParams = { ...activeScene.parameters, use_model_audio: enabled };
+    await updateSceneAndSync(activeScene.id, { parameters: newParams });
+  };
+
+  // Per-scene exclude from final export.  Defaults to true so existing
+  // generations are included.  When false, this scene's model audio is
+  // EXCLUDED from the rendered MP4 even though the file is still on disk.
+  const includeModelAudioScene =
+    activeScene?.parameters?.include_model_audio_in_export === undefined
+      ? true
+      : Boolean(activeScene.parameters.include_model_audio_in_export);
+  const hasModelAudioFile = Boolean(activeScene?.parameters?.chosen_model_audio_path);
+  const projectIncludeModelAudio = Boolean(
+    (currentProject?.settings as any)?.include_model_audio_in_export ?? true
+  );
+  const handleSetIncludeModelAudio = async (enabled: boolean) => {
+    if (!activeScene || !currentProject) return;
+    const newParams = { ...activeScene.parameters, include_model_audio_in_export: enabled };
     await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
@@ -3404,30 +3430,36 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 </label>
               )}
 
-              {/* AV-native: don't send project audio, let model render its own */}
-              {currentProject?.mode !== 'narration_images' && (
+              {/* Per-scene exclude from the final export.  Only shown when
+                  this scene actually has model-generated audio on disk;
+                  otherwise the checkbox is meaningless.  Disabled (with
+                  hint) when the project-level include is already off
+                  because flipping ON here wouldn't override the master. */}
+              {currentProject?.mode !== 'narration_images' && hasModelAudioFile && (
                 <label
                   className={`flex items-center gap-2 px-3 py-2 rounded cursor-pointer text-sm transition-colors ${
-                    projectEnableModelAudio
+                    projectIncludeModelAudio
                       ? 'bg-gray-800 hover:bg-gray-700 text-gray-300'
                       : 'bg-gray-800/40 text-gray-500 cursor-not-allowed'
                   }`}
                   title={
-                    projectEnableModelAudio
-                      ? 'Skip sending project audio to the video model — the model generates its own speech / SFX / ambient. Result is baked into the scene MP4 AND extracted as a sidecar WAV controlled by the Concept tab Model Audio mixer slider.'
-                      : 'Enable "Model-Generated Audio" on the Concept tab first to use this per-scene.'
+                    projectIncludeModelAudio
+                      ? 'Include THIS scene\'s model-generated audio in the final exported MP4. Uncheck if you don\'t like how this scene\'s model audio came out — the video stays in the export, just without its audio bed.'
+                      : 'Project-wide "Include model-generated audio in the final export" is OFF on the Concept tab. Re-enable that to control individual scenes.'
                   }
                 >
                   <input
                     type="checkbox"
-                    checked={useModelAudio}
-                    disabled={!projectEnableModelAudio}
-                    onChange={(e) => handleSetUseModelAudio(e.target.checked)}
+                    checked={includeModelAudioScene}
+                    disabled={!projectIncludeModelAudio}
+                    onChange={(e) => handleSetIncludeModelAudio(e.target.checked)}
                     className="w-4 h-4 accent-purple-500"
                   />
-                  <span>Let model generate its own audio</span>
+                  <span>Include this scene&apos;s model audio in export</span>
                   <span className="text-xs text-gray-500 ml-auto">
-                    {projectEnableModelAudio ? '(skip timeline audio for this scene)' : '(enable on Concept tab)'}
+                    {projectIncludeModelAudio
+                      ? (includeModelAudioScene ? '(will be in export)' : '⚠ excluded from export')
+                      : '(project export-include is off)'}
                   </span>
                 </label>
               )}
