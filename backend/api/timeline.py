@@ -149,6 +149,15 @@ class LyricsResponse(BaseModel):
     words: list[WordTimestamp]
     srt_blocks: list[SrtBlock] = []  # Pre-built subtitle lines from SRT
     initial_text: str = ""  # User-provided lyrics/script input
+    # Word-timing source — surfaces in the Audio-tab indicator chip so
+    # the user can see at a glance whether the project's narration
+    # timing is from an authoritative SRT (e.g. ElevenLabs export) or
+    # from a probabilistic Whisper pass.  Empty string means no lyrics
+    # row exists yet.  ``cue_count`` is the distinct SRT cue index
+    # count when source == "srt" (0 otherwise), useful for the chip
+    # tooltip ("12 cues from the SRT") and for the audit endpoint.
+    source: str = ""  # "srt" | "whisper" | ""
+    cue_count: int = 0
 
 
 class WaveformPeaksResponse(BaseModel):
@@ -178,6 +187,273 @@ async def _get_project_or_404(project_id: UUID, session: AsyncSession) -> Projec
             detail=f"Project {project_id} not found",
         )
     return project
+
+
+async def _maybe_resync_scene_boundaries(
+    project_id: UUID,
+    session: AsyncSession,
+    trigger: str,
+) -> dict:
+    """Run the boundary audit and, if the source has drifted past the
+    threshold, re-snap each existing scene's start/end to the natural
+    break point of the new narration source.
+
+    Called immediately after the narration source updates — Whisper
+    re-analyze (``trigger="whisper_analyze"``) or SRT upload
+    (``trigger="srt_upload"``).  For narration projects (`narration_video`
+    / `narration_images`) only; music_video uses LLM-picked cuts and is
+    left alone.
+
+    Returns the resulting audit dict (with ``resynced`` boolean + count
+    keys appended) so the caller can log + the calling endpoint can
+    surface it to the frontend later.  Failure is non-fatal — the user
+    can always run Suggest Timeline manually.
+    """
+    from backend.services.scene_boundaries import (
+        audit_scene_boundaries,
+        needs_auto_resync,
+        closest_break,
+        natural_break_points,
+    )
+    from backend.database.models import AppSettings as _AS
+
+    # Mode gate — we only auto-resync narration projects.  Music video
+    # uses LLM-picked cuts; the user expects creative control there.
+    proj = await session.get(Project, project_id)
+    if not proj:
+        return {"resynced": False, "reason": "project_not_found"}
+    if getattr(proj, "mode", None) not in ("narration_video", "narration_images"):
+        return {"resynced": False, "reason": "mode_not_narration"}
+
+    # ── Active auto-gen guard ─────────────────────────────────────────
+    # If a sequential auto-gen run is in flight, do NOT mutate scene
+    # boundaries — the run reads scene.end_time - scene.start_time fresh
+    # on each iteration, so changing those values mid-run would leave
+    # in-flight ComfyUI jobs carrying old durations and subsequent
+    # submissions carrying new ones.  The user's project would end up
+    # half-and-half (1.8.14 audit gap "I").  Resync gets deferred — the
+    # user can re-upload the SRT or click *Suggest Timeline* manually
+    # once the run finishes.
+    try:
+        from backend.api.generation import _seq_auto_jobs as _seq_jobs
+        _pid_s = str(project_id)
+        _state = _seq_jobs.get(_pid_s, {})
+        _state_status = _state.get("status") if _state else None
+        if _state_status == "running":
+            logger.warning(
+                f"_maybe_resync_scene_boundaries({trigger}, project={project_id}): "
+                f"auto-gen is currently running — DEFERRING resync to avoid "
+                f"mid-run timing inconsistency.  User can run Suggest Timeline "
+                f"after the auto-gen run completes."
+            )
+            return {"resynced": False, "reason": "auto_gen_running"}
+    except Exception as _gate_err:
+        # The guard is best-effort.  If the import or state lookup
+        # fails, we'd rather over-resync than silently skip.
+        logger.debug(
+            f"_maybe_resync_scene_boundaries gate-check failed: {_gate_err}"
+        )
+
+    # Pull bounds + scenes + words.
+    _row = (await session.execute(select(_AS).where(_AS.id == 1))).scalars().first()
+    _min = float(_row.video_min_duration if _row else 5.0) or 5.0
+    _max = float(_row.video_max_duration if _row else 15.0) or 15.0
+
+    scenes_stmt = (
+        select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+    )
+    scenes = list((await session.execute(scenes_stmt)).scalars().all())
+    if not scenes:
+        return {"resynced": False, "reason": "no_scenes"}
+
+    lyrics_row = (
+        await session.execute(select(Lyrics).where(Lyrics.project_id == project_id))
+    ).scalars().first()
+    words = list(lyrics_row.words or []) if lyrics_row else []
+    if not words:
+        return {"resynced": False, "reason": "no_words"}
+
+    audit = audit_scene_boundaries(
+        scenes=scenes, words=words, min_duration=_min, max_duration=_max,
+    )
+    if not needs_auto_resync(audit):
+        logger.info(
+            f"_maybe_resync_scene_boundaries({trigger}, project={project_id}): "
+            f"audit OK — source={audit['source']!r}, stale_fraction="
+            f"{audit['stale_fraction']:.2f} (threshold not exceeded, leaving "
+            f"scenes alone)"
+        )
+        audit["resynced"] = False
+        audit["reason"] = "audit_passes"
+        return audit
+
+    # Snap each scene's start/end to the closest natural break point.
+    # Pad / trim afterwards through _clamp_scene_duration-equivalent
+    # logic so the resync doesn't itself violate min/max.  Snap each
+    # scene FIRST into a candidate (start, end) buffer, then sweep the
+    # whole list to enforce monotonic neighbor ordering (scene[N].end ≤
+    # scene[N+1].start).  Without the second pass, independent snapping
+    # can produce overlapping ranges (scene N pads to start+15 while
+    # scene N+1's start originally lived inside that pad) or accidental
+    # gaps (scene N's end snaps earlier than scene N+1's start) — both
+    # break downstream lyric slicing.  See 1.8.14 audit gap "D".
+    breaks = natural_break_points(words)
+
+    snapped: list[tuple[float, float, float, float]] = []  # (new_start, new_end, sdist, edist)
+    for sc in scenes:
+        new_start, sdist = closest_break(float(sc.start_time), breaks)
+        new_end, edist = closest_break(float(sc.end_time), breaks)
+        if new_end <= new_start:
+            new_end = new_start + _min
+        # Clamp span to min/max post-snap.
+        span = new_end - new_start
+        if span < _min:
+            new_end = new_start + _min
+        elif span > _max:
+            new_end = new_start + _max
+        snapped.append((new_start, new_end, sdist, edist))
+
+    # ── Monotonic neighbor pass ──────────────────────────────────────
+    # Walk left-to-right; if a scene's start dips below the previous
+    # scene's end, push it up to that end.  If that pushes the span
+    # below min_duration, extend the end correspondingly (but cap at
+    # max_duration so we never re-introduce the gap-vs-overlap problem).
+    for i in range(1, len(snapped)):
+        prev_end = snapped[i - 1][1]
+        new_start, new_end, sdist, edist = snapped[i]
+        if new_start < prev_end:
+            new_start = prev_end
+            if new_end <= new_start:
+                new_end = new_start + _min
+            elif new_end - new_start < _min:
+                new_end = new_start + _min
+            elif new_end - new_start > _max:
+                new_end = new_start + _max
+            snapped[i] = (new_start, new_end, sdist, edist)
+        # Also detect a gap larger than the snap tolerance: if the prior
+        # scene ended noticeably earlier than this scene starts, pull
+        # the prior scene's end forward so the timeline is contiguous
+        # (matches how the assembler renders narration videos — silence
+        # in the gap would be jarring).  Only fix gaps > 100ms.
+        if new_start - prev_end > 0.1:
+            p_start, _, p_sdist, p_edist = snapped[i - 1]
+            new_prev_end = new_start
+            # Re-clamp the previous scene's span too.
+            if new_prev_end - p_start > _max:
+                # Can't extend that far — leave the gap, will be a
+                # silent freeze-frame in the export.
+                pass
+            elif new_prev_end - p_start < _min:
+                # Already below min after the gap-fix; leave alone.
+                pass
+            else:
+                snapped[i - 1] = (p_start, new_prev_end, p_sdist, p_edist)
+
+    # ── Final-scene clamp to audio length ────────────────────────────
+    # The monotonic-neighbor pass above can chain-shift scenes forward
+    # when adjacent scenes snap to the same SRT cue.  Without a top
+    # clamp the very last scene's end_time can drift past the actual
+    # audio length, producing a clip whose slice would silently
+    # truncate at EOF (and whose video would render as silence over
+    # the final phantom seconds).  Compute the audio length once from
+    # the words' last word.end (cheapest source — we already have the
+    # words in scope), and clip the final snapped end to that value.
+    if snapped:
+        _last_word_end = 0.0
+        try:
+            _last_word_end = float(words[-1].get("end", 0.0) or 0.0)
+        except Exception:
+            _last_word_end = 0.0
+        if _last_word_end > 0:
+            _last_idx = len(snapped) - 1
+            _ls, _le, _lsd, _led = snapped[_last_idx]
+            if _le > _last_word_end + 0.05:
+                _new_le = max(_ls + _min, _last_word_end)
+                logger.info(
+                    f"_resync: clamping final scene end_time "
+                    f"{_le:.2f}->{_new_le:.2f} (audio ends at {_last_word_end:.2f}s)"
+                )
+                snapped[_last_idx] = (_ls, _new_le, _lsd, _led)
+
+    # ── Tiny-tail absorption in resync output ──────────────────────
+    # If the last scene's snapped span is below ``video_min_duration``
+    # AND merging into the previous scene stays within
+    # ``video_max_duration``, absorb it.  Same producer-agnostic
+    # behavior the DP main / fallback paths now use.  This catches the
+    # 1.78s tail user observed in 1.8.14 after re-running narration
+    # analyze: the resync snapped scene N-1 forward to a cue boundary
+    # and left scene N with only the trailing fragment of the audio.
+    if len(snapped) >= 2:
+        _last_idx = len(snapped) - 1
+        _ls, _le, _lsd, _led = snapped[_last_idx]
+        _last_span = _le - _ls
+        if _last_span < _min - 1e-6:
+            _ps, _pe, _psd, _ped = snapped[_last_idx - 1]
+            _merged_span = _le - _ps
+            if _merged_span <= _max + 1e-6:
+                snapped[_last_idx - 1] = (_ps, _le, _psd, _ped)
+                snapped.pop()
+                logger.info(
+                    f"_resync: absorbed {_last_span:.2f}s tail into previous "
+                    f"scene → merged span {_merged_span:.2f}s"
+                )
+            else:
+                logger.warning(
+                    f"_resync: final scene span {_last_span:.2f}s is below "
+                    f"video_min_duration={_min:.2f}s but cannot merge into "
+                    f"previous ({_merged_span:.2f}s > video_max_duration="
+                    f"{_max:.2f}s).  Leaving tiny tail in place — adjust "
+                    f"manually if needed."
+                )
+
+    snapped_count = 0
+    # ``scenes`` may have one more element than ``snapped`` after the
+    # tail absorption above — pair only the survivors, then delete the
+    # leftover scene row from the DB so the timeline shows the merged
+    # span, not the old (start_old, end_old) ghost.
+    _orphan_scenes: list = []
+    if len(scenes) > len(snapped):
+        _orphan_scenes = list(scenes[len(snapped):])
+    for sc, (new_start, new_end, sdist, edist) in zip(scenes, snapped):
+        if abs(new_start - float(sc.start_time)) > 1e-3 or abs(new_end - float(sc.end_time)) > 1e-3:
+            logger.info(
+                f"_resync scene {sc.order_index}: "
+                f"{sc.start_time:.2f}->{new_start:.2f} | "
+                f"{sc.end_time:.2f}->{new_end:.2f} "
+                f"(start_drift={sdist:.2f}s, end_drift={edist:.2f}s)"
+            )
+            sc.start_time = new_start
+            sc.end_time = new_end
+            snapped_count += 1
+    # Remove orphan scenes that the tail-absorption pruned out so the
+    # final timeline matches the merged span, not the old N-scene shape.
+    # The lingering scene's chapter_id is preserved on its absorbed
+    # neighbor via the merge (we already extended that scene's
+    # ``end_time``), so deleting the orphan is safe — no audio span is
+    # lost.  CASCADE deletes its child rows (jobs / timeline_positions
+    # / etc.) just like the manual scene-delete path.
+    for _orphan in _orphan_scenes:
+        logger.info(
+            f"_resync: deleting orphan scene {_orphan.id} (order_index "
+            f"{_orphan.order_index}) merged into previous"
+        )
+        await session.delete(_orphan)
+    if _orphan_scenes:
+        # Re-number ``order_index`` on the surviving scenes so the
+        # sequence is contiguous (no gap left by the deleted orphan).
+        for _new_idx, sc in enumerate(scenes[:len(snapped)]):
+            if sc.order_index != _new_idx:
+                sc.order_index = _new_idx
+    await session.commit()
+    logger.info(
+        f"_maybe_resync_scene_boundaries({trigger}, project={project_id}): "
+        f"snapped {snapped_count}/{len(scenes)} scenes to source={audit['source']!r} "
+        f"break points"
+    )
+    audit["resynced"] = True
+    audit["scenes_snapped"] = snapped_count
+    audit["trigger"] = trigger
+    return audit
 
 
 async def _slice_audio_for_scenes(
@@ -214,6 +490,29 @@ async def _slice_audio_for_scenes(
         logger.warning(f"Music file not found at {audio_path}")
         return 0
 
+    # Probe the actual audio duration up front so we can clamp scene
+    # end_times that overshoot it.  This guards against the SRT-
+    # preservation case: when a user re-records narration with shorter
+    # audio but keeps the old SRT cues, scene.end_time can sit past
+    # the new audio's EOF.  ffmpeg's `-ss S -t D` silently produces an
+    # empty / truncated WAV in that case, which the LTX dispatcher and
+    # the export assembler both happily ship — manifesting as a silent
+    # tail in the final video.  Bounds-check + warn so the user sees
+    # the mismatch in diag.md and the clip falls back to the audible
+    # portion of the source.
+    _audio_total_duration: Optional[float] = None
+    try:
+        from backend.services.video.ffmpeg import get_media_info
+        _audio_total_duration = float(
+            (get_media_info(str(audio_path)) or {}).get("duration") or 0.0
+        )
+        if _audio_total_duration <= 0:
+            _audio_total_duration = None
+    except Exception as _probe_err:
+        logger.debug(
+            f"Audio duration probe failed (non-fatal): {_probe_err!r}"
+        )
+
     # Get all scenes
     scenes_stmt = (
         select(Scene)
@@ -231,9 +530,37 @@ async def _slice_audio_for_scenes(
     clips_dir.mkdir(parents=True, exist_ok=True)
 
     count = 0
+    _truncated_scene_count = 0
     for scene in scenes:
         try:
-            clip_filename = f"scene_{scene.order_index:03d}_{scene.start_time:.2f}_{scene.end_time:.2f}.wav"
+            # Bounds check: clamp scene end_time to the audio's actual
+            # length so ffmpeg can't be asked to slice past EOF.  Don't
+            # mutate scene.end_time on the DB row — only the slice
+            # parameters — so the timeline UI still shows what the user
+            # intended (the SRT cue) and we don't silently rewrite their
+            # timeline.  If the scene start ALSO falls past EOF, skip.
+            _eff_end = float(scene.end_time)
+            _eff_start = float(scene.start_time)
+            if _audio_total_duration is not None:
+                if _eff_start >= _audio_total_duration:
+                    logger.warning(
+                        f"Scene {scene.order_index}: start_time "
+                        f"{_eff_start:.2f}s ≥ audio length "
+                        f"{_audio_total_duration:.2f}s — skipping slice "
+                        f"(scene timing exceeds new audio file)"
+                    )
+                    _truncated_scene_count += 1
+                    continue
+                if _eff_end > _audio_total_duration:
+                    logger.warning(
+                        f"Scene {scene.order_index}: end_time "
+                        f"{_eff_end:.2f}s clamped to audio length "
+                        f"{_audio_total_duration:.2f}s for slicing"
+                    )
+                    _eff_end = _audio_total_duration
+                    _truncated_scene_count += 1
+
+            clip_filename = f"scene_{scene.order_index:03d}_{_eff_start:.2f}_{_eff_end:.2f}.wav"
             clip_path = clips_dir / clip_filename
             rel_clip_path = str(clip_path.relative_to(settings.project_dir))
 
@@ -241,8 +568,8 @@ async def _slice_audio_for_scenes(
                 slice_audio,
                 str(audio_path),
                 str(clip_path),
-                scene.start_time,
-                scene.end_time,
+                _eff_start,
+                _eff_end,
             )
 
             # Store in scene parameters
@@ -252,6 +579,14 @@ async def _slice_audio_for_scenes(
             count += 1
         except Exception as e:
             logger.warning(f"Failed to slice audio for scene {scene.order_index}: {e}")
+
+    if _truncated_scene_count > 0 and _audio_total_duration is not None:
+        logger.warning(
+            f"Audio slicing for project {project_id}: {_truncated_scene_count} "
+            f"scene(s) had timing past audio EOF ({_audio_total_duration:.2f}s).  "
+            f"This usually means the SRT cues + the current audio file disagree. "
+            f"Re-upload the SRT or re-record the audio to match."
+        )
 
     return count
 
@@ -476,19 +811,70 @@ async def analyze_audio(
             )
 
         try:
-            # Upsert lyrics — delete existing first
+            # Upsert lyrics — delete existing first.
+            #
+            # SRT-preservation guard: if the previously-saved Lyrics row
+            # was derived from an SRT upload (any word carries a ``block``
+            # index), the cue boundaries it encodes are authoritative —
+            # ElevenLabs / the narrator's own production pipeline wrote
+            # them.  Whisper's re-transcription is statistically softer
+            # and would overwrite that precision.  In that case we keep
+            # the SRT words but refresh ``full_text`` / ``initial_text``
+            # so the lyrics panel still picks up any user-side edits.
             existing_lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
             existing_lyrics_result = await session.execute(existing_lyrics_stmt)
             existing_lyrics = existing_lyrics_result.scalars().first()
+
+            _srt_words_existing: list[dict] = []
+            if existing_lyrics:
+                try:
+                    _existing_words = list(existing_lyrics.words or [])
+                    if any(
+                        isinstance(_w, dict) and _w.get("block") is not None
+                        for _w in _existing_words
+                    ):
+                        _srt_words_existing = _existing_words
+                except Exception:
+                    _srt_words_existing = []
+
             if existing_lyrics:
                 await session.delete(existing_lyrics)
                 await session.flush()
 
+            if _srt_words_existing:
+                logger.warning(
+                    f"Re-analyzing audio for project {project_id} — keeping "
+                    f"{len(_srt_words_existing)} existing SRT-cue words (block "
+                    f"indices preserved) instead of overwriting with "
+                    f"{len(transcription_words)} fresh Whisper words.  "
+                    f"User should re-upload SRT to refresh cue timing."
+                )
+                _words_to_save = _srt_words_existing
+                # Keep ``full_text`` and ``words`` in lock-step: rebuild
+                # full_text from the SRT words we're saving so downstream
+                # consumers that join words → text don't see one source
+                # while readers of ``full_text`` see the other.  Without
+                # this, the lyrics panel would show fresh Whisper text
+                # but auto-gen would pull text-from-words and get the SRT
+                # transcript — subtle divergence that's hard to debug.
+                _srt_full_text = " ".join(
+                    str(_w.get("word", "")).strip()
+                    for _w in _srt_words_existing
+                    if isinstance(_w, dict) and _w.get("word")
+                ).strip()
+                if _srt_full_text:
+                    _full_text_to_save = _srt_full_text
+                else:
+                    _full_text_to_save = lyrics_text
+            else:
+                _words_to_save = transcription_words
+                _full_text_to_save = lyrics_text
+
             lyrics_record = Lyrics(
                 project_id=project_id,
-                full_text=lyrics_text,
+                full_text=_full_text_to_save,
                 initial_text=initial_text or "",
-                words=transcription_words,
+                words=_words_to_save,
             )
             session.add(lyrics_record)
             await session.commit()
@@ -575,6 +961,20 @@ async def analyze_audio(
             )
             for w in transcription_words
         ]
+
+        # Auto-resync existing scene boundaries to the freshly-analyzed
+        # narration timing when staleness exceeds threshold (narration
+        # projects only — music_video uses LLM-picked cuts so we leave
+        # those alone unless the user explicitly re-runs Suggest Timeline).
+        try:
+            await _maybe_resync_scene_boundaries(
+                project_id, session, trigger="whisper_analyze",
+            )
+        except Exception as _resync_err:
+            logger.warning(
+                f"Post-Whisper auto-resync failed (non-fatal) for "
+                f"project {project_id}: {_resync_err}"
+            )
 
         return AnalyzeAudioResponse(
             sections=section_responses,
@@ -888,7 +1288,22 @@ async def get_lyrics(
                     f"[{srt_blocks[0].start:.3f}-{srt_blocks[0].end:.3f}]"
                 )
             initial = getattr(lyrics_record, "initial_text", "") or ""
-            return LyricsResponse(text=lyrics_record.full_text, words=words, srt_blocks=srt_blocks, initial_text=initial)
+            # Source-label the response so the frontend's Audio-tab chip
+            # can show "SRT loaded — N cues" vs "Whisper transcription".
+            try:
+                from backend.services.scene_boundaries import (
+                    source_label as _src_label,
+                    cue_ranges as _cue_ranges,
+                )
+                _src = _src_label(raw_words)
+                _cues = len(_cue_ranges(raw_words)) if _src == "srt" else 0
+            except Exception:
+                _src, _cues = "", 0
+            return LyricsResponse(
+                text=lyrics_record.full_text, words=words,
+                srt_blocks=srt_blocks, initial_text=initial,
+                source=_src, cue_count=_cues,
+            )
 
         # Fall back to cached lyrics JSON file
         project_path = settings.project_dir / str(project_id)
@@ -908,7 +1323,19 @@ async def get_lyrics(
                     for w in raw_words
                 ]
                 srt_blocks = _build_srt_blocks(raw_words)
-                return LyricsResponse(text=lyrics_data.get("text", ""), words=words, srt_blocks=srt_blocks)
+                try:
+                    from backend.services.scene_boundaries import (
+                        source_label as _src_label,
+                        cue_ranges as _cue_ranges,
+                    )
+                    _src = _src_label(raw_words)
+                    _cues = len(_cue_ranges(raw_words)) if _src == "srt" else 0
+                except Exception:
+                    _src, _cues = "", 0
+                return LyricsResponse(
+                    text=lyrics_data.get("text", ""), words=words,
+                    srt_blocks=srt_blocks, source=_src, cue_count=_cues,
+                )
 
         # Return empty response if no lyrics found
         return LyricsResponse(text="", words=[])
@@ -2273,6 +2700,55 @@ def _get_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
 #          prefers natural break points (long pauses, paragraph gaps)
 # ═══════════════════════════════════════════════════════════════════════
 
+def _absorb_tiny_tail(
+    scenes: list[dict],
+    min_dur: float,
+    max_dur: float,
+    *,
+    where: str = "",
+) -> list[dict]:
+    """Merge a final scene whose span is below ``min_dur`` into the
+    previous scene when that merge stays within ``max_dur``.
+
+    Why it exists: multiple scene-producing paths (DP main backtracking,
+    DP fallback, LLM ``_split_oversized``, post-Whisper / post-SRT
+    resync) can each land the timeline with a 1–3 s tail that violates
+    the project's ``video_min_duration`` setting.  LTX 2.3 can't
+    meaningfully render a 1.78 s scene, so we'd rather extend the
+    previous scene to cover that audio than ship a sub-minimum scene
+    and rely on downstream clamps to bail us out.
+
+    Returns the same list (mutated when an absorb happens) for chaining.
+    Logs every absorb so the operator can see why the timeline grew a
+    little at the tail.  Inverse case ("can't merge, span would exceed
+    ``max_dur``") is left alone — that's a real edge case the user
+    should see in the audit so they can adjust manually.
+    """
+    if len(scenes) < 2:
+        return scenes
+    last = scenes[-1]
+    last_span = float(last.get("end_time", 0.0)) - float(last.get("start_time", 0.0))
+    if last_span >= min_dur - 1e-6:
+        return scenes
+    prev = scenes[-2]
+    new_prev_span = float(last.get("end_time", 0.0)) - float(prev.get("start_time", 0.0))
+    if new_prev_span > max_dur + 1e-6:
+        logger.warning(
+            f"_absorb_tiny_tail({where}): final scene {last_span:.2f}s is below "
+            f"video_min_duration={min_dur:.2f}s but cannot be merged into the "
+            f"previous scene ({new_prev_span:.2f}s > video_max_duration={max_dur:.2f}s).  "
+            f"Leaving tiny tail in place — user should tweak boundaries manually."
+        )
+        return scenes
+    prev["end_time"] = last["end_time"]
+    scenes.pop()
+    logger.info(
+        f"_absorb_tiny_tail({where}): absorbed {last_span:.2f}s tail into "
+        f"previous scene → new span {new_prev_span:.2f}s"
+    )
+    return scenes
+
+
 def _dp_segment_narration(
     phrase_groups: list[list[dict]],
     total_duration: float,
@@ -2380,10 +2856,134 @@ def _dp_segment_narration(
     # ── Backtrack to find optimal boundaries ────────────────────────────
     if dp[n] == INF:
         # Fallback: no valid partition found (constraints too tight).
-        # Relax by allowing any split and use greedy approach.
+        # Previous behavior was to chop the audio into fixed-length
+        # ``ideal_dur`` slices (5+15)/2 = 10.0s — exactly the "everything
+        # is 10 seconds" symptom users hit when Whisper merged a long
+        # narration into a single phrase or one phrase exceeded
+        # ``max_dur`` alone.  See 1.8.14 audit: that produced
+        # ``scene_000_0.00_10.00`` / ``scene_001_10.00_20.00`` /... slices
+        # with zero alignment to the actual narration.
+        #
+        # The smarter fallback below builds the same evenly-spaced target
+        # positions but SNAPS each one to the closest natural break
+        # (SRT cue boundary when the source is SRT, or a >300 ms inter-
+        # word gap when the source is Whisper) using the same helper the
+        # boundary audit uses.  Scenes still respect ``min_dur``/``max_dur``
+        # in expectation, but cut points actually align with the audio
+        # — which is what the user expected from "re-split scenes."
         logger.warning(
             f"[NarrationDP] No valid DP solution found with min={min_dur}, "
-            f"max={max_dur}. Falling back to greedy segmentation."
+            f"max={max_dur} ({n} phrases) — falling back to natural-break "
+            f"snapping (was previously: fixed {ideal_dur:.1f}s slices)."
+        )
+
+        # Flatten phrase_groups back into a plain word list so the
+        # boundary helper can work — it expects the same shape as
+        # ``Lyrics.words`` (list of dicts with ``start``/``end``/``word``
+        # and optional ``block``).
+        _flat_words: list[dict] = []
+        for pg in phrase_groups:
+            for _w in pg:
+                _flat_words.append(_w)
+
+        try:
+            from backend.services.scene_boundaries import (
+                natural_break_points,
+                closest_break,
+                source_label,
+            )
+            _breaks = natural_break_points(_flat_words)
+            _source = source_label(_flat_words)
+        except Exception as _import_err:
+            logger.warning(
+                f"[NarrationDP] Could not import boundary helper "
+                f"({_import_err!r}) — using raw fixed-slice fallback"
+            )
+            _breaks = []
+            _source = ""
+
+        scenes: list[dict] = []
+        if _breaks and len(_breaks) >= 2:
+            # Build candidate ideal positions, then snap each to the
+            # nearest break.  We accept the snap unless it would create
+            # a zero-length or below-min span, in which case we step to
+            # the next break > current scene start + min_dur.
+            pos = 0.0
+            scene_num = 1
+            _exhausted_break_count = 0
+            while pos < total_duration - 0.5:
+                target = min(pos + ideal_dur, total_duration)
+                # Snap target to nearest break.
+                snapped, _dist = closest_break(target, _breaks)
+                # Reject snaps that produce too-short spans — step
+                # forward to the smallest break strictly greater than
+                # pos + min_dur.
+                if snapped <= pos + min_dur * 0.5:
+                    larger = [b for b in _breaks if b >= pos + min_dur]
+                    if larger:
+                        snapped = larger[0]
+                    else:
+                        # Natural breaks exhausted for the remainder of
+                        # the audio — the user has no more cue/phrase
+                        # boundaries to snap to.  Surface this as a
+                        # WARNING (not the silent INFO the original code
+                        # would have produced) so the tail's uniform
+                        # slicing is visible in diag.md.  This usually
+                        # means the SRT had cues only for the front of
+                        # the audio, or Whisper's phrase grouping
+                        # bunched everything into the start.
+                        _exhausted_break_count += 1
+                        snapped = min(pos + ideal_dur, total_duration)
+                # Clamp the resulting span to min/max.
+                if snapped - pos < min_dur:
+                    snapped = min(pos + min_dur, total_duration)
+                elif snapped - pos > max_dur:
+                    snapped = pos + max_dur
+                scenes.append({
+                    "name": f"Scene {scene_num}",
+                    "start_time": round(pos, 2),
+                    "end_time": round(snapped, 2),
+                })
+                pos = snapped
+                scene_num += 1
+                # Safety: if we somehow didn't advance, bail to prevent
+                # an infinite loop (shouldn't happen given the min_dur
+                # clamp, but defense in depth).
+                if scenes[-1]["end_time"] <= scenes[-1]["start_time"] + 1e-3:
+                    break
+
+            # Tiny tail absorption — same rationale as the DP main
+            # path.  Routed through the shared helper so logging and
+            # behavior stay in lock-step across producers.
+            scenes = _absorb_tiny_tail(
+                scenes, min_dur=min_dur, max_dur=max_dur,
+                where="DP fallback",
+            )
+
+            if _exhausted_break_count > 0:
+                logger.warning(
+                    f"[NarrationDP] Natural-break fallback exhausted candidate "
+                    f"breaks {_exhausted_break_count} time(s) — the tail of "
+                    f"the audio fell back to uniform {ideal_dur:.1f}s slices "
+                    f"(source={_source!r}).  Upload an SRT covering the full "
+                    f"narration to get phrase-aligned scenes throughout."
+                )
+            logger.info(
+                f"[NarrationDP] Natural-break fallback produced {len(scenes)} "
+                f"scenes (source={_source!r}, {len(_breaks)} candidate breaks, "
+                f"{_exhausted_break_count} uniform-tail steps)"
+            )
+            return scenes
+
+        # Worst-case path (no usable breaks at all): keep the original
+        # fixed-slice behavior so we don't regress to "zero scenes."
+        # Logged as ERROR so it's visible in the user's diag.md when it
+        # actually happens — it means the audio has no detectable speech
+        # boundaries at all and the user needs to upload an SRT.
+        logger.error(
+            f"[NarrationDP] No natural break points available — falling back to "
+            f"raw {ideal_dur:.1f}s slices.  User should upload an SRT to get "
+            f"phrase-aligned scenes."
         )
         scenes = []
         pos = 0.0
@@ -2437,6 +3037,16 @@ def _dp_segment_narration(
             "lyrics": lyrics_text,
         })
         prev_cut = cut_idx
+
+    # DP cost function intentionally exempts the LAST scene from the
+    # ``dur >= min_dur`` rule (see the `and i < n` at line ~2706 of
+    # the DP loop) so it can always produce SOMETHING that covers the
+    # tail, but that leaks 1–3s scenes into the user's timeline (e.g.
+    # the 1.78s tail user hit in 1.8.14).  Absorb the tail here so the
+    # DP-main path matches the fallback path's behavior.
+    scenes = _absorb_tiny_tail(
+        scenes, min_dur=min_dur, max_dur=max_dur, where="DP main",
+    )
 
     logger.info(
         f"[NarrationDP] Segmented {n} phrases into {len(scenes)} scenes "
@@ -3508,6 +4118,15 @@ async def suggest_timeline(
             vs for vs in validated_scenes
             if vs["end_time"] - vs["start_time"] > 0.1
         ]
+
+    # LLM-produced timelines can finish with a tail below
+    # ``min_dur`` — the LLM sometimes uses every remaining cut point to
+    # finish "filling" the audio.  Same producer-agnostic absorption
+    # the DP paths run.
+    validated_scenes = _absorb_tiny_tail(
+        validated_scenes, min_dur=min_dur, max_dur=max_dur,
+        where="LLM post-split",
+    )
 
     # De-duplicate names
     name_counts: dict[str, int] = {}

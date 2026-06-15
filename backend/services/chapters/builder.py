@@ -206,7 +206,10 @@ async def _create_chapters_from_headers(
     # the same FK-safe ordering: scenes first, then chapters depth-DESC.
     _pid_hex = project_id.hex
     for c in list(existing_chapters):
-        if c.source == "auto":
+        # Treat NULL/'' source the same as 'auto' — matches the widened
+        # SQL DELETE below so legacy rows expunge in lock-step with the
+        # delete and can't be re-flushed from the ORM cache.
+        if c.source in ("auto", "", None):
             try:
                 session.expunge(c)
             except Exception:
@@ -218,8 +221,13 @@ async def _create_chapters_from_headers(
     for d in range(settings_.max_depth, -1, -1):
         await session.execute(
             text(
+                # Catch legacy NULL/'' source rows too — they predate the
+                # 1.8.0 ``source`` column default and would otherwise
+                # survive cleanup and pile up under newly-built chapters.
                 "DELETE FROM chapters "
-                "WHERE project_id = :pid AND source = 'auto' AND depth = :d"
+                "WHERE project_id = :pid "
+                "AND (source = 'auto' OR source IS NULL OR source = '') "
+                "AND depth = :d"
             ),
             {"pid": _pid_hex, "d": d},
         )
@@ -322,7 +330,10 @@ async def _create_auto_chapters(
     _pid_hex = project_id.hex
     # Expunge cached ORM objects so we don't re-flush stale copies.
     for c in list(existing_chapters):
-        if c.source == "auto":
+        # Treat NULL/'' source the same as 'auto' — matches the widened
+        # SQL DELETE below so legacy rows expunge in lock-step with the
+        # delete and can't be re-flushed from the ORM cache.
+        if c.source in ("auto", "", None):
             try:
                 session.expunge(c)
             except Exception:
@@ -337,8 +348,13 @@ async def _create_auto_chapters(
     for d in range(settings_.max_depth, -1, -1):
         await session.execute(
             text(
+                # Catch legacy NULL/'' source rows too — they predate the
+                # 1.8.0 ``source`` column default and would otherwise
+                # survive cleanup and pile up under newly-built chapters.
                 "DELETE FROM chapters "
-                "WHERE project_id = :pid AND source = 'auto' AND depth = :d"
+                "WHERE project_id = :pid "
+                "AND (source = 'auto' OR source IS NULL OR source = '') "
+                "AND depth = :d"
             ),
             {"pid": _pid_hex, "d": d},
         )
@@ -411,6 +427,32 @@ async def rebuild_chapters(
     logger.info(f"Rebuilding chapters for project {project_id} (force_auto={force_auto})")
 
     settings_ = await _load_settings(session)
+
+    # ── Legacy-source backfill ──────────────────────────────────────────
+    # The Chapter.source column was added in 1.8.0 with default="auto",
+    # but rows that existed before that migration ran (or rows created
+    # via raw-SQL paths that skipped the default) can sit at NULL or the
+    # empty string.  The cleanup DELETE below filters on
+    # ``source = 'auto'``, so those rows would slip past it and pile up
+    # under newly-built chapters — symptom: doubled chapters after every
+    # re-process audio.  Force-upgrade them to ``'auto'`` here so they
+    # behave like normal auto rows for the rest of the rebuild.
+    _pid_hex_pre = project_id.hex
+    _backfill_res = await session.execute(
+        text(
+            "UPDATE chapters SET source = 'auto' "
+            "WHERE project_id = :pid AND (source IS NULL OR source = '')"
+        ),
+        {"pid": _pid_hex_pre},
+    )
+    if _backfill_res.rowcount:
+        logger.warning(
+            f"Backfilled {_backfill_res.rowcount} chapter row(s) with "
+            f"NULL/empty source -> 'auto' for project {project_id}.  These "
+            f"would have skipped the cleanup DELETE and produced doubled "
+            f"chapters on re-process audio."
+        )
+        await session.commit()
 
     # Load project, lyrics, scenes, existing chapters
     result = await session.execute(select(Project).where(Project.id == project_id))

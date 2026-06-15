@@ -131,6 +131,65 @@ class SceneResponse(BaseModel):
         from_attributes = True
 
 
+# ── Duration-bounds helper ────────────────────────────────────────────────
+# Reads AppSettings.video_min_duration / video_max_duration and clamps a
+# (start, end) pair so the resulting scene length is inside [min, max].
+# Both POST /scenes (create) and PATCH /scenes (edit) call this so a
+# manually-entered scene can't produce a render that's wildly out of spec.
+# The actual ComfyUI duration sent to LTX 2.3 is independently clamped in
+# the dispatcher — this helper keeps the *DB row* honest so all downstream
+# code (lyric slicing, suggest_timeline boundary audit, etc.) sees a value
+# the project's settings would actually accept.
+async def _clamp_scene_duration(
+    session: AsyncSession,
+    start_time: float,
+    end_time: float,
+    context: str = "",
+) -> tuple[float, float]:
+    """Clamp ``(start, end)`` so the resulting span fits ``[min, max]``.
+
+    Always preserves ``start_time`` and adjusts ``end_time`` upward or
+    downward — moving the start would change which Whisper words land in
+    the scene, which is more destructive than just trimming/padding the
+    end.  Returns the (possibly modified) pair.
+    """
+    try:
+        from backend.database.models import AppSettings as _AppSettings
+        from sqlmodel import select as _select
+        _row = (await session.execute(_select(_AppSettings).where(_AppSettings.id == 1))).scalars().first()
+        _min = float(_row.video_min_duration if _row else 5.0) or 5.0
+        _max = float(_row.video_max_duration if _row else 15.0) or 15.0
+    except Exception:
+        _min, _max = 5.0, 15.0
+
+    _span = float(end_time) - float(start_time)
+    if _span < 0:
+        # Caller gave end_time < start_time; treat as zero-length and pad up.
+        logger.warning(
+            f"_clamp_scene_duration: negative span {_span:.2f}s "
+            f"({start_time:.2f}..{end_time:.2f}) — padding to min={_min:.2f}s "
+            f"({context})"
+        )
+        return float(start_time), float(start_time) + _min
+    if _span < _min:
+        _new_end = float(start_time) + _min
+        logger.warning(
+            f"_clamp_scene_duration: span {_span:.2f}s below "
+            f"video_min_duration={_min:.2f}s — padding end_time to "
+            f"{_new_end:.2f}s ({context})"
+        )
+        return float(start_time), _new_end
+    if _span > _max:
+        _new_end = float(start_time) + _max
+        logger.warning(
+            f"_clamp_scene_duration: span {_span:.2f}s above "
+            f"video_max_duration={_max:.2f}s — trimming end_time to "
+            f"{_new_end:.2f}s ({context})"
+        )
+        return float(start_time), _new_end
+    return float(start_time), float(end_time)
+
+
 # Helper: load a single scene with all relationships eagerly loaded
 async def _load_scene_with_relations(session: AsyncSession, scene_id: UUID) -> Scene | None:
     """Load a scene with generation_history, stem_selection, timeline_positions."""
@@ -157,6 +216,49 @@ async def _get_project_or_404(project_id: UUID, session: AsyncSession) -> Projec
             detail=f"Project {project_id} not found",
         )
     return project
+
+
+@router.get(
+    "/audit-boundaries",
+    summary="Report scenes whose timing is out of spec or stale",
+)
+async def audit_scene_boundaries_endpoint(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Audit every scene's start/end timing against project bounds and
+    against the narration source (Whisper or SRT, whichever is loaded).
+
+    Returned shape — see ``services/scene_boundaries.py::audit_scene_boundaries``.
+    Used by the diagnostic UI to show "X of N scenes drifted from
+    narration source" and by the auto-resync code path on Whisper / SRT
+    completion to decide whether to re-segment.
+    """
+    from backend.services.scene_boundaries import audit_scene_boundaries
+    from backend.database.models import AppSettings as _AS, Lyrics as _Lyr
+    from sqlmodel import select as _sel
+
+    await _get_project_or_404(project_id, session)
+
+    # Project bounds (default 5/15).
+    _row = (await session.execute(_sel(_AS).where(_AS.id == 1))).scalars().first()
+    _min = float(_row.video_min_duration if _row else 5.0) or 5.0
+    _max = float(_row.video_max_duration if _row else 15.0) or 15.0
+
+    # Scenes (ordered) and the lyrics row for the narration source words.
+    scenes_stmt = (
+        _sel(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+    )
+    scenes = list((await session.execute(scenes_stmt)).scalars().all())
+
+    lyrics_row = (
+        await session.execute(_sel(_Lyr).where(_Lyr.project_id == project_id))
+    ).scalars().first()
+    words = list(lyrics_row.words or []) if lyrics_row else []
+
+    return audit_scene_boundaries(
+        scenes=scenes, words=words, min_duration=_min, max_duration=_max,
+    )
 
 
 @router.get(
@@ -243,12 +345,21 @@ async def create_scene(
         scenes = result.scalars().all()
         next_order_index = len(scenes)
 
+        # Apply the project's video duration bounds (min/max) so a manual
+        # scene-create can't ship a 60s scene that LTX 2.3 can't render or
+        # a 0.5s scene that produces a 1-frame artifact.  Clamp + log so
+        # the user sees what happened.
+        _clamped_start, _clamped_end = await _clamp_scene_duration(
+            session, _snap_to_frame(req.start_time), _snap_to_frame(req.end_time),
+            context=f"POST /scenes (project {project_id})",
+        )
+
         scene = Scene(
             project_id=project_id,
             order_index=next_order_index,
             name=req.name,
-            start_time=_snap_to_frame(req.start_time),
-            end_time=_snap_to_frame(req.end_time),
+            start_time=_clamped_start,
+            end_time=_clamped_end,
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
         )
@@ -527,10 +638,23 @@ async def update_scene(
 
         if req.name is not None:
             scene.name = req.name
-        if req.start_time is not None:
-            scene.start_time = _snap_to_frame(req.start_time)
-        if req.end_time is not None:
-            scene.end_time = _snap_to_frame(req.end_time)
+        # Clamp start/end together so we always evaluate the FINAL pair
+        # against min/max (touching only one half-violates without context).
+        if req.start_time is not None or req.end_time is not None:
+            _new_start = (
+                _snap_to_frame(req.start_time) if req.start_time is not None
+                else float(scene.start_time)
+            )
+            _new_end = (
+                _snap_to_frame(req.end_time) if req.end_time is not None
+                else float(scene.end_time)
+            )
+            _new_start, _new_end = await _clamp_scene_duration(
+                session, _new_start, _new_end,
+                context=f"PATCH /scenes/{scene_id}",
+            )
+            scene.start_time = _new_start
+            scene.end_time = _new_end
         if req.prompt is not None:
             scene.prompt = req.prompt
         if req.negative_prompt is not None:
@@ -762,10 +886,23 @@ async def delete_scene(
             )
 
         # Apply the merge to the absorbing scene BEFORE deleting (so the
-        # foreign-key cascade can't interfere).
+        # foreign-key cascade can't interfere).  Each branch routes the
+        # new (start_time, end_time) pair through _clamp_scene_duration
+        # so an absorbed neighbor can't push the surviving scene past
+        # AppSettings.video_max_duration — without this guard, deleting
+        # a 12s scene into a 14s neighbor would produce a 26s span and
+        # the auto-gen path would silently dispatch an out-of-bounds
+        # video render.  (1.8.14 audit gap "B" — see CHANGELOG.)
         absorbing_scene: Optional[Scene] = None
         if effective_target == "previous" and prev_scene is not None:
-            prev_scene.end_time = scene.end_time
+            _new_start, _new_end = await _clamp_scene_duration(
+                session,
+                float(prev_scene.start_time),
+                float(scene.end_time),
+                context=f"delete_scene merge-into-previous (scene {scene.id})",
+            )
+            prev_scene.start_time = _new_start
+            prev_scene.end_time = _new_end
             sc_params = dict(prev_scene.parameters or {})
             sc_params["extended_via_delete"] = True
             sc_params["extended_at"] = (sc_params.get("extended_at", []) + [{
@@ -780,7 +917,14 @@ async def delete_scene(
                 f"({prev_scene.name}) — new end_time={prev_scene.end_time:.2f}s"
             )
         elif effective_target == "next" and next_scene is not None:
-            next_scene.start_time = scene.start_time
+            _new_start, _new_end = await _clamp_scene_duration(
+                session,
+                float(scene.start_time),
+                float(next_scene.end_time),
+                context=f"delete_scene merge-into-next (scene {scene.id})",
+            )
+            next_scene.start_time = _new_start
+            next_scene.end_time = _new_end
             sc_params = dict(next_scene.parameters or {})
             sc_params["extended_via_delete"] = True
             sc_params["extended_at"] = (sc_params.get("extended_at", []) + [{

@@ -1573,12 +1573,24 @@ class JobDispatcher:
                     director_audio_guidance = max(director_audio_guidance, 0.7)
                     logger.info(f"Lipsync enabled — audio_guidance boosted to {director_audio_guidance}")
 
+                _seq_duration_raw = params.get("duration")
+                if _seq_duration_raw is None or float(_seq_duration_raw) <= 0:
+                    logger.warning(
+                        f"[{job.id}] sequencer workflow received non-positive / missing "
+                        f"duration ({_seq_duration_raw!r}) — falling back to 5.0s.  "
+                        f"This usually means upstream forgot to forward scene timing "
+                        f"into job.parameters."
+                    )
+                    _seq_duration_resolved = 5.0
+                else:
+                    _seq_duration_resolved = float(_seq_duration_raw)
+
                 return prepare_sequencer_workflow(
                     workflow_path=workflow_path,
                     prompt=params.get("prompt", ""),
                     width=params.get("width", 768),
                     height=params.get("height", 512),
-                    duration=params.get("duration", 5.0),
+                    duration=_seq_duration_resolved,
                     framerate=params.get("framerate", 24),
                     seed=seed,
                     audio_path=audio_path or "",
@@ -1611,6 +1623,11 @@ class JobDispatcher:
                 except Exception:
                     pass
 
+            # Initialize OUTSIDE the try so an exception during the
+            # AppSettings query doesn't leave `db_settings` unbound when
+            # the duration-clamp block below references it (regression
+            # found in 1.8.14 audit).
+            db_settings = None
             async with self._session_factory() as session:
                 try:
                     from backend.database.models import AppSettings as DBAppSettings
@@ -1625,7 +1642,28 @@ class JobDispatcher:
                 except Exception as e:
                     logger.warning(f"Failed to read video settings: {e}")
 
-            base_duration = params.get("duration", 10.0)
+            # Explicit duration check — a missing or non-positive duration
+            # used to silently fall through to 10.0s, which broke any scene
+            # whose actual range differed from 10s (very common in long
+            # narration projects).  Surface the bug instead of papering
+            # over it, then fall back to AppSettings video_min_duration
+            # (or 5s) so the job still renders — just at a clearly-
+            # visible minimum length instead of an arbitrary "10".
+            _raw_duration = params.get("duration")
+            if _raw_duration is None or float(_raw_duration) <= 0:
+                _fallback_floor = float(
+                    (db_settings.video_min_duration if db_settings else 5.0) or 5.0
+                )
+                logger.warning(
+                    f"[{job.id}] Video job has non-positive / missing duration "
+                    f"({_raw_duration!r}).  Upstream code path forgot to pass "
+                    f"scene.end_time - scene.start_time into job.parameters.  "
+                    f"Falling back to video_min_duration={_fallback_floor:.2f}s — "
+                    f"the resulting clip will be too short; investigate the caller."
+                )
+                base_duration = _fallback_floor
+            else:
+                base_duration = float(_raw_duration)
             effective_duration = base_duration + video_tail
 
             # V2V overlap compensation removed — V2V now uses I2V workflow

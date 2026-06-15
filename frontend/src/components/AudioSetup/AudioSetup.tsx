@@ -537,6 +537,66 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
         {/* Upload SRT — narration modes only */}
         {isNarration && (
           <>
+            {/* Narration-timing source chip — surfaces whether scene
+                boundaries will be driven by an authoritative SRT (e.g.
+                ElevenLabs export) or a probabilistic Whisper pass.
+                Updates in real time as the user uploads / re-uploads
+                because the parent query key invalidates after every
+                analyze / upload_srt round-trip. */}
+            {(() => {
+              const _src = ((lyricsData as any)?.source || '') as string;
+              const _cues = Number((lyricsData as any)?.cue_count || 0);
+              const _wordCount = Array.isArray((lyricsData as any)?.words)
+                ? (lyricsData as any).words.length
+                : 0;
+              if (_src === 'srt') {
+                return (
+                  <div
+                    className="w-full px-3 py-2 rounded-lg text-xs flex items-center gap-2 bg-emerald-900/40 border border-emerald-700/60 text-emerald-200"
+                    title={
+                      `SRT-derived narration timing — ${_cues} cue(s), ` +
+                      `${_wordCount} word(s).  Scene boundaries will snap to ` +
+                      `cue starts/ends.  Re-running Whisper will NOT overwrite ` +
+                      `these cues; re-upload the SRT to refresh.`
+                    }
+                  >
+                    <MessageSquare size={14} />
+                    <span className="font-medium">SRT loaded</span>
+                    <span className="text-emerald-300/80 ml-auto">
+                      {_cues} cue{_cues === 1 ? '' : 's'} · {_wordCount} word{_wordCount === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                );
+              }
+              if (_src === 'whisper') {
+                return (
+                  <div
+                    className="w-full px-3 py-2 rounded-lg text-xs flex items-center gap-2 bg-amber-900/30 border border-amber-700/40 text-amber-200"
+                    title={
+                      `Whisper-derived narration timing — ${_wordCount} word(s). ` +
+                      `Upload an SRT to use authoritative cue boundaries instead ` +
+                      `(better alignment + survives audio re-analysis).`
+                    }
+                  >
+                    <MessageSquare size={14} />
+                    <span className="font-medium">Whisper timing</span>
+                    <span className="text-amber-300/80 ml-auto">
+                      {_wordCount} word{_wordCount === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                );
+              }
+              return (
+                <div
+                  className="w-full px-3 py-2 rounded-lg text-xs flex items-center gap-2 bg-gray-800/60 border border-gray-700/60 text-gray-400"
+                  title="No narration timing yet.  Run audio analysis or upload an SRT."
+                >
+                  <MessageSquare size={14} />
+                  <span>No SRT or Whisper transcription</span>
+                </div>
+              );
+            })()}
+
             <button
               onClick={() => srtInputRef.current?.click()}
               disabled={isUploadingSrt}

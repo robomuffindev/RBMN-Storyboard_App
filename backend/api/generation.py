@@ -71,7 +71,14 @@ class GenerateVideoRequest(BaseModel):
     prompt: str
     width: int = 1024
     height: int = 576
-    duration: float = 10.0
+    # ``duration`` is OPTIONAL — when the frontend omits it, the endpoint
+    # resolves the value server-side from ``scene.end_time -
+    # scene.start_time``.  Previously this defaulted to 10.0, which
+    # silently overrode whatever the scene actually wanted and caused
+    # narration / video drift in long projects.  Allowing None makes the
+    # default explicit + scene-aware.  See ``settings.video_min_duration``
+    # / ``video_max_duration`` for the clamps that apply on top.
+    duration: Optional[float] = None
     framerate: int = 24
     seed: Optional[int] = None
     first_frame_asset_id: Optional[UUID] = None
@@ -196,6 +203,155 @@ async def _get_project_or_404(project_id: UUID, session: AsyncSession) -> Projec
         )
     return project
 
+
+async def _resolve_video_duration(
+    session: AsyncSession,
+    scene: Scene,
+    requested_duration: Optional[float],
+) -> float:
+    """Decide the final video duration used for ComfyUI.
+
+    Priority:
+      1. Explicit ``requested_duration`` from the request body if set and >0.
+      2. Otherwise: ``scene.end_time - scene.start_time`` (the authoritative
+         per-scene range that drives narration/lyric slicing).
+
+    The result is then clamped to ``AppSettings.video_min_duration`` /
+    ``video_max_duration`` so a runaway scene can't trigger a multi-minute
+    LTX render and a too-short scene gets bumped to the model's effective
+    minimum.  Both the source choice and any clamp are logged.
+
+    This helper exists because the legacy Pydantic default ``duration:
+    float = 10.0`` silently overrode every scene's actual range — long
+    narration projects drifted out of sync with the model output because
+    every scene rendered at exactly 10s regardless of how long the
+    underlying lyrics/narration span really was.
+    """
+    # Read the project's min/max bounds (5/15s defaults).
+    _stmt = select(AppSettings).where(AppSettings.id == 1)
+    _row = (await session.execute(_stmt)).scalars().first()
+    _min = float(_row.video_min_duration if _row else 5.0) or 5.0
+    _max = float(_row.video_max_duration if _row else 15.0) or 15.0
+
+    # Source = explicit request value if it's a sane positive number,
+    # otherwise the scene's actual range.
+    if requested_duration is not None and float(requested_duration) > 0:
+        _src_value = float(requested_duration)
+        _src_label = "request_body"
+    else:
+        _scene_range = max(0.0, float(scene.end_time) - float(scene.start_time))
+        _src_value = _scene_range
+        _src_label = "scene.end_time - scene.start_time"
+
+    # If even the scene range is zero (a brand-new placeholder scene that
+    # was never given a real timeline), fall back to the project minimum
+    # rather than silently producing a 0-second job (which the dispatcher
+    # would later reject).  This is the closest we can get to "make
+    # *something* render" while still respecting the user's bounds.
+    if _src_value <= 0.0:
+        logger.warning(
+            f"_resolve_video_duration: scene {scene.id} has zero-length range "
+            f"({scene.start_time:.2f}..{scene.end_time:.2f}) and no explicit "
+            f"request duration — falling back to video_min_duration={_min:.2f}s"
+        )
+        _src_value = _min
+        _src_label = "fallback_min_duration"
+
+    # Apply the user's min/max clamp.
+    _final = max(_min, min(_max, _src_value))
+    if _final != _src_value:
+        logger.warning(
+            f"_resolve_video_duration: clamped {_src_value:.2f}s -> {_final:.2f}s "
+            f"(source={_src_label}, min={_min:.2f}, max={_max:.2f}, scene={scene.id})"
+        )
+    else:
+        logger.debug(
+            f"_resolve_video_duration: scene={scene.id} duration={_final:.2f}s "
+            f"(source={_src_label}, within [{_min:.2f}, {_max:.2f}])"
+        )
+    return _final
+
+
+def _clamp_duration_to_bounds(
+    raw_duration: float,
+    min_duration: float,
+    max_duration: float,
+    context: str = "",
+) -> float:
+    """Synchronous duration clamp used by every Auto-Gen submission site
+    inside ``generation.py``.  The site has already loaded ``AppSettings``
+    once at the top of the run (so we don't want each site re-opening a
+    DB session just to read the bounds again) — this helper takes the
+    pre-loaded ``min_duration`` / ``max_duration`` directly and emits a
+    warning on every clamp so out-of-bounds scene timings are visible
+    in the log.
+
+    Without this clamp the per-site ``duration = scene.end_time -
+    scene.start_time`` expression would pass an arbitrary value (e.g.
+    26s after a delete-merge) straight into ComfyUI — see 1.8.14 audit
+    gap "E".
+    """
+    _src = float(raw_duration)
+    if _src <= 0.0:
+        logger.warning(
+            f"_clamp_duration_to_bounds: non-positive raw duration {_src:.2f}s "
+            f"({context}) — using min={min_duration:.2f}s as floor"
+        )
+        return float(min_duration)
+    _final = max(float(min_duration), min(float(max_duration), _src))
+    if abs(_final - _src) > 1e-3:
+        logger.warning(
+            f"_clamp_duration_to_bounds: clamped {_src:.2f}s -> {_final:.2f}s "
+            f"(min={min_duration:.2f}, max={max_duration:.2f}, {context})"
+        )
+    return _final
+
+
+
+
+async def _scene_duration_for_dispatch(
+    _ignored_session_or_factory,
+    scene: Scene,
+    label: str = "auto_gen",
+) -> float:
+    """Per-site helper used by every Auto-Gen submission point.
+
+    Reads ``AppSettings.video_min_duration`` / ``video_max_duration`` via
+    the global ``async_session`` factory (works from both request
+    handlers and background tasks since neither's session needs to be
+    threaded through) and clamps ``scene.end_time - scene.start_time``
+    to those bounds.
+
+    The first parameter is accepted but ignored — kept for forward
+    compatibility with call sites that pass either a ``session_factory``
+    or an active ``session``; the function opens its own short-lived
+    session regardless to avoid contaminating the caller's transaction.
+
+    Without this clamp the per-site ``duration = scene.end_time -
+    scene.start_time`` expression would ship arbitrary durations into
+    ComfyUI — see 1.8.14 audit gap "E".  The dispatcher's
+    fallback-on-missing block catches only None/<=0, not above-max
+    values, so the clamp has to happen UPSTREAM of submission.
+    """
+    _ = _ignored_session_or_factory  # silence linters
+    try:
+        from backend.database.models import AppSettings as _AS
+        from backend.database import async_session as _async_session
+        from sqlmodel import select as _select
+        async with _async_session() as _s:
+            _row = (await _s.execute(_select(_AS).where(_AS.id == 1))).scalars().first()
+        _min = float(_row.video_min_duration if _row else 5.0) or 5.0
+        _max = float(_row.video_max_duration if _row else 15.0) or 15.0
+    except Exception as _read_err:
+        logger.debug(
+            f"_scene_duration_for_dispatch: AppSettings read failed ({_read_err!r}); "
+            f"using defaults 5.0/15.0"
+        )
+        _min, _max = 5.0, 15.0
+    return _clamp_duration_to_bounds(
+        float(scene.end_time) - float(scene.start_time), _min, _max,
+        context=f"{label} scene {scene.order_index}",
+    )
 
 async def _get_scene_or_404(
     scene_id: UUID, project_id: UUID, session: AsyncSession
@@ -474,6 +630,15 @@ async def generate_video(
             job_type="video",
         )
 
+        # Resolve duration server-side when the frontend didn't supply one.
+        # This replaces the old `duration: float = 10.0` Pydantic default that
+        # silently overrode every scene's actual time range — see request
+        # model docstring.  Clamped to AppSettings video_min/max_duration so
+        # the result is always within the user's configured bounds.
+        _resolved_duration = await _resolve_video_duration(
+            session, scene, req.duration
+        )
+
         # Create job record
         job = Job(
             project_id=project_id,
@@ -486,7 +651,7 @@ async def generate_video(
                 "prompt": req.prompt,
                 "width": req.width,
                 "height": req.height,
-                "duration": req.duration,
+                "duration": _resolved_duration,
                 "framerate": req.framerate,
                 "seed": resolved_seed,
                 "first_frame_asset_id": str(req.first_frame_asset_id) if req.first_frame_asset_id else None,
@@ -773,7 +938,9 @@ class GenerateAssetRequest(BaseModel):
     reference_asset_ids: list[UUID] = []
     two_pass: bool = False
     # Video-specific
-    duration: float = 10.0
+    # Optional — when absent, resolved server-side from the scene's
+    # actual time range.  See GenerateVideoRequest for rationale.
+    duration: Optional[float] = None
     framerate: int = 24
     first_frame_asset_id: Optional[UUID] = None
     last_frame_asset_id: Optional[UUID] = None
@@ -869,7 +1036,28 @@ async def generate_asset(
                 job.parameters["reference_asset_ids"] = []
 
         else:
-            # Video generation — follows generate_video() pattern
+            # Video generation — follows generate_video() pattern.
+            # No scene attached (this is the asset generator), so we can't
+            # source duration from a scene range.  Use the requested value
+            # if set and clamp to project bounds, otherwise fall back to
+            # video_min_duration so we never emit a 10s silent default.
+            _stmt = select(AppSettings).where(AppSettings.id == 1)
+            _row = (await session.execute(_stmt)).scalars().first()
+            _min = float(_row.video_min_duration if _row else 5.0) or 5.0
+            _max = float(_row.video_max_duration if _row else 15.0) or 15.0
+            if req.duration is not None and float(req.duration) > 0:
+                _asset_duration = max(_min, min(_max, float(req.duration)))
+                if _asset_duration != float(req.duration):
+                    logger.warning(
+                        f"Asset generator video duration {req.duration!r} clamped to "
+                        f"{_asset_duration:.2f}s (bounds [{_min:.2f}, {_max:.2f}])"
+                    )
+            else:
+                _asset_duration = _min
+                logger.info(
+                    f"Asset generator video duration unset — defaulting to "
+                    f"video_min_duration={_min:.2f}s"
+                )
             job = Job(
                 project_id=project_id,
                 scene_id=None,  # Standalone — no scene
@@ -880,7 +1068,7 @@ async def generate_asset(
                     "prompt": req.prompt,
                     "width": req.width,
                     "height": req.height,
-                    "duration": req.duration,
+                    "duration": _asset_duration,
                     "framerate": req.framerate,
                     "seed": resolved_seed,
                     "first_frame_asset_id": str(req.first_frame_asset_id) if req.first_frame_asset_id else None,
@@ -2149,7 +2337,8 @@ async def auto_generate(
                 scene_params["video_prompt"] = video_prompt
                 scene.parameters = scene_params
 
-                duration = scene.end_time - scene.start_time
+                duration = await _scene_duration_for_dispatch(
+                    session_factory, scene, label="auto_gen")
                 vid_wf = "ltx_fflf" if uses_ff_lf else "ltx_i2v"
 
                 job = Job(
@@ -3220,7 +3409,8 @@ async def _run_windowed_batch(
                 scene.parameters = scene_params
                 await session.commit()
 
-                duration = scene.end_time - scene.start_time
+                duration = await _scene_duration_for_dispatch(
+                    session_factory, scene, label="auto_gen")
                 eligible.append({
                     "scene_id": scene.id,
                     "scene_name": scene_name,
@@ -4292,7 +4482,8 @@ async def _run_sequential_auto_gen(
                     scene.parameters = scene_params
                     await session.commit()
 
-                    duration = scene.end_time - scene.start_time
+                    duration = await _scene_duration_for_dispatch(
+                    session_factory, scene, label="auto_gen")
                     job = Job(
                         project_id=project_id,
                         scene_id=scene.id,
@@ -4504,7 +4695,8 @@ async def _run_sequential_auto_gen(
                     scene.parameters = scene_params
                     await session.commit()
 
-                    duration = scene.end_time - scene.start_time
+                    duration = await _scene_duration_for_dispatch(
+                    session_factory, scene, label="auto_gen")
                     job = Job(
                         project_id=project_id,
                         scene_id=scene.id,
@@ -4632,7 +4824,8 @@ async def _run_sequential_auto_gen(
                     scene.parameters = scene_params
                     await session.commit()
 
-                    duration = scene.end_time - scene.start_time
+                    duration = await _scene_duration_for_dispatch(
+                    session_factory, scene, label="auto_gen")
                     # Scene 1 = I2V, scenes 2+ = V2V extend
                     vid_wf = "ltx_v2v_extend" if not is_first_scene else "ltx_i2v"
                     job = Job(

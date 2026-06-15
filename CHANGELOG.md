@@ -1,5 +1,73 @@
 # Changelog
 
+## [1.8.14] - 2026-06-14
+
+### Fixed — Narration / video duration drift ("everything defaults to 10 seconds")
+
+Lorenzo reported that in narration modes scenes "default to 10 seconds which doesn't work with the narration. It also slowly makes it so the narration and concepts in the generated videos and images no longer make sense with each other."
+
+Root cause was three silent 10-second fallbacks compounding with stale scene boundaries after Whisper / SRT re-analysis:
+
+- **`GenerateVideoRequest.duration` and `AutoGenerateRequest.duration`** defaulted to `10.0` when the frontend omitted the field — whatever the scene's actual `end_time - start_time` was got silently overridden. Both fields are now `Optional[float] = None`; absent values resolve server-side via the new `_resolve_video_duration(session, scene, requested)` helper that returns the scene's actual range, then clamps to `AppSettings.video_min_duration` / `video_max_duration`.
+- **Dispatcher silent fallback** at `dispatcher.py` `params.get("duration", 10.0)` and the LTX-sequencer `params.get("duration", 5.0)` now log a `WARNING` when the field is missing or non-positive, and fall back to the project's `video_min_duration` (not the hardcoded 10/5). Surfaces upstream bugs instead of papering over them.
+- **No min/max clamp on manual scene create/edit.** `POST /scenes` and `PATCH /scenes` now run every start/end pair through `_clamp_scene_duration(...)`, which reads `AppSettings.video_min_duration` / `video_max_duration` and trims/pads `end_time` to fit. Start time is never moved (would change which Whisper words land in the scene — too destructive). Each clamp logs a warning so the user can see what happened in `diag.md`.
+
+### Added — Stale-boundary detector + auto-resync on narration source change
+
+The "narration and concepts drift apart" symptom was caused by Whisper re-transcribing the narration audio (or a fresh SRT upload arriving) without ever re-running Suggest Timeline. The DB kept the original scene boundaries from the first pass; the new Whisper / SRT word timing was different; `_get_scene_lyrics` then sliced the wrong words into each scene; the LLM prompt enhancer received the wrong narration text; the generated images / videos drifted away from what's actually being said.
+
+New module `backend/services/scene_boundaries.py`:
+
+- `source_label(words)` — detects whether `Lyrics.words` came from Whisper or SRT (SRT-parsed words carry a `block` integer).
+- `cue_ranges(words)` — for SRT sources, groups words by `block` so the resync can snap to actual cue boundaries.
+- `natural_break_points(words)` — SRT → every cue start/end; Whisper → every >300ms inter-word gap.
+- `closest_break(boundary, breaks)` — returns nearest natural break point + distance.
+- `audit_scene_boundaries(scenes, words, min, max)` — full per-scene report: out-of-bounds duration, distance from nearest natural break, snap suggestion when SRT is present.
+- `needs_auto_resync(audit)` — heuristic: SRT mismatch ALWAYS triggers (cues are authoritative); Whisper triggers when stale fraction ≥30%.
+
+Auto-resync fires from two places in `backend/api/timeline.py`:
+
+- After `analyze_audio` (`POST /api/projects/{id}/analyze`) commits the new Lyrics row — for narration projects, audits boundaries against the new Whisper words and snaps each scene's start/end to the closest phrase boundary when stale.
+- After `upload_srt` (`POST /api/projects/{id}/upload_srt`) commits the parsed cues — always snaps narration-mode scenes to cue boundaries (SRT > Whisper precision).
+
+The resync is gated to `narration_video` / `narration_images` projects — music video mode uses LLM-picked cuts and is left alone. Failure is non-fatal: a snap error never breaks the analyze / upload endpoint.
+
+### Added — `/scenes/audit-boundaries` debug endpoint
+
+`GET /api/projects/{id}/scenes/audit-boundaries` returns the same audit dict the auto-resync uses. Per-scene `duration_status` (`ok` / `below_min` / `above_max`), `start_drift_s` / `end_drift_s` against the nearest natural break, and `snap_suggestion` when SRT is present. Used by `diag.py` and any future "fix boundaries" UI; safe to hit from the Settings page to see how many scenes have drifted.
+
+### Why SRT is preferred over Whisper
+
+SRT files come from authoritative sources (ElevenLabs, Aivo, etc.) — the cue boundaries are the *intended* phrasing of the narration, not a probabilistic Whisper guess. When `Lyrics.words` carry the `block` key, every downstream consumer (audit, resync, scene slicing) treats those as ground truth and aligns boundaries to cue starts/ends. Whisper-sourced words still get audited, but with a higher stale-fraction threshold (30%) since Whisper phrase boundaries are noisier and a few manually-tuned scenes shouldn't trigger a wholesale resync.
+
+### Files
+
+- `backend/api/generation.py` — `GenerateVideoRequest.duration` / `AutoGenerateRequest.duration` → `Optional[float] = None`; `_resolve_video_duration` helper at top of module; consumers in `generate_video` (`/generate-video`) and `generate_asset` (`/asset`) updated.
+- `backend/services/jobs/dispatcher.py` — sequencer path + i2v path both log + clamp when `duration` is missing/non-positive; falls back to `AppSettings.video_min_duration`.
+- `backend/api/scenes.py` — new `_clamp_scene_duration` helper; `POST /scenes` and `PATCH /scenes` both call it; new `GET /api/projects/{id}/scenes/audit-boundaries` endpoint.
+- `backend/services/scene_boundaries.py` (new) — SRT-vs-Whisper detection + audit + resync heuristic primitives.
+- `backend/api/timeline.py` — `_maybe_resync_scene_boundaries` helper; auto-resync hooks in `analyze_audio` + `upload_srt`.
+
+### Notes
+
+- Old projects with already-drifted scenes need one re-upload of audio (or SRT) to trigger the resync. After that, drift can't accumulate again.
+- The dispatcher `WARNING` log line is the canary for any remaining silent-fallback bug. If you see `[<job_id>] Video job has non-positive / missing duration` after this release, that's a caller that needs fixing — please report.
+
+## [1.8.13] - 2026-06-14
+
+### Fixed — Auto-gen stuck at N/M with "status flipped to None"
+
+User reported Auto-Gen sitting at "13 / 77 scenes" forever even though ComfyUI workers were still completing jobs. Backend log showed the windowed-batch poll loop logging `"Windowed batch: exiting poll loop — status flipped to None"` mid-run.
+
+Root cause: a previous Auto-Gen run's 30-minute `_evict_seq_auto_job(pid)` eviction task fired during the current run and popped the live tracking dict entry. The poll loop's status check then returned `None` (not `"running"`) and exited; the queue/dispatcher kept processing in-flight jobs (giving the illusion of partial progress) but no new Pass 1 jobs got submitted.
+
+Fix in `backend/api/generation.py`:
+
+- Stamped a per-run `_evict_id` UUID on `_seq_auto_jobs[pid]` at run start (both `start_sequential_auto_gen` and `_resume_sequential_auto_gen`).
+- `_schedule_eviction(pid, evict_id)` passes the token into the eviction coroutine.
+- `_evict_seq_auto_job(pid, evict_id)` only pops when (a) the entry still exists, (b) `entry["_evict_id"] == evict_id` (same run we scheduled cleanup for), AND (c) the entry is in a terminal state.
+- Stale evictions log `"Eviction for {pid} skipped — entry replaced by newer run"` instead of silently killing the live run.
+
 ## [1.8.12] - 2026-06-08
 
 ### Added — Scene delete dialog with merge-target selection
