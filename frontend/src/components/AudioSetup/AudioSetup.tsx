@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, Music, Loader, CheckCircle, AlertCircle, Play, Pause, Mic, Drum, Guitar, Waves, FileText, Sparkles, Scissors, MessageSquare } from 'lucide-react';
-import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt } from '@/api/client';
+import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt, updateProject } from '@/api/client';
 import { useAppStore } from '@/store';
 
 interface AudioSetupProps {
@@ -107,6 +107,7 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
   const queryClient = useQueryClient();
   const assets = useAppStore(s => s.assets);
   const scenes = useAppStore(s => s.scenes);
+  const currentProject = useAppStore(s => s.currentProject);
 
   const [stage, setStage] = useState<AnalysisStage>('idle');
   const [errorMessage, setErrorMessage] = useState('');
@@ -605,6 +606,81 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
               {isUploadingSrt ? <Loader size={14} className="animate-spin" /> : <MessageSquare size={14} />}
               {isUploadingSrt ? 'Uploading SRT...' : 'Upload SRT Subtitles'}
             </button>
+
+            {/* Disable Whisper toggle — only meaningful when an SRT is
+                loaded.  Persisted on project.settings.disable_whisper so
+                the next Re-process Audio honors it.  Backend gracefully
+                falls back to running Whisper if the project is somehow
+                missing SRT cues when the flag is on. */}
+            {(() => {
+              const _src = ((lyricsData as any)?.source || '') as string;
+              const _isSrtLoaded = _src === 'srt';
+              const _disabled = !_isSrtLoaded;
+              const _checked = Boolean(
+                (currentProject?.settings as any)?.disable_whisper
+              );
+              const onToggle = async () => {
+                if (_disabled || !currentProject) return;
+                const newVal = !_checked;
+                const nextSettings = {
+                  ...(currentProject.settings || {}),
+                  disable_whisper: newVal,
+                };
+                try {
+                  await updateProject(currentProject.id, {
+                    settings: nextSettings,
+                  } as any);
+                  // Local store sync so the checkbox flips immediately
+                  useAppStore.getState().setProject({
+                    ...currentProject,
+                    settings: nextSettings,
+                  } as any);
+                  queryClient.invalidateQueries({
+                    queryKey: ['project', currentProject.id],
+                  });
+                } catch (err) {
+                  console.error('Failed to toggle disable_whisper:', err);
+                  alert('Could not save the Disable Whisper toggle.');
+                }
+              };
+              return (
+                <label
+                  className={`w-full flex items-start gap-2 px-3 py-2 rounded-lg text-xs ${
+                    _disabled
+                      ? 'bg-gray-800/40 border border-gray-700/40 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-800 border border-gray-700 text-gray-200 cursor-pointer hover:bg-gray-750'
+                  }`}
+                  title={
+                    _disabled
+                      ? 'Upload an SRT first — Whisper can only be skipped when SRT cues are available as the timing source.'
+                      : _checked
+                      ? 'Whisper transcription is currently SKIPPED.  Re-process Audio will use the SRT cues directly as narration timing.'
+                      : 'Enable to skip Whisper transcription entirely on the next Re-process Audio.  Faster + cleaner alignment when you have an authoritative SRT (ElevenLabs etc.).'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={_checked && !_disabled}
+                    disabled={_disabled}
+                    onChange={onToggle}
+                    className="mt-0.5 w-3.5 h-3.5 accent-emerald-500"
+                  />
+                  <div className="flex-1">
+                    <div className="font-medium">
+                      Disable Whisper Detection
+                      <span className="ml-1 text-gray-500">(SRT required)</span>
+                    </div>
+                    <div className="text-[10px] mt-0.5 leading-tight">
+                      {_disabled
+                        ? 'Upload an SRT to enable.  When on, the next Re-process Audio skips Whisper and uses SRT cues directly.'
+                        : _checked
+                        ? '✓ Whisper will be skipped.  SRT cues will be the sole narration timing source.'
+                        : 'When on, Re-process Audio skips Whisper entirely.  SRT cues become the only timing source — faster and more precise than probabilistic transcription.'}
+                    </div>
+                  </div>
+                </label>
+              );
+            })()}
             <input
               ref={srtInputRef}
               type="file"

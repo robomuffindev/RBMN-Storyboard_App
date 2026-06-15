@@ -114,6 +114,124 @@ async def lifespan(app: FastAPI):
     except Exception as _orph_err:
         logger.error(f"Orphan sweep failed (non-fatal): {_orph_err}", exc_info=True)
 
+    # ── Chapter dedup sweep ──────────────────────────────────────────────
+    # The chapter-doubling bug (1.8.0–1.8.14) left some user databases with
+    # 2x rows per (name, depth, parent) tuple.  Even after the in-line
+    # auto-dedup at the end of rebuild_chapters, projects that haven't been
+    # re-rebuilt since the bug ran still carry the doubles.  Run a
+    # one-shot sweep on every boot — cheap (one query per project, only
+    # touches projects that actually have duplicates) and self-healing.
+    try:
+        from backend.services.chapters import deduplicate_project_chapters
+        from backend.database.models import Project as _Proj
+        from sqlmodel import select as _sel
+        async with async_session() as _dd_session:
+            _proj_rows = await _dd_session.execute(_sel(_Proj.id))
+            _proj_ids = [r[0] for r in _proj_rows.all()]
+            _total_dropped = 0
+            for _pid in _proj_ids:
+                try:
+                    _dropped = await deduplicate_project_chapters(_dd_session, _pid)
+                    if _dropped:
+                        _total_dropped += _dropped
+                        logger.warning(
+                            f"Chapter dedup sweep: project {_pid} had "
+                            f"{_dropped} duplicate chapter row(s) — removed."
+                        )
+                except Exception as _proj_err:
+                    logger.error(
+                        f"Chapter dedup sweep failed for project {_pid}: "
+                        f"{_proj_err}",
+                        exc_info=True,
+                    )
+            if _total_dropped > 0:
+                logger.warning(
+                    f"Chapter dedup sweep: removed {_total_dropped} duplicate "
+                    f"chapter row(s) across {len(_proj_ids)} project(s)."
+                )
+            else:
+                logger.info(
+                    f"Chapter dedup sweep: no duplicates across "
+                    f"{len(_proj_ids)} project(s)."
+                )
+    except Exception as _dd_err:
+        logger.error(f"Chapter dedup sweep failed (non-fatal): {_dd_err}", exc_info=True)
+
+    # ── Auto-vs-manual name-collision sweep ──────────────────────────────
+    # Real-world DBs (diagnosed 2026-06-15) have rows like:
+    #   Chapter 2  source=manual  t=190-380   <- user-edited round bounds
+    #   Chapter 2  source=auto    t=194-407   <- auto-creator's pass
+    # Same name, different time, dedup-key (name,depth,parent,start_time)
+    # correctly does NOT collapse them.  But the user sees a "doubled"
+    # chapter in the UI.  Manual rows are the user's source of truth.
+    # Drop the auto-side collisions on startup so existing DBs heal
+    # without manual cleanup.
+    try:
+        from sqlalchemy import text as _txt
+        async with async_session() as _coll_session:
+            _coll_rows = await _coll_session.execute(
+                _txt(
+                    "SELECT a.id, a.project_id, a.name "
+                    "FROM chapters a "
+                    "JOIN chapters b "
+                    "  ON a.project_id = b.project_id "
+                    " AND a.name = b.name "
+                    " AND a.depth = b.depth "
+                    " AND COALESCE(a.parent_chapter_id, '') = COALESCE(b.parent_chapter_id, '') "
+                    "WHERE a.source = 'auto' AND b.source = 'manual'"
+                )
+            )
+            _coll_ids = [(r[0], r[1], r[2]) for r in _coll_rows.all()]
+            if _coll_ids:
+                _ids = [r[0] for r in _coll_ids]
+                _ph = ",".join("?" * len(_ids))
+                _raw = await _coll_session.connection()
+                # Unbind scenes pointing at the auto rows so they cascade
+                # to the manual sibling (rebound by the next suggest
+                # timeline / rebuild call).
+                await _raw.exec_driver_sql(
+                    f"UPDATE scenes SET chapter_id = NULL WHERE chapter_id IN ({_ph})",
+                    tuple(_ids),
+                )
+                # Re-parent any sub-chapters of the doomed rows so the
+                # parent FK doesn't kill them.
+                await _raw.exec_driver_sql(
+                    f"UPDATE chapters SET parent_chapter_id = NULL WHERE parent_chapter_id IN ({_ph})",
+                    tuple(_ids),
+                )
+                await _raw.exec_driver_sql(
+                    f"DELETE FROM chapters WHERE id IN ({_ph})",
+                    tuple(_ids),
+                )
+                await _coll_session.commit()
+                # Rebind orphan scenes to surviving manual chapters by time.
+                from backend.services.chapters.resolver import bind_scenes_to_chapters_by_time
+                _by_proj: dict = {}
+                for _id, _pid, _name in _coll_ids:
+                    _by_proj.setdefault(_pid, []).append(_name)
+                for _pid, _names in _by_proj.items():
+                    try:
+                        await bind_scenes_to_chapters_by_time(_coll_session, _pid)
+                    except Exception as _rb_err:
+                        logger.error(
+                            f"Auto-manual collision sweep: rebind failed "
+                            f"for project {_pid}: {_rb_err}"
+                        )
+                await _coll_session.commit()
+                logger.warning(
+                    f"Auto-manual chapter collision sweep: dropped "
+                    f"{len(_coll_ids)} auto row(s) colliding with manual "
+                    f"chapter names: {[r[2] for r in _coll_ids[:5]]}"
+                )
+            else:
+                logger.info("Auto-manual chapter collision sweep: none found")
+    except Exception as _coll_err:
+        logger.error(
+            f"Auto-manual chapter collision sweep failed (non-fatal): "
+            f"{_coll_err}",
+            exc_info=True,
+        )
+
     # Initialize services
     from backend.services.comfyui.dispatcher import ComfyDispatcher
     from backend.services.jobs.dispatcher import JobDispatcher

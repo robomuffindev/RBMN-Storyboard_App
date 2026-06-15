@@ -686,9 +686,43 @@ async def analyze_audio(
             _proj_for_mode is not None
             and _proj_for_mode.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO)
         )
+
+        # ── SRT-only narration mode ────────────────────────────────────
+        # When the user has uploaded an SRT and set the project's
+        # ``disable_whisper`` flag, skip Whisper entirely and use the
+        # existing SRT cues as the sole narration timing.  Whisper's
+        # output would otherwise overwrite the precise ElevenLabs cue
+        # boundaries with probabilistic guesses that re-introduce drift.
+        # The flag lives on ``Project.settings.disable_whisper`` so it's
+        # per-project (different projects can be in different modes).
+        # The Audio-tab UI gates this toggle on "SRT loaded" so the user
+        # can't accidentally enable it for a Whisper-only project.
+        _proj_settings_pre = (_proj_for_mode.settings if _proj_for_mode else {}) or {}
+        _disable_whisper = bool(_proj_settings_pre.get("disable_whisper", False))
+        _has_srt_already = False
+        if _disable_whisper:
+            # Verify SRT is actually loaded — refuse to skip Whisper if
+            # there's no fallback source of word timing.
+            _lyrics_pre_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
+            _lyrics_pre = (await session.execute(_lyrics_pre_stmt)).scalars().first()
+            if _lyrics_pre:
+                _pre_words = list(_lyrics_pre.words or [])
+                _has_srt_already = any(
+                    isinstance(_w, dict) and _w.get("block") is not None
+                    for _w in _pre_words
+                )
+            if not _has_srt_already:
+                logger.warning(
+                    f"analyze_audio: project {project_id} has disable_whisper=True "
+                    f"but no SRT-derived words on Lyrics row.  Refusing to skip "
+                    f"Whisper — falling back to normal transcription."
+                )
+                _disable_whisper = False
+
         logger.info(
             f"Analyzing audio file {audio_asset.filename} for project "
-            f"{project_id} (asset {audio_asset.id}, skip_demucs={_skip_demucs})"
+            f"{project_id} (asset {audio_asset.id}, skip_demucs={_skip_demucs}, "
+            f"disable_whisper={_disable_whisper})"
         )
 
         # Get settings for Whisper mode
@@ -706,17 +740,51 @@ async def analyze_audio(
         from backend.services.audio.analysis import AudioAnalyzer
 
         analyzer = AudioAnalyzer(cache_dir=str(project_path / "cache" / "audio_analysis"))
-        analysis_result = await asyncio.to_thread(
-            analyzer.analyze_full,
-            str(audio_path),
-            whisper_mode,
-            whisper_remote_url,
-            whisper_comfyui_url=whisper_comfyui_url,
-            initial_text=initial_text,
-            whisper_model=whisper_model,
-            whisper_language=whisper_language,
-            skip_demucs=_skip_demucs,
-        )
+        if _disable_whisper:
+            # SRT-only mode: skip Whisper, run only sections + (skip_demucs)
+            # stem prep so the rest of the pipeline gets the section data.
+            # Reuse the existing SRT-derived words as the transcription
+            # output — the SRT preservation block below recognizes them.
+            logger.info(
+                f"analyze_audio: project {project_id} skipping Whisper "
+                f"(disable_whisper=True, SRT loaded with "
+                f"{len(_pre_words)} words)"
+            )
+            analysis_result = await asyncio.to_thread(
+                analyzer.analyze_full,
+                str(audio_path),
+                "skip",  # whisper_mode='skip' tells analyze_full not to transcribe
+                whisper_remote_url,
+                whisper_comfyui_url=whisper_comfyui_url,
+                initial_text=initial_text,
+                whisper_model=whisper_model,
+                whisper_language=whisper_language,
+                skip_demucs=_skip_demucs,
+            )
+            # Override the transcription field with SRT words so downstream
+            # code finds them on Lyrics.words.  The analyze_full with
+            # whisper_mode='skip' returns empty words; we substitute SRT.
+            analysis_result["transcription"] = list(_pre_words)
+            analysis_result["lyrics"] = {
+                "text": " ".join(
+                    str(_w.get("word", "")).strip()
+                    for _w in _pre_words
+                    if isinstance(_w, dict) and _w.get("word")
+                ).strip(),
+                "words": list(_pre_words),
+            }
+        else:
+            analysis_result = await asyncio.to_thread(
+                analyzer.analyze_full,
+                str(audio_path),
+                whisper_mode,
+                whisper_remote_url,
+                whisper_comfyui_url=whisper_comfyui_url,
+                initial_text=initial_text,
+                whisper_model=whisper_model,
+                whisper_language=whisper_language,
+                skip_demucs=_skip_demucs,
+            )
 
         # Save analysis results to cache
         cache_dir = project_path / "cache"

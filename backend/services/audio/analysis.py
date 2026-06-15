@@ -197,9 +197,20 @@ class AudioAnalyzer:
             stems = self.separate_stems(str(audio_path))
             logger.info(f"Stem separation complete: {stems.keys()}")
 
-        # Step 2: Transcription on vocal stem (with fallback to original audio)
+        # Step 2: Transcription on vocal stem (with fallback to original audio).
+        # Special bypass: ``whisper_mode == "skip"`` means the caller has
+        # an SRT loaded and wants to use those cues as the sole narration
+        # timing.  We log + leave ``transcription`` empty so section
+        # detection and the rest of the pipeline still runs normally;
+        # the caller substitutes SRT cues into the response afterward.
         vocal_stem = stems.get("vocals")
         transcription = []
+        _whisper_skipped = (whisper_mode == "skip")
+        if _whisper_skipped:
+            logger.info(
+                "Whisper transcription SKIPPED (whisper_mode='skip') — "
+                "caller will substitute SRT words after this returns"
+            )
 
         def _try_transcribe(audio_for_whisper: str, label: str) -> List[Dict[str, Any]]:
             """Attempt transcription and return word list."""
@@ -252,9 +263,12 @@ class AudioAnalyzer:
         # results with the original file. Demucs vocal separation can introduce
         # artifacts (phase cancellation, distortion) that degrade transcription
         # accuracy, especially for certain mixing styles.
-        transcription = _try_transcribe(str(audio_path), "original audio (full mix)")
+        if _whisper_skipped:
+            transcription = []  # SRT path will fill these in upstream
+        else:
+            transcription = _try_transcribe(str(audio_path), "original audio (full mix)")
 
-        if not _has_meaningful_words(transcription):
+        if not _whisper_skipped and not _has_meaningful_words(transcription):
             # If full audio failed, try the vocal stem as fallback
             if vocal_stem and Path(vocal_stem).exists():
                 logger.warning(

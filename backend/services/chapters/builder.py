@@ -360,6 +360,40 @@ async def _create_auto_chapters(
         )
     await session.flush()
 
+    # ── Respect existing MANUAL chapters ─────────────────────────────
+    # If the user has manual chapters (source='manual'), do NOT create
+    # auto chapters on top — that produces colliding "Chapter N" names
+    # at different time ranges and the user sees "doubled" chapters in
+    # the UI.  Diagnosed in 1.8.15: a project had 4 manual rows covering
+    # 0..763.6s + 3 auto rows covering 194..809.8s with the same names.
+    #
+    # Instead: extend the last manual chapter's end_time to the project
+    # audio end so tail scenes (past the manual coverage) still bind to
+    # a real chapter.  Then return early — the rebuild orchestrator's
+    # bind_scenes_to_chapters_by_time call will assign every scene to
+    # one of the manual chapters.
+    manual_chapters = [c for c in existing_chapters if c.source == "manual"]
+    if manual_chapters:
+        manual_chapters.sort(key=lambda c: (c.depth, c.order_index, float(c.start_time or 0.0)))
+        last = max(manual_chapters, key=lambda c: float(c.end_time or 0.0))
+        audio_end = _project_audio_end_time(scenes)
+        if audio_end > float(last.end_time or 0.0):
+            old_end = float(last.end_time or 0.0)
+            last.end_time = audio_end
+            session.add(last)
+            await session.flush()
+            logger.info(
+                f"_create_auto_chapters: extended last manual chapter "
+                f"'{last.name}' end_time from {old_end:.1f}s to {audio_end:.1f}s "
+                f"so tail scenes bind to it instead of triggering "
+                f"auto-chapter creation."
+            )
+        logger.info(
+            f"_create_auto_chapters: respecting {len(manual_chapters)} "
+            f"existing manual chapter(s); skipping auto-chapter creation."
+        )
+        return list(manual_chapters)
+
     # Group scenes into batches
     limit = settings_.auto_split_threshold
     n = len(scenes)
@@ -404,6 +438,28 @@ async def _create_auto_chapters(
 # ── Top-level orchestration ───────────────────────────────────────────
 
 
+# Per-project rebuild lock.  Without this, two concurrent rebuild_chapters
+# calls (e.g. SuggestTimeline firing twice in quick succession from the
+# frontend, or rebuild_chapters being called from an SRT-upload side-effect
+# at the same time as from analyze_audio onSuccess) can both pass the
+# nuclear pre-clean — each sees an empty chapters table after the OTHER's
+# DELETE commits — and then each insert N rows, producing 2N total.
+# The asyncio.Lock serializes rebuilds per-project so the second caller
+# waits for the first to fully commit before starting its own pre-clean.
+import asyncio as _asyncio
+_REBUILD_LOCKS: dict[str, _asyncio.Lock] = {}
+
+
+def _get_rebuild_lock(project_id: UUID) -> _asyncio.Lock:
+    """Return (creating on demand) the per-project rebuild lock."""
+    key = project_id.hex if hasattr(project_id, "hex") else str(project_id)
+    lk = _REBUILD_LOCKS.get(key)
+    if lk is None:
+        lk = _asyncio.Lock()
+        _REBUILD_LOCKS[key] = lk
+    return lk
+
+
 async def rebuild_chapters(
     session: AsyncSession,
     project_id: UUID,
@@ -413,7 +469,8 @@ async def rebuild_chapters(
     """Re-derive the project's chapter tree from current state.
 
     Idempotent — calling repeatedly produces the same result given the
-    same inputs.
+    same inputs.  Per-project serialised via ``_get_rebuild_lock`` so
+    concurrent callers can't both pass the pre-clean and double-insert.
 
     Args:
         session: Async DB session.
@@ -424,35 +481,172 @@ async def rebuild_chapters(
     Returns:
         The fresh list of Chapter rows for this project.
     """
+    _lock = _get_rebuild_lock(project_id)
+    if _lock.locked():
+        logger.warning(
+            f"rebuild_chapters({project_id}): another rebuild is in "
+            f"flight — WAITING for it to finish before starting.  "
+            f"Concurrent rebuilds are the 1.8.x chapter-doubling root cause."
+        )
+    async with _lock:
+        return await _rebuild_chapters_locked(
+            session, project_id, force_auto=force_auto
+        )
+
+
+async def _rebuild_chapters_locked(
+    session: AsyncSession,
+    project_id: UUID,
+    *,
+    force_auto: bool = False,
+) -> List[Chapter]:
+    """The actual rebuild body, run under the per-project lock."""
     logger.info(f"Rebuilding chapters for project {project_id} (force_auto={force_auto})")
 
     settings_ = await _load_settings(session)
 
-    # ── Legacy-source backfill ──────────────────────────────────────────
-    # The Chapter.source column was added in 1.8.0 with default="auto",
-    # but rows that existed before that migration ran (or rows created
-    # via raw-SQL paths that skipped the default) can sit at NULL or the
-    # empty string.  The cleanup DELETE below filters on
-    # ``source = 'auto'``, so those rows would slip past it and pile up
-    # under newly-built chapters — symptom: doubled chapters after every
-    # re-process audio.  Force-upgrade them to ``'auto'`` here so they
-    # behave like normal auto rows for the rest of the rebuild.
+    # ── Nuclear pre-clean ───────────────────────────────────────────────
+    # Earlier rebuild paths tried to be clever — `_create_auto_chapters`
+    # filtered DELETE by ``source = 'auto'`` and
+    # `_create_chapters_from_headers` ran a header diff to "carry forward"
+    # matched chapters.  Both produced doubled chapters across multiple
+    # 1.8.x sessions when ANY of these conditions held:
+    #
+    #   * Legacy rows with NULL / empty source (pre-1.8.0 chapter table)
+    #   * SQLAlchemy ORM cache re-flushing rows the SQL DELETE just
+    #     wiped (expunge timing)
+    #   * Header diff matching against stale script_header chapters
+    #     whose names had subtly drifted (case, whitespace, encoding)
+    #
+    # The robust fix is to STOP being clever: at the top of every
+    # rebuild, unconditionally delete every non-manual chapter row for
+    # the project via raw SQL deepest-first, expire the ORM cache, and
+    # only THEN run the build.  Manual chapters (``source = 'manual'``)
+    # are preserved because those represent explicit user intent
+    # (created via POST /chapters/:id, not auto-built).  Everything
+    # else — auto, script_header, NULL, empty — gets wiped.
+    #
+    # We sacrifice the "preserve color customization across rebuilds"
+    # micro-feature for the much bigger "rebuilds are actually
+    # idempotent" guarantee.  Color customization can come back later
+    # via a "remember color by name" pass if it ever matters.
     _pid_hex_pre = project_id.hex
-    _backfill_res = await session.execute(
+
+    # Step 1: unbind scenes from any chapter so the chapter DELETE can't
+    # FK-fail on referenced rows.
+    await session.execute(
+        text("UPDATE scenes SET chapter_id = NULL WHERE project_id = :pid"),
+        {"pid": _pid_hex_pre},
+    )
+
+    # Step 2: delete every non-manual chapter, deepest-first, so
+    # sub-chapters go before parents and the parent_chapter_id FK never
+    # references a dead row.  Use a high explicit depth ceiling rather
+    # than the settings_.max_depth (which can be reduced between
+    # sessions and leave deeper rows behind).
+    _deleted_total = 0
+    for d in range(10, -1, -1):
+        del_res = await session.execute(
+            text(
+                "DELETE FROM chapters "
+                "WHERE project_id = :pid "
+                "AND (source IS NULL OR source != 'manual') "
+                "AND depth = :d"
+            ),
+            {"pid": _pid_hex_pre, "d": d},
+        )
+        _deleted_total += del_res.rowcount or 0
+
+    # Step 3: commit + expire all ORM cache so any cached chapter rows
+    # from THIS session can't be re-flushed on the next session.add().
+    # session.expire_all is essential — without it, SQLAlchemy can
+    # silently re-INSERT rows whose primary key still lives in its
+    # identity map even though the underlying SQL DELETE removed them.
+    await session.commit()
+    session.expire_all()
+
+    if _deleted_total > 0:
+        logger.info(
+            f"rebuild_chapters({project_id}): pre-cleaned {_deleted_total} "
+            f"existing non-manual chapter row(s).  Build will create a "
+            f"fresh tree from current scenes/script."
+        )
+
+    # Step 4: VERIFY the pre-clean actually landed in the DB.  On
+    # SQLite-async with ``expire_on_commit=False`` + a busy connection,
+    # the DELETE can report ``rowcount=N`` but the next SELECT in the
+    # same session still sees the rows because the autobegin transaction
+    # wraps both statements.  If anything survived, drop down to the raw
+    # connection (bypasses the ORM session snapshot entirely) and force
+    # the DELETE through.  Logs LOUD so this self-diagnoses on the next
+    # diag.md if it ever happens.  This is the safety net the prior
+    # match-and-update + nuclear-pre-clean attempts both lacked.
+    _check = await session.execute(
         text(
-            "UPDATE chapters SET source = 'auto' "
-            "WHERE project_id = :pid AND (source IS NULL OR source = '')"
+            "SELECT COUNT(*) FROM chapters "
+            "WHERE project_id = :pid "
+            "AND (source IS NULL OR source != 'manual')"
         ),
         {"pid": _pid_hex_pre},
     )
-    if _backfill_res.rowcount:
-        logger.warning(
-            f"Backfilled {_backfill_res.rowcount} chapter row(s) with "
-            f"NULL/empty source -> 'auto' for project {project_id}.  These "
-            f"would have skipped the cleanup DELETE and produced doubled "
-            f"chapters on re-process audio."
+    _surv = int(_check.scalar() or 0)
+    if _surv > 0:
+        logger.error(
+            f"rebuild_chapters({project_id}): pre-clean DID NOT PERSIST — "
+            f"{_surv} non-manual chapter row(s) survived the commit.  This "
+            f"is the doubled-chapter bug.  Forcing a raw-connection DELETE "
+            f"to bypass any session-level snapshot."
         )
-        await session.commit()
+        # Fall through to raw connection, bypassing the ORM session.
+        try:
+            _raw_conn = await session.connection()
+            await _raw_conn.exec_driver_sql(
+                "DELETE FROM chapters WHERE project_id = ? "
+                "AND (source IS NULL OR source != 'manual')",
+                (_pid_hex_pre,),
+            )
+            await session.commit()
+            session.expire_all()
+            # Re-check.  If STILL non-zero, something fundamental is
+            # broken with the project's FK constraints — surface that
+            # rather than silently shipping doubled chapters.
+            _check2 = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM chapters "
+                    "WHERE project_id = :pid "
+                    "AND (source IS NULL OR source != 'manual')"
+                ),
+                {"pid": _pid_hex_pre},
+            )
+            _surv2 = int(_check2.scalar() or 0)
+            if _surv2 > 0:
+                logger.critical(
+                    f"rebuild_chapters({project_id}): even the raw-connection "
+                    f"DELETE failed to remove {_surv2} chapter(s).  Aborting "
+                    f"rebuild — the build phase would produce doubled rows.  "
+                    f"Check FK constraints on the chapters table and report."
+                )
+                raise RuntimeError(
+                    f"Cannot pre-clean chapters for project {project_id}: "
+                    f"{_surv2} row(s) refuse to delete.  See ERROR log."
+                )
+            logger.warning(
+                f"rebuild_chapters({project_id}): raw-connection DELETE "
+                f"succeeded — pre-clean is now correct.  Investigate why "
+                f"the ORM-level DELETE failed to persist (likely an outer "
+                f"transaction snapshot on this request session)."
+            )
+        except RuntimeError:
+            raise
+        except Exception as _raw_err:
+            logger.critical(
+                f"rebuild_chapters({project_id}): raw-connection DELETE "
+                f"itself raised {_raw_err!r}.  Aborting rebuild to avoid "
+                f"doubled chapters."
+            )
+            raise RuntimeError(
+                f"Pre-clean fallback failed: {_raw_err}"
+            ) from _raw_err
 
     # Load project, lyrics, scenes, existing chapters
     result = await session.execute(select(Project).where(Project.id == project_id))
@@ -550,11 +744,195 @@ async def rebuild_chapters(
         select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.depth, Chapter.order_index)
     )
     final = list(fresh.scalars().all())
+
+    # ── Post-build sanity check: duplicate detection ───────────────────
+    # The "doubled chapters" bug was hard to catch because the rebuild
+    # path technically ran to completion — it just left twice as many
+    # rows in the DB.  This block surfaces it: if any (name, depth,
+    # parent_chapter_id) triple appears more than once, that's a
+    # duplicate.  We log it loud (ERROR) so the next "diag.md" snapshot
+    # makes the regression obvious; we don't auto-remediate here because
+    # silently deleting rows the user might have customized is worse
+    # than the duplicates themselves.
+    # ── True-duplicate detection ────────────────────────────────────────
+    # A "true" duplicate is a chapter that shares not just name + depth +
+    # parent with another row, but ALSO occupies the same time range.
+    # Two legitimately distinct chapters with the same name (e.g. two
+    # scenes both called "Verse" at different parts of a song) MUST NOT
+    # be collapsed — they're real, distinct story beats.  The dedup key
+    # therefore includes a coarse start-time bucket (rounded to 0.1s) so
+    # only rows that genuinely refer to the same beat get collapsed.
+    _dup_keys: dict[tuple, list] = {}
+    for c in final:
+        _t_bucket = round(float(c.start_time or 0.0), 1)
+        k = (
+            c.name or "",
+            c.depth,
+            str(c.parent_chapter_id) if c.parent_chapter_id else None,
+            _t_bucket,
+        )
+        _dup_keys.setdefault(k, []).append(c)
+    _dups = [(k, rows) for k, rows in _dup_keys.items() if len(rows) > 1]
+    if _dups:
+        logger.error(
+            f"rebuild_chapters({project_id}): DUPLICATE CHAPTERS DETECTED — "
+            f"{len(_dups)} (name, depth, parent, start_time) tuple(s) appear "
+            f"more than once.  Total chapters: {len(final)}.  Auto-dedup now."
+        )
+        # ── Auto-dedup: keep the OLDEST row per dedup key and raw-DELETE
+        # the rest.  Use raw connection so the ORM session snapshot can't
+        # resurrect the deleted rows on next commit.  Critically: after
+        # the DELETE we MUST re-run bind_scenes_to_chapters_by_time so
+        # the scenes that were pointing at the now-dead rows (we null'd
+        # their chapter_id below to avoid an FK violation) get rebound
+        # to the survivor row.  Without that rebind, every dedup leaves
+        # orphan scenes — which is exactly the "4 scenes not in
+        # chapter 4" symptom the user just reported.
+        _ids_to_drop: list[str] = []
+        _surviving_ids: list = []
+        for _key, _rows in _dups:
+            _rows.sort(key=lambda r: (r.created_at or datetime.utcnow(), str(r.id)))
+            _surviving_ids.append(_rows[0].id)
+            for _extra in _rows[1:]:
+                _ids_to_drop.append(_extra.id.hex if hasattr(_extra.id, "hex") else str(_extra.id).replace("-", ""))
+        if _ids_to_drop:
+            try:
+                # Unbind any scenes still pointing at the doomed rows
+                _placeholders = ",".join("?" * len(_ids_to_drop))
+                _raw = await session.connection()
+                await _raw.exec_driver_sql(
+                    f"UPDATE scenes SET chapter_id = NULL WHERE chapter_id IN ({_placeholders})",
+                    tuple(_ids_to_drop),
+                )
+                # Re-parent any chapters whose parent is about to die — point
+                # them at NULL so the cascade doesn't take them with it.
+                await _raw.exec_driver_sql(
+                    f"UPDATE chapters SET parent_chapter_id = NULL WHERE parent_chapter_id IN ({_placeholders})",
+                    tuple(_ids_to_drop),
+                )
+                await _raw.exec_driver_sql(
+                    f"DELETE FROM chapters WHERE id IN ({_placeholders})",
+                    tuple(_ids_to_drop),
+                )
+                await session.commit()
+                session.expire_all()
+                logger.info(
+                    f"rebuild_chapters({project_id}): auto-dedup dropped "
+                    f"{len(_ids_to_drop)} duplicate chapter row(s).  "
+                    f"Re-binding orphan scenes to survivor rows..."
+                )
+                # CRITICAL: rebind any scenes that just had their chapter_id
+                # nulled.  Without this the dedup leaves orphan scenes
+                # which the user sees as "N scenes not in chapter X".
+                await bind_scenes_to_chapters_by_time(session, project_id)
+                await session.commit()
+                # Refresh final list
+                fresh2 = await session.execute(
+                    select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.depth, Chapter.order_index)
+                )
+                final = list(fresh2.scalars().all())
+                # Sanity-check the rebind actually rebound everything
+                _orphan_count_q = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM scenes "
+                        "WHERE project_id = :pid AND chapter_id IS NULL"
+                    ),
+                    {"pid": _pid_hex_pre},
+                )
+                _orphan_count = int(_orphan_count_q.scalar() or 0)
+                if _orphan_count > 0:
+                    logger.warning(
+                        f"rebuild_chapters({project_id}): {_orphan_count} "
+                        f"scene(s) still unbound after dedup rebind.  These "
+                        f"likely fall outside any chapter's time range — "
+                        f"check chapter start/end_time vs scene boundaries."
+                    )
+            except Exception as _dedup_err:
+                logger.critical(
+                    f"rebuild_chapters({project_id}): auto-dedup FAILED — "
+                    f"{_dedup_err!r}.  Returning doubled chapter list."
+                )
+
     logger.info(
         f"Rebuild complete: project={project_id} {len(final)} chapters "
-        f"(used_headers={use_headers})"
+        f"(used_headers={use_headers}, duplicates_removed={len(_dups)})"
     )
     return final
+
+
+async def deduplicate_project_chapters(
+    session: AsyncSession, project_id: UUID
+) -> int:
+    """Standalone dedup pass for a single project's chapters table.
+
+    Used by:
+      * The startup migration (sweeps every project once per app boot).
+      * The `/chapters/reparse` endpoint as a last-resort manual recovery
+        when the user reports doubled chapters and wants them cleaned
+        without rerunning the full rebuild.
+
+    Returns the number of rows deleted.  Preserves the oldest row in each
+    (name, depth, parent_chapter_id) cluster — the row most likely to
+    have the user's accumulated edits.
+    """
+    _pid_hex = project_id.hex
+    # Find duplicate groups.  GROUP BY can be tricky with NULL parent_id
+    # on SQLite so we fetch and group in Python.  Include start_time in
+    # the dedup key (rounded to 0.1s) so two distinct chapters that happen
+    # to share a name but live at different points in the timeline do NOT
+    # get collapsed into one — they're real, separate story beats.
+    rows = await session.execute(
+        text(
+            "SELECT id, name, depth, parent_chapter_id, created_at, start_time "
+            "FROM chapters WHERE project_id = :pid"
+        ),
+        {"pid": _pid_hex},
+    )
+    by_key: dict[tuple, list] = {}
+    for r in rows.all():
+        _t_bucket = round(float(r[5] or 0.0), 1)
+        key = (r[1] or "", int(r[2] or 0), r[3], _t_bucket)
+        by_key.setdefault(key, []).append((r[0], r[4]))
+    drops: list[str] = []
+    for _key, _rows in by_key.items():
+        if len(_rows) <= 1:
+            continue
+        _rows.sort(key=lambda t: (t[1] or "", t[0]))
+        for _extra_id, _ in _rows[1:]:
+            drops.append(_extra_id)
+    if not drops:
+        return 0
+    placeholders = ",".join("?" * len(drops))
+    raw = await session.connection()
+    await raw.exec_driver_sql(
+        f"UPDATE scenes SET chapter_id = NULL WHERE chapter_id IN ({placeholders})",
+        tuple(drops),
+    )
+    await raw.exec_driver_sql(
+        f"UPDATE chapters SET parent_chapter_id = NULL WHERE parent_chapter_id IN ({placeholders})",
+        tuple(drops),
+    )
+    await raw.exec_driver_sql(
+        f"DELETE FROM chapters WHERE id IN ({placeholders})",
+        tuple(drops),
+    )
+    await session.commit()
+    # Rebind any orphan scenes to the survivor rows.  Without this the
+    # standalone dedup (used by the startup migration) would leave the
+    # caller's scenes unbound just because they happened to be pointing
+    # at the now-dead duplicate row.  bind_scenes_to_chapters_by_time
+    # walks every leaf chapter and assigns scenes by time overlap, so
+    # the surviving row inherits the orphans automatically.
+    try:
+        await bind_scenes_to_chapters_by_time(session, project_id)
+        await session.commit()
+    except Exception as _rebind_err:
+        logger.error(
+            f"deduplicate_project_chapters({project_id}): rebind after "
+            f"dedup FAILED — {_rebind_err!r}.  Scenes left orphaned; "
+            f"user can re-run Suggest Timeline to recover."
+        )
+    return len(drops)
 
 
 async def _apply_auto_split(
