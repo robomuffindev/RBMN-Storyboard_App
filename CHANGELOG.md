@@ -1,5 +1,79 @@
 # Changelog
 
+## [1.8.15] - 2026-06-15
+
+### Fixed — Doubled chapters after Reprocess Audio (long-running root-cause hunt)
+
+Lorenzo reported that re-uploading audio + SRT + clicking "Reprocess Audio" produced doubled chapters. Three earlier rounds of attempted fixes (NULL/empty source backfill, widened SQL filter, nuclear pre-clean wiping every non-manual row, verify+raw-DELETE escape hatch) cleaned the rebuild path itself but the doubling kept showing up in the UI.
+
+The real bug was uncovered with a new chapter diagnostic (`tools/diag_chapters.py`) that dumped the raw chapters table. The state was:
+
+| Name | Source | Time |
+|------|--------|------|
+| Chapter 1 | manual | 0–190 |
+| Chapter 2 | manual | 190–380 |
+| Chapter 2 | **auto** | 194.4–407.3 |
+| Chapter 3 | manual | 380–580 |
+| Chapter 3 | **auto** | 407.3–608.8 |
+| Chapter 4 | manual | 580–763.6 |
+| Chapter 4 | **auto** | 608.8–809.8 |
+
+Root cause: `_create_auto_chapters` blindly numbered new chapters starting from 1 regardless of any pre-existing manual rows. When a project had manual chapters that covered most of the timeline but didn't extend to the audio end, the auto-creator filled the tail with rows named "Chapter 2", "Chapter 3", "Chapter 4" at slightly different time ranges. The dedup (which now keys on `(name, depth, parent, start_time_rounded_to_0.1s)`) correctly did NOT collapse them — they're structurally distinct rows referring to distinct timeline positions — but to the user they looked like duplicates because the names matched.
+
+Fix in two places:
+
+- `backend/services/chapters/builder.py::_create_auto_chapters` — at the top, after auto-row cleanup, check for existing `source='manual'` rows. If present: extend the last manual chapter's `end_time` to the project's audio end so tail scenes bind to it, then return without creating any auto rows. Respects the user's manual structure as the source of truth.
+- `backend/main.py` lifespan — new auto-vs-manual collision sweep on every boot. Finds `(name, depth, parent)` collisions where one row has `source='auto'` and another has `source='manual'` in the same project. Unbinds scenes from the auto row, re-parents any sub-chapters, raw-DELETEs the auto row via `exec_driver_sql`, then calls `bind_scenes_to_chapters_by_time` to rebind the orphan scenes to the surviving manual sibling. Self-heals existing DBs on first restart.
+
+### Added — Defense-in-depth chapter integrity
+
+Several safeguards built during the 1.8.14 → 1.8.15 hunt remain as belt-and-suspenders:
+
+- **Per-project `asyncio.Lock` around `rebuild_chapters`**. Prevents concurrent rebuilds (e.g. analyze_audio's onSuccess firing suggestTimeline twice in quick succession) from both passing the nuclear pre-clean and inserting N rows each. Second caller waits for the first to commit; logs a `WARNING` so the concurrency is visible.
+- **In-line auto-dedup at end of `rebuild_chapters`**. After the build + bind + auto-split, walks every chapter row and groups by `(name, depth, parent_chapter_id, start_time_bucket=0.1s)`. Any duplicate cluster collapses to its oldest row (by `created_at`) via raw `exec_driver_sql`. Critically, after the DELETE, re-runs `bind_scenes_to_chapters_by_time` so scenes that lost their chapter_id get rebound to the survivor — without this rebind a dedup left orphan scenes (the regression Lorenzo saw with "4 scenes not in chapter 4").
+- **Standalone `deduplicate_project_chapters(session, project_id)` helper** in `backend.services.chapters`. Same dedup + rebind logic, callable from anywhere. Used by the startup sweep and available for manual recovery.
+- **Verify-and-raw-DELETE escape hatch** after the nuclear pre-clean. If a session-level `DELETE FROM chapters` reports `rowcount=N` but the next SELECT in the same session still sees rows (SQLite-async transaction-visibility edge case), the function drops down to the raw connection and forces the DELETE through.
+
+### Added — "Disable Whisper Detection (SRT Required)" toggle
+
+For projects with an authoritative SRT (ElevenLabs, Aivo, etc.), Whisper transcription is now optional. Toggle lives on the Audio tab under the Upload SRT button. When enabled AND an SRT is loaded, the next "Reprocess Audio" skips Whisper entirely and uses the SRT cues directly as the narration timing source.
+
+- Backend `analyze_audio` reads `Project.settings.disable_whisper`, verifies an SRT is loaded (presence of `block` keys in `Lyrics.words`), and passes `whisper_mode="skip"` to `analyze_full`. Falls back to running Whisper if the toggle is on but no SRT is loaded.
+- `analyze_full` honors `whisper_mode == "skip"` by returning an empty transcription list, skipping the meaningful-words check, and letting the SRT path upstream substitute its words into the analysis result.
+- Frontend `AudioSetup` adds a labelled checkbox below the Upload SRT button. Disabled (greyed out) until an SRT is loaded — surfaces what the toggle requires before the user wastes a click on it. Persists to `Project.settings.disable_whisper` via `updateProject` and syncs the local Zustand store immediately so the checkbox state survives a re-render.
+
+Saves the 30–90s Whisper pass on each Reprocess and avoids Whisper-vs-SRT timing conflicts entirely when the user has the authoritative timing source.
+
+### Added — Clickable scene names in the Generation Queue
+
+Mirroring the Story Flow scene-title navigation pattern (`AppLayout.tsx::goToSceneInTimeline`): clicking "Scene 79" in the Generation Queue now selects that scene in the timeline, seeks the playhead to its start, and the SceneEditor's tabbed info panel switches to show that scene's data.
+
+- `frontend/src/components/GenerationPanel/GenerationPanel.tsx` — `getSceneName` replaced with `getSceneForJob` which returns the full Scene object. The chip is now a `<button>` with `setActiveScene + setPlaybackPosition + setIsPlaying(false)`, hover state (purple underline), keyboard focus ring, and tooltip. `e.stopPropagation()` keeps the parent card's cancel/retry/delete buttons working. Falls back to non-clickable gray text if the scene was deleted but the job still references it.
+
+### Added — `tools/diag_chapters.py` debug script
+
+Standalone diagnostic that dumps the chapters table for the most recently-updated project (or any project ID passed as an argument). Prints:
+
+- Project mode + lyrics state (`initial_text` length, `# header` line count, words count, SRT block count, unique blocks).
+- Full chapter table with name, depth, parent, source, time range, scene count, ID prefix.
+- Duplicate groups under the dedup key `(name, depth, parent, start_time_bucket)`.
+- Scenes not bound to any chapter (orphans), with their times and order_index.
+- Total scene count.
+
+Usage: `python tools/diag_chapters.py > chapters.md`. Paste the output anywhere a chapter symptom needs to be diagnosed — the snapshot replaces several rounds of "what's actually in the DB?" guesswork.
+
+### Files
+
+- `backend/services/chapters/builder.py` — per-project `asyncio.Lock` + `_get_rebuild_lock`; `rebuild_chapters` delegates to `_rebuild_chapters_locked` under the lock; manual-respect short-circuit at top of `_create_auto_chapters`; in-line auto-dedup with time-bucket key + post-dedup rebind; standalone `deduplicate_project_chapters` helper.
+- `backend/services/chapters/__init__.py` — exports `deduplicate_project_chapters`.
+- `backend/main.py` — chapter dedup sweep + auto-vs-manual collision sweep in lifespan.
+- `backend/api/timeline.py` — `disable_whisper` gate in `analyze_audio`; substitutes SRT words when Whisper is skipped.
+- `backend/services/audio/analysis.py` — `analyze_full` honors `whisper_mode="skip"`.
+- `frontend/src/components/AudioSetup/AudioSetup.tsx` — Disable Whisper toggle UI; persists via `updateProject`.
+- `frontend/src/components/GenerationPanel/GenerationPanel.tsx` — clickable scene-name chip.
+- `tools/diag_chapters.py` (new) — chapter integrity diagnostic.
+- `VERSION`, `pyproject.toml`, `backend/main.py` — bumped to 1.8.15.
+
 ## [1.8.14] - 2026-06-14
 
 ### Fixed — Narration / video duration drift ("everything defaults to 10 seconds")

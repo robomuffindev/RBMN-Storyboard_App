@@ -720,7 +720,19 @@ export const uploadBatchAudio = (file: File) => {
   });
 };
 
-export const startBatchRun = (items: Omit<BatchItemConfig, 'id' | 'audioFile'>[]) =>
+// SRT upload — stages a per-item .srt file in the same _batch_staging
+// tree as audio uploads.  Mirrors uploadBatchAudio's response shape so
+// BatchItemAddModal can use the same handler pattern.
+export const uploadBatchSrt = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post<{ upload_path: string; filename: string }>('/batch/upload-srt', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
+  });
+};
+
+export const startBatchRun = (items: Omit<BatchItemConfig, 'id' | 'audioFile' | 'srtFile'>[]) =>
   api.post<BatchRunStatus>('/batch/run', { items });
 
 export const getBatchStatus = (batchId: string) =>

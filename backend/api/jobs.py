@@ -27,6 +27,13 @@ class JobResponse(BaseModel):
     id: UUID
     project_id: UUID
     scene_id: Optional[UUID]
+    # Snapshot of the scene's name at the time the response is built.
+    # This is included so the Generation Queue UI can still display
+    # "Scene 79" on a completed job after the underlying Scene row has
+    # been deleted or after the user switches to a different project.
+    # Populated by the list endpoint via a single bulk lookup.  When
+    # the scene_id is null or no longer exists, this field is null.
+    scene_name: Optional[str] = None
     job_type: str
     status: str
     priority: int
@@ -88,9 +95,37 @@ async def list_jobs(
         query = query.order_by(Job.created_at.desc())
 
         result = await session.execute(query)
-        jobs = result.scalars().all()
+        jobs = list(result.scalars().all())
 
-        return [JobResponse.model_validate(job) for job in jobs]
+        # Bulk-resolve scene names so the Generation Queue UI can still
+        # show "Scene 79" on completed jobs even after the underlying
+        # Scene row has been deleted or after the user switched projects
+        # (in which case the frontend's local `scenes` array no longer
+        # contains the relevant rows).  Single SELECT for every distinct
+        # scene_id referenced by the returned jobs.
+        scene_name_by_id: dict[UUID, str] = {}
+        _scene_ids = list({j.scene_id for j in jobs if j.scene_id is not None})
+        if _scene_ids:
+            from backend.database.models import Scene
+            _sn_q = await session.execute(
+                select(Scene.id, Scene.name).where(Scene.id.in_(_scene_ids))  # type: ignore[arg-type]
+            )
+            for _sid, _sname in _sn_q.all():
+                scene_name_by_id[_sid] = _sname
+
+        out: list[JobResponse] = []
+        for j in jobs:
+            r = JobResponse.model_validate(j)
+            if j.scene_id and j.scene_id in scene_name_by_id:
+                r.scene_name = scene_name_by_id[j.scene_id]
+            elif j.scene_id and isinstance(j.parameters, dict):
+                # Fallback: a job-create site may have snapshot the name
+                # into parameters before the Scene row was deleted.
+                _pname = j.parameters.get("scene_name")
+                if isinstance(_pname, str) and _pname:
+                    r.scene_name = _pname
+            out.append(r)
+        return out
     except HTTPException:
         raise
     except Exception as e:
@@ -258,7 +293,20 @@ async def get_job(
                 detail=f"Job {job_id} not found",
             )
 
-        return JobResponse.model_validate(job)
+        r = JobResponse.model_validate(job)
+        # Resolve scene_name so the Generation Queue chip stays visible
+        # on this job even after the Scene row is deleted.  Same logic
+        # as list_jobs but for a single record.
+        if job.scene_id is not None:
+            from backend.database.models import Scene
+            _s = await session.get(Scene, job.scene_id)
+            if _s is not None:
+                r.scene_name = _s.name
+            elif isinstance(job.parameters, dict):
+                _pname = job.parameters.get("scene_name")
+                if isinstance(_pname, str) and _pname:
+                    r.scene_name = _pname
+        return r
     except HTTPException:
         raise
     except Exception as e:
@@ -379,7 +427,19 @@ async def retry_job(
         job_queue: JobQueue = request.app.state.job_queue
         job_queue.notify()
 
-        return JobResponse.model_validate(job)
+        r = JobResponse.model_validate(job)
+        # Resolve scene_name so the Generation Queue chip stays visible
+        # on the retried job — same fallback chain as list_jobs / get_job.
+        if job.scene_id is not None:
+            from backend.database.models import Scene
+            _s = await session.get(Scene, job.scene_id)
+            if _s is not None:
+                r.scene_name = _s.name
+            elif isinstance(job.parameters, dict):
+                _pname = job.parameters.get("scene_name")
+                if isinstance(_pname, str) and _pname:
+                    r.scene_name = _pname
+        return r
     except HTTPException:
         raise
     except Exception as e:

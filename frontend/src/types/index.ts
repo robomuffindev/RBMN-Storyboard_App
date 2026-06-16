@@ -142,6 +142,11 @@ export interface Job {
   id: string;
   project_id: string;
   scene_id?: string;
+  // Snapshot of the referenced scene's name at response time.  Persists
+  // visible in the Generation Queue chip even after the underlying Scene
+  // is deleted or the user switches projects.  Backend bulk-resolves on
+  // every /api/jobs list.
+  scene_name?: string | null;
   job_type: JobType;
   status: JobStatus;
   priority: number;
@@ -407,11 +412,25 @@ export interface BatchItemConfig {
   audio_filename: string;
   audio_upload_path: string;
   audioFile?: File; // kept client-side for display
+  // Per-item SRT — authoritative narration timing source for narration
+  // modes.  Empty string when no SRT attached.  srt_filename is shown
+  // in the UI; srt_upload_path is the backend staging path.
+  srt_filename?: string;
+  srt_upload_path?: string;
+  srtFile?: File; // kept client-side for display
+  // Skip Whisper for this item (requires SRT attached)
+  disable_whisper?: boolean;
   lyrics_text: string;
   project_name: string;
   concept_direction: string;
   style_text: string;
-  render_type: 'music_video' | 'narration_video';
+  // Per-item color scheme override (e.g. "warm sunset", "black and white", "neon")
+  color_scheme?: string;
+  // Enable LTX 2.3 AV-native model audio for this item's videos
+  enable_model_audio?: boolean;
+  // Image post-process filter (none | grayscale | bw | sepia)
+  image_filter?: 'none' | 'grayscale' | 'bw' | 'sepia';
+  render_type: 'music_video' | 'narration_video' | 'narration_images';
   video_mode: 'i2v' | 'v2v' | 'fflf';
   image_mode: 'missing' | 'all_with_refs';
   two_pass: boolean;

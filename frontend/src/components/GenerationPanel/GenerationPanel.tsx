@@ -40,12 +40,26 @@ function ElapsedTimer({ startedAt, completedAt }: { startedAt?: string; complete
 
 export default function GenerationPanel() {
   const { jobs, scenes } = useAppStore();
+  const setActiveScene = useAppStore((s) => s.setActiveScene);
+  const setPlaybackPosition = useAppStore((s) => s.setPlaybackPosition);
+  const setIsPlaying = useAppStore((s) => s.setIsPlaying);
 
-  // Helper to resolve scene_id to scene name
-  const getSceneName = (sceneId?: string) => {
+  // Helper to resolve scene_id to the full Scene object so we can both
+  // display its name AND navigate to it in the timeline on click.
+  const getSceneForJob = (sceneId?: string) => {
     if (!sceneId) return null;
-    const scene = scenes.find((s) => s.id === sceneId);
-    return scene ? scene.name : null;
+    return scenes.find((s) => s.id === sceneId) || null;
+  };
+
+  // Click handler: select scene + seek playhead so the SceneEditor's
+  // tabbed panel switches to show this scene's info (same pattern Story
+  // Flow uses for its scene title clicks — see AppLayout.tsx
+  // `goToSceneInTimeline`).
+  const goToScene = (scene: { id: string; start_time: number } | null) => {
+    if (!scene) return;
+    setActiveScene(scene as any);
+    setPlaybackPosition(scene.start_time);
+    setIsPlaying(false);
   };
 
   // Helper to extract short IP/host from worker URL
@@ -162,7 +176,14 @@ export default function GenerationPanel() {
   };
 
   const JobCard = ({ job }: { job: Job }) => {
-    const sceneName = getSceneName(job.scene_id);
+    const sceneObj = getSceneForJob(job.scene_id);
+    // Prefer the backend-resolved snapshot (`job.scene_name`) so the
+    // chip remains visible even when the scene was deleted or the user
+    // navigated to a different project (the local `scenes` array won't
+    // contain the row in that case).  Fall back to the live lookup so
+    // older job records — created before the backend was teaching the
+    // /jobs response to carry scene_name — still display.
+    const sceneName = job.scene_name || (sceneObj ? sceneObj.name : null);
     const workerLabel = getWorkerLabel(job.worker_url);
     const twoPassPhase = job.parameters?.two_pass_phase;
     const modelBadge = getModelBadge(job);
@@ -243,10 +264,22 @@ export default function GenerationPanel() {
       {(sceneName || workerLabel) && (
         <div className="flex flex-wrap gap-x-3 gap-y-1 mb-2">
           {sceneName && (
-            <span className="inline-flex items-center gap-1 text-xs text-gray-400">
-              <Film size={12} className="text-purple-400 flex-shrink-0" />
-              <span className="truncate max-w-[120px]" title={sceneName}>{sceneName}</span>
-            </span>
+            sceneObj ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); goToScene(sceneObj); }}
+                className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-purple-300 hover:underline focus:outline-none focus:ring-1 focus:ring-purple-500 rounded"
+                title={`Jump to ${sceneName} in the timeline`}
+              >
+                <Film size={12} className="text-purple-400 flex-shrink-0" />
+                <span className="truncate max-w-[120px]">{sceneName}</span>
+              </button>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-xs text-gray-500" title={sceneName}>
+                <Film size={12} className="text-purple-400 flex-shrink-0" />
+                <span className="truncate max-w-[120px]">{sceneName}</span>
+              </span>
+            )
           )}
           {workerLabel && (
             <span className="inline-flex items-center gap-1 text-xs text-gray-400">

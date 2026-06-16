@@ -67,11 +67,31 @@ class BatchItemConfig(BaseModel):
     """Configuration for a single batch item."""
     audio_filename: str  # filename of uploaded audio
     audio_upload_path: str  # temp path from upload endpoint
+    # SRT upload — per-item authoritative narration timing.  When present
+    # and the project mode is narration_video / narration_images, the
+    # SRT cue boundaries replace Whisper output as the timing source.
+    # Empty string = no SRT for this item.
+    srt_filename: str = ""
+    srt_upload_path: str = ""
+    # Bypass Whisper entirely when an SRT is loaded.  Saves the 30–90s
+    # transcription pass per item and avoids Whisper-vs-SRT timing
+    # conflicts.  Silently downgrades to running Whisper if no SRT is
+    # actually attached (logged as a WARNING).
+    disable_whisper: bool = False
     lyrics_text: str = ""
     project_name: str = ""  # auto-derived from filename if empty
     concept_direction: str = ""
     style_text: str = ""
-    render_type: str = "music_video"  # music_video | narration_video
+    # Per-item color scheme override (writes Project.settings.color_scheme
+    # before concept generation so the LLM honors it).  Empty = no override.
+    color_scheme: str = ""
+    # Enable model-generated audio (LTX 2.3 AV-native) on this item's
+    # videos.  Sets Concept.enable_model_audio after concept generation.
+    enable_model_audio: bool = False
+    # Image post-process filter applied at export time
+    # (none | grayscale | bw | sepia).
+    image_filter: str = "none"
+    render_type: str = "music_video"  # music_video | narration_video | narration_images
     video_mode: str = "i2v"  # i2v | v2v | fflf
     image_mode: str = "missing"  # missing (skip filled) | all_with_refs (regenerate using prev-scene reference)
     two_pass: bool = True
@@ -167,6 +187,40 @@ async def upload_batch_audio(file: UploadFile = File(...)):
 
     logger.info(f"Batch audio staged: {dest_path} ({len(content)} bytes)")
 
+    return {
+        "upload_path": str(dest_path),
+        "filename": file.filename,
+    }
+
+
+@router.post("/upload-srt")
+async def upload_batch_srt(file: UploadFile = File(...)):
+    """Upload an SRT subtitle file to the batch staging directory.
+
+    Per-item narration timing source for narration_video / narration_images
+    batches.  When attached to a batch item, the SRT cue boundaries
+    replace Whisper output as the authoritative timing — see the
+    `Disable Whisper Detection (SRT Required)` toggle for the parallel
+    per-project control.  Identical staging strategy to upload_batch_audio
+    so the same _batch_staging tree is used.
+    """
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No filename provided",
+        )
+    if not file.filename.lower().endswith(".srt"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an .srt subtitle file",
+        )
+    staging_dir = settings.project_dir / "_batch_staging" / str(uuid4())
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = staging_dir / file.filename
+    content = await file.read()
+    with open(dest_path, "wb") as f:
+        f.write(content)
+    logger.info(f"Batch SRT staged: {dest_path} ({len(content)} bytes)")
     return {
         "upload_path": str(dest_path),
         "filename": file.filename,
@@ -784,9 +838,21 @@ async def _process_single_item(
         _check_cancelled()
 
         async with async_session() as session:
+            # Seed Project.settings with the per-item flags that other
+            # parts of the pipeline read directly: disable_whisper is
+            # honored by analyze_audio (1.8.15) and color_scheme feeds
+            # the LLM concept enhancer.
+            _proj_settings: dict = {}
+            if config.disable_whisper:
+                _proj_settings["disable_whisper"] = True
+            if (config.color_scheme or "").strip():
+                _proj_settings["color_scheme"] = config.color_scheme.strip()
+            if (config.image_filter or "none").strip().lower() != "none":
+                _proj_settings["image_filter"] = config.image_filter.strip().lower()
             project = Project(
                 name=item_state["project_name"],
                 mode=ProjectMode(config.render_type),
+                settings=_proj_settings,
             )
             session.add(project)
             await session.flush()
@@ -880,6 +946,45 @@ async def _process_single_item(
         # Narration batches feed pure-speech audio — skip Demucs to save
         # ~30 min / item and avoid phase artifacts from stem separation.
         _skip_demucs = config.render_type in ("narration_video", "narration_images")
+
+        # ── SRT pre-parse ────────────────────────────────────────────
+        # If the user attached an SRT for this item, parse it now so we
+        # can (a) honor disable_whisper by skipping the Whisper pass
+        # entirely, and (b) replace whatever transcription Whisper
+        # produces with the authoritative SRT cue text + timing.  Same
+        # downstream semantics as the per-project Disable Whisper toggle
+        # added in 1.8.15.
+        _srt_words: list[dict] = []
+        _srt_attached = bool(config.srt_upload_path) and Path(config.srt_upload_path).exists()
+        if _srt_attached:
+            try:
+                from backend.services.audio.analysis import AudioAnalyzer as _AA
+                _srt_text = Path(config.srt_upload_path).read_text(
+                    encoding="utf-8-sig", errors="replace"
+                )
+                _srt_words = _AA._parse_srt_to_words(_srt_text)
+                logger.info(
+                    f"Batch item {item_index}: SRT parsed — {len(_srt_words)} words, "
+                    f"{len({w.get('block') for w in _srt_words if 'block' in w})} cues"
+                )
+            except Exception as _srt_err:
+                logger.warning(
+                    f"Batch item {item_index}: SRT parse FAILED ({_srt_err}); "
+                    f"falling back to Whisper-only analysis."
+                )
+                _srt_words = []
+                _srt_attached = False
+
+        # Honor disable_whisper only when an SRT actually loaded — the
+        # backend project-level path enforces the same gate, surface a
+        # WARNING when the user requested the bypass but no usable SRT
+        # exists so the run still completes (using Whisper as fallback).
+        _bypass_whisper = bool(config.disable_whisper) and _srt_attached
+        if config.disable_whisper and not _srt_attached:
+            logger.warning(
+                f"Batch item {item_index}: disable_whisper=True but no SRT loaded — "
+                f"running Whisper anyway."
+            )
         if _skip_demucs:
             logger.info(
                 f"Batch item: skipping Demucs for narration render type "
@@ -899,12 +1004,16 @@ async def _process_single_item(
             f"Batch item analysis budget: {_budget // 60} min "
             f"(audio ~{_audio_dur:.0f}s, skip_demucs={_skip_demucs})"
         )
+        # Pass whisper_mode="skip" when the user opted in AND we have an
+        # SRT to fill the transcription gap — analyze_full short-circuits
+        # the Whisper pass entirely and returns an empty transcription.
+        _effective_whisper_mode = "skip" if _bypass_whisper else whisper_mode
         try:
             analysis_result = await asyncio.wait_for(
                 asyncio.to_thread(
                     analyzer.analyze_full,
                     str(audio_dest),
-                    whisper_mode,
+                    _effective_whisper_mode,
                     whisper_remote_url,
                     whisper_comfyui_url=whisper_comfyui_url,
                     initial_text=initial_text,
@@ -918,6 +1027,23 @@ async def _process_single_item(
             raise RuntimeError(
                 "Audio analysis timed out after 1 hour "
                 "(check Whisper backend / GPU)"
+            )
+
+        # ── SRT word substitution ────────────────────────────────────
+        # When an SRT was attached, the SRT cue words are the
+        # authoritative timing — overwrite Whisper output regardless of
+        # bypass setting (the user explicitly provided this SRT, treat
+        # it as the source of truth like the per-project upload_srt
+        # endpoint does).
+        if _srt_attached and _srt_words:
+            analysis_result["transcription"] = list(_srt_words)
+            analysis_result["lyrics"] = {
+                "text": " ".join(w.get("word", "") for w in _srt_words),
+                "words": list(_srt_words),
+            }
+            logger.info(
+                f"Batch item {item_index}: substituted Whisper transcription with "
+                f"{len(_srt_words)} SRT cue words."
             )
 
         # Save analysis results to cache
@@ -1150,8 +1276,47 @@ async def _process_single_item(
                     proj_settings["concept_direction"] = config.concept_direction
                 if config.style_text:
                     proj_settings["style_text"] = config.style_text
+                # Per-item concept toggles added since the batch screen
+                # was last revisited (1.8.5 AV-native, 1.8.x color
+                # override).  Color was already seeded at project create,
+                # but base-on-lyrics may have overwritten settings — so
+                # re-apply here as well.  enable_model_audio is concept
+                # level, not project-settings, so it lives on the
+                # Concept row (handled below).
+                if (config.color_scheme or "").strip():
+                    proj_settings["color_scheme"] = config.color_scheme.strip()
+                if (config.image_filter or "none").strip().lower() != "none":
+                    proj_settings["image_filter"] = config.image_filter.strip().lower()
                 project.settings = proj_settings
                 await session.commit()
+
+        # Concept-level AV-native flag.  When the user enabled
+        # model-generated audio on the batch item, set
+        # Concept.enable_model_audio so subsequent video generations use
+        # the LTX 2.3 AV-native workflow.  Best-effort: if no Concept
+        # row exists yet (rare — base-on-lyrics should have created
+        # one) skip silently.
+        if config.enable_model_audio:
+            try:
+                async with async_session() as _av_session:
+                    from backend.database.models import Concept as _Concept
+                    _av_q = await _av_session.execute(
+                        select(_Concept).where(_Concept.project_id == project_id)
+                    )
+                    _av_row = _av_q.scalars().first()
+                    if _av_row:
+                        _av_row.enable_model_audio = True
+                        _av_session.add(_av_row)
+                        await _av_session.commit()
+                        logger.info(
+                            f"Batch item {item_index}: enabled model-generated "
+                            f"audio (AV-native LTX 2.3) on Concept."
+                        )
+            except Exception as _av_err:
+                logger.warning(
+                    f"Batch item {item_index}: enable_model_audio set FAILED — "
+                    f"{_av_err}"
+                )
 
         logger.info(f"Batch item {item_index}: concept generated")
 
