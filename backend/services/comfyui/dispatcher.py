@@ -48,6 +48,20 @@ def apply_user_caps(worker: "ComfyWorker", caps_config: dict) -> None:
     """
     if not caps_config:
         return
+    # ── Priority ─────────────────────────────────────────────────────
+    # Users with mixed-speed servers (e.g. one fast 4090, two slow 3060s)
+    # set priority so the fast box gets picked first and slow boxes only
+    # take work when the fast one is busy.  Lower number = higher prio.
+    # Accept any integer; clamp into [0, 1000] so a stray huge value
+    # doesn't break the sort's comparison.  Missing/non-numeric falls
+    # back to the dataclass default (100).
+    try:
+        _p = caps_config.get("priority", None)
+        if _p is not None:
+            worker.priority = max(0, min(1000, int(_p)))
+    except (TypeError, ValueError):
+        pass
+
     # ── Capability tags (image/video checkboxes) ─────────────────────
     merged_caps = set(worker.capabilities)
     if caps_config.get("image", True):
@@ -94,6 +108,15 @@ class ComfyWorker:
     models: Set[str] = field(default_factory=set)  # e.g., {"SD15", "SD3"}
     last_check: datetime = field(default_factory=datetime.now)
     is_runpod: bool = False  # True if this worker was added via RunPod integration
+    # User-configurable per-worker priority.  Lower number = picked
+    # first (high priority).  Higher number = used last (low priority).
+    # The dispatcher sort key uses (priority, in_flight, -last_check)
+    # so among idle workers the highest-priority one wins, but once a
+    # high-priority worker saturates (in_flight rises), lower-priority
+    # workers get picked up — the "slower fallback" semantics the user
+    # asked for.  Default 100 puts new workers in the middle so
+    # explicitly-prioritized workers naturally sort around them.
+    priority: int = 100
 
     def __hash__(self):
         return hash(self.url)
@@ -406,8 +429,23 @@ class ComfyDispatcher:
                 capable = model_capable
             # else: no workers have models configured — skip model filter entirely
 
-        # Select least-loaded
-        selected = min(capable, key=lambda w: (w.in_flight, -w.last_check.timestamp()))
+        # Select highest-priority among least-loaded.  Sort key:
+        #   1. in_flight          — never overload a busy worker; this
+        #                           is what enables the "fallback to
+        #                           slower server" behavior — once the
+        #                           fast (high-prio) server is busy, the
+        #                           lower-prio server's in_flight=0
+        #                           tuple naturally beats it.
+        #   2. priority           — among same-loaded workers, the
+        #                           lower number (higher priority) wins.
+        #                           So when nothing is busy, the user's
+        #                           preferred fast server is always
+        #                           picked first.
+        #   3. -last_check ts     — tiebreak by most recent health check.
+        selected = min(
+            capable,
+            key=lambda w: (w.in_flight, w.priority, -w.last_check.timestamp()),
+        )
 
         if reserve:
             selected.in_flight += 1

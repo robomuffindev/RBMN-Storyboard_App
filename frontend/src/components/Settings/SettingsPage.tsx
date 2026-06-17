@@ -750,6 +750,28 @@ export default function SettingsPage() {
               <div key={index} className="p-3 bg-gray-800 rounded border border-gray-700">
                 <div className="flex items-center gap-3">
                   <span className="flex-1 text-sm font-mono text-gray-300 truncate">{url}</span>
+                  {/* Priority — lower number = picked first (fast server),
+                      higher number = used last (slow server fallback).
+                      Range 0-1000, default 100.  See dispatcher
+                      select_worker sort key. */}
+                  <div
+                    className="flex items-center gap-1"
+                    title="Priority — lower number is picked first. Higher number runs only when higher-priority servers are busy."
+                  >
+                    <label className="text-[10px] text-gray-500 uppercase tracking-wider">Prio</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      step={10}
+                      value={typeof caps.priority === 'number' ? caps.priority : 100}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        setCap('priority', Number.isFinite(v) ? Math.max(0, Math.min(1000, v)) : 100);
+                      }}
+                      className="w-16 px-1.5 py-1 text-xs bg-gray-900 border border-gray-700 rounded text-gray-200 text-right focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
                   <button
                     onClick={() => testComfyMutation.mutate(url)}
                     className="px-3 py-1 text-xs font-medium transition-colors"
