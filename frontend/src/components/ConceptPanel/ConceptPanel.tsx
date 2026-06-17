@@ -89,6 +89,14 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   // (which only influences the LLM prompt).  Values: "" / "bw" /
   // "grayscale" / "sepia".  Per-scene image_color_filter overrides.
   const [globalImageColorFilter, setGlobalImageColorFilter] = useState('');
+  // Global project context — environmental wrapper injected into every
+  // LLM enhance call when enabled.  All four fields persist independently;
+  // they're only sent to the LLM when globalContextEnabled is true.
+  const [globalContextEnabled, setGlobalContextEnabled] = useState(false);
+  const [globalContextTimeOfDay, setGlobalContextTimeOfDay] = useState('');
+  const [globalContextSeason, setGlobalContextSeason] = useState('');
+  const [globalContextWeather, setGlobalContextWeather] = useState('');
+  const [globalContextCustom, setGlobalContextCustom] = useState('');
   // Model-generated audio (LTX 2.3 AV-native).  When ON, every I2V video
   // render in this project uses the AV-native workflow — no per-scene
   // opt-in required.  Mixer slider controls level for the resulting
@@ -179,6 +187,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        global_context_enabled: globalContextEnabled,
+        global_context_time_of_day: globalContextTimeOfDay,
+        global_context_season: globalContextSeason,
+        global_context_weather: globalContextWeather,
+        global_context_custom: globalContextCustom,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
         include_model_audio_in_export: includeModelAudioInExport,
@@ -257,6 +270,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           : true
       );
       setCustomColorPalette(conceptData.custom_color_palette || '');
+      setGlobalContextEnabled(Boolean((conceptData as any).global_context_enabled));
+      setGlobalContextTimeOfDay(((conceptData as any).global_context_time_of_day || '') as string);
+      setGlobalContextSeason(((conceptData as any).global_context_season || '') as string);
+      setGlobalContextWeather(((conceptData as any).global_context_weather || '') as string);
+      setGlobalContextCustom(((conceptData as any).global_context_custom || '') as string);
       setDirty(false);
     }
   }, [conceptData, dirty]);
@@ -287,6 +305,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        global_context_enabled: globalContextEnabled,
+        global_context_time_of_day: globalContextTimeOfDay,
+        global_context_season: globalContextSeason,
+        global_context_weather: globalContextWeather,
+        global_context_custom: globalContextCustom,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
         include_model_audio_in_export: includeModelAudioInExport,
@@ -355,6 +378,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        global_context_enabled: globalContextEnabled,
+        global_context_time_of_day: globalContextTimeOfDay,
+        global_context_season: globalContextSeason,
+        global_context_weather: globalContextWeather,
+        global_context_custom: globalContextCustom,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
         include_model_audio_in_export: includeModelAudioInExport,
@@ -392,6 +420,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        global_context_enabled: globalContextEnabled,
+        global_context_time_of_day: globalContextTimeOfDay,
+        global_context_season: globalContextSeason,
+        global_context_weather: globalContextWeather,
+        global_context_custom: globalContextCustom,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
         include_model_audio_in_export: includeModelAudioInExport,
@@ -594,6 +627,104 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           <p className="text-[10px] text-gray-500 mt-1">
             Runs FFmpeg over every newly-generated image. Per-scene override available on each Image tab.
           </p>
+        </div>
+
+        {/* Global Project Context — environmental wrapper injected into
+            every LLM enhance call when enabled.  Off by default; the
+            dropdowns persist independently so the user can pre-fill them
+            and only flip the toggle on when they're ready. */}
+        <div className="bg-gray-800/40 border border-gray-700/60 rounded p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <input
+              type="checkbox"
+              id="global-context-enabled"
+              checked={globalContextEnabled}
+              onChange={(e) => { setGlobalContextEnabled(e.target.checked); markDirty(); }}
+              className="w-4 h-4 rounded"
+            />
+            <label htmlFor="global-context-enabled" className="text-sm font-medium text-gray-300 cursor-pointer">
+              Enable Global Project Context
+            </label>
+          </div>
+          <p className="text-[10px] text-gray-500 mb-3">
+            When ON, every scene's LLM prompt enhancement receives this environmental setup as a MANDATORY context
+            (time of day, season, weather, etc.). Off by default — toggle to apply.
+          </p>
+          <div className={`space-y-2 ${globalContextEnabled ? '' : 'opacity-50 pointer-events-none'}`}>
+            <div>
+              <label className="block text-[11px] text-gray-400 mb-1">Time of Day</label>
+              <select
+                value={globalContextTimeOfDay}
+                onChange={(e) => { setGlobalContextTimeOfDay(e.target.value); markDirty(); }}
+                className="w-full px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— none —</option>
+                <option value="dawn">Dawn</option>
+                <option value="sunrise">Sunrise</option>
+                <option value="morning">Morning</option>
+                <option value="midday">Midday</option>
+                <option value="afternoon">Afternoon</option>
+                <option value="golden_hour">Golden Hour</option>
+                <option value="sunset">Sunset</option>
+                <option value="dusk">Dusk</option>
+                <option value="twilight">Twilight</option>
+                <option value="night">Night</option>
+                <option value="midnight">Midnight</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-gray-400 mb-1">Season</label>
+              <select
+                value={globalContextSeason}
+                onChange={(e) => { setGlobalContextSeason(e.target.value); markDirty(); }}
+                className="w-full px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— none —</option>
+                <option value="spring">Spring</option>
+                <option value="summer">Summer</option>
+                <option value="fall">Autumn / Fall</option>
+                <option value="winter">Winter</option>
+                <option value="monsoon">Monsoon</option>
+                <option value="dry_season">Dry Season</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-gray-400 mb-1">Weather</label>
+              <select
+                value={globalContextWeather}
+                onChange={(e) => { setGlobalContextWeather(e.target.value); markDirty(); }}
+                className="w-full px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— none —</option>
+                <option value="sunny">Sunny / Clear</option>
+                <option value="partly_cloudy">Partly Cloudy</option>
+                <option value="overcast">Overcast</option>
+                <option value="light_rain">Light Rain</option>
+                <option value="rain">Rain</option>
+                <option value="heavy_rain">Heavy Rain</option>
+                <option value="thunderstorm">Thunderstorm</option>
+                <option value="storm">Storm</option>
+                <option value="snow">Snow</option>
+                <option value="heavy_snow">Heavy Snow / Blizzard</option>
+                <option value="fog">Fog</option>
+                <option value="mist">Mist</option>
+                <option value="windy">Windy</option>
+                <option value="dust_storm">Dust Storm</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-gray-400 mb-1">
+                Custom Context <span className="text-gray-500">(period setting, location, mood — anything the dropdowns don't cover)</span>
+              </label>
+              <textarea
+                value={globalContextCustom}
+                onChange={(e) => { setGlobalContextCustom(e.target.value); markDirty(); }}
+                placeholder="e.g. Set in 1880s rural Vermont. Recurring location is the old red barn. Mood is melancholy and reflective."
+                rows={2}
+                className="w-full px-2.5 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-none"
+              />
+            </div>
+          </div>
         </div>
 
         {/* Model-Generated Audio (LTX 2.3 AV-native) — master toggle.
@@ -1059,6 +1190,11 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        global_context_enabled: globalContextEnabled,
+        global_context_time_of_day: globalContextTimeOfDay,
+        global_context_season: globalContextSeason,
+        global_context_weather: globalContextWeather,
+        global_context_custom: globalContextCustom,
         enable_model_audio: enableModelAudio,
         model_audio_volume: modelAudioVolume,
         include_model_audio_in_export: includeModelAudioInExport,

@@ -1657,6 +1657,26 @@ async def _build_auto_enhance_context(
     if style_text:
         parts.append(f"Visual style: {style_text}")
 
+    # Global project context — explicit user-set environmental wrapper
+    # (time of day, season, weather, custom).  Only fires when the user
+    # explicitly toggled it on AND at least one field is filled; otherwise
+    # invisible to the LLM.  See ConceptData.global_context_* docs.
+    try:
+        from backend.api.concept import resolve_global_context
+        _gctx = resolve_global_context(project.settings or {})
+        if _gctx:
+            parts.append(
+                f"⚠️ MANDATORY GLOBAL PROJECT CONTEXT (applies to EVERY scene "
+                f"unless explicitly overridden by per-scene direction): {_gctx}. "
+                f"All scenes must respect this environmental setup — lighting, "
+                f"sky, ground cover, foliage state, atmospheric mood, and time "
+                f"cues must reflect it consistently throughout the project."
+            )
+    except Exception:
+        # Best-effort: never break enhance because of an optional global
+        # context resolver import failure.
+        pass
+
     # Image direction
     image_direction = project.settings.get("image_direction", "")
     if image_direction and image_direction != "none":

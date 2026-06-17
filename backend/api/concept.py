@@ -103,6 +103,27 @@ class ConceptData(BaseModel):
     # `Scene.parameters.include_model_audio_in_export` lets the user
     # silence individual scenes.
     include_model_audio_in_export: bool = True
+    # ── Global project context ───────────────────────────────────────
+    # OFF by default — must be explicitly toggled on.  When enabled,
+    # the resolved context string gets injected into every LLM prompt
+    # enhancement so all scenes share the same environmental setup
+    # (time of day, season, weather, etc.).  Pieces:
+    #   • global_context_enabled — master gate.
+    #   • global_context_time_of_day — preset key (sunrise, morning,
+    #     midday, sunset, dusk, night, etc.) or "" for none.
+    #   • global_context_season    — preset key (spring, summer, fall,
+    #     winter) or "" for none.
+    #   • global_context_weather   — preset key (sunny, overcast,
+    #     rain, storm, snow, fog, etc.) or "" for none.
+    #   • global_context_custom    — free-form text the user types to
+    #     describe anything the preset dropdowns don't cover (period
+    #     setting, mood, recurring location, etc.).  All four are
+    #     concatenated server-side into the final injected string.
+    global_context_enabled: bool = False
+    global_context_time_of_day: str = ""
+    global_context_season: str = ""
+    global_context_weather: str = ""
+    global_context_custom: str = ""
 
 
 class SceneFlowIdea(BaseModel):
@@ -140,6 +161,83 @@ class GenerateCharacterRequest(BaseModel):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+
+# Preset → LLM-facing phrasing for the global project context dropdowns.
+# Keys match the Pydantic / frontend select values; values are phrased
+# how we want the LLM to receive them.  Adding new presets only requires
+# extending these dicts — no schema migration.
+GLOBAL_CONTEXT_TIME_OF_DAY = {
+    "dawn": "dawn (first light, low sun on the horizon, long shadows, cool-warm gradient sky)",
+    "sunrise": "sunrise (golden hour, soft warm directional light from a low sun)",
+    "morning": "morning (clear bright daylight, fresh feel, soft shadows)",
+    "midday": "midday (high noon sun, short shadows, strong direct light)",
+    "afternoon": "afternoon (warming light, lengthening shadows, settled atmosphere)",
+    "golden_hour": "golden hour (warm directional sun low in the sky, rim lighting on subjects)",
+    "sunset": "sunset (saturated warm sky, low sun, dramatic silhouettes)",
+    "dusk": "dusk (deep blue sky after sunset, soft ambient light, last traces of warm color)",
+    "twilight": "twilight (cool blue tones, fading light, atmospheric haze)",
+    "night": "night (deep darkness, moonlight or artificial light only, high contrast)",
+    "midnight": "midnight (deepest night, minimal ambient light, stars visible)",
+}
+GLOBAL_CONTEXT_SEASON = {
+    "spring": "spring (fresh foliage, blossoms, soft green palette, lively atmosphere)",
+    "summer": "summer (lush green vegetation, vibrant saturated colors, warm air)",
+    "fall": "autumn / fall (orange and red foliage, fallen leaves, cooler crisp air)",
+    "autumn": "autumn / fall (orange and red foliage, fallen leaves, cooler crisp air)",
+    "winter": "winter (bare trees, snow or frost, cold muted palette, breath visible in cold air)",
+    "monsoon": "monsoon (heavy humid air, water-soaked ground, dramatic clouds)",
+    "dry_season": "dry season (parched ground, dust in air, low humidity, golden grass)",
+}
+GLOBAL_CONTEXT_WEATHER = {
+    "sunny": "sunny clear skies (bright direct sunlight, sharp shadows, vivid colors)",
+    "partly_cloudy": "partly cloudy (scattered clouds, intermittent sunlight, soft moving shadows)",
+    "overcast": "overcast (even diffuse light, low contrast, muted colors, gray flat sky)",
+    "light_rain": "light rain (wet surfaces with subtle reflections, fine drizzle, soft mist)",
+    "rain": "rain (visible rainfall, puddles, slick reflective ground, atmospheric haze)",
+    "heavy_rain": "heavy rain (sheets of water, low visibility, splashing puddles, dark heavy clouds)",
+    "thunderstorm": "thunderstorm (dramatic dark clouds, occasional lightning flashes, sheeting rain, electric atmosphere)",
+    "storm": "storm (violent weather, heavy wind, low visibility, dramatic charged sky)",
+    "snow": "snowfall (soft white blanket of snow, falling flakes, muted palette, hushed atmosphere)",
+    "heavy_snow": "heavy snow / blizzard (dense falling snow, near-whiteout, drifts piling up, biting cold)",
+    "fog": "fog (low visibility, soft diffused light, ghostly silhouettes, muted colors)",
+    "mist": "mist (light atmospheric haze, softened distant elements, gentle dreamy quality)",
+    "windy": "windy (visibly moving foliage, blown hair and clothing, drifting debris)",
+    "dust_storm": "dust storm (thick airborne particulate, orange-brown haze, severely reduced visibility)",
+}
+
+
+def resolve_global_context(settings: dict) -> str:
+    """Build the LLM-facing global context string from project settings.
+
+    Returns an empty string when the feature is disabled OR every field
+    is empty — callers can treat it as "no global context" without an
+    extra truthiness check.  When enabled and any field is set, returns
+    a single comma-joined sentence ready to inject into an enhance
+    request's ``context`` parameter.
+
+    The mapping is LLM-friendly phrasing (not the raw enum key) so the
+    LLM gets concrete descriptive language instead of "morning" or
+    "rain" alone.  The custom free-text field is appended verbatim so
+    users can override or extend the presets.
+    """
+    if not settings or not bool(settings.get("global_context_enabled", False)):
+        return ""
+    parts: list[str] = []
+    tod = (settings.get("global_context_time_of_day") or "").strip().lower()
+    season = (settings.get("global_context_season") or "").strip().lower()
+    weather = (settings.get("global_context_weather") or "").strip().lower()
+    custom = (settings.get("global_context_custom") or "").strip()
+    if tod in GLOBAL_CONTEXT_TIME_OF_DAY:
+        parts.append(f"Time of day: {GLOBAL_CONTEXT_TIME_OF_DAY[tod]}")
+    if season in GLOBAL_CONTEXT_SEASON:
+        parts.append(f"Season: {GLOBAL_CONTEXT_SEASON[season]}")
+    if weather in GLOBAL_CONTEXT_WEATHER:
+        parts.append(f"Weather: {GLOBAL_CONTEXT_WEATHER[weather]}")
+    if custom:
+        parts.append(f"Additional setting notes: {custom}")
+    return ". ".join(parts)
+
 
 async def _get_project(project_id: UUID, session: AsyncSession) -> Project:
     project = await session.get(Project, project_id)
@@ -188,6 +286,11 @@ async def get_concept(
         # Default True so older projects (saved before this field existed)
         # keep their model audio in exports — opt-out, not opt-in.
         include_model_audio_in_export=bool(s.get("include_model_audio_in_export", True)),
+        global_context_enabled=bool(s.get("global_context_enabled", False)),
+        global_context_time_of_day=str(s.get("global_context_time_of_day", "") or ""),
+        global_context_season=str(s.get("global_context_season", "") or ""),
+        global_context_weather=str(s.get("global_context_weather", "") or ""),
+        global_context_custom=str(s.get("global_context_custom", "") or ""),
     )
 
 
@@ -241,6 +344,14 @@ async def save_concept(
     settings["enable_model_audio"] = bool(req.enable_model_audio)
     settings["model_audio_volume"] = max(0.0, min(2.0, float(req.model_audio_volume)))
     settings["include_model_audio_in_export"] = bool(req.include_model_audio_in_export)
+    # Global project context (off by default; only injected into LLM
+    # prompts when ``global_context_enabled`` is True — see
+    # ``resolve_global_context()`` below).
+    settings["global_context_enabled"] = bool(req.global_context_enabled)
+    settings["global_context_time_of_day"] = (req.global_context_time_of_day or "").strip()
+    settings["global_context_season"] = (req.global_context_season or "").strip()
+    settings["global_context_weather"] = (req.global_context_weather or "").strip()
+    settings["global_context_custom"] = (req.global_context_custom or "").strip()
     project.settings = settings
     await session.commit()
     await session.refresh(project)

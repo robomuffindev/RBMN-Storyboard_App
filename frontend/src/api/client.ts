@@ -435,6 +435,16 @@ export const getConcept = (projectId: string) =>
     global_color_override: string;
     custom_color_palette: string;
     global_image_color_filter?: string;  // "" | "bw" | "grayscale" | "sepia"
+    // Global project context — environmental wrapper for every LLM
+    // enhance call.  Off by default; only injected when explicitly on.
+    global_context_enabled?: boolean;
+    global_context_time_of_day?: string;
+    global_context_season?: string;
+    global_context_weather?: string;
+    global_context_custom?: string;
+    enable_model_audio?: boolean;
+    model_audio_volume?: number;
+    include_model_audio_in_export?: boolean;
   }>(
     `/projects/${projectId}/concept`
   );
@@ -470,6 +480,11 @@ export const saveConcept = (projectId: string, data: {
   global_color_override?: string;
   custom_color_palette?: string;
   global_image_color_filter?: string;  // "" | "bw" | "grayscale" | "sepia"
+  global_context_enabled?: boolean;
+  global_context_time_of_day?: string;
+  global_context_season?: string;
+  global_context_weather?: string;
+  global_context_custom?: string;
   enable_model_audio?: boolean;
   model_audio_volume?: number;
   include_model_audio_in_export?: boolean;
