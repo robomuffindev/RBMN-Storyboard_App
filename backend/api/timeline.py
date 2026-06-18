@@ -2905,22 +2905,39 @@ def _dp_segment_narration(
             boundaries.append(boundaries[-1] if boundaries else 0.0)
             gaps.append(0.0)
             continue
-        start = pg[0].get("start", 0.0)
+        start = float(pg[0].get("start", 0.0) or 0.0)
         if i == 0:
-            # Cut point before first phrase
-            boundaries.append(max(0.0, start - 0.3) if start > 0.3 else 0.0)
-            gaps.append(start)  # gap from 0 to first word
+            # Scene 1 OWNS the intro silence.  A long lead-in pause is not
+            # attached to two scenes, so it is never split — the first
+            # scene always starts at 0.0 and covers everything up to the
+            # first cut (per Lorenzo's spec: intro/outro pauses may be long
+            # on purpose and belong to a single scene).
+            boundaries.append(0.0)
+            gaps.append(start)  # gap from 0 to first word (intro length)
         else:
-            prev_end = phrase_groups[i - 1][-1].get("end", 0.0) if phrase_groups[i - 1] else 0.0
-            gap = start - prev_end
-            # Place boundary in the gap (same logic as cut point builder)
-            if gap > 0.6:
-                boundaries.append(round(start - 0.3, 2))
-            else:
-                boundaries.append(round((prev_end + start) / 2.0, 2))
-            gaps.append(max(0.0, gap))
+            # Robust phrase end: the LAST word's recorded ``end`` can under-
+            # shoot the true spoken end (Whisper) or be slightly out of
+            # order, so take the MAX end across the whole phrase.  This
+            # guarantees the boundary sits AFTER every spoken word in the
+            # phrase, so the scene's audio slot fully contains its dialogue
+            # and nothing bleeds past the cut.
+            prev_pg = phrase_groups[i - 1]
+            prev_end = (
+                max((float(w.get("end", 0.0) or 0.0) for w in prev_pg), default=0.0)
+                if prev_pg else 0.0
+            )
+            gap = max(0.0, start - prev_end)
+            # SPLIT THE INTER-PHRASE PAUSE EVENLY between the two scenes:
+            # half the silence tails the current scene, half leads into the
+            # next (a 1.0s pause → 0.5s each side).  The midpoint also
+            # guarantees boundary > prev_end, which is what eliminates the
+            # "previous scene's dialogue is still playing after the cut"
+            # symptom.
+            boundaries.append(round((prev_end + start) / 2.0, 3))
+            gaps.append(gap)
 
-    # Final boundary = end of audio
+    # Final boundary = end of audio.  The trailing/outro silence belongs to
+    # the LAST scene only and is never split — mirrors the intro rule above.
     boundaries.append(round(total_duration, 3))
 
     # ── Detect paragraph breaks from user lyrics ────────────────────────

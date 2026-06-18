@@ -2522,45 +2522,77 @@ def generate_ass_subtitles(
         opts.update(style_opts)
 
     # ── Group words into subtitle lines ──────────────────────────────
+    # SRT-sourced words carry a ``block`` index.  When present that cue
+    # grouping is AUTHORITATIVE — emit exactly one subtitle line per block
+    # so the burned-in captions match the uploaded SRT (and the live
+    # preview, which groups the same way).  This keeps captions, scene
+    # boundaries and audio all anchored to the same ground-truth timing.
+    # Whisper-sourced words (no block) fall back to pause/length grouping:
+    # break on a noticeable timing gap or after ~8 words.
     lines: list[dict] = []  # [{text, start, end}, ...]
-    current_words: list[str] = []
-    line_start: float = 0.0
-    line_end: float = 0.0
 
-    for i, w in enumerate(words):
-        word_text = w.get("word", "").strip()
-        if not word_text:
-            continue
+    _has_blocks = any(w.get("block") is not None for w in words)
+    if _has_blocks:
+        _blocks: dict[int, list[dict]] = {}
+        _order: list[int] = []
+        for w in words:
+            b = w.get("block")
+            if b is None:
+                continue
+            if b not in _blocks:
+                _blocks[b] = []
+                _order.append(b)
+            _blocks[b].append(w)
+        for b in sorted(_order):
+            bw = _blocks[b]
+            text = " ".join((x.get("word", "") or "").strip() for x in bw).strip()
+            if not text:
+                continue
+            lines.append({
+                "text": text,
+                "start": min(float(x.get("start", 0) or 0) for x in bw),
+                "end": max(float(x.get("end", 0) or 0) for x in bw),
+            })
+    else:
+        current_words: list[str] = []
+        line_start: float = 0.0
+        line_end: float = 0.0
 
-        w_start = float(w.get("start", 0))
-        w_end = float(w.get("end", w_start + 0.1))
+        for i, w in enumerate(words):
+            word_text = w.get("word", "").strip()
+            if not word_text:
+                continue
 
-        if not current_words:
-            line_start = w_start
+            w_start = float(w.get("start", 0))
+            w_end = float(w.get("end", w_start + 0.1))
 
-        # Check if we should break to a new line:
-        # - timing gap > 0.3s from previous word end, or
-        # - reached 8 words in current line
-        gap = w_start - line_end if current_words else 0
-        if current_words and (gap > 0.3 or len(current_words) >= 8):
+            if not current_words:
+                line_start = w_start
+
+            # Break to a new caption line on a noticeable pause (gap > 0.3s
+            # from the previous word's end) or after 8 words.  The pause
+            # break is what keeps captions from lingering across a silence
+            # and re-syncs them to the spoken rhythm.
+            gap = w_start - line_end if current_words else 0
+            if current_words and (gap > 0.3 or len(current_words) >= 8):
+                lines.append({
+                    "text": " ".join(current_words),
+                    "start": line_start,
+                    "end": line_end,
+                })
+                current_words = []
+                line_start = w_start
+
+            current_words.append(word_text)
+            line_end = w_end
+
+        # Flush remaining words
+        if current_words:
             lines.append({
                 "text": " ".join(current_words),
                 "start": line_start,
                 "end": line_end,
             })
-            current_words = []
-            line_start = w_start
-
-        current_words.append(word_text)
-        line_end = w_end
-
-    # Flush remaining words
-    if current_words:
-        lines.append({
-            "text": " ".join(current_words),
-            "start": line_start,
-            "end": line_end,
-        })
 
     # ── Format ASS timecodes ─────────────────────────────────────────
     def _ass_time(seconds: float) -> str:

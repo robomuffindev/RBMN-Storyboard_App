@@ -1746,8 +1746,7 @@ async def browse_directory():
             logger.warning(f"Folder picker not available: {e}")
             return None
 
-    loop = asyncio.get_event_loop()
-    selected = await loop.run_in_executor(None, _pick_folder)
+    selected = await asyncio.to_thread(_pick_folder)
 
     if selected is None:
         return {"success": False, "path": None, "message": "No folder selected or dialog unavailable"}
@@ -1826,11 +1825,24 @@ async def change_project_dir(
             return "Directory set (no data moved)"
 
     try:
-        loop = asyncio.get_event_loop()
-        result_msg = await loop.run_in_executor(None, _do_directory_change)
+        result_msg = await asyncio.to_thread(_do_directory_change)
     except Exception as e:
         logger.error(f"Failed to change project directory: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to change directory: {e}")
 
     # Save the new path to database settings
-    settings.project_dir = str
+    settings.project_dir = str(new_path)
+    session.add(settings)
+    await session.commit()
+    await session.refresh(settings)
+
+    logger.info(
+        f"Project directory changed: {old_path} -> {new_path} ({result_msg})"
+    )
+
+    return ChangeProjectDirResponse(
+        success=True,
+        message=result_msg,
+        old_path=str(old_path),
+        new_path=str(new_path),
+    )
