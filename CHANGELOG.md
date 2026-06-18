@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.8.17] - 2026-06-18
+
+A maintenance + narration-precision release: a critical truncation repair in the settings API, three code-hygiene cleanups, and a precise rework of how narration scene boundaries and subtitle cues are timed so video stays locked to the audio through to the end.
+
+### Fixed — Truncated `change_project_dir` endpoint (data-loss risk)
+
+`backend/api/settings.py` had shipped truncated: the `change_project_dir` endpoint ended mid-statement at `settings.project_dir = str` — no closing call, no `commit`, no `return`. It parsed clean only because `str` is a valid builtin reference, so neither `ast.parse` nor `tsc` ever flagged it (the Edit-tool Windows-mount truncation pattern from the handover notes). With *move data* enabled the endpoint physically `shutil.move`d all project data to the new folder, then failed to persist the new path — leaving the DB pointing at the now-empty old directory, and returning no body despite declaring `response_model=ChangeProjectDirResponse`. Completed the statement to persist (`str(new_path)`), `session.add` / `commit` / `refresh`, log, and return the declared model — matching the commit pattern already used elsewhere in the file. Restart-to-apply behavior is by design and already surfaced in the UI.
+
+### Fixed — Narration scene cuts now split pauses evenly and never clip dialogue
+
+Lorenzo reported that the ends of some scene dialogues were still being heard after the visual had already cut to the next scene, even though that dialogue belonged to the scene's lyrics — and that the mismatch compounded toward the end of long narrations. The live preview is audio-driven (it shows whichever scene owns the current master-audio position), so the bleed meant a scene's `end_time` was genuinely landing before its dialogue finished.
+
+Reworked the boundary builder in `backend/api/timeline.py::_dp_segment_narration`:
+
+- **Inter-phrase pauses are now split evenly between the two adjacent scenes.** The boundary is placed at the midpoint of the gap (`(prev_end + start) / 2`), so a 1.0s pause leaves 0.5s tailing the current scene and 0.5s leading into the next (previously a >0.6s gap was biased to `next_word_start − 0.3`). Per Lorenzo's spec.
+- **Anti-bleed guarantee.** The phrase end used for the cut is now the MAX word-end across the whole phrase rather than the last word's recorded `.end`, so the boundary always sits after every spoken word even when Whisper under-shoots a word's end. The midpoint placement then guarantees `boundary > prev_end`, so dialogue can never overflow the cut.
+- **Intro/outro pauses are never split.** Scene 1 now always starts at `0.0` (was `first_word − 0.3`, which could shift the entire timeline out of sync by the intro length), owning the intro silence; the final boundary stays at `total_duration` so the outro stays whole with the last scene. Long deliberate lead-in/lead-out pauses are left intact because they belong to a single scene only.
+
+Verified by standalone simulation: a 1.0s pause splits to the exact midpoint, a 0.4s pause splits to its midpoint, intro/outro are preserved, and every interior boundary lands at or after its phrase's max word-end (zero bleed).
+
+### Fixed — Burned-in subtitle cues now honor the SRT and break at pauses
+
+`backend/services/video/ffmpeg.py::generate_ass_subtitles` previously re-grouped words by a fixed gap+word-count heuristic, ignoring the SRT `block` index — so exported captions could diverge from the uploaded SRT (and from the live preview, which groups strictly by block). When words carry SRT block indices that cue grouping is now AUTHORITATIVE: exactly one subtitle line per block, matching the SRT and the preview. Whisper-sourced words (no block) keep pause-based breaking (>0.3s gap, or 8 words) so captions track the spoken rhythm and clear during silences.
+
+> **Applying the narration fixes:** existing projects must re-run **Suggest Timeline** to regenerate boundaries — the change is in boundary *generation*, not a migration of existing scenes.
+
+### Changed — Code hygiene cleanups (no behavior change)
+
+- **Removed deprecated `asyncio.get_event_loop()`** at both call sites in `settings.py` (folder picker + change-dir), swapped to `await asyncio.to_thread(fn)`, matching the pattern already used elsewhere in the file. Avoids the Python 3.12+ `DeprecationWarning`.
+- **Production console stripping.** `frontend/vite.config.ts` now uses the `defineConfig(({ mode }) => ...)` form with `esbuild: { drop: mode === 'production' ? ['console', 'debugger'] : [] }`. Because the app always runs `vite build` and serves `dist/`, all `console.*` statements are stripped from the shipped bundle while `vite` dev keeps them for diagnostics.
+- **Removed stale artifacts** — `frontend/dist_new/`, an empty top-level `New folder/`, and ~19 leftover `frontend/vite.config.ts.timestamp-*.mjs` Vite temp files.
+
+### Verification
+
+Backend `ast.parse` clean across all 59 files; `py_compile` clean on every touched/related file; truncation marker + abrupt-EOF + bare-builtin-assignment sweeps all clean; frontend `tsc --noEmit` clean; boundary and subtitle-grouping logic confirmed via standalone simulations.
+
 ## [1.8.16] - 2026-06-17
 
 This release covers a large surface — batch-mode parity with all features added in 1.8.x, server priority routing, global project context for LLM prompts, a long-running narration-timing drift fix, several UI state-refresh fixes, and the Generation Queue scene-name persistence.
