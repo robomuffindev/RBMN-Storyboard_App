@@ -237,3 +237,164 @@ def reconcile_words_to_canonical(
             "using Whisper words as-is"
         )
         return whisper_words
+
+
+def retime_srt_words_to_audio(
+    srt_words: List[Dict[str, Any]],
+    whisper_words: List[Dict[str, Any]],
+    *,
+    min_similarity: float = 0.30,
+) -> List[Dict[str, Any]]:
+    """Re-anchor SRT word timings to the actual audio.
+
+    ElevenLabs (and other) SRT exports carry accurate *text* and cue
+    (``block``) grouping, but their *timestamps* drift from the rendered
+    audio — the error accumulates over long narrations (observed ~10s by
+    the 13-minute mark), which makes scene cuts land progressively before
+    the words are actually spoken.
+
+    This keeps the SRT's word strings AND ``block`` grouping but replaces
+    each word's ``start``/``end`` with audio-accurate timings transferred
+    from a Whisper pass over the real audio, using a difflib sequence
+    alignment between the two token streams (they transcribe the same
+    speech, so they align tightly).
+
+    Args:
+        srt_words: SRT words — dicts with ``word``/``start``/``end`` and
+            (usually) ``block``.  This is the structure we KEEP.
+        whisper_words: Whisper words over the actual audio — dicts with
+            ``word``/``start``/``end``.  This is the TIMING source.
+        min_similarity: bail out (return ``srt_words`` unchanged) if the
+            two streams share less than this fraction of tokens — protects
+            against an SRT that doesn't match the audio at all.
+
+    Returns:
+        A new word list = SRT text + block, Whisper-accurate timings.
+        Returns ``srt_words`` unchanged on empty input, low similarity, or
+        any internal failure (re-timing must never break SRT upload).
+    """
+    if not srt_words or not whisper_words:
+        return srt_words
+    try:
+        srt_norm: List[str] = []
+        srt_map: List[int] = []
+        for j, w in enumerate(srt_words):
+            n = _normalize_token(str(w.get("word", "")))
+            if n:
+                srt_norm.append(n)
+                srt_map.append(j)
+        wh_norm: List[str] = []
+        wh_map: List[int] = []
+        for i, w in enumerate(whisper_words):
+            n = _normalize_token(str(w.get("word", "")))
+            if n:
+                wh_norm.append(n)
+                wh_map.append(i)
+        if not srt_norm or not wh_norm:
+            return srt_words
+
+        sm = difflib.SequenceMatcher(a=srt_norm, b=wh_norm, autojunk=False)
+        ratio = sm.quick_ratio()
+        if ratio < min_similarity:
+            logger.warning(
+                f"SRT re-time skipped: SRT/Whisper token similarity {ratio:.0%} "
+                f"below {min_similarity:.0%} — keeping original SRT timings "
+                f"(srt={len(srt_norm)} tokens, whisper={len(wh_norm)} tokens)."
+            )
+            return srt_words
+
+        n = len(srt_words)
+        a_start: List[Optional[float]] = [None] * n
+        a_end: List[Optional[float]] = [None] * n
+
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            # a = SRT (index i), b = Whisper (index j)
+            if tag == "equal":
+                for k in range(i2 - i1):
+                    sj = srt_map[i1 + k]
+                    wj = wh_map[j1 + k]
+                    a_start[sj] = float(whisper_words[wj].get("start", 0.0) or 0.0)
+                    a_end[sj] = float(whisper_words[wj].get("end", 0.0) or 0.0)
+            elif tag == "replace":
+                wh_rng = [whisper_words[wh_map[k]] for k in range(j1, j2)]
+                srt_rng = [srt_map[k] for k in range(i1, i2)]
+                if not srt_rng or not wh_rng:
+                    continue  # leave None → interpolated below
+                t0 = float(wh_rng[0].get("start", 0.0) or 0.0)
+                t1 = float(wh_rng[-1].get("end", t0) or t0)
+                if t1 < t0:
+                    t1 = t0
+                cnt = len(srt_rng)
+                step = (t1 - t0) / max(cnt, 1)
+                for ci, sj in enumerate(srt_rng):
+                    a_start[sj] = t0 + ci * step
+                    a_end[sj] = t0 + (ci + 1) * step
+            # "delete" (SRT tokens Whisper missed) and "insert" (Whisper
+            # tokens not in SRT) leave SRT gaps as None → interpolated.
+
+        known = [(j, a_start[j]) for j in range(n) if a_start[j] is not None]
+        if not known:
+            logger.warning("SRT re-time: no aligned anchors — keeping original SRT timings.")
+            return srt_words
+
+        # Interpolate start times for unaligned SRT words from neighbours.
+        starts: List[float] = [0.0] * n
+        ki = 0
+        for j in range(n):
+            if a_start[j] is not None:
+                starts[j] = float(a_start[j])
+                continue
+            # advance ki to the last known anchor with index <= j
+            while ki + 1 < len(known) and known[ki + 1][0] <= j:
+                ki += 1
+            prev = known[ki] if known[ki][0] <= j else None
+            nxt = None
+            for cand in known:
+                if cand[0] >= j:
+                    nxt = cand
+                    break
+            if prev and nxt and nxt[0] != prev[0]:
+                frac = (j - prev[0]) / (nxt[0] - prev[0])
+                starts[j] = prev[1] + (nxt[1] - prev[1]) * frac
+            elif prev:
+                starts[j] = prev[1] + 0.3 * (j - prev[0])
+            else:
+                starts[j] = max(0.0, nxt[1] - 0.3 * (nxt[0] - j))
+
+        # Enforce monotonic non-decreasing starts.
+        for j in range(1, n):
+            if starts[j] < starts[j - 1]:
+                starts[j] = starts[j - 1]
+
+        out: List[Dict[str, Any]] = []
+        for j in range(n):
+            o = dict(srt_words[j])  # keep word, block, any extras
+            s = round(max(0.0, starts[j]), 3)
+            if a_end[j] is not None and float(a_end[j]) >= starts[j]:
+                e = round(float(a_end[j]), 3)
+            elif j + 1 < n:
+                e = round(max(s, starts[j + 1]), 3)
+            else:
+                e = round(s + 0.3, 3)
+            if e < s:
+                e = round(s + 0.05, 3)
+            o["start"] = s
+            o["end"] = e
+            out.append(o)
+
+        _n_blocks = sum(1 for o in out if o.get("block") is not None)
+        logger.info(
+            f"SRT re-time: {len(srt_words)} SRT words re-anchored to audio via "
+            f"{len(whisper_words)} Whisper words (similarity={ratio:.0%}, "
+            f"{_n_blocks} words retain block grouping). "
+            f"SRT span {float(srt_words[0].get('start',0) or 0):.1f}-"
+            f"{float(srt_words[-1].get('end',0) or 0):.1f}s → audio span "
+            f"{out[0]['start']:.1f}-{out[-1]['end']:.1f}s."
+        )
+        return out
+
+    except Exception as e:
+        logger.warning(
+            f"SRT re-time failed: {type(e).__name__}: {e} — keeping original SRT timings."
+        )
+        return srt_words

@@ -1,5 +1,80 @@
 # Changelog
 
+## [1.8.22] - 2026-06-18
+
+### Fixed — SRT upload no longer blocks on Whisper; re-anchor moved into Process Audio
+
+The 1.8.20/1.8.21 SRT re-anchor ran Whisper **synchronously inside the SRT upload**. With a ComfyUI Whisper backend (multi-minute, ~52-min budget) the upload HTTP request blocked and the frontend errored — and it could spawn a second Whisper run alongside an in-flight Process Audio pass.
+
+Reworked so the timing re-anchor happens where Whisper already runs — **Process Audio** — and SRT upload stays instant:
+
+- **`upload_srt` is now fast and never runs Whisper.** If the project already has Whisper word timing (from a prior Process Audio run) it maps the SRT spelling + cue grouping onto it instantly; otherwise it just stores the SRT and logs that Process Audio will re-anchor it.
+- **`analyze_audio` (Process Audio) now re-anchors instead of discarding Whisper timing.** Previously, re-analyzing a project that had an SRT *kept the SRT's drifting timestamps* and threw away the fresh Whisper timing. It now combines them via `retime_srt_words_to_audio`: SRT words + cue blocks (correct spelling) with Whisper's audio-accurate timing.
+
+Workflow (matches the intent): **Upload SRT (instant) → Process Audio (Whisper runs once, re-anchors) → Suggest Timeline.** Result: SRT spelling + cue grouping with audio-accurate cut points, and no upload timeouts.
+
+## [1.8.21] - 2026-06-18
+
+### Changed — SRT re-anchor now reuses the existing Whisper pass (robust)
+
+Refined the 1.8.20 SRT-timing fix after confirming the real use case: the SRT is needed for correct ElevenLabs **spelling** (Whisper garbles words), while Whisper provides accurate **timing** from the audio. The combination — SRT words + Whisper timing — is exactly what `retime_srt_words_to_audio` produces.
+
+`upload_srt` now sources the timing in priority order: (1) **reuse Whisper words already stored on the project** from a prior Process Audio run — no re-transcription, and no dependency on locating the audio file at upload time; (2) fall back to a fresh Whisper pass on the audio (with hardened path resolution that tries both `project_dir/<id>/rel` and `project_dir/rel`). This removes the audio-path fragility that caused the re-anchor to silently no-op on projects whose media lives on a different drive than the database.
+
+Deterministic workflow: **Process Audio (Whisper) → Upload SRT → Suggest Timeline.** Result: clean SRT spelling + cue grouping, with audio-accurate cut points. Verified by simulation (Whisper "tortis" → SRT "tortoise" spelling kept, blocks kept, timing error 0.000s vs audio).
+
+> Requires the backend to be restarted on this version. Note: this surfaced a separate environment issue — a project whose **database is on C: but media on D:** (leftover from the old broken `change_project_dir`); consolidating those onto one `project_dir` is recommended.
+
+## [1.8.20] - 2026-06-18
+
+### Fixed — SRT timings re-anchored to the actual audio (root cause of narration drift)
+
+Diagnosed the long-standing "scenes cut earlier and earlier, dialogue still playing after the cut" problem to its true root cause — and it was NOT the segmenter. Using a Whisper pass over the real audio of a 13-minute narration (`1-The_Song_Beneath_the_Stump_V6`), the SRT-derived scene boundaries were shown to be a perfect match to the SRT (0 bleed) but drift progressively against the actual audio: **39 of 48 scenes ended mid-word** when measured against real speech, with the offset growing to ~10s by the end. The cause is that ElevenLabs (and similar) **SRT word timestamps drift from the rendered audio** on long files — the text and cue grouping are correct, but the times are not. Because the segmenter faithfully placed cuts on the SRT times, every prior segmentation fix reproduced the bad input timing.
+
+Fix: when an SRT is uploaded, the app now **re-anchors the SRT's timing to the audio**. New `retime_srt_words_to_audio()` in `backend/services/audio/text_align.py` runs a difflib sequence alignment between the SRT word stream and a Whisper pass over the real audio, then keeps the SRT's word strings AND cue (`block`) grouping while transferring Whisper's audio-accurate `start`/`end` onto each word (interpolating words Whisper missed, distributing time across mismatched runs, enforcing monotonic order). `upload_srt` runs this automatically (Whisper on the actual audio, `skip_demucs=True`), and it is fully best-effort: any failure, low SRT/Whisper similarity (<30%), or a project with `disable_whisper` set falls back to the SRT's own timings so upload never breaks.
+
+Result: you keep clean ElevenLabs SRT wording AND cue grouping, but scene boundaries now sit on audio-accurate times. Verified by simulation (SRT drift 0.36s mean → 0.000s after re-anchor; text + blocks preserved; monotonic; graceful bail on mismatched audio and on Whisper-missing words).
+
+> **To fix an existing project:** re-upload its SRT (this triggers the audio re-anchor), then re-run **Suggest Timeline**. Note the SRT upload now runs Whisper, so it takes ~30–90s instead of being instant.
+
+### Added — `tools/diag_timeline.py` audio reality check
+
+The timeline diagnostic now auto-targets the most recently edited project and adds an "audio reality check": it locates the project's audio file, ffprobes its true duration, and (for SRT projects) compares cue times to ffmpeg-detected speech onsets — the tooling that surfaced the SRT-vs-audio drift. Also reports per-scene bleed and drift-growth.
+
+## [1.8.19] - 2026-06-18
+
+### Added — Structure-first narration segmentation (two-phase)
+
+Reworked `_dp_segment_narration` so scene cuts follow the narration's real structure instead of only chasing an even length. Per Lorenzo's two-phase model:
+
+- **Phase 1 — adaptive major-silence anchors.** The segmenter measures this narration's own inter-phrase pauses and flags the ones that are clearly larger than typical (≥ 3× the median pause, floor 1.5s — adaptive so it works for tight SRT cues and loose Whisper timing alike). These structural pauses become near-inviolable scene boundaries via a heavy DP span penalty (a scene that would swallow a major silence is charged 50 cost units, dwarfing every normal term). The penalty is finite, so honouring an anchor can never push the DP into the fixed-slice fallback.
+- **Phase 2 — even fill.** The existing duration-balancing DP fills each chunk between anchors, keeping scenes as consistent as possible within the project's min/max (e.g. 8–20s).
+- **Standalone silence scenes.** A pause at least as long as the scene minimum (e.g. an instrumental break or deliberate beat) is carved into its OWN scene rather than split 50/50 between neighbours. Guarded so a long pause can never shave an adjacent scene below 60% of the minimum.
+
+This is additive: projects with no major silences (e.g. uniform-cue SRT like the verified V6) segment exactly as before — even-filled, midpoint boundaries, no spurious silence scenes. The win shows up on long narrations and anywhere a scene previously spanned a clear topic-change pause.
+
+Verified by simulation: uniform SRT → unchanged even fill (no silence scenes); SRT with a 12s instrumental gap → exactly one carved ~12s silence scene; Whisper with structural pauses → cuts anchored on the pauses, all scenes within 8–20s, no uniform-10s collapse.
+
+> **To apply:** re-run **Suggest Timeline** on narration projects (segmentation only changes on regeneration; Process Audio just re-snaps existing scenes).
+
+### Note — uniform-10s projects are stale, not a live bug
+
+Confirmed the fixed-slice fallback is unreachable in current code: running the real segmenter on Judges-scale Whisper data (1,200 words) yields 60+ distinct scene lengths, never uniform 10s. Projects still showing a uniform 10s grid (e.g. *The Book of Judges*, *Bacon Is For Liars V2*) were segmented by an older build and never re-segmented — Process Audio only re-snaps, it doesn't re-run segmentation. Re-running Suggest Timeline regenerates them correctly. Added `tools/diag_timeline.py` to inspect any project's SRT-cue map, timing source, and per-scene boundary alignment.
+
+## [1.8.18] - 2026-06-18
+
+### Fixed — SRT cue times are now the authoritative scene-segmentation map (no more cumulative drift)
+
+Lorenzo re-ran *Process Audio* with an SRT loaded and saw narration scenes start aligned but progressively cut earlier and earlier before each pause toward the end of the timeline — even though the SRT carries exact per-cue start/end times, so segmentation should be a pure lookup.
+
+Root cause in `backend/api/timeline.py::_group_words_into_sentences` (the phrase grouper that feeds `_dp_segment_narration` / Suggest Timeline): when a pasted script (`initial_text`) was present, it always ran the fuzzy `_match_words_to_lyrics_lines` "monotonic multi-word anchor" matcher to map script lines onto word timestamps — **even when the words came from an SRT.** That matcher interpolates missed anchors by time and tolerates matches up to 20s away, so its small per-line errors accumulate down a long script. The previous 1.8.17 fix corrected boundary *placement* between phrase groups, but the phrase *groups* themselves were still built by the drifting matcher, so the SRT's exact map was never actually used.
+
+Fix: `_group_words_into_sentences` now checks for SRT `block` indices first. When present, it groups one phrase per cue directly from the block map (each cue's words already carry exact SRT start/end) and returns immediately — the fuzzy matcher is bypassed entirely. Scene boundaries become an exact lookup against the cue times, identical for every project regardless of length. Whisper-only projects (no `block`) fall through to the unchanged lyrics/punctuation grouping.
+
+Verified by simulation: 40 SRT cues with varied inter-cue pauses produce boundaries that land at the exact midpoint of every cue gap with **zero cumulative error** (error does not grow with cue index) and zero dialogue bleed.
+
+> **To apply:** re-run **Suggest Timeline** on the project. *Process Audio* only re-snaps existing scene boundaries (it preserves the scene count and your manual edits); regenerating the segmentation from the corrected cue map requires a Suggest Timeline pass.
+
 ## [1.8.17] - 2026-06-18
 
 A maintenance + narration-precision release: a critical truncation repair in the settings API, three code-hygiene cleanups, and a precise rework of how narration scene boundaries and subtitle cues are timed so video stays locked to the audio through to the end.

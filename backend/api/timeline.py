@@ -910,30 +910,55 @@ async def analyze_audio(
                 await session.flush()
 
             if _srt_words_existing:
-                logger.warning(
-                    f"Re-analyzing audio for project {project_id} — keeping "
-                    f"{len(_srt_words_existing)} existing SRT-cue words (block "
-                    f"indices preserved) instead of overwriting with "
-                    f"{len(transcription_words)} fresh Whisper words.  "
-                    f"User should re-upload SRT to refresh cue timing."
-                )
+                # RE-ANCHOR: combine the SRT's TEXT + cue (block) grouping with
+                # Whisper's audio-accurate TIMING.  ElevenLabs/SRT timestamps
+                # drift from the rendered audio over long files, but the SRT's
+                # wording is correct (Whisper garbles spellings).  So we keep
+                # the SRT words + blocks and transfer the fresh Whisper timing
+                # onto them.  (When Whisper was skipped — disable_whisper —
+                # ``transcription_words`` equals the SRT words, so re-timing is
+                # a harmless no-op.)  This is the place the re-anchor belongs:
+                # Whisper has just run here, so SRT upload itself stays instant.
                 _words_to_save = _srt_words_existing
-                # Keep ``full_text`` and ``words`` in lock-step: rebuild
-                # full_text from the SRT words we're saving so downstream
-                # consumers that join words → text don't see one source
-                # while readers of ``full_text`` see the other.  Without
-                # this, the lyrics panel would show fresh Whisper text
-                # but auto-gen would pull text-from-words and get the SRT
-                # transcript — subtle divergence that's hard to debug.
+                try:
+                    if (
+                        transcription_words
+                        and transcription_words is not _srt_words_existing
+                    ):
+                        from backend.services.audio.text_align import (
+                            retime_srt_words_to_audio as _retime,
+                        )
+                        _retimed = _retime(_srt_words_existing, transcription_words)
+                        if _retimed and len(_retimed) == len(_srt_words_existing):
+                            _words_to_save = _retimed
+                            logger.info(
+                                f"Process Audio: re-anchored {len(_srt_words_existing)} "
+                                f"SRT words to Whisper audio timing (SRT spelling + "
+                                f"cue blocks preserved)."
+                            )
+                        else:
+                            logger.warning(
+                                "Process Audio: SRT re-anchor length mismatch — "
+                                "keeping SRT timings."
+                            )
+                    else:
+                        logger.info(
+                            f"Re-analyzing project {project_id}: no fresh Whisper "
+                            f"timing to re-anchor against — keeping "
+                            f"{len(_srt_words_existing)} SRT-cue words as-is."
+                        )
+                except Exception as _re_err:
+                    logger.warning(
+                        f"Process Audio: SRT re-anchor failed "
+                        f"({type(_re_err).__name__}: {_re_err}) — keeping SRT timings."
+                    )
+                # Keep full_text in lock-step with the words we're saving.
                 _srt_full_text = " ".join(
                     str(_w.get("word", "")).strip()
-                    for _w in _srt_words_existing
+                    for _w in _words_to_save
                     if isinstance(_w, dict) and _w.get("word")
                 ).strip()
-                if _srt_full_text:
-                    _full_text_to_save = _srt_full_text
-                else:
-                    _full_text_to_save = lyrics_text
+                _full_text_to_save = _srt_full_text or lyrics_text
             else:
                 _words_to_save = transcription_words
                 _full_text_to_save = lyrics_text
@@ -1571,6 +1596,42 @@ def _group_words_into_sentences(
     import re
     if not words:
         return []
+
+    # ── SRT CUES ARE AUTHORITATIVE (highest priority) ───────────────────
+    # When the words carry SRT ``block`` indices (uploaded SRT / Eleven-
+    # Labs export), the cue grouping IS the ground-truth phrase map and
+    # every word already carries an EXACT start/end from the SRT.  Group
+    # one phrase per cue and return immediately — we must NOT fall through
+    # to the fuzzy ``_match_words_to_lyrics_lines`` anchor matcher, whose
+    # monotonic interpolation drifts cumulatively down a long script and
+    # produces the "scenes start well then cut earlier and earlier" bug.
+    # With the SRT present, scene boundaries become an exact lookup rather
+    # than an estimate.  (Whisper-only projects have no ``block`` and fall
+    # through to the lyrics/punctuation logic below, unchanged.)
+    if any(isinstance(w, dict) and w.get("block") is not None for w in words):
+        by_block: dict[int, list[dict]] = {}
+        order: list[int] = []
+        for w in words:
+            b = w.get("block")
+            if b is None:
+                # A stray word with no block (rare mid-SRT gap) attaches to
+                # the most recently seen cue so no audio is dropped.
+                if order:
+                    by_block[order[-1]].append(w)
+                continue
+            b = int(b)
+            if b not in by_block:
+                by_block[b] = []
+                order.append(b)
+            by_block[b].append(w)
+        groups = [by_block[b] for b in sorted(by_block.keys()) if by_block[b]]
+        logger.info(
+            f"[PhraseGroups] SRT source detected — grouped {len(words)} words "
+            f"into {len(groups)} cue-phrases (block-authoritative; fuzzy lyrics "
+            f"matcher bypassed so cue times map 1:1 to scene boundaries)"
+        )
+        if groups:
+            return groups
 
     # ── PRIMARY: Use lyrics lines if available ──────────────────────────
     if lyrics_text and lyrics_text.strip():
@@ -2953,6 +3014,33 @@ def _dp_segment_narration(
             elif phrase_idx < n:
                 phrase_idx += 1
 
+    # ── Phase 1: detect MAJOR silences (adaptive structural anchors) ─────
+    # Lorenzo's two-phase model: the long pauses are where a narrator
+    # finishes a thought, so they should be near-inviolable scene cuts;
+    # the even-sizing DP then fills the chunks between them.  "Major" is
+    # measured RELATIVE to this narration's own phrasing (adaptive) so it
+    # works for tight SRT cues (~1s gaps) and loose Whisper timing alike:
+    # a gap is major when it's well above the typical inter-phrase gap.
+    # ``major_set`` holds phrase indices i whose PRECEDING gap (gaps[i]) is
+    # a structural break — the DP is penalised for letting a scene span one.
+    major_set: set[int] = set()
+    _interior_gaps = [gaps[k] for k in range(1, n)]
+    if _interior_gaps:
+        _sorted_g = sorted(_interior_gaps)
+        _median_g = _sorted_g[len(_sorted_g) // 2]
+        # Threshold: 3x the median pause, never below a 1.5s floor.  Any gap
+        # at/above this is a structural break.
+        _major_thresh = max(1.5, _median_g * 3.0)
+        for k in range(1, n):
+            if gaps[k] >= _major_thresh:
+                major_set.add(k)
+        if major_set:
+            logger.info(
+                f"[NarrationDP] Phase 1: {len(major_set)} major silence(s) "
+                f"(gap >= {_major_thresh:.2f}s; median pause {_median_g:.2f}s) "
+                f"will anchor scene cuts."
+            )
+
     # ── Ideal duration for even scene sizing ────────────────────────────
     ideal_dur = (min_dur + max_dur) / 2.0
 
@@ -2989,6 +3077,18 @@ def _dp_segment_narration(
             # 3) Paragraph break bonus: strongly prefer cutting at paragraph starts
             if j in paragraph_breaks:
                 cost -= 1.0  # strong bonus
+
+            # 4) MAJOR-SILENCE anchor: heavily penalise a scene that would
+            #    swallow a structural pause (one lying strictly inside the
+            #    span j<k<i).  The penalty (50/silence) dwarfs every normal
+            #    cost term so cuts land ON the major silences — but it stays
+            #    finite, so the DP never fails when honouring an anchor would
+            #    violate min/max (it then accepts the least-bad span rather
+            #    than collapsing to the fixed-slice fallback).
+            if major_set:
+                _spanned = sum(1 for _k in major_set if j < _k < i)
+                if _spanned:
+                    cost += 50.0 * _spanned
 
             total = dp[j] + cost
             if total < dp[i]:
@@ -3195,6 +3295,10 @@ def _dp_segment_narration(
         # Collect lyrics text for this scene
         scene_phrases = phrase_groups[prev_cut:cut_idx]
         lyrics_text = " ".join(_get_phrase_text(pg) for pg in scene_phrases if pg).strip()
+        # Speech span (earliest word start / latest word end) for this scene —
+        # used by the standalone-silence carve below.
+        _sp_start = min((float(w.get("start", 0.0) or 0.0) for pg in scene_phrases for w in pg), default=start_t)
+        _sp_end = max((float(w.get("end", 0.0) or 0.0) for pg in scene_phrases for w in pg), default=end_t)
         # Auto-name from first few words
         first_words = lyrics_text[:50].strip()
         if len(lyrics_text) > 50:
@@ -3208,8 +3312,47 @@ def _dp_segment_narration(
             "start_time": round(start_t, 2),
             "end_time": round(end_t, 2),
             "lyrics": lyrics_text,
+            "_sp_start": _sp_start,
+            "_sp_end": _sp_end,
         })
         prev_cut = cut_idx
+
+    # ── Standalone "silence" scenes for long pauses (>= min_dur) ─────────
+    # Per Lorenzo's spec: a pause longer than the scene minimum (e.g. an
+    # instrumental break or a deliberate beat of silence) becomes its OWN
+    # scene rather than being split 50/50 between its neighbours.  Shorter
+    # pauses keep the even midpoint split.  Guard: only carve when both
+    # neighbours stay comfortably above 60% of min_dur, so a long pause can
+    # never shave an adjacent scene below the minimum.
+    if len(scenes) >= 2:
+        _carved: list[dict] = []
+        for _i, _sc in enumerate(scenes):
+            _carved.append(_sc)
+            if _i + 1 < len(scenes):
+                _nxt = scenes[_i + 1]
+                _gap = float(_nxt.get("_sp_start", _nxt["start_time"])) - float(_sc.get("_sp_end", _sc["end_time"]))
+                if _gap >= min_dur:
+                    _sil_s = round(float(_sc["_sp_end"]), 2)
+                    _sil_e = round(float(_nxt["_sp_start"]), 2)
+                    _left_ok = (_sil_s - float(_sc["start_time"])) >= min_dur * 0.6
+                    _right_ok = (float(_nxt["end_time"]) - _sil_e) >= min_dur * 0.6
+                    if (_sil_e - _sil_s) >= min_dur and _left_ok and _right_ok:
+                        _sc["end_time"] = _sil_s
+                        _nxt["start_time"] = _sil_e
+                        _carved.append({
+                            "name": f"Silence / instrumental ({_sil_e - _sil_s:.0f}s)",
+                            "start_time": _sil_s,
+                            "end_time": _sil_e,
+                            "lyrics": "",
+                            "_sp_start": _sil_s,
+                            "_sp_end": _sil_e,
+                            "_silence": True,
+                        })
+                        logger.info(
+                            f"[NarrationDP] Carved standalone silence scene "
+                            f"[{_sil_s:.2f}-{_sil_e:.2f}s] ({_sil_e - _sil_s:.1f}s pause)"
+                        )
+        scenes = _carved
 
     # DP cost function intentionally exempts the LAST scene from the
     # ``dur >= min_dur`` rule (see the `and i < n` at line ~2706 of
@@ -3231,6 +3374,11 @@ def _dp_segment_narration(
             f"dur={s['end_time'] - s['start_time']:.1f}s "
             f"'{s['name'][:60]}'"
         )
+
+    for _s in scenes:
+        _s.pop("_sp_start", None)
+        _s.pop("_sp_end", None)
+        _s.pop("_silence", None)
 
     return scenes
 
@@ -4787,6 +4935,51 @@ async def upload_srt(
 
         # Reconstruct full text from parsed words
         full_text = " ".join(w["word"] for w in words)
+
+        # ── Instant SRT/Whisper timing align (NO synchronous Whisper) ────
+        # SRT upload must stay FAST.  It must NOT run Whisper here — ComfyUI
+        # Whisper can take many minutes and would time out the upload (and
+        # double up with a Process Audio run).  So:
+        #   * If the project ALREADY has Whisper word timing (from a prior
+        #     Process Audio run), map the SRT spelling + cue grouping onto it
+        #     instantly (no transcription).
+        #   * Otherwise just store the SRT.  The audio re-anchor then happens
+        #     when the user runs **Process Audio** (Whisper), which re-anchors
+        #     the SRT to the audio timing as part of that pass.
+        # Skipped entirely when ``disable_whisper`` is set.
+        try:
+            from backend.services.audio.text_align import (
+                retime_srt_words_to_audio as _retime,
+            )
+            _proj = await session.get(Project, project_id)
+            _psettings = (_proj.settings if _proj else {}) or {}
+            _ex_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
+            _ex = (await session.execute(_ex_stmt)).scalars().first()
+            _prev_words = list(_ex.words or []) if _ex else []
+            _prev_is_whisper = bool(_prev_words) and not all(
+                isinstance(w, dict) and w.get("block") is not None for w in _prev_words
+            )
+            if _psettings.get("disable_whisper", False):
+                logger.info("SRT upload: disable_whisper set — keeping SRT timings.")
+            elif _prev_is_whisper:
+                _retimed = _retime(words, _prev_words)
+                if _retimed and len(_retimed) == len(words):
+                    words = _retimed
+                    logger.info(
+                        f"SRT upload: mapped SRT spelling onto existing Whisper "
+                        f"timing ({len(_prev_words)} words) — instant, no transcription."
+                    )
+            else:
+                logger.info(
+                    "SRT upload: stored with the SRT's own timings.  Run "
+                    "Process Audio (Whisper) to re-anchor the timing to the "
+                    "audio — your SRT spelling + cue grouping are preserved."
+                )
+        except Exception as _e:
+            logger.warning(
+                f"SRT upload: timing-align step failed ({type(_e).__name__}: {_e}) "
+                f"— keeping SRT timings."
+            )
 
         # Upsert lyrics record
         existing_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
