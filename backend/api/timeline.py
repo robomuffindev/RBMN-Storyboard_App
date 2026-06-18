@@ -2835,6 +2835,63 @@ def _dp_segment_narration(
     if not phrase_groups:
         return [{"name": "Scene 1", "start_time": 0.0, "end_time": total_duration}]
 
+    # ── Pre-split overlong phrase groups ────────────────────────────────
+    # A single phrase whose span (first word start → last word end) exceeds
+    # ``max_dur`` is unsplitable by the DP (the inner loop's
+    # ``if dur > max_dur: break`` rejects it and the whole DP falls back
+    # to a lossy natural-break path).  More importantly, even when the
+    # fallback runs, clamping to pos+max_dur strands the phrase's tail
+    # words inside the NEXT scene's visual window — that's the "scenes
+    # cut early while the previous rhyme is still being spoken" symptom.
+    #
+    # The fix is to split any overlong phrase here, BEFORE the DP, at
+    # the largest internal inter-word gap.  Each resulting sub-phrase is
+    # then short enough to participate in the DP normally and every word
+    # stays inside a scene boundary.  Repeat until every group fits.
+    _safe_groups: list[list[dict]] = []
+    _split_count = 0
+    for _pg in phrase_groups:
+        if not _pg:
+            _safe_groups.append(_pg)
+            continue
+        _pending = [_pg]
+        while _pending:
+            _cur = _pending.pop(0)
+            if not _cur or len(_cur) < 2:
+                _safe_groups.append(_cur)
+                continue
+            _span = float(_cur[-1].get("end", 0.0)) - float(_cur[0].get("start", 0.0))
+            if _span <= max_dur or len(_cur) < 2:
+                _safe_groups.append(_cur)
+                continue
+            # Find the largest inter-word gap and split there.  This
+            # preserves natural phrasing — the gap is where the speaker
+            # took a breath or pause, which is the best place to cut.
+            _best_gap = -1.0
+            _best_idx = -1
+            for _wi in range(1, len(_cur)):
+                _gap = float(_cur[_wi].get("start", 0.0)) - float(_cur[_wi - 1].get("end", 0.0))
+                if _gap > _best_gap:
+                    _best_gap = _gap
+                    _best_idx = _wi
+            # Defensive fallback: if no gaps exist (degenerate), split at midpoint
+            if _best_idx <= 0:
+                _best_idx = max(1, len(_cur) // 2)
+            _left = _cur[:_best_idx]
+            _right = _cur[_best_idx:]
+            _pending.insert(0, _right)
+            _pending.insert(0, _left)
+            _split_count += 1
+    if _split_count > 0:
+        logger.warning(
+            f"[NarrationDP] Pre-split {_split_count} overlong phrase group(s) "
+            f"(span > max_dur={max_dur:.1f}s) to keep words aligned with scene "
+            f"boundaries.  Original {len(phrase_groups)} groups → {len(_safe_groups)} "
+            f"after splitting.  Each split picks the largest internal inter-word "
+            f"gap so the cut lands at a natural breath/pause."
+        )
+        phrase_groups = _safe_groups
+
     n = len(phrase_groups)
 
     # ── Build boundary times and gap sizes ──────────────────────────────
@@ -3006,7 +3063,38 @@ def _dp_segment_narration(
                 if snapped - pos < min_dur:
                     snapped = min(pos + min_dur, total_duration)
                 elif snapped - pos > max_dur:
-                    snapped = pos + max_dur
+                    # PHRASE-RESPECTING CLAMP — previously this branch
+                    # silently set ``snapped = pos + max_dur`` regardless
+                    # of where the narration's words actually ended.  That
+                    # produced the "scenes cut early while the previous
+                    # rhyme is still being spoken" bug: the master audio
+                    # plays continuously across the assembled scenes, so
+                    # if a scene's visual ends at pos+max_dur but the
+                    # phrase's last word lives at pos+(max_dur+2), those
+                    # 2s of speech overflow into the NEXT scene's visual
+                    # window.  The fix is to snap the clamp DOWN to the
+                    # last natural break (SRT cue end or Whisper word gap)
+                    # that fits in [pos+min_dur, pos+max_dur].  When no
+                    # break fits — meaning the user has a single phrase
+                    # that's genuinely longer than max_dur — log a loud
+                    # WARNING and accept the flat clamp as a last resort.
+                    _flat_clamp = pos + max_dur
+                    _eligible = [
+                        b for b in _breaks
+                        if (pos + min_dur) <= b <= _flat_clamp
+                    ]
+                    if _eligible:
+                        snapped = _eligible[-1]
+                    else:
+                        logger.warning(
+                            f"[NarrationDP] No natural break in [{pos + min_dur:.1f}s, "
+                            f"{_flat_clamp:.1f}s] at pos={pos:.1f}s — falling back to "
+                            f"flat clamp at {_flat_clamp:.1f}s.  This means the next "
+                            f"scene's visuals will start while the previous scene's "
+                            f"words may still be playing.  Raise video_max_duration in "
+                            f"Settings or split the phrase to fix."
+                        )
+                        snapped = _flat_clamp
                 scenes.append({
                     "name": f"Scene {scene_num}",
                     "start_time": round(pos, 2),

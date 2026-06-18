@@ -704,8 +704,27 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
                       block: w?.block,
                     }));
                   }
+                  // Force the cached `source` to 'srt' even if the backend
+                  // response omitted it — both the "SRT loaded" indicator
+                  // chip and the "Disable Whisper Detection" toggle gate
+                  // off this exact field.  Older backend versions returned
+                  // a LyricsResponse without `source`, so without this
+                  // explicit set the UI would stay in "no SRT" state until
+                  // a full page refresh re-fetched from GET /lyrics.
+                  srtData.source = 'srt';
+                  if (typeof srtData.cue_count !== 'number') {
+                    const _blocks = new Set<number>();
+                    for (const w of srtData?.words || []) {
+                      if (typeof w?.block === 'number') _blocks.add(w.block);
+                    }
+                    srtData.cue_count = _blocks.size || (Array.isArray(srtData?.srt_blocks) ? srtData.srt_blocks.length : 0);
+                  }
                   queryClient.setQueryData(['lyrics', projectId], srtData);
-                  console.debug(`[SRT Upload] Set lyrics cache: ${srtData?.words?.length} words, ${srtData?.srt_blocks?.length} srt_blocks`);
+                  // Belt-and-suspenders: invalidate so any other consumer
+                  // of the lyrics query (or the next focus-back / staleness
+                  // tick) refetches the authoritative server state.
+                  queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
+                  console.debug(`[SRT Upload] Set lyrics cache: ${srtData?.words?.length} words, source=${srtData?.source}, cues=${srtData?.cue_count}`);
                 } catch (err: any) {
                   const detail = err?.response?.data?.detail || 'Failed to upload SRT';
                   alert(`Error: ${detail}`);

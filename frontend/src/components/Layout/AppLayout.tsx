@@ -1520,6 +1520,32 @@ export default function AppLayout() {
           if (autoGenStatus === 'running' || autoGenStatus === 'pending') {
             setAutoGenMinimized(true);
             setAutoGenDismissed(false);
+          } else if (
+            autoGenStatus === 'done' ||
+            autoGenStatus === 'completed' ||
+            autoGenStatus === 'failed' ||
+            autoGenStatus === 'cancelled'
+          ) {
+            // Run already finished — clear local state so the next time
+            // the user clicks Auto Gen, the modal opens to the setup
+            // form instead of the stuck completion screen.  Without
+            // this reset the modal's internal `sessionHasStarted` latch
+            // (added to survive transient polling errors) plus
+            // `isBackendDone` keep it pinned on the completion view
+            // forever until a full page refresh.
+            setAutoGenStatus('idle');
+            setAutoGenMode('');
+            setAutoGenCompleted(0);
+            setAutoGenTotal(0);
+            setAutoGenStep(null);
+            setAutoGenSceneName(null);
+            setAutoGenBatchRunId(null);
+            setAutoGenMinimized(false);
+            setAutoGenDismissed(false);
+            if (autoGenPollRef.current) {
+              clearInterval(autoGenPollRef.current);
+              autoGenPollRef.current = null;
+            }
           }
         }}
         onMinimize={() => {

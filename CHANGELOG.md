@@ -1,5 +1,100 @@
 # Changelog
 
+## [1.8.16] - 2026-06-17
+
+This release covers a large surface — batch-mode parity with all features added in 1.8.x, server priority routing, global project context for LLM prompts, a long-running narration-timing drift fix, several UI state-refresh fixes, and the Generation Queue scene-name persistence.
+
+### Fixed — Narration scenes cut before previous rhyme finishes speaking
+
+Lorenzo reported that final-exported narration videos cut to the next scene while the previous scene's words were still being heard in the audio. The drift was visible enough to make the rhyming structure feel "off."
+
+Root cause traced to two places in `backend/api/timeline.py::_dp_segment_narration`:
+
+- **DP main path silent rejection** — the inner loop's `if dur > max_dur: break` rejected any single phrase group whose span exceeded `video_max_duration`. When that happened to ANY phrase, the entire DP gave up and fell through to the natural-break fallback (which has its own drift problem).
+- **Natural-break fallback's flat clamp** — `elif snapped - pos > max_dur: snapped = pos + max_dur` capped a scene's `end_time` at a fixed offset regardless of where the phrase's words actually ended. The next scene's `start_time = pos = snapped` inherited the clamped value. The master narration audio plays continuously across the assembly, so any words past the clamped boundary overflow into the next scene's visual window.
+
+Two-part fix:
+
+- **Pre-split overlong phrase groups before the DP runs.** New block at the top of `_dp_segment_narration` walks every phrase group; if `last_word.end - first_word.start > max_dur`, recursively splits at the largest internal inter-word gap (the speaker's natural breath/pause). Each sub-phrase fits and the DP main path always finds a solution. Logs a `WARNING` with the original vs. final group count whenever splits happen.
+- **Phrase-respecting clamp in the fallback.** Replaced the flat `snapped = pos + max_dur` with a search for the LAST natural break in `[pos+min_dur, pos+max_dur]` — SRT cue end or Whisper word-gap candidate. When no candidate exists (genuinely impossible-to-satisfy constraint — e.g. a single 15s word), a loud `WARNING` logs the situation and accepts the flat clamp as a last resort, telling the user how to fix it (raise `video_max_duration` in Settings or split the phrase).
+
+Runtime smoke test with a deliberately overlong 25s phrase containing a 15s unsplitable word produced four scenes, none exceeding `max_dur`, the unsplitable region called out with a `WARNING` rather than silent drift.
+
+### Fixed — Auto-Gen modal stuck on completed state until page refresh
+
+Closing the Auto-Gen modal after a completed run kept the local `autoGenStatus = 'done'` plus `sessionHasStarted = true` latch from 1.8.4. The next click on Auto Gen re-opened the modal directly on the completion screen — no path back to the setup form without a full page refresh.
+
+Fix in `AppLayout.tsx::AutoGenerateModal.onClose`: when status is terminal (`done`/`completed`/`failed`/`cancelled`) at close time, reset the entire chunk of auto-gen state (`autoGenStatus → 'idle'`, mode, completed/total counters, step text, scene name, batch run ID, minimized + dismissed flags) and clear the polling interval. Next open shows the setup form fresh. The active-run branch (running/pending) still goes to minimized state as before.
+
+### Fixed — SRT upload didn't refresh the SRT-loaded indicator or Disable Whisper toggle
+
+Both the "SRT loaded" chip on the Audio tab and the new "Disable Whisper Detection" toggle (1.8.15) gate off `lyricsData.source === 'srt'`. After SRT upload, the handler did `setQueryData(['lyrics', projectId], srtData)` — but if the backend's upload-SRT response omitted the `source` field, the cache was written with that field undefined and the UI stayed in "no SRT" state until a full page refresh.
+
+Fix in `AudioSetup.tsx::onChange` (SRT input):
+
+- **Force `srtData.source = 'srt'`** before writing to the cache so the indicator flips green and the toggle un-greys immediately.
+- **Backfill `cue_count`** from the words' `block` set or `srt_blocks.length` when missing, so the chip's "N cues · M words" text is accurate.
+- **Also `invalidateQueries(['lyrics', projectId])`** so subsequent consumers (Concept tab, scene boundary audit) refetch authoritative state from `GET /lyrics`.
+
+### Added — Per-server priority for ComfyUI worker selection
+
+Mixed-speed render farms now route jobs in priority order. Lower priority number = picked first when idle; among workers with equal `in_flight` load, the lower-priority-number worker wins. Once a high-priority server saturates, idle lower-priority workers pick up the overflow automatically — the "use fast server first, fall back to slow servers when fast is busy" behavior users wanted.
+
+- `backend/services/comfyui/dispatcher.py::ComfyWorker.priority: int = 100` — new field, range 0-1000.
+- `apply_user_caps` reads `caps_config["priority"]` and clamps; ignores non-numeric input rather than resetting.
+- `select_worker` sort key changed from `(in_flight, -last_check)` to `(in_flight, priority, -last_check)`. `in_flight` stays primary so a busy high-priority worker yields to an idle low-priority one — the fallback path.
+- Settings UI: small `PRIO` number input on every server row, default 100, step 10, clamped client-side.
+- Persistence: lives in `AppSettings.comfyui_server_caps[url]["priority"]` — same JSON shape as the image/video toggles, so the existing settings PUT handler persists it without backend changes.
+
+Runtime-tested with three workers (fast prio=10, mid=50, slow=100): Job 1 → fast, Job 2 (fast busy) → mid, Job 3 (fast+mid busy) → slow. Exactly the expected fallback ladder.
+
+### Added — Global Project Context (Concept tab)
+
+A new "Enable Global Project Context" section on the Concept tab lets the user specify environmental context (time of day, season, weather, custom free-text) that's injected into every LLM enhance call as a MANDATORY context. **OFF by default** — users must explicitly toggle it on, matching the user's spec.
+
+- `ConceptData` gained 5 fields: `global_context_enabled`, `global_context_time_of_day`, `global_context_season`, `global_context_weather`, `global_context_custom`. All persist independently on `Project.settings` so the user can pre-fill the dropdowns and only flip the toggle when ready.
+- 11 time-of-day presets (dawn → midnight, including golden hour, twilight), 6 seasons (spring/summer/fall/winter/monsoon/dry_season), 14 weather conditions (sunny → dust storm, including fog, mist, thunderstorm).
+- New `resolve_global_context(settings)` helper in `backend/api/concept.py` translates enum keys into rich LLM-facing phrasing (e.g. `morning` → `"morning (clear bright daylight, fresh feel, soft shadows)"`) and returns `""` when disabled or empty.
+- LLM injection in `backend/api/generation.py::_build_auto_enhance_context` — when enabled, the resolved string gets injected as `⚠️ MANDATORY GLOBAL PROJECT CONTEXT (applies to EVERY scene unless explicitly overridden by per-scene direction)`. Same enforcement level as the per-project color override.
+
+### Added — Batch mode now exposes everything added since it was last revisited
+
+Audit caught 6 batch-mode gaps. All closed:
+
+- **SRT upload per item.** New `/api/batch/upload-srt` endpoint mirrors `upload-audio`. `BatchItemConfig.srt_upload_path` carries it through; at audio-analyze time the pipeline parses the SRT (`AudioAnalyzer._parse_srt_to_words`) and substitutes its words for Whisper output as the authoritative timing source.
+- **Disable Whisper toggle.** `BatchItemConfig.disable_whisper`. When true AND an SRT is attached, the pipeline passes `whisper_mode="skip"` to `analyze_full`. When the toggle is on without an SRT, a `WARNING` logs and Whisper runs anyway.
+- **`narration_images` render type.** Previously only `narration_video` was selectable. Three-radio option now.
+- **Model-generated audio (LTX 2.3 AV-native).** `BatchItemConfig.enable_model_audio` — writes `Concept.enable_model_audio = True` after concept generation so every I2V uses the AV-native workflow.
+- **Color scheme override.** `BatchItemConfig.color_scheme` (free-text) — written to `Project.settings.color_scheme` at project create AND re-applied after `base-on-lyrics` so the LLM doesn't wipe it.
+- **Image post-process filter.** `BatchItemConfig.image_filter` (`none` / `grayscale` / `bw` / `sepia`) — written to `Project.settings.image_filter` for the export FFmpeg post-process.
+
+Frontend: `BatchItemAddModal` got an SRT file picker (narration-mode-only, with X-to-clear), Disable Whisper checkbox (greyed until SRT loaded), narration_images radio, Color Scheme input, Image Filter dropdown, and Model-Generated Audio checkbox.
+
+### Added — Generation Queue scene names persist + are clickable
+
+Two complementary improvements:
+
+- **Clickable scene chips.** Clicking "Scene 79" in any job card on the Generation Queue selects that scene in the timeline, seeks the playhead, and switches the SceneEditor tabbed panel — same pattern Story Flow scene titles use (`AppLayout.tsx::goToSceneInTimeline`). Hover state, keyboard focus ring, `e.stopPropagation()` so the parent card's cancel/retry/delete still work.
+- **Scene name persistence on done/deleted-scene jobs.** `JobResponse` now carries an optional `scene_name` field, bulk-resolved server-side via a single `SELECT id, name FROM scenes WHERE id IN (...)` query at every list / get / retry endpoint. If the scene has since been deleted, the response falls back to `job.parameters["scene_name"]`. Frontend `JobCard` prefers `job.scene_name` over the local `scenes` array lookup, so the chip remains visible (in non-clickable gray) even after scene deletion or project switching. Zero schema migration — `Scene` row stays the source of truth, with a `parameters` fallback path for future snapshot writes.
+
+### Files (1.8.16)
+
+- `backend/api/timeline.py` — DP pre-split overlong phrase groups; phrase-respecting clamp in fallback.
+- `backend/api/jobs.py` — `JobResponse.scene_name` field + bulk resolver in list_jobs / get_job / retry_job.
+- `backend/services/comfyui/dispatcher.py` — `ComfyWorker.priority`; `apply_user_caps` reads it; `select_worker` sort key updated.
+- `backend/api/concept.py` — 5 `global_context_*` fields; `resolve_global_context` helper; `GLOBAL_CONTEXT_*` preset dicts.
+- `backend/api/generation.py` — global context injection in `_build_auto_enhance_context`.
+- `backend/api/batch.py` — `BatchItemConfig` 6 new fields; `/upload-srt` endpoint; SRT word substitution + `whisper_mode="skip"` plumbing; project settings seeding at create + re-apply after `base-on-lyrics`; `Concept.enable_model_audio` set post-concept.
+- `frontend/src/components/Layout/AppLayout.tsx` — Auto-Gen modal close-time reset for terminal states.
+- `frontend/src/components/AudioSetup/AudioSetup.tsx` — SRT upload cache write injects `source='srt'` + invalidates lyrics query.
+- `frontend/src/components/Settings/SettingsPage.tsx` — PRIO number input per ComfyUI server row.
+- `frontend/src/components/ConceptPanel/ConceptPanel.tsx` — Global Project Context UI block (enable checkbox + 3 dropdowns + custom textarea).
+- `frontend/src/components/BatchMode/BatchItemAddModal.tsx` — SRT picker, Disable Whisper, narration_images radio, Color Scheme, Image Filter, Model Audio checkbox.
+- `frontend/src/components/GenerationPanel/GenerationPanel.tsx` — clickable scene chip + `job.scene_name` preference.
+- `frontend/src/api/client.ts` — `uploadBatchSrt` helper; ConceptData GET/PUT types extended with `global_context_*`.
+- `frontend/src/types/index.ts` — `BatchItemConfig` types extended; `Job.scene_name` added.
+- `VERSION`, `pyproject.toml`, `backend/main.py` — bumped to 1.8.16.
+
 ## [1.8.15] - 2026-06-15
 
 ### Fixed — Doubled chapters after Reprocess Audio (long-running root-cause hunt)
