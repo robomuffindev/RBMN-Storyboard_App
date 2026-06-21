@@ -589,6 +589,9 @@ export default function AppLayout() {
             clearInterval(autoGenPollRef.current);
             autoGenPollRef.current = null;
           }
+          // Refresh scenes so the Image tab's character selections reflect
+          // exactly what auto-gen persisted (image_refs_first) per scene.
+          if (id) queryClient.invalidateQueries({ queryKey: ['scenes', id] });
         }
       } catch {
         // ignore transient errors

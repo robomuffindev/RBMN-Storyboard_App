@@ -1335,17 +1335,13 @@ class JobDispatcher:
             """
             _is_two_pass_base = _params.get("two_pass_phase") == "base"
             try:
-                use_zimage = False
-                if _is_two_pass_base:
-                    use_zimage = True
-                else:
-                    async with self._session_factory() as zig_session:
-                        from backend.database.models import AppSettings as ZigAppSettings
-                        zig_stmt = sfw_select(ZigAppSettings).where(ZigAppSettings.id == 1)
-                        zig_result = await zig_session.execute(zig_stmt)
-                        zig_settings = zig_result.scalars().first()
-                        if zig_settings and zig_settings.single_image_generator == "z_image_turbo":
-                            use_zimage = True
+                # ``klein_t2i`` means ZERO reference images.  Klein is only ever
+                # used to composite character references (Pass 2); a no-reference
+                # text-to-image render must ALWAYS use Z-Image Turbo — running it
+                # through Klein is never correct.  So we redirect every klein_t2i
+                # job to Z-Image regardless of the single_image_generator
+                # preference (the preference only ever chose Z-Image anyway).
+                use_zimage = True
                 if use_zimage:
                     wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
                     p_text = _params.get("prompt", "")
@@ -1960,7 +1956,7 @@ class JobDispatcher:
         # (5 total).  Any extras are dropped here with a warning so the
         # job doesn't crash with "Unknown workflow type: klein_6ref"
         # when a scene has 5+ character refs assigned.
-        MAX_CHARS_IN_COMPOSITE = 4
+        MAX_CHARS_IN_COMPOSITE = 3
         char_ref_ids_str = list(char_ref_ids_str)
         if len(char_ref_ids_str) > MAX_CHARS_IN_COMPOSITE:
             dropped = char_ref_ids_str[MAX_CHARS_IN_COMPOSITE:]

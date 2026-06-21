@@ -56,7 +56,7 @@ export default function ReferenceSelector({
   projectId,
 }: ReferenceSelectorProps) {
   const maxRefs = frameType === 'first' ? 5 : 4;
-  const maxCharRefs = 2; // Klein works best with 1-2 character references
+  const maxCharRefs = 3; // up to 3 character references (Klein composite)
   const totalUsed = value.characterIndices.length + value.extras.length;
   const slotsLeft = maxRefs - totalUsed;
   const charSlotsLeft = maxCharRefs - value.characterIndices.length;

@@ -418,68 +418,61 @@ async def generate_image(
             # Collect character ref IDs: from request first, then fall back to concept data
             char_ref_ids = [str(aid) for aid in req.reference_asset_ids] if req.reference_asset_ids else []
             if not char_ref_ids:
-                # Resolve from project concept data — find characters with image_path.
-                # Use forgiving lookup: exact rel_path match FIRST, then suffix
-                # match as a fallback so subtle path differences (leading
-                # slash, project_id prefix variants, whitespace) don't cause
-                # silent two-pass downgrades.  Matches what the frontend
-                # collectRefAssetIds() does via `rel_path.endsWith(image_path)`.
+                # SINGLE SOURCE OF TRUTH: resolve characters from THIS scene's
+                # explicit selection (image_refs_first.characterIndices) — NOT
+                # "all project characters".  This guarantees the Image tab's
+                # selection is exactly what Pass 2 composites.  An explicit
+                # empty list means "no characters on this scene".  When the
+                # field is absent (never set) we default to the first 3 AND
+                # persist that, so the Image tab reflects what was used.
                 project = await session.get(Project, project_id)
-                if project and project.settings:
-                    characters = project.settings.get("characters", [])
-                    _resolved_count = 0
-                    _missed_paths: list[str] = []
-                    for char in characters:
-                        img_path = (char.get("image_path", "") or "").strip()
-                        if not img_path:
-                            continue
-                        from sqlmodel import select
-                        # 1) Exact match
-                        stmt = select(Asset).where(
-                            Asset.project_id == project_id,
-                            Asset.rel_path == img_path,
-                        )
+                characters = (project.settings.get("characters", []) if (project and project.settings) else [])
+                _refs = (scene.parameters or {}).get("image_refs_first") if scene else None
+                _idx = _refs.get("characterIndices") if isinstance(_refs, dict) else None
+                _MAX_SCENE_CHARS = 3
+                if _idx is not None:
+                    _chosen = [
+                        characters[ix] for ix in _idx
+                        if isinstance(ix, int) and 0 <= ix < len(characters)
+                    ][:_MAX_SCENE_CHARS]
+                else:
+                    # No selection saved → use NO characters.  The Image-tab
+                    # selection is the SINGLE SOURCE OF TRUTH: "not selected"
+                    # means "not used".  With no character refs, two-pass
+                    # downgrades to single-pass Z-Image below.
+                    _chosen = []
+                _missed_paths: list[str] = []
+                from sqlmodel import select as _sel0
+                import os as _os0
+                for char in _chosen:
+                    img_path = (char.get("image_path", "") or "").strip()
+                    if not img_path:
+                        continue
+                    stmt = _sel0(Asset).where(Asset.project_id == project_id, Asset.rel_path == img_path)
+                    asset = (await session.execute(stmt)).scalars().first()
+                    if not asset:
+                        stmt = _sel0(Asset).where(Asset.project_id == project_id, Asset.rel_path.like(f"%{img_path}"))  # type: ignore
                         asset = (await session.execute(stmt)).scalars().first()
-                        # 2) Suffix match (forgives leading slashes, prefix
-                        # variants).  Use LIKE with leading wildcard.
-                        if not asset:
-                            stmt = select(Asset).where(
-                                Asset.project_id == project_id,
-                                Asset.rel_path.like(f"%{img_path}"),  # type: ignore
-                            )
+                    if not asset:
+                        _basename = _os0.path.basename(img_path)
+                        if _basename and _basename != img_path:
+                            stmt = _sel0(Asset).where(Asset.project_id == project_id, Asset.rel_path.like(f"%{_basename}"))  # type: ignore
                             asset = (await session.execute(stmt)).scalars().first()
-                        # 3) Basename-only match (last resort — match the filename)
-                        if not asset:
-                            import os as _os
-                            _basename = _os.path.basename(img_path)
-                            if _basename and _basename != img_path:
-                                stmt = select(Asset).where(
-                                    Asset.project_id == project_id,
-                                    Asset.rel_path.like(f"%{_basename}"),  # type: ignore
-                                )
-                                asset = (await session.execute(stmt)).scalars().first()
-                        if asset:
-                            char_ref_ids.append(str(asset.id))
-                            _resolved_count += 1
-                        else:
-                            _missed_paths.append(img_path)
-                    if char_ref_ids:
-                        logger.info(
-                            f"Two-pass: resolved {len(char_ref_ids)} character ref IDs "
-                            f"from concept data (exact + suffix + basename matching)"
-                        )
-                    elif _missed_paths:
-                        # Loud warning so user sees WHY two-pass downgraded
-                        # to single-pass instead of just getting a scene with
-                        # no characters in it.
-                        logger.warning(
-                            f"Two-pass requested but ALL {len(_missed_paths)} character "
-                            f"image_path lookups failed.  Paths tried: {_missed_paths[:3]}"
-                            f"{'...' if len(_missed_paths) > 3 else ''}.  "
-                            f"Either the characters have no image_path, the Assets were "
-                            f"deleted, or the rel_path doesn't match.  Two-pass will "
-                            f"downgrade to single-pass and the image will have no characters."
-                        )
+                    if asset:
+                        char_ref_ids.append(str(asset.id))
+                    else:
+                        _missed_paths.append(img_path)
+                if char_ref_ids:
+                    logger.info(
+                        f"Two-pass: resolved {len(char_ref_ids)} character ref(s) from the "
+                        f"scene's selection (image_refs_first), cap {_MAX_SCENE_CHARS}."
+                    )
+                elif _missed_paths:
+                    logger.warning(
+                        f"Two-pass: {len(_missed_paths)} selected-character image_path "
+                        f"lookup(s) failed: {_missed_paths[:3]}. Two-pass will downgrade "
+                        f"to single-pass (no characters)."
+                    )
             # ── No-refs guard ───────────────────────────────────────────
             # If after request + concept-fallback there are STILL no refs,
             # downgrade to single-pass.  Pass 2 has nothing to composite,
@@ -1328,6 +1321,63 @@ async def _resolve_character_asset_ids(
     return asset_ids
 
 
+def _select_scene_characters_from_flow(
+    idea_text: str,
+    characters: list,
+    cap: int = 2,
+) -> list[int] | None:
+    """Pick the (<= ``cap``) most important characters for a scene by which
+    ones the flow LLM named in ``idea_text``.
+
+    The flow prompt instructs the LLM to reference ONLY the 1-2 most
+    important characters by name, so the names it actually uses ARE its
+    selection.  We match each project character's name (or first token)
+    against the storyboard text and return their indices in order of first
+    appearance, capped at ``cap``.  Returns ``None`` when nothing matched
+    (caller keeps the existing default).
+    """
+    if not idea_text or not characters:
+        return None
+    import re as _re
+    text_low = idea_text.lower()
+    hits: list[tuple[int, int]] = []  # (position, char_index)
+    for idx, c in enumerate(characters):
+        try:
+            name = str((c or {}).get("name", "") or "").strip()
+        except Exception:
+            name = ""
+        if not name:
+            continue
+        cands = [name]
+        toks = name.split()
+        if toks and toks[0].lower() != name.lower():
+            cands.append(toks[0])
+        pos = None
+        for cand in cands:
+            cl = cand.lower().strip()
+            if len(cl) < 2:
+                continue
+            m = _re.search(r"\b" + _re.escape(cl) + r"\b", text_low)
+            if m:
+                pos = m.start()
+                break
+        if pos is not None:
+            hits.append((pos, idx))
+    if not hits:
+        return None
+    hits.sort(key=lambda x: x[0])
+    # de-dup indices preserving order, cap
+    seen: set[int] = set()
+    out: list[int] = []
+    for _pos, idx in hits:
+        if idx not in seen:
+            seen.add(idx)
+            out.append(idx)
+        if len(out) >= cap:
+            break
+    return out or None
+
+
 async def _ensure_video_flow(
     project: Project,
     scenes: list[Scene],
@@ -1437,9 +1487,13 @@ async def _ensure_video_flow(
             "culture, honor that setting in clothing, architecture, props, and lighting. Do NOT contemporize.\n\n"
             "CRITICAL: Each scene MUST be visually DISTINCT from the others. Vary the composition, "
             "camera angle, subject position, action, and environment across scenes.\n\n"
-            "Note: This app supports character reference images (up to 5 characters) that maintain visual "
-            "consistency across scenes. When characters are defined, reference them by name "
-            "in your scene descriptions — their appearance stays consistent automatically.\n\n"
+            "CHARACTER LIMIT (IMPORTANT): A single scene's image can include AT MOST 3 characters. "
+            "For EACH scene, decide which characters are most central to that scene's content, and "
+            "reference ONLY the 1–3 MOST IMPORTANT characters BY NAME in your description — never more "
+            "than three named characters in one scene. Fewer is better when only one or two truly matter. "
+            "If no defined character is central to a scene, reference none and describe the "
+            "environment/action instead. Characters referenced by name keep a consistent appearance "
+            "automatically.\n\n"
             "Keep each idea under 100 words.\n\n"
             "IMPORTANT: Return ONLY a JSON array of strings, one per scene, in order. "
             "No markdown, no labels, no explanation — just the JSON array."
@@ -1465,9 +1519,13 @@ async def _ensure_video_flow(
             "dark water. Make abstract lyrics VISUALLY CONCRETE.\n\n"
             "CRITICAL: Each scene MUST be visually DISTINCT from the others. Vary the composition, "
             "camera angle, subject position, action, and environment across scenes.\n\n"
-            "Note: This app supports character reference images (up to 5 characters) that maintain visual "
-            "consistency across scenes. When characters are defined, reference them by name "
-            "in your scene descriptions — their appearance stays consistent automatically.\n\n"
+            "CHARACTER LIMIT (IMPORTANT): A single scene's image can include AT MOST 3 characters. "
+            "For EACH scene, decide which characters are most central to that scene's content, and "
+            "reference ONLY the 1–3 MOST IMPORTANT characters BY NAME in your description — never more "
+            "than three named characters in one scene. Fewer is better when only one or two truly matter. "
+            "If no defined character is central to a scene, reference none and describe the "
+            "environment/action instead. Characters referenced by name keep a consistent appearance "
+            "automatically.\n\n"
             "Keep each idea under 100 words.\n\n"
             "IMPORTANT: Return ONLY a JSON array of strings, one per scene, in order. "
             "No markdown, no labels, no explanation — just the JSON array."
@@ -1620,11 +1678,31 @@ async def _ensure_video_flow(
         for b_idx, b_count, _, _ in batch_prompts:
             ideas_list.extend(batch_results.get(b_idx, [""] * b_count))
 
-    # Save flow ideas to scenes
+    # Save flow ideas to scenes (and the LLM's per-scene character pick).
     for i, scene in enumerate(scenes):
         idea_text = ideas_list[i] if i < len(ideas_list) else ""
         params = dict(scene.parameters or {})
         params["flow_idea"] = idea_text
+        # LLM-driven character selection: honor the (<=2) most important
+        # characters the flow named for THIS scene, instead of the blunt
+        # "first 2 project characters" default.  Only set when the scene has
+        # no explicit selection yet (respects manual user picks).
+        try:
+            _refs = params.get("image_refs_first") if isinstance(params.get("image_refs_first"), dict) else None
+            _already = (_refs or {}).get("characterIndices") if _refs else None
+            if not _already:
+                _sel = _select_scene_characters_from_flow(idea_text, characters, cap=3)
+                if _sel:
+                    _new_refs = dict(_refs or {})
+                    _new_refs["characterIndices"] = _sel
+                    _new_refs.setdefault("extras", [])
+                    params["image_refs_first"] = _new_refs
+                    logger.info(
+                        f"Auto-flow: scene {scene.order_index} character pick → "
+                        f"indices {_sel} (from named characters in the flow)."
+                    )
+        except Exception as _csel_err:
+            logger.debug(f"Auto-flow character selection skipped for scene {i}: {_csel_err}")
         scene.parameters = params
 
     await session.commit()
@@ -3166,16 +3244,28 @@ async def _run_windowed_batch(
             _existing_refs = _scene_params_read.get("image_refs_first", {})
             _selected_indices = _existing_refs.get("characterIndices") if isinstance(_existing_refs, dict) else None
             if _selected_indices is not None:
-                # User has an explicit selection (could be []).  Use it as-is.
-                _selected_chars = [
-                    characters[i] for i in _selected_indices
+                # Explicit selection (incl. []) is ALWAYS respected as-is.
+                _used_indices = [
+                    i for i in _selected_indices
                     if isinstance(i, int) and 0 <= i < len(characters)
                 ]
             else:
-                # No explicit selection — sensible default of first 2 chars
-                _selected_chars = characters[:2]
+                # No explicit selection yet → AUTO-PICK the most relevant
+                # characters for this scene from its own text (flow + prompt +
+                # narration), capped at 3.  This is auto-gen's automatic
+                # character selection; it persists the pick below so the Image
+                # tab shows exactly what was used.
+                _pick_text = " ".join([
+                    str((scene.parameters or {}).get("flow_idea", "") or ""),
+                    str(scene.prompt or ""),
+                    str(scene_lyrics or ""),
+                ]).strip()
+                _used_indices = _select_scene_characters_from_flow(
+                    _pick_text, characters, cap=3
+                ) or []
+            _selected_chars = [characters[i] for i in _used_indices]
             char_asset_ids = await _resolve_character_asset_ids(
-                _selected_chars, project_id, session, max_chars=2
+                _selected_chars, project_id, session, max_chars=3
             )
             extra_ref_ids = _collect_ref_asset_ids(scene, "first")
             ref_ids = char_asset_ids + extra_ref_ids  # Characters first = Image 1, Image 2
@@ -3193,11 +3283,11 @@ async def _run_windowed_batch(
             # Only seed default character indices for scenes that have NO prior
             # selection.  Scenes with an explicit selection (including []) are
             # preserved so the user can keep a scene character-free.
-            if characters and "image_refs_first" not in scene_params:
-                scene_params["image_refs_first"] = {
-                    "characterIndices": list(range(min(2, len(characters)))),
-                    "extras": [],
-                }
+            # Persist an EXPLICIT empty selection when the scene has none, so
+            # the Image tab reflects "no characters" (the single source of
+            # truth) instead of silently defaulting to project characters.
+            if "image_refs_first" not in scene_params:
+                scene_params["image_refs_first"] = {"characterIndices": list(_used_indices), "extras": []}
             scene.parameters = scene_params
             await session.commit()
 
@@ -4300,14 +4390,26 @@ async def _run_sequential_auto_gen(
                 _seq_existing_refs = (scene.parameters or {}).get("image_refs_first", {})
                 _seq_selected_indices = _seq_existing_refs.get("characterIndices") if isinstance(_seq_existing_refs, dict) else None
                 if _seq_selected_indices is not None:
-                    _seq_selected_chars = [
-                        proj_chars[i] for i in _seq_selected_indices
+                    # Explicit selection (incl. []) is ALWAYS respected.
+                    _seq_used_indices = [
+                        i for i in _seq_selected_indices
                         if isinstance(i, int) and 0 <= i < len(proj_chars)
                     ]
                 else:
-                    _seq_selected_chars = proj_chars[:2]
+                    # No explicit selection yet → AUTO-PICK the most relevant
+                    # characters from this scene's text (flow + prompt +
+                    # narration), capped at 3, and persist below.
+                    _seq_pick_text = " ".join([
+                        str((scene.parameters or {}).get("flow_idea", "") or ""),
+                        str(scene.prompt or ""),
+                        str(scene_lyrics or ""),
+                    ]).strip()
+                    _seq_used_indices = _select_scene_characters_from_flow(
+                        _seq_pick_text, proj_chars, cap=3
+                    ) or []
+                _seq_selected_chars = [proj_chars[i] for i in _seq_used_indices]
                 seq_char_aids = await _resolve_character_asset_ids(
-                    _seq_selected_chars, project_id, session, max_chars=2
+                    _seq_selected_chars, project_id, session, max_chars=3
                 )
                 extra_ids = _collect_ref_asset_ids(scene, "first")
                 ref_ids = seq_char_aids + extra_ids
@@ -4324,11 +4426,8 @@ async def _run_sequential_auto_gen(
                 # Only seed default characterIndices on scenes with no prior
                 # selection — preserves user's explicit per-scene choice
                 # (including the "no characters" case via empty list).
-                if proj_chars and "image_refs_first" not in scene_params:
-                    scene_params["image_refs_first"] = {
-                        "characterIndices": list(range(min(2, len(proj_chars)))),
-                        "extras": [],
-                    }
+                if "image_refs_first" not in scene_params:
+                    scene_params["image_refs_first"] = {"characterIndices": list(_seq_used_indices), "extras": []}
                 scene.parameters = scene_params
                 await session.commit()
 

@@ -74,7 +74,9 @@ function labelWorkflow(wt: string | undefined | null): string {
     case 'z_image_turbo':
       return 'Z-Image Turbo';
     case 'klein_t2i':
-      return 'Klein T2I';
+      // klein_t2i is a 0-reference placeholder that the backend ALWAYS
+      // redirects to Z-Image Turbo at dispatch — so label it as such.
+      return 'Z-Image Turbo';
     case 'klein_1ref':
     case 'klein_2ref':
     case 'klein_3ref':
@@ -1072,13 +1074,21 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   // try to use Klein with the stale ref.  Now every reference picker
   // tick persists the new state immediately via the cache-coherent path.
   const setActiveRefs = useCallback(
-    (newRefs: ReferenceState) => {
+    (newRefs: ReferenceState, markManual: boolean = false) => {
       // 1) local React state for UI snappiness
       setActiveRefsLocal(newRefs);
       // 2) write through to DB + React Query + Zustand
       if (!activeScene || !currentProject) return;
       const key = frameSubTab === 'first' ? 'image_refs_first' : 'image_refs_last';
-      const newParams = { ...activeScene.parameters, [key]: newRefs };
+      const newParams: Record<string, any> = { ...activeScene.parameters, [key]: newRefs };
+      // When the USER manually edits the picks, lock this frame so the
+      // auto-select on Enhance/Generate stops overriding their choice.
+      // (Auto-select calls this WITHOUT markManual, so it can still seed an
+      // initial suggestion until the user takes control.)
+      if (markManual) {
+        const manualKey = frameSubTab === 'first' ? 'image_refs_first_manual' : 'image_refs_last_manual';
+        newParams[manualKey] = true;
+      }
       // Fire-and-forget — failures are surfaced via the centralized error path
       updateSceneAndSync(activeScene.id, { parameters: newParams }).catch((e) =>
         console.warn('[refs] auto-save failed:', e),
@@ -1944,36 +1954,47 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
    * Returns the updated ReferenceState (also sets it in component state).
    */
   const autoSelectCharactersForScene = (): ReferenceState => {
+    // Auto-pick characters ONLY when this frame has NO explicit selection yet
+    // (image_refs_first/last.characterIndices is absent — the scene was never
+    // touched and auto-gen never seeded it).  Any explicit selection is
+    // respected verbatim: manual picks, a deliberate empty [] ("no characters
+    // here"), and the selection auto-gen persists.  This lets Enhance/Generate
+    // fill in the right characters for a brand-new scene WITHOUT ever
+    // overriding a choice you (or auto-gen) already made.
+    const key = frameSubTab === 'first' ? 'image_refs_first' : 'image_refs_last';
+    const existing = (activeScene?.parameters as any)?.[key];
+    const hasExplicit = existing && Array.isArray(existing.characterIndices);
+    if (hasExplicit) return activeRefs;
     if (conceptCharacters.length === 0) return activeRefs;
 
-    // Combine text sources to search for character mentions
-    const searchText = [
-      sceneFlowIdea,
-      activePrompt,
-      sceneLyrics,
-    ].join(' ').toLowerCase();
-
+    // Combine the scene's text sources to find which characters it's about.
+    const searchText = [sceneFlowIdea, activePrompt, sceneLyrics]
+      .join(' ')
+      .toLowerCase();
     if (!searchText.trim()) return activeRefs;
 
     const maxRefs = frameSubTab === 'first' ? 5 : 4;
-    const maxCharRefs = 2; // Klein works best with 1-2 character references
+    const maxCharRefs = 3; // up to 3 character references (Klein composite)
     const currentCharIndices = [...activeRefs.characterIndices];
     let changed = false;
 
     for (let idx = 0; idx < conceptCharacters.length; idx++) {
-      if (currentCharIndices.includes(idx)) continue; // already selected
+      if (currentCharIndices.includes(idx)) continue;
       const charName = conceptCharacters[idx].name?.toLowerCase().trim();
       if (!charName) continue;
-
-      // Check if character name appears in the text (word boundary aware)
-      // Split multi-word names and check if all parts appear
-      const nameParts = charName.split(/\s+/).filter(p => p.length > 2);
-      const mentioned = nameParts.length > 0 && nameParts.every(part => searchText.includes(part));
-
+      // Match the full name OR its first significant token (word-boundary
+      // aware) — characters are usually referenced by their first name.
+      const tokens = charName.split(/\s+/).filter((t) => t.length > 1);
+      const firstTok = tokens[0] || '';
+      const mentioned =
+        searchText.includes(charName) ||
+        (firstTok.length > 2 &&
+          new RegExp(`\\b${firstTok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(searchText));
       if (mentioned) {
-        // Check both total capacity and character limit
-        if (currentCharIndices.length < maxCharRefs &&
-            currentCharIndices.length + activeRefs.extras.length < maxRefs) {
+        if (
+          currentCharIndices.length < maxCharRefs &&
+          currentCharIndices.length + activeRefs.extras.length < maxRefs
+        ) {
           currentCharIndices.push(idx);
           changed = true;
         }
@@ -1982,6 +2003,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
     if (changed) {
       const newRefs = { ...activeRefs, characterIndices: currentCharIndices };
+      // Persist (auto-selection — NOT marked manual, so a later deliberate
+      // edit still takes precedence and locks it).
       setActiveRefs(newRefs);
       return newRefs;
     }
@@ -2466,10 +2489,12 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 const _refCount =
                   (activeRefs?.characterIndices?.length || 0) +
                   (activeRefs?.extras?.length || 0);
-                const _zimgPref = appSettings?.single_image_generator === 'z_image_turbo';
-                const _modelLabel = (n: number, forceZimg: boolean) => {
-                  if (forceZimg) return 'Z-Image Turbo';
-                  if (n === 0) return _zimgPref ? 'Z-Image Turbo' : 'Klein T2I';
+                const _modelLabel = (n: number, _forceZimg: boolean) => {
+                  // 0 references = text-to-image = ALWAYS Z-Image Turbo (the
+                  // backend redirects klein_t2i → Z-Image regardless of the
+                  // single_image_generator setting; Klein is only ever used to
+                  // composite character references in Pass 2).
+                  if (n === 0) return 'Z-Image Turbo';
                   return `Klein ${n}-ref`;
                 };
                 // Effective two-pass: backend downgrades to single when no refs
@@ -2733,7 +2758,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   </span>
                 </label>
                 <div className="w-full px-3 py-2 bg-gray-800/60 border border-gray-700/50 rounded text-gray-300 text-sm">
-                  {computedWorkflowType.replace('klein_', 'FLUX Klein – ').replace('t2i', 'Text to Image').replace('1ref', '1 Reference').replace('2ref', '2 References').replace('3ref', '3 References').replace('4ref', '4 References')}
+                  {computedWorkflowType === 'klein_t2i' ? 'Z-Image Turbo (text-to-image)' : computedWorkflowType.replace('klein_', 'FLUX Klein – ').replace('1ref', '1 Reference').replace('2ref', '2 References').replace('3ref', '3 References').replace('4ref', '4 References')}
                   {refAssetIds.length > 0 && (
                     <span className="text-gray-500 ml-1">({refAssetIds.length} ref{refAssetIds.length !== 1 ? 's' : ''})</span>
                   )}
@@ -2825,7 +2850,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 <ReferenceSelector
                   characters={conceptCharacters}
                   value={activeRefs}
-                  onChange={setActiveRefs}
+                  onChange={(next) => setActiveRefs(next, true)}
                   frameType={frameSubTab}
                   projectId={currentProject.id}
                 />

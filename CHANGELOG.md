@@ -1,5 +1,76 @@
 # Changelog
 
+## [1.8.29] - 2026-06-18
+
+### Fixed — Workflow label now shows Z-Image for no-reference renders
+
+The Image tab displayed "FLUX Klein – Text to Image" for a 0-reference scene, even though the backend always redirects `klein_t2i` to Z-Image Turbo at dispatch (Klein is only ever used to composite character refs in Pass 2). The label was misleading — the actual render was already Z-Image. Fixed three frontend label spots to show **Z-Image Turbo** for `klein_t2i`: `labelWorkflow()`, the per-scene model label (no longer gated on the `single_image_generator` setting), and the computed-workflow display. Post-render history already showed the correct model.
+
+## [1.8.28] - 2026-06-18
+
+### Added — Auto-pick character references on Enhance + robust auto-gen selection
+
+Completed the character-selection model so the right references are chosen automatically without ever overriding a deliberate choice. The rule everywhere: **a scene's `image_refs_first.characterIndices` is authoritative; auto-pick only fills it in when it's absent (never set).**
+
+- **Enhance/Generate now auto-pick when a scene has no explicit selection.** The frontend re-enabled `autoSelectCharactersForScene`, but gated on "no explicit selection yet": it matches the scene's flow/prompt/narration text against the character roster (full name or first-name, word-boundary aware), selects up to 3, and persists them — so enhancing a fresh scene picks the correct refs. An explicit selection (manual picks, a deliberate empty `[]`, or what auto-gen saved) is respected verbatim and never overridden.
+- **Auto-gen auto-selects in the image phase too, not just at flow time.** Both the windowed and sequential auto-gen paths now run the same server-side character pick (`_select_scene_characters_from_flow` over flow + prompt + narration, cap 3) for any scene without an explicit selection, and persist the result to `image_refs_first` so the Image tab shows exactly what was used. This makes auto-gen's selection reliable even when story flow already existed (previously the pick only ran inside `_ensure_video_flow` during fresh flow generation).
+
+Net: run Auto Gen → each scene gets its most-relevant characters chosen, persisted, and visible. Manually enhance a brand-new scene → it picks the right characters for you. Deselect characters on a scene → that choice sticks and nothing re-adds them.
+
+## [1.8.27] - 2026-06-18
+
+### Fixed — Deep audit of image-gen: no-ref renders use Z-Image, characters only when selected
+
+Two linked regressions: a scene with no characters selected still rendered with characters, and no-reference renders ran on Klein instead of Z-Image. Root cause was a chain of "default to the first N project characters" fallbacks (one of them added in 1.8.26) that injected characters a scene never asked for — which made the workflow `klein_Nref` (Klein-with-refs) instead of `klein_t2i`, so it never redirected to Z-Image.
+
+Audited the whole path and made the scene's `image_refs_first.characterIndices` the strict single source of truth:
+
+- **Removed every "default first-N characters" fallback** — in the `/generate-image` two-pass resolver, and both the windowed and sequential auto-gen paths. No selection (empty OR absent) now means **no characters**. Auto-gen still auto-selects via the server-side LLM character pick (which persists the choice and shows it on the Image tab); scenes the LLM names no character for stay character-free.
+- **Auto-gen seeds an explicit empty selection** (`characterIndices: []`) when a scene has none, so the Image tab reflects "no characters" instead of silently pulling project characters in.
+- **Frontend `autoSelectCharactersForScene` disabled** — it used to re-add characters mentioned in the flow/prompt text on every Enhance/Generate, overriding the visible selection. The saved selection is now authoritative everywhere.
+- **`klein_t2i` always redirects to Z-Image Turbo** in the dispatcher (regardless of the `single_image_generator` preference). Klein is only ever used to composite character references (Pass 2); a zero-reference text-to-image render must always be Z-Image. Two-pass Pass 1 was already forced to Z-Image; this extends it to all no-reference renders.
+
+Net: remove all characters from a scene → it renders single-pass on Z-Image with no characters; select 1–3 → Klein Pass 2 composites exactly those. The Image-tab selection is precisely what gets used and is saved for re-render/troubleshooting.
+
+## [1.8.26] - 2026-06-18
+
+### Fixed — Scene character selection is now the single source of truth (auto-gen used hidden refs)
+
+A scene with no characters selected on the Image tab could still render with characters (a "4-reference" composite), and the picker didn't reflect what auto-gen actually used.
+
+- **`/generate-image` two-pass fallback no longer resolves ALL project characters.** When a generation request carries no explicit refs, it now resolves characters from the scene's `image_refs_first.characterIndices` (an explicit empty list = "no characters here"), and when the field is absent it defaults to the first 3 AND persists that — so the Image tab always reflects exactly what Pass 2 composited.
+- **Character caps raised 2 → 3** across the auto-gen paths (`_resolve_character_asset_ids(..., max_chars=3)`, the first-N defaults, and the seeded `characterIndices`) so a scene's saved 3-character pick is actually honored end-to-end (slot 1 = base image, up to 3 character refs).
+- **Frontend refreshes scenes when auto-gen finishes** (`invalidateQueries(['scenes', id])`), so the Image-tab selections update to match what auto-gen persisted instead of showing stale empty state.
+
+Net: the characters shown selected on each frame's Image tab are exactly the references used in the second pass, and that selection is saved for re-render / troubleshooting.
+
+## [1.8.25] - 2026-06-18
+
+### Fixed — Manual scene character selections now stick (were overridden by auto-select)
+
+On the Image tab, manually selecting/deselecting characters didn't survive clicking **Enhance** or **Generate**. Cause: `autoSelectCharactersForScene()` ran on every Enhance/Generate, re-added any character whose name appeared in the flow/prompt/lyrics text, and saved that over the user's picks — so deselecting a character that's mentioned in the text silently reverted.
+
+Fix (`frontend/src/components/SceneEditor/`):
+- The reference picker's `onChange` now marks the frame as **manually edited** (`image_refs_first_manual` / `image_refs_last_manual` in scene params, persisted via the cache-coherent `updateSceneAndSync`).
+- `autoSelectCharactersForScene()` short-circuits and returns the current selection unchanged once that manual flag is set — so auto-select can seed an initial suggestion, but never overrides a user's explicit choice afterward.
+- Raised the per-frame character cap from 2 to **3** in both the `ReferenceSelector` UI and the auto-select logic, matching 1.8.24 (slot 1 stays the base scene image; up to 3 character refs).
+
+Now: pick/deselect characters on a scene, hit Enhance or Generate, and your selection is exactly what's used and saved.
+
+## [1.8.24] - 2026-06-18
+
+### Changed — Per-scene character cap is 3 (not 2)
+
+Per Lorenzo: the Klein composite daisy-chains references (slot 1 = the base scene image, then character refs), and up to **3 characters** gives great results while more starts "off-roading". Raised the per-scene character selection cap from 2 to 3 (`_select_scene_characters_from_flow(..., cap=3)`), updated the story-flow prompt to state the 3-character limit, and lowered the dispatcher's hard ceiling `MAX_CHARS_IN_COMPOSITE` from 4 to 3 so no composite ever exceeds 3 character refs. "Fewer is better when only one or two truly matter" is kept in the prompt so scenes aren't crowded.
+
+## [1.8.23] - 2026-06-18
+
+### Added — LLM picks the 2 most important characters per scene (was: first 2)
+
+Scene images previously defaulted each scene's character refs to the **first 2 project characters** positionally (`characters[:2]`), regardless of who the scene is actually about. The story-flow LLM is now told the **3-character limit** (slot 1 is reserved for the base scene image; up to 3 character refs) and instructed to reference only the **1–3 most important characters by name** for each scene; `_ensure_video_flow` then derives `image_refs_first.characterIndices` from the characters the flow actually named (matched by name / first token, in order of appearance, capped at 3). Falls back to the existing default only when the flow names no character, and never overrides an explicit manual selection. New helper `_select_scene_characters_from_flow` in `backend/api/generation.py`.
+
+Result: a scene about "the Rabbit and the Fox" gets the Rabbit and Fox refs — not whoever happens to be characters #1 and #2. Re-run Auto Gen / regenerate Story Flow to apply to existing scenes.
+
 ## [1.8.22] - 2026-06-18
 
 ### Fixed — SRT upload no longer blocks on Whisper; re-anchor moved into Process Audio
