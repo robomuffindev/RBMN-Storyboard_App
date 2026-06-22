@@ -1317,6 +1317,35 @@ class JobDispatcher:
         except Exception as e:
             logger.debug(f"Could not inject color override: {e}")
 
+        # ── Pass-2 composite: ALWAYS anchor the base scene's exposure/look ──
+        # Klein regenerates from an empty latent conditioned on the references,
+        # so without an explicit anchor it tends to re-grade and DARKEN the
+        # scene and let the character refs' lighting take over.  Append a strong
+        # preservation instruction at the very END of the prompt (Klein weighs
+        # the latest tokens most) so the composite keeps the base scene's
+        # brightness, exposure, palette and composition — only the characters
+        # are inserted.  Runs for every composite, with or without a color
+        # override (the override suffix, if any, has already been appended).
+        try:
+            if params.get("two_pass") and params.get("two_pass_phase") == "composite":
+                _pv = params.get("prompt", "") or ""
+                if _pv and "preserve the first reference image" not in _pv.lower():
+                    _preserve = (
+                        " Preserve the first reference image exactly: keep its lighting, "
+                        "exposure, brightness, contrast, color grade, palette and composition "
+                        "identical. Do NOT darken, dim, desaturate, re-grade or restyle the "
+                        "scene. Insert ONLY the character(s) from the other reference images, "
+                        "re-lit to match the scene; change nothing else about the base image."
+                    )
+                    params = dict(params)
+                    params["prompt"] = _pv + _preserve
+                    logger.info(
+                        f"[{job.id if job else 'N/A'}] Pass-2 composite: appended "
+                        f"base-scene preservation anchor (anti-darkening)"
+                    )
+        except Exception as _pe_err:
+            logger.debug(f"Pass-2 preservation anchor skipped: {_pe_err}")
+
         # ── Z-Image Turbo redirect helper ──────────────────────────────────
         # Checks single_image_generator setting and redirects T2I jobs to
         # Z-Image Turbo when applicable. Returns the prepared workflow or None.

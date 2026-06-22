@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.30] - 2026-06-18
+
+### Improved — Pass-2 Klein compositing preserves the base scene (anti-darkening)
+
+Two-pass character compositing was re-grading and darkening scenes instead of just inserting characters. Root cause: the Klein "Edit Ultra" workflow generates from an EMPTY latent conditioned on reference latents, so it regenerates the whole frame (using the base scene only as a reference) and drifts in exposure/palette — Klein also blends lighting from the character reference photos.
+
+Prompt-level hardening (the structural fix is a workflow change — see note):
+- **Always-on base-preservation anchor at dispatch** (`dispatcher.py`): every Pass-2 composite prompt now gets a strong instruction appended at the very end (where Klein weighs tokens most) to keep the first reference image's exact lighting, exposure, brightness, contrast, color grade, palette and composition, and to insert ONLY the characters — "do not darken, dim, desaturate, re-grade or restyle." Previously this only happened when a color override was active.
+- **Stronger anti-darkening in the Pass-2 system prompt** (`prompt_enhancer.py`): the top rule now explicitly calls out Klein's tendency to darken/re-grade and requires the prompt to lock the base image's exact brightness and exposure.
+
+> **Note (workflow-level fix):** the most complete fix is to run Pass 2 as img2img — feed the base scene as the *init latent* with denoise ~0.5–0.7 instead of `EmptyFlux2LatentImage` — so Klein preserves the base pixels and only paints the characters in. That requires editing `KLEIN_EDIT_ULTRA_WORKFLOW_*REF.json` and testing in ComfyUI; can be added as a tunable per Lorenzo's preference.
+
 ## [1.8.29] - 2026-06-18
 
 ### Fixed — Workflow label now shows Z-Image for no-reference renders

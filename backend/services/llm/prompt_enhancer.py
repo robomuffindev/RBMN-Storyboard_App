@@ -329,6 +329,13 @@ and mood ARE the look of the final composite.  Your job is to add characters
 INTO this scene without changing its visual identity.  Klein blends color
 signals from ALL reference images — you must explicitly LOCK the output to
 the first image's palette in your prompt.
+CRITICAL — DO NOT DARKEN OR RESTYLE: Klein tends to DARKEN, dim, and re-grade
+the scene when compositing.  You MUST explicitly instruct it to keep the base
+image's EXACT brightness, exposure, and tonal range (e.g. "at the same
+brightness and exposure as the first image, without darkening, dimming, or
+re-grading").  The final composite must look like the base scene with the
+characters ADDED — never a darker, moodier, or restyled version of it.  Change
+NOTHING about the base scene except inserting the characters.
 ═══════════════════════════════════════════════════════════════════════════
 
 CRITICAL CONTEXT — TWO-PASS COMPOSITING:
