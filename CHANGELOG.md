@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.9.1] - 2026-06-21
+
+### Added — Chapter scope picker for Auto-Gen (All / Single / Multiple)
+
+The Auto-Generate panel now has the same chapter scope selector as the Export screen, so you can run auto-gen on the whole project, one chapter, or several specific chapters — instead of only "the chapter you're currently viewing" vs "everything."
+
+- Reuses the export `ChapterPicker` (All / Single / Multiple). Defaults to the chapter you're currently viewing (Single) if any, else the whole project (All) — so existing behavior is preserved.
+- **Multiple** runs the selected chapters **sequentially**, one scoped pass per chapter in timeline order: each chapter gets its own scoped story-flow pre-step + auto-gen run, and the next only starts after the current one finishes (polls the auto-gen status endpoint for completion). No changes to the batch pipeline internals.
+- Cancel stops the whole queue between chapters. Per-chapter failures are collected and reported without aborting the rest of the queue.
+- Picker only appears for projects that have chapters; single/all paths are unchanged.
+
 ## [1.9.0] - 2026-06-21
 
 ### Added — Krea 2 Turbo as an optional first-pass image generator

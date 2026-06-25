@@ -1573,6 +1573,7 @@ export default function AppLayout() {
         autoGenStep={autoGenStep}
         autoGenSceneName={autoGenSceneName}
         autoGenBatchRunId={autoGenBatchRunId}
+        chapters={chapterTree}
       />}
 
       {/* Asset Generator Modal */}
@@ -3162,7 +3163,7 @@ const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string
   },
 ];
 
-function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenStatus, autoGenMode, autoGenCompleted, autoGenTotal, autoGenStep, autoGenSceneName, autoGenBatchRunId }: {
+function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenStatus, autoGenMode, autoGenCompleted, autoGenTotal, autoGenStep, autoGenSceneName, autoGenBatchRunId, chapters }: {
   projectId: string;
   onClose: () => void;
   onMinimize: () => void;
@@ -3174,6 +3175,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   autoGenStep: string | null;
   autoGenSceneName: string | null;
   autoGenBatchRunId: string | null;
+  chapters: import('@/types').ChapterTreeNode[];
 }) {
   const navigate = useNavigate();
   const currentProject = useAppStore((s) => s.currentProject);
@@ -3205,6 +3207,17 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   // tokens regenerating prompts the user already curated.
   const [skipExistingPrompts, setSkipExistingPrompts] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // Chapter scope for this run.  Defaults to the chapter the user is currently
+  // viewing (single) if any, else the whole project (all).  "multiple" runs the
+  // selected chapters one after another, each as its own scoped pass.
+  const [scope, setScope] = useState<import('@/types').ChapterSelection>(() => {
+    const zs = useAppStore.getState().chapterScope;
+    return zs?.chapterId
+      ? { mode: 'single', chapter_ids: [zs.chapterId] }
+      : { mode: 'all', chapter_ids: [] };
+  });
+  // Set true by Cancel so a multi-chapter queue stops between chapters.
+  const cancelRequestedRef = useRef(false);
 
   const isBackendRunning = autoGenStatus === 'running';
   const isBackendDone = autoGenStatus === 'done' || autoGenStatus === 'completed';
@@ -3266,70 +3279,113 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
     return `${s}s`;
   };
 
+  // Flatten the chapter tree (timeline order) — used to order a multi-chapter
+  // queue and to look up chapter names for status messages.
+  const flatChapters = () => {
+    const out: any[] = [];
+    const walk = (nodes: any[]) => { for (const n of nodes) { out.push(n); if (n.children?.length) walk(n.children); } };
+    walk(chapters as any[]);
+    return out;
+  };
+  const chapterLabel = (cid: string) => (flatChapters().find((c: any) => c.id === cid)?.name) || 'chapter';
+  const orderByTimeline = (ids: string[]) => {
+    const order = flatChapters().slice().sort((a: any, b: any) => a.start_time - b.start_time).map((c: any) => c.id);
+    return ids.slice().sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  };
+  // All scene ids belonging to a chapter (and its descendants).
+  const chapterSceneIds = (cid: string): Set<string> => {
+    const ids = new Set<string>();
+    const gather = (n: any) => { (n.scene_ids || []).forEach((x: any) => ids.add(String(x))); (n.children || []).forEach(gather); };
+    const find = (nodes: any[]): boolean => {
+      for (const n of nodes) { if (n.id === cid) { gather(n); return true; } if (n.children && find(n.children)) return true; }
+      return false;
+    };
+    find(chapters as any[]);
+    return ids;
+  };
+
+  // Poll the auto-gen status endpoint until the CURRENT scoped run is terminal.
+  // Used to chain a multi-chapter queue (start next only after this one ends).
+  const awaitRunTerminal = (): Promise<void> => new Promise((resolve) => {
+    const startedAt = Date.now();
+    let sawRunning = false;
+    const iv = setInterval(async () => {
+      if (cancelRequestedRef.current) { clearInterval(iv); resolve(); return; }
+      try {
+        const r = await getSequentialAutoGenStatus(projectId);
+        const st = r.data?.status;
+        if (st === 'running' || st === 'pending') sawRunning = true;
+        const terminal = st && st !== 'running' && st !== 'pending';
+        if (sawRunning && terminal) { clearInterval(iv); resolve(); }
+        else if (!sawRunning && Date.now() - startedAt > 60000) { clearInterval(iv); resolve(); }
+      } catch { /* transient — keep polling */ }
+    }, 4000);
+  });
+
+  // Run ONE scoped pass: optional flow pre-step (scoped) + kick off auto-gen.
+  const runOneScope = async (chapterId: string | undefined, label: string) => {
+    if (useStoryFlow && (mode.includes('video') || mode === 'all_images')) {
+      const allScenes = useAppStore.getState().scenes || [];
+      const inScope: any[] = chapterId
+        ? allScenes.filter((sc: any) => chapterSceneIds(chapterId).has(String(sc.id)))
+        : allScenes;
+      const missingFlow = inScope.some((sc: any) => !(((sc.parameters || {}).flow_idea || '').trim()));
+      if (missingFlow) {
+        setStatusMsg((isNarration ? 'Generating story flow ideas' : 'Generating video flow ideas') + ` for ${label}...`);
+        try { await generateVideoFlow(projectId, chapterId); }
+        catch (e) { console.warn('Story/video flow generation failed, continuing with existing flow data:', e); }
+      }
+    }
+    setStatusMsg(`Queuing generation jobs for ${label}...`);
+    await startSequentialAutoGen(
+      projectId, mode, overrideFullSet, false /* vocalsOnlyAudio */, skipAudioMux,
+      twoPass, useStoryFlow, lipsyncEnabled, vocalsOnlyForLipsync, chapterId, skipExistingPrompts,
+    );
+  };
+
   const handleQueue = async () => {
     setIsStarting(true);
     setError(null);
     setStatusMsg(null);
+    cancelRequestedRef.current = false;
 
+    // Build the ordered list of scoped passes from the picker selection.
+    let scopes: Array<{ id: string | undefined; label: string }> = [];
+    if (scope.mode === 'all' || (chapters?.length ?? 0) === 0) {
+      scopes = [{ id: undefined, label: 'entire video' }];
+    } else if (scope.mode === 'single') {
+      const cid = scope.chapter_ids[0];
+      scopes = cid ? [{ id: cid, label: chapterLabel(cid) }] : [{ id: undefined, label: 'entire video' }];
+    } else {
+      const ids = orderByTimeline(scope.chapter_ids);
+      scopes = ids.length ? ids.map((cid) => ({ id: cid, label: chapterLabel(cid) })) : [{ id: undefined, label: 'entire video' }];
+    }
+
+    const failures: string[] = [];
     try {
-      // Forward chapter scope from Zustand FIRST so we can also pass it
-      // through to the pre-step story-flow call (otherwise that call
-      // generates ideas for all 328 scenes when the user only asked for
-      // 23 in this chapter).
-      const _zScope = useAppStore.getState().chapterScope;
-      const _scopeForRun = _zScope?.chapterId ?? undefined;
-
-      // Generate video flow first if useStoryFlow is on and we're producing
-      // video — but ONLY if there's actually work to do.  When every scene
-      // in scope already has a flow_idea, regenerating is pure waste and
-      // overwrites edits the user may have made.
-      if (useStoryFlow && (mode.includes('video') || mode === 'all_images')) {
-        const _allScenes = useAppStore.getState().scenes || [];
-        const _inScope: any[] = _zScope
-          ? _allScenes.filter((s: any) => _zScope.sceneIds.has(String(s.id)))
-          : _allScenes;
-        const _missingFlow = _inScope.some((s: any) => {
-          const flow = ((s.parameters || {}).flow_idea || '').trim();
-          return !flow;
-        });
-        if (_missingFlow) {
-          const _label = _zScope ? `chapter "${_zScope.name}"` : 'project';
-          setStatusMsg(
-            (isNarration ? 'Generating story flow ideas' : 'Generating video flow ideas')
-            + ` for ${_label}...`
-          );
-          try {
-            await generateVideoFlow(projectId, _scopeForRun);
-          } catch (e) {
-            console.warn('Story/video flow generation failed, continuing with existing flow data:', e);
+      for (let i = 0; i < scopes.length; i++) {
+        if (cancelRequestedRef.current) break;
+        const sc = scopes[i];
+        const prefix = scopes.length > 1 ? `Chapter ${i + 1}/${scopes.length}: ` : '';
+        try {
+          await runOneScope(sc.id, `${prefix}${sc.label}`);
+          if (i === 0) { setStatusMsg(null); setElapsed(0); setStartTime(Date.now()); setIsStarting(false); }
+          onStarted(); // (re)start AppLayout polling so progress reflects this pass
+          if (i < scopes.length - 1) {
+            setStatusMsg(`Chapter ${i + 1}/${scopes.length} done — starting next...`);
+            await awaitRunTerminal();
           }
-        } else {
-          console.info(
-            `[AutoGen] Skipping flow gen — all ${_inScope.length} ${_zScope ? 'chapter ' : ''}scenes already have flow_idea`
-          );
+        } catch (e: any) {
+          failures.push(sc.label);
+          if (i === 0) setIsStarting(false);
+          console.error('[multi-chapter] pass failed:', sc.label, e);
         }
       }
-
-      setStatusMsg('Queuing generation jobs...');
-      await startSequentialAutoGen(
-        projectId,
-        mode,
-        overrideFullSet,
-        false, // vocalsOnlyAudio
-        skipAudioMux,
-        twoPass,
-        useStoryFlow,
-        lipsyncEnabled,
-        vocalsOnlyForLipsync,
-        _scopeForRun,
-        skipExistingPrompts,
-      );
-
       setStatusMsg(null);
-      setElapsed(0);
-      setStartTime(Date.now());
       setIsStarting(false);
-      onStarted(); // start polling in AppLayout
+      if (failures.length) {
+        setError(`Some chapters could not start: ${failures.join('; ')}`);
+      }
     } catch (e: any) {
       const detail = e?.response?.data?.detail || e?.message || 'Auto-generation failed';
       setError(detail);
@@ -3338,6 +3394,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   };
 
   const handleCancel = async () => {
+    cancelRequestedRef.current = true;  // stop pending chapters in a multi-chapter queue
     try {
       await cancelSequentialAutoGen(projectId);
     } catch { /* ignore */ }
@@ -3534,6 +3591,18 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
                 </label>
               ))}
             </div>
+
+            {/* Chapter scope — All / Single / Multiple (multi runs sequentially) */}
+            {(chapters?.length ?? 0) > 0 && (
+              <div className="mb-4">
+                <ChapterPicker chapters={chapters} value={scope} onChange={setScope} />
+                {scope.mode === 'multiple' && scope.chapter_ids.length > 1 && (
+                  <p className="text-[11px] text-gray-500 mt-1.5">
+                    Selected chapters run one after another — each as its own scoped pass, in timeline order.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Advanced Options Toggle */}
             <button

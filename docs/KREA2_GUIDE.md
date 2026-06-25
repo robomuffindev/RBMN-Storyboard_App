@@ -146,9 +146,33 @@ prompt per model in Settings.
 - **Gated activation:** Krea 2 only engages if `KREA2_TURBO_T2I.json` exists.
   Until you add your tested workflow, the app logs a one-line notice and falls
   back to Z-Image — nothing breaks.
-- **Two-pass (character) scenes are unaffected:** Pass 2 character compositing
-  always uses Klein. If Krea 2 is selected, it can paint the Pass-1 base scene
-  (no refs), and Klein composites the characters on top in Pass 2.
+- **Two-pass (character) scenes are unaffected** (verified): Pass 2 character
+  compositing always uses Klein. If Krea 2 is selected, it paints the Pass-1
+  base scene (no refs), and Klein composites the characters on top in Pass 2.
+
+### Two-pass character compositing with Krea 2 (how it stays intact)
+
+The character-swap pipeline is **model-agnostic for Pass 1** — it works the same
+whether Pass 1 is Z-Image or Krea 2:
+
+1. You select characters on a scene → `_apply_two_pass_to_job_params` sets
+   `two_pass=true`, `two_pass_phase="base"`, stores the character ref IDs, and
+   sets the Pass-1 workflow to `klein_t2i` (the no-reference placeholder).
+2. At dispatch, `klein_t2i` is redirected to your selected first-pass generator
+   (Krea 2 if selected and present, else Z-Image), which paints the base scene.
+3. When Pass 1 finishes, the dispatcher auto-chains Pass 2. This trigger is gated
+   only on `two_pass` + `two_pass_phase == "base"` — it does **not** look at which
+   model painted Pass 1 — so Krea 2's output triggers Pass 2 exactly like
+   Z-Image's would.
+4. Pass 2 builds a `klein_Nref` job whose **slot 1 is the Pass-1 image** and
+   slots 2+ are the character references, with the directed
+   `TWO_PASS_COMPOSITE_SYSTEM_PROMPT` (palette/exposure preservation + character
+   identity). Klein swaps the characters into the scene.
+
+So selecting characters always produces a Klein second pass using the reference
+system and the directed prompt — Krea 2 simply replaces Z-Image as the Pass-1
+scene painter. (Confirmed by a full-tree code audit: no two-pass logic anywhere
+keys on the Z-Image model.)
 - The prompt enhancer applies Krea 2-specific prompting rules when Krea 2 is
   selected.
 
