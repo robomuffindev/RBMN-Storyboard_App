@@ -73,6 +73,9 @@ function labelWorkflow(wt: string | undefined | null): string {
   switch (wt) {
     case 'z_image_turbo':
       return 'Z-Image Turbo';
+    case 'krea2_turbo':
+    case 'krea2_t2i':
+      return 'Krea 2 Turbo';
     case 'klein_t2i':
       // klein_t2i is a 0-reference placeholder that the backend ALWAYS
       // redirects to Z-Image Turbo at dispatch — so label it as such.
@@ -878,6 +881,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   });
   const imageModelType = appSettings?.image_model_type || 'flux2_klein_dev_9b';
   const videoModelType = appSettings?.video_model_type || 'ltx_2.3';
+  // First-pass (0-ref) generator label, mirrors dispatcher single_image_generator routing
+  const firstPassLabel = appSettings?.single_image_generator === 'krea2_turbo' ? 'Krea 2 Turbo' : 'Z-Image Turbo';
 
   // Sync video framerate from global settings
   useEffect(() => {
@@ -2494,7 +2499,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   // backend redirects klein_t2i → Z-Image regardless of the
                   // single_image_generator setting; Klein is only ever used to
                   // composite character references in Pass 2).
-                  if (n === 0) return 'Z-Image Turbo';
+                  if (n === 0) return firstPassLabel;
                   return `Klein ${n}-ref`;
                 };
                 // Effective two-pass: backend downgrades to single when no refs
@@ -2758,7 +2763,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   </span>
                 </label>
                 <div className="w-full px-3 py-2 bg-gray-800/60 border border-gray-700/50 rounded text-gray-300 text-sm">
-                  {computedWorkflowType === 'klein_t2i' ? 'Z-Image Turbo (text-to-image)' : computedWorkflowType.replace('klein_', 'FLUX Klein – ').replace('1ref', '1 Reference').replace('2ref', '2 References').replace('3ref', '3 References').replace('4ref', '4 References')}
+                  {computedWorkflowType === 'krea2_turbo' || computedWorkflowType === 'krea2_t2i' ? 'Krea 2 Turbo (text-to-image)' : computedWorkflowType === 'klein_t2i' ? `${firstPassLabel} (text-to-image)` : computedWorkflowType.replace('klein_', 'FLUX Klein – ').replace('1ref', '1 Reference').replace('2ref', '2 References').replace('3ref', '3 References').replace('4ref', '4 References')}
                   {refAssetIds.length > 0 && (
                     <span className="text-gray-500 ml-1">({refAssetIds.length} ref{refAssetIds.length !== 1 ? 's' : ''})</span>
                   )}
@@ -4262,7 +4267,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 ? (assets as any[]).find((a: any) => a?.id === _baseAssetId)
                 : null;
               const _wt = _baseAsset?.meta?.workflow_type as string | undefined;
-              const _modelLabel = _wt ? labelWorkflow(_wt) : 'Z-Image Turbo';
+              const _modelLabel = _wt ? labelWorkflow(_wt) : firstPassLabel;
               return (
                 <div style={{ position: 'absolute', top: '12px', left: '12px', backgroundColor: 'rgba(79,70,229,0.9)', color: 'white', padding: '4px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}>
                   Pass 1 · {_modelLabel} — Scene Only (Before Character Compositing)

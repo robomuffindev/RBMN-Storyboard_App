@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rbmn-storyboard"
-version = "1.8.31"
+version = "1.9.0"
 description = "AI Music Video & Narration Video Storyboard Application"
 requires-python = ">=3.10,<3.13"
 dependencies = [

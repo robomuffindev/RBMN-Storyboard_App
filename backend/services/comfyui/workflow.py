@@ -1329,6 +1329,145 @@ def prepare_zimage_workflow(
     return workflow
 
 
+def _krea2_set_by_title_or_class(
+    workflow: dict, titles, class_types, input_name: str, value, label: str
+) -> bool:
+    """Set ``input_name``=value on the first node matching any of ``titles``
+    (by _meta.title) or, failing that, any of ``class_types`` (by class_type).
+
+    Tolerant helper for the Krea 2 workflow whose exact node titles are not
+    known until the user supplies their tested JSON.  Returns True if a node
+    was updated.  Never raises — logs a warning if nothing matched.
+    """
+    # 1) exact title match
+    for t in titles:
+        for node in workflow.values():
+            if isinstance(node, dict) and node.get("_meta", {}).get("title") == t:
+                node.setdefault("inputs", {})[input_name] = value
+                logger.debug(f"Krea2: set {t}.{input_name} = {value}")
+                return True
+    # 2) class_type match (first node that has the input slot)
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in class_types:
+            inp = node.setdefault("inputs", {})
+            if input_name in inp or not inp:
+                inp[input_name] = value
+                logger.debug(f"Krea2: set {node.get('class_type')}.{input_name} = {value}")
+                return True
+    logger.warning(f"Krea2: could not find a node to set {label} ({input_name})")
+    return False
+
+
+def prepare_krea2_workflow(
+    workflow_path: str,
+    prompt: str,
+    width: int,
+    height: int,
+    seed: int,
+    model_name: Optional[str] = None,
+) -> dict:
+    """Load and prepare a Krea 2 Turbo text-to-image workflow.
+
+    Krea 2 Turbo is a single-pass, text-only model (no reference images, no
+    negative prompt — it runs at CFG ~1).  This mirrors prepare_zimage_workflow
+    but is resilient to node-title variation since the user supplies their own
+    tested workflow JSON.
+
+    Sets (by title, falling back to class_type):
+    - positive CLIP Text Encode  -> text (+ anti-text suffix)
+    - empty latent image          -> width, height
+    - KSampler / sampler          -> seed (seed or noise_seed)
+    - diffusion model loader       -> unet_name (only if model_name provided)
+    """
+    logger.info(f"Preparing Krea2 workflow from {workflow_path}")
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+    full_prompt = (prompt + anti_text_suffix) if prompt else prompt
+
+    # ── Prompt ──
+    # The Krea 2 graph feeds its prompt from a PrimitiveStringMultiline
+    # ("MANUAL PROMPT") through an Any Switch into the CLIP Text Encode.  Write
+    # into that primitive's .value — NEVER into CLIPTextEncode.text when it is
+    # wired to an upstream node (a list), which would sever the graph.
+    _prompt_set = False
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        title = (node.get("_meta", {}) or {}).get("title", "") or ""
+        inp = node.get("inputs", {})
+        if (ct in ("PrimitiveStringMultiline", "PrimitiveString")
+                or "PROMPT" in title.upper()) and "value" in inp \
+                and not isinstance(inp.get("value"), list):
+            inp["value"] = full_prompt
+            _prompt_set = True
+            logger.debug(f"Krea2: set prompt on '{title or ct}'.value")
+            break
+    if not _prompt_set:
+        # Fallback: a CLIP Text Encode whose text is a literal string (not wired)
+        for node in workflow.values():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                inp = node.setdefault("inputs", {})
+                if not isinstance(inp.get("text"), list):
+                    inp["text"] = full_prompt
+                    _prompt_set = True
+                    logger.debug("Krea2: set prompt on CLIPTextEncode.text (literal)")
+                    break
+    if not _prompt_set:
+        logger.warning("Krea2: no prompt node found to set")
+
+    # ── Dimensions ── (Empty[SD3]LatentImage) — dynamic scene resolution
+    _krea2_set_by_title_or_class(
+        workflow,
+        ["Empty Latent Image", "EmptySD3LatentImage", "Empty SD3 Latent Image"],
+        {"EmptySD3LatentImage", "EmptyLatentImage"},
+        "width", int(width), "latent width",
+    )
+    _krea2_set_by_title_or_class(
+        workflow,
+        ["Empty Latent Image", "EmptySD3LatentImage", "Empty SD3 Latent Image"],
+        {"EmptySD3LatentImage", "EmptyLatentImage"},
+        "height", int(height), "latent height",
+    )
+
+    # ── Seed ── set EVERY seed slot in the sampling chain so the app's per-scene
+    # seed fully controls reproducibility AND per-scene variance.  We touch ONLY
+    # the seed fields — never steps/cfg/sampler/scheduler/denoise or any of the
+    # Smart-Seed-Variance / Krea2-Rebalance correction settings.
+    _seed_targets = 0
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        inp = node.get("inputs", {})
+        if ct == "KSampler" and not isinstance(inp.get("seed"), list) and "seed" in inp:
+            inp["seed"] = int(seed); _seed_targets += 1
+        elif ct == "RBG_Smart_Seed_Variance" and not isinstance(inp.get("seed"), list) and "seed" in inp:
+            inp["seed"] = int(seed); _seed_targets += 1
+        elif ct in ("RandomNoise", "KSamplerSelect") and not isinstance(inp.get("noise_seed"), list) and "noise_seed" in inp:
+            inp["noise_seed"] = int(seed); _seed_targets += 1
+    if not _seed_targets:
+        logger.warning("Krea2: no seed node found to set")
+    else:
+        logger.debug(f"Krea2: set seed={seed} on {_seed_targets} node(s)")
+
+    # ── Diffusion model file ── (fp8 vs mxfp8 per server GPU) — only if provided
+    if model_name:
+        _krea2_set_by_title_or_class(
+            workflow,
+            ["Load Diffusion Model", "UNETLoader", "Unet Loader"],
+            {"UNETLoader"},
+            "unet_name", model_name, "diffusion model name",
+        )
+
+    logger.info("Krea2 workflow prepared")
+    return workflow
+
+
 def prepare_sequencer_workflow(
     workflow_path: str,
     prompt: str,

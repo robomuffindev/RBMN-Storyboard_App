@@ -85,6 +85,9 @@ export default function GenerationPanel() {
     if (wf === 'z_image_turbo') {
       return { label: 'Z-Image Turbo', cls: 'bg-emerald-700 text-emerald-50' };
     }
+    if (wf === 'krea2_turbo' || wf === 'krea2_t2i') {
+      return { label: 'Krea 2 Turbo', cls: 'bg-fuchsia-700 text-fuchsia-50' };
+    }
     // Klein 9B — reference-conditioned or T2I fallback
     if (wf.startsWith('klein_')) {
       // Show the ref count for refs workflows so a `klein_5ref` job is

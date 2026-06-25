@@ -252,6 +252,7 @@ async def init_db() -> None:
             "UPDATE app_settings SET color_correction_enabled = 0, export_color_match_clips = 0, _mig_color_default_off = 1 WHERE _mig_color_default_off = 0 OR _mig_color_default_off IS NULL",
             "ALTER TABLE app_settings ADD COLUMN ltx_model_gguf VARCHAR DEFAULT 'ltx-2.3-22b-dev-Q8_0.gguf'",
             "ALTER TABLE app_settings ADD COLUMN single_image_generator VARCHAR DEFAULT 'z_image_turbo'",
+            "ALTER TABLE app_settings ADD COLUMN krea2_model_name VARCHAR DEFAULT 'krea2_turbo_fp8.safetensors'",
             "ALTER TABLE app_settings ADD COLUMN use_distilled_lora BOOLEAN DEFAULT 1",
             "ALTER TABLE app_settings ADD COLUMN distilled_lora_name VARCHAR DEFAULT 'ltx-2.3-22b-distilled-lora-384.safetensors'",
             "ALTER TABLE app_settings ADD COLUMN restrict_explicit_content BOOLEAN DEFAULT 0",

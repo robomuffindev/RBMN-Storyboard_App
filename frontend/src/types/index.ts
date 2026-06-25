@@ -215,6 +215,7 @@ export interface AppSettings {
   runpod_pods?: RunPodPodConfig[];
   // Single image generator
   single_image_generator?: string;
+  krea2_model_name?: string;
   // Distilled LoRA
   use_distilled_lora?: boolean;
   distilled_lora_name?: string;

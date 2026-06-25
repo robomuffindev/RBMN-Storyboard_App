@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.0] - 2026-06-21
+
+### Added — Krea 2 Turbo as an optional first-pass image generator
+
+Full integrated, **gated** support for Krea 2 Turbo as an alternative to Z-Image for no-reference (first-pass) text-to-image. Krea 2 is first-pass only (not an edit model) — character compositing (Pass 2) still always uses FLUX.2 Klein. **Nothing changes for existing users:** the default remains Z-Image, and Krea 2 only activates once a tested `KREA2_TURBO_T2I.json` is present (otherwise it logs a notice and falls back to Z-Image).
+
+- **Settings:** new "Krea 2 Turbo" option under Single Image Generator, plus a "Krea 2 Model File" picker (`krea2_turbo_fp8.safetensors` for RTX 40xx/older, `krea2_turbo_mxfp8.safetensors` for RTX 50xx Blackwell). New `krea2_model_name` setting (schema + migration + API serialization).
+- **Dispatcher:** the `klein_t2i` first-pass redirect now resolves the selected generator — Z-Image (default) or Krea 2 — and is gated on the workflow file existing. Sets the real `workflow_type` (`krea2_turbo`/`z_image_turbo`) for correct worker capability matching and UI labels.
+- **Workflow prep:** new `prepare_krea2_workflow()` — tolerant node resolution (title with class-type fallbacks) so it works with whatever tested JSON is supplied; overrides the diffusion model to the chosen fp8/mxfp8 file.
+- **Prompting:** dedicated `KREA2_IMAGE_SYSTEM_PROMPT` with Krea 2-specific rules (natural-language prose, no quality-booster/tag spam, no weight syntax, lighting/material-led, concise). The enhancer auto-uses it when Krea 2 is selected. Other models' prompts are untouched.
+- **UI labels:** scene model badges and the generation queue badge recognize Krea 2 Turbo; the predicted 0-ref label follows the setting.
+- **Docs:** new `docs/KREA2_GUIDE.md` — model variants + fp8/mxfp8 (50xx vs older), download locations, ComfyUI settings (8 steps, CFG 0–1, er_sde, simple), prompting best practices, and an activation checklist.
+
 ## [1.8.31] - 2026-06-21
 
 ### Fixed — SQLite WAL never shrank (parked at ~4 MB with "nothing to commit")

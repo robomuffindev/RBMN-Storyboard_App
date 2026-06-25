@@ -27,6 +27,7 @@ from ..comfyui.workflow import (
     prepare_v2v_pass2_workflow,
     prepare_transition_workflow,
     prepare_zimage_workflow,
+    prepare_krea2_workflow,
     prepare_sequencer_workflow,
     prepare_workflow_from_config,
     stamp_vhs_unique_prefix,
@@ -1352,47 +1353,90 @@ class JobDispatcher:
         async def _try_zimage_redirect(
             _params: dict, _seed: int, _job_id: str | None
         ):
-            """Attempt Z-Image Turbo redirect for text-to-image (no refs).
+            """Redirect a no-reference text-to-image (klein_t2i) job to the
+            user's selected FIRST-PASS generator: Z-Image Turbo (default) or
+            Krea 2 Turbo.
 
-            Z-Image is FORCED when this job is the Pass 1 (base) of a
-            two-pass run, regardless of the AppSettings.single_image_generator
-            preference.  Rationale: Pass 1 paints the scene without any
-            character refs, then Pass 2 composites the characters in — there
-            is no reason to ever run Pass 1 through Klein (which is slower
-            and would benefit from refs it does not receive).  For non-
-            two-pass T2I jobs, fall through to the user setting.
+            ``klein_t2i`` means ZERO reference images — Klein is only ever used
+            to composite character references (Pass 2), so a no-ref T2I render
+            must NEVER run through Klein.  We always redirect; the only choice
+            is WHICH first-pass model.  Krea 2 is gated on its workflow file
+            existing, so selecting it is inert until the tested JSON is added
+            (falls back to Z-Image with a warning).  Sets _params["workflow_type"]
+            to the generator actually used.
             """
             _is_two_pass_base = _params.get("two_pass_phase") == "base"
+            p_text = _params.get("prompt", "")
+            # First-pass models have no negative prompt node
+            _params["effective_negative_prompt"] = ""
+            anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
+            _params["submitted_image_prompt"] = (p_text + anti_text_suffix) if p_text else p_text
+
+            # Resolve the selected first-pass generator from settings
+            generator = "z_image_turbo"
+            krea2_model = "krea2_turbo_fp8.safetensors"
             try:
-                # ``klein_t2i`` means ZERO reference images.  Klein is only ever
-                # used to composite character references (Pass 2); a no-reference
-                # text-to-image render must ALWAYS use Z-Image Turbo — running it
-                # through Klein is never correct.  So we redirect every klein_t2i
-                # job to Z-Image regardless of the single_image_generator
-                # preference (the preference only ever chose Z-Image anyway).
-                use_zimage = True
-                if use_zimage:
-                    wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
-                    p_text = _params.get("prompt", "")
-                    # Z-Image has no negative prompt node — don't pass or store negative prompt
-                    _params["effective_negative_prompt"] = ""
-                    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-                    _params["submitted_image_prompt"] = (p_text + anti_text_suffix) if p_text else p_text
-                    _why = (
-                        "two-pass Pass 1 (forced — characters added in Pass 2)"
-                        if _is_two_pass_base
-                        else "user setting + no reference images"
+                async with self._session_factory() as _fp_session:
+                    from backend.database.models import AppSettings as _FpAS
+                    _fp_res = await _fp_session.execute(
+                        sfw_select(_FpAS).where(_FpAS.id == 1)
                     )
-                    logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo ({_why}, negative prompt ignored — unsupported)")
-                    return prepare_zimage_workflow(
-                        workflow_path=wf_path,
-                        prompt=p_text,
-                        width=_params.get("width", 1024),
-                        height=_params.get("height", 1024),
-                        seed=_seed,
-                    )
+                    _fp_set = _fp_res.scalars().first()
+                    if _fp_set:
+                        generator = _fp_set.single_image_generator or "z_image_turbo"
+                        krea2_model = getattr(_fp_set, "krea2_model_name", None) or krea2_model
             except Exception as e:
-                logger.debug(f"Could not check single_image_generator: {e} — using Klein")
+                logger.debug(f"first-pass generator lookup failed: {e} — defaulting Z-Image")
+
+            # ── Krea 2 Turbo (gated on workflow file presence) ──
+            if generator == "krea2_turbo":
+                krea2_path = workflows_dir / "KREA2_TURBO_T2I.json"
+                if krea2_path.exists():
+                    try:
+                        _why = "two-pass Pass 1" if _is_two_pass_base else "first-pass T2I"
+                        logger.info(
+                            f"[{_job_id or 'N/A'}] Redirecting to Krea 2 Turbo "
+                            f"({_why}, model={krea2_model}, negative prompt unsupported)"
+                        )
+                        _params["workflow_type"] = "krea2_turbo"
+                        return prepare_krea2_workflow(
+                            workflow_path=str(krea2_path),
+                            prompt=p_text,
+                            width=_params.get("width", 1024),
+                            height=_params.get("height", 1024),
+                            seed=_seed,
+                            model_name=krea2_model,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[{_job_id or 'N/A'}] Krea 2 workflow prep failed ({e}) "
+                            f"— falling back to Z-Image Turbo"
+                        )
+                else:
+                    logger.warning(
+                        f"[{_job_id or 'N/A'}] single_image_generator=krea2_turbo but "
+                        f"KREA2_TURBO_T2I.json not found in workflows/ — using Z-Image "
+                        f"Turbo until the tested Krea 2 workflow is added"
+                    )
+
+            # ── Z-Image Turbo (default + fallback) ──
+            try:
+                wf_path = str(workflows_dir / "ZIMAGE_TURBO_T2I.json")
+                _why = (
+                    "two-pass Pass 1 (forced — characters added in Pass 2)"
+                    if _is_two_pass_base else "first-pass T2I (no reference images)"
+                )
+                logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo ({_why}, negative prompt ignored — unsupported)")
+                _params["workflow_type"] = "z_image_turbo"
+                return prepare_zimage_workflow(
+                    workflow_path=wf_path,
+                    prompt=p_text,
+                    width=_params.get("width", 1024),
+                    height=_params.get("height", 1024),
+                    seed=_seed,
+                )
+            except Exception as e:
+                logger.debug(f"Z-Image redirect failed: {e}")
             return None
 
         # Z-Image redirect: when single_image_generator is z_image_turbo and workflow is klein_t2i,
@@ -1400,10 +1444,9 @@ class JobDispatcher:
         if workflow_type == "klein_t2i":
             zimage_result = await _try_zimage_redirect(params, seed, job.id if job else None)
             if zimage_result is not None:
-                # Update workflow_type in params so worker selection uses
-                # the correct (empty) capability set for Z-Image Turbo
-                # instead of requiring 'klein' capability.
-                params["workflow_type"] = "z_image_turbo"
+                # _try_zimage_redirect already set params["workflow_type"] to the
+                # first-pass generator actually used (z_image_turbo or krea2_turbo)
+                # so worker selection uses the correct (empty) capability set.
                 return zimage_result
 
         # Log when Z-Image is the user's preference but refs force Klein
@@ -1455,7 +1498,7 @@ class JobDispatcher:
                         params, seed, job.id if job else None
                     )
                     if zimage_fallback is not None:
-                        params["workflow_type"] = "z_image_turbo"
+                        # workflow_type set inside the helper (z_image_turbo/krea2_turbo)
                         return zimage_fallback
             workflow_path = str(workflows_dir / klein_map[effective_workflow])
             prompt_text = params.get("prompt", "")
@@ -3469,6 +3512,7 @@ class JobDispatcher:
             "klein_5ref": {"klein"},
             "klein_t2i": {"klein"},
             "z_image_turbo": set(),  # No special capability needed
+            "krea2_turbo": set(),   # No special capability needed (first-pass T2I)
             "ltx_fflf": {"ltx"},
             "ltx_i2v": {"ltx"},
             "ltx_v2v_extend": {"ltx"},
@@ -3530,7 +3574,7 @@ class JobDispatcher:
             "klein_4ref", "klein_5ref", "klein_t2i",
         ):
             return {img_model}
-        if workflow_type == "z_image_turbo":
+        if workflow_type in ("z_image_turbo", "krea2_turbo"):
             return {single_img_model}
         if workflow_type in (
             "ltx_fflf", "ltx_i2v",

@@ -58,6 +58,7 @@ class SettingsResponse(BaseModel):
     video_model_type: str = "ltx_2.3"
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     single_image_generator: str = "z_image_turbo"
+    krea2_model_name: str = "krea2_turbo_fp8.safetensors"
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
@@ -129,6 +130,7 @@ class SettingsUpdate(BaseModel):
     video_model_type: Optional[str] = None
     ltx_model_gguf: Optional[str] = None
     single_image_generator: Optional[str] = None
+    krea2_model_name: Optional[str] = None
     use_distilled_lora: Optional[bool] = None
     distilled_lora_name: Optional[str] = None
     default_llm_provider: Optional[str] = None
@@ -339,6 +341,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         video_model_type=settings.video_model_type or "ltx_2.3",
         ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
         single_image_generator=settings.single_image_generator or "z_image_turbo",
+        krea2_model_name=settings.krea2_model_name or "krea2_turbo_fp8.safetensors",
         use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
         distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
         default_llm_provider=settings.default_llm_provider,
@@ -531,6 +534,8 @@ async def update_settings(
             settings.ltx_model_gguf = req.ltx_model_gguf
         if req.single_image_generator is not None:
             settings.single_image_generator = req.single_image_generator
+        if req.krea2_model_name is not None:
+            settings.krea2_model_name = req.krea2_model_name
         if req.use_distilled_lora is not None:
             settings.use_distilled_lora = req.use_distilled_lora
         if req.distilled_lora_name is not None:
@@ -1259,6 +1264,7 @@ class SettingsExportData(BaseModel):
     video_model_type: str
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     single_image_generator: str = "z_image_turbo"
+    krea2_model_name: str = "krea2_turbo_fp8.safetensors"
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
@@ -1338,6 +1344,7 @@ async def export_settings(
             video_model_type=settings.video_model_type or "ltx_2.3",
             ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
             single_image_generator=settings.single_image_generator or "z_image_turbo",
+            krea2_model_name=settings.krea2_model_name or "krea2_turbo_fp8.safetensors",
             use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
             distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
             default_llm_provider=settings.default_llm_provider,
@@ -1470,6 +1477,8 @@ async def import_settings(
             settings.ltx_model_gguf = data["ltx_model_gguf"]
         if "single_image_generator" in data:
             settings.single_image_generator = data["single_image_generator"]
+        if "krea2_model_name" in data:
+            settings.krea2_model_name = data["krea2_model_name"]
         if "use_distilled_lora" in data:
             settings.use_distilled_lora = data["use_distilled_lora"]
         if "distilled_lora_name" in data:

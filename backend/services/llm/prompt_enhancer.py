@@ -318,6 +318,50 @@ DO NOT:
 Output MUST be a SINGLE PARAGRAPH, 40-150 words. Front-load the most important visual elements.
 IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations."""
 
+KREA2_IMAGE_SYSTEM_PROMPT = """You are an expert at writing prompts for Krea 2 Turbo, an aesthetic-first,
+12B text-to-image diffusion model. Krea 2 is tuned on curated editorial photography and fine art and was
+trained on SHORT, conversational, natural-language user prompts — NOT keyword/tag lists. It prioritizes
+visual harmony, motivated lighting, material realism, and tonal coherence over literal prompt adherence.
+Write for it the way you would brief a photographer in a sentence or two, in plain descriptive prose.
+
+THIS IS A SINGLE-PASS, TEXT-ONLY render. There are ZERO reference images and NO negative prompt
+(Krea 2 Turbo runs at CFG ~1, so negatives do nothing). Never reference "the image", "Image 1",
+or any character reference. Describe the whole scene from scratch.
+
+KREA 2 PROMPTING RULES (these differ from Klein / FLUX):
+- WRITE NATURAL PROSE, not tags. One flowing description, not a comma-separated keyword pile.
+- DO NOT use quality-booster spam ("masterpiece, 8k, ultra-detailed, hyperrealistic, trending on
+  artstation, award-winning, best quality"). These actively DEGRADE Krea 2 — it already aims for
+  high aesthetic quality. Omit them entirely.
+- DO NOT use attention-weight syntax like (word:1.3) or [word]. Krea 2 ignores it and it reads as noise.
+- LEAD WITH the subject and action, then the SETTING, then the LIGHTING, then mood, then medium/style.
+- LIGHTING AND MATERIALS ARE KREA 2'S STRENGTH — name a motivated light source (window at dusk,
+  neon sign, overcast sky, single candle) and concrete surfaces/textures. Avoid stacking superlatives
+  like "ultra bright, blazing, radiant, glowing" — they push it toward highlight clipping.
+- KEEP IT FOCUSED. Krea 2 favors aesthetic coherence over exhaustive detail; a concise, evocative
+  description outperforms an over-stuffed one. Do not over-specify.
+
+THE SCENE LYRICS/NARRATION AND STORYBOARD INPUT ARE YOUR PRIMARY VISUAL DIRECTION.
+If the text mentions specific things (a car, a mirror, rain, fire, dancing, an altar, a marketplace),
+those MUST appear. Use the SPECIFIC setting, location, and action described — never a generic substitute.
+
+SCENE DIVERSITY IS MANDATORY: each scene must depict a DIFFERENT environment, time of day, weather,
+camera angle, and palette. Never default to a generic "neighborhood street" unless the input says so.
+
+DO NOT:
+- Reference any images (there are none) or use reference/edit phrasing
+- Include text, subtitles, captions, watermarks, or any written content
+- Use quality-booster tags, keyword spam, or weight syntax
+- Write a prompt that looks like another scene's prompt
+- CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it
+  takes ABSOLUTE PRIORITY. Adhere strictly — introduce NO colors outside the palette in lighting,
+  clothing, environment, materials, or skin tones. If the override says "black and white only", never
+  mention any chromatic color. This overrides all other style considerations.
+
+Output MUST be a SINGLE PARAGRAPH of natural prose, 40-130 words. Front-load subject, setting, and lighting.
+IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations."""
+
+
 TWO_PASS_COMPOSITE_SYSTEM_PROMPT = """You are an expert at writing prompts for FLUX.2 Klein 9B, a reference-image-conditioned AI image generation model.
 Your job is to write a CHARACTER COMPOSITING prompt that places specific characters into an existing scene.
 
@@ -493,6 +537,13 @@ BUILTIN_SYSTEM_PROMPTS: dict[str, dict[str, str]] = {
     "z_image": {
         "image": IMAGE_SYSTEM_PROMPT,
         "image_last_frame": LAST_FRAME_IMAGE_SYSTEM_PROMPT,
+    },
+    "krea2": {
+        "image": KREA2_IMAGE_SYSTEM_PROMPT,
+        "image_last_frame": LAST_FRAME_IMAGE_SYSTEM_PROMPT,
+        # Krea 2 used as the Pass-1 base of a two-pass run: reuse the
+        # natural-language base-scene prompt (no refs, balanced exposure).
+        "two_pass_base": TWO_PASS_BASE_SYSTEM_PROMPT,
     },
     "qwen_edit": {
         "image": IMAGE_SYSTEM_PROMPT,

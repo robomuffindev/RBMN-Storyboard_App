@@ -783,6 +783,12 @@ async def enhance_prompt(
         else:
             gen_model_name = app_settings.image_model_type or "flux2_klein_dev_9b"
             overrides = app_settings.image_system_prompt_overrides or {}
+            # When the first-pass generator is Krea 2 Turbo, a no-reference
+            # image render goes through Krea 2 (not Klein/Z-Image), which needs
+            # its own natural-language prompting rules.  Use the "krea2" prompt
+            # key so the enhanced prompt matches the actual render model.
+            if (app_settings.single_image_generator or "") == "krea2_turbo":
+                gen_model_name = "krea2"
 
         model_override = overrides.get(gen_model_name, {})
         if isinstance(model_override, dict) and model_override.get("enabled") and model_override.get("text", "").strip():
@@ -790,7 +796,7 @@ async def enhance_prompt(
 
         # When project mode is narration, use narration-specific prompts
         # (only if no user override is already set)
-        if not system_prompt_override and project.mode in ("narration_images", "narration_video"):
+        if not system_prompt_override and gen_model_name != "krea2" and project.mode in ("narration_images", "narration_video"):
             from backend.services.llm.prompt_enhancer import (
                 NARRATION_IMAGE_SYSTEM_PROMPT,
                 NARRATION_VIDEO_SYSTEM_PROMPT,

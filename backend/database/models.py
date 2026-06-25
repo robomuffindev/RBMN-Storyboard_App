@@ -341,6 +341,9 @@ class AppSettings(SQLModel, table=True):
     image_model_type: str = Field(default="flux2_klein_dev_9b")
     video_model_type: str = Field(default="ltx_2.3")
     single_image_generator: str = Field(default="z_image_turbo")
+    # Krea 2 Turbo first-pass model file (overrides UNETLoader in the Krea2
+    # workflow). fp8 = RTX 40xx/30xx/older, mxfp8 = RTX 50xx Blackwell.
+    krea2_model_name: str = Field(default="krea2_turbo_fp8.safetensors")
     use_distilled_lora: bool = Field(default=True)
     distilled_lora_name: str = Field(default="ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
     # Network access — when True, server binds to 0.0.0.0 (LAN/WAN accessible)

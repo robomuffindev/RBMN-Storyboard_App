@@ -109,6 +109,17 @@ async def register_default_workflows(session: AsyncSession) -> None:
         },
     ]
 
+    # Krea 2 Turbo — registered ONLY once the user has dropped in their tested
+    # workflow JSON (KREA2_TURBO_T2I.json).  Until then it's simply absent and
+    # the dispatcher falls back to Z-Image, so no startup warning is emitted.
+    if (workflows_dir / "KREA2_TURBO_T2I.json").exists():
+        defaults.append({
+            "filename": "KREA2_TURBO_T2I.json",
+            "name": "Krea 2 Turbo - Text to Image",
+            "workflow_type": "krea2_t2i",
+            "description": "Krea 2 Turbo single-pass text-to-image (first-pass generator, no reference images, no negative prompt).",
+        })
+
     # Register each default workflow
     registered_count = 0
     for default_config in defaults:
