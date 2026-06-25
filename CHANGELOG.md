@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.8.31] - 2026-06-21
+
+### Fixed — SQLite WAL never shrank (parked at ~4 MB with "nothing to commit")
+
+Power-user report: the `-wal` file grows to ~4 MB and stays there even when there's nothing left to commit. Diagnosed as expected-but-untidy SQLite behavior, not corruption:
+
+- WAL mode was enabled but no explicit checkpoint was ever forced. SQLite's automatic checkpoint runs in **PASSIVE** mode at the `wal_autocheckpoint` threshold (default 1000 pages × 4 KB page size = **~4 MB**, exactly the size observed). PASSIVE folds committed frames back into the main `.db` but **never truncates** the `-wal` file, so it parks at ~4 MB. The data is already committed ("nothing transferable") — the file just isn't reclaimed.
+- The WAL capping at 4 MB (rather than growing without bound) confirms checkpoints were succeeding, so there was **no leaked/long-lived reader** blocking checkpointing.
+
+Fixes (`backend/database/database.py`, `backend/main.py`):
+- New `checkpoint_wal(mode="TRUNCATE")` helper runs `PRAGMA wal_checkpoint(TRUNCATE)` to fold frames in **and** shrink the `-wal` to 0 bytes.
+- `cleanup_db()` now TRUNCATE-checkpoints before `engine.dispose()`, so a clean shutdown leaves a 0-byte `-wal`.
+- New `periodic_wal_checkpoint()` background loop (every 5 min) TRUNCATE-checkpoints during long sessions, reclaiming disk after big write bursts (auto-gen / batch). Cancelled on shutdown.
+- `wal_autocheckpoint=1000` is now set explicitly with a comment documenting the 4 MB relationship.
+
 ## [1.8.30] - 2026-06-18
 
 ### Improved — Pass-2 Klein compositing preserves the base scene (anti-darkening)

@@ -1,4 +1,5 @@
 """Database engine setup and session management."""
+import asyncio
 import logging
 from typing import AsyncGenerator
 
@@ -43,6 +44,15 @@ def set_sqlite_pragmas(dbapi_conn, connection_record):
 
     # WAL mode for better concurrency
     cursor.execute("PRAGMA journal_mode=WAL")
+
+    # Auto-checkpoint threshold (frames).  SQLite's automatic checkpoint runs
+    # in PASSIVE mode when the -wal reaches this many pages.  Default is 1000
+    # pages which at the 4 KB page size is ~4 MB — the ceiling the -wal parks
+    # at.  PASSIVE checkpoints fold committed frames back into the main .db but
+    # never TRUNCATE the -wal file, so it sits at ~4 MB with "nothing to
+    # commit".  We keep the default threshold and reclaim the space with an
+    # explicit TRUNCATE checkpoint (periodic + on shutdown — see checkpoint_wal).
+    cursor.execute("PRAGMA wal_autocheckpoint=1000")
 
     # Write-ahead log synchronous mode (NORMAL = balance between safety and speed)
     cursor.execute("PRAGMA synchronous=NORMAL")
@@ -455,7 +465,65 @@ async def init_db() -> None:
     logger.info("Database initialized successfully")
 
 
+async def checkpoint_wal(mode: str = "TRUNCATE"):
+    """Force a WAL checkpoint; for TRUNCATE this shrinks the -wal to 0 bytes.
+
+    Automatic checkpoints run in PASSIVE mode at the wal_autocheckpoint
+    threshold (~4 MB).  PASSIVE folds committed frames back into the main .db
+    but never truncates the -wal, so it stays at ~4 MB even with nothing left
+    to commit.  An explicit wal_checkpoint(TRUNCATE) reclaims that space.
+
+    Returns (busy, log_frames, checkpointed_frames) or None on failure.
+    busy=1 means a reader/writer held the lock so the file was not truncated
+    this pass — it succeeds on a later idle pass and is NOT an error.
+    """
+    mode = (mode or "TRUNCATE").upper()
+    if mode not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
+        mode = "TRUNCATE"
+    try:
+        async with engine.connect() as conn:
+            result = await conn.exec_driver_sql(f"PRAGMA wal_checkpoint({mode})")
+            row = result.fetchone()
+        if row is not None:
+            busy, log_frames, ckpt = int(row[0]), int(row[1]), int(row[2])
+            if busy:
+                logger.debug(
+                    f"WAL checkpoint({mode}) busy=1 — lock held, -wal not "
+                    f"truncated this pass (log={log_frames} frames)"
+                )
+            else:
+                logger.debug(
+                    f"WAL checkpoint({mode}) ok — log={log_frames}, "
+                    f"checkpointed={ckpt}"
+                )
+            return busy, log_frames, ckpt
+        return None
+    except Exception as e:
+        logger.warning(f"WAL checkpoint({mode}) failed: {e}")
+        return None
+
+
+async def periodic_wal_checkpoint(interval_seconds: int = 300) -> None:
+    """Background loop: periodically TRUNCATE-checkpoint the WAL.
+
+    Keeps the -wal file from parking at the ~4 MB ceiling during long sessions
+    and reclaims disk after large write bursts (auto-gen / batch).  Cancelled
+    on shutdown.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await checkpoint_wal("TRUNCATE")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug(f"periodic_wal_checkpoint iteration failed: {e}")
+
+
 async def cleanup_db() -> None:
-    """Close database connections."""
+    """Checkpoint the WAL, then close database connections."""
+    # Flush + shrink the -wal so a clean shutdown leaves a 0-byte WAL instead
+    # of the ~4 MB PASSIVE-checkpoint residue.
+    await checkpoint_wal("TRUNCATE")
     await engine.dispose()
     logger.info("Database connections closed")

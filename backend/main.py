@@ -280,6 +280,14 @@ async def lifespan(app: FastAPI):
         app.state.job_dispatcher.dispatch_loop()
     )
 
+    # Periodic WAL checkpoint (TRUNCATE) — keeps the SQLite -wal file from
+    # parking at the ~4 MB autocheckpoint ceiling and reclaims disk after
+    # write bursts (auto-gen / batch).  See database.checkpoint_wal.
+    from backend.database import periodic_wal_checkpoint
+    app.state.wal_checkpoint_task = asyncio.create_task(
+        periodic_wal_checkpoint(interval_seconds=300)
+    )
+
     # Initialize RunPod manager if configured
     from backend.services.runpod.manager import RunPodManager
     runpod_manager = RunPodManager.get_instance()
@@ -324,6 +332,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    # Stop the periodic WAL checkpoint loop before final checkpoint+dispose
+    if hasattr(app.state, "wal_checkpoint_task"):
+        app.state.wal_checkpoint_task.cancel()
+        try:
+            await app.state.wal_checkpoint_task
+        except asyncio.CancelledError:
+            pass
+
     await cleanup_db()
     logger.info("Shutdown complete")
 
@@ -332,7 +348,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Robomuffin Idea Factory",
     description="AI music video / narration video creation tool",
-    version="1.8.30",
+    version="1.8.31",
     lifespan=lifespan,
 )
 
