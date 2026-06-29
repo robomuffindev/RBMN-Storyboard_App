@@ -91,3 +91,21 @@ website-*.html
 # ---------- Alembic (unused — migrations are inline in database.py) ----------
 alembic.ini
 alembi
+# ---------- Sample / user AAF files (large, personal — never commit) ----------
+sampleaaf/
+*.aaf
+
+# Local Krea2 V2 workflow source exports (not for repo)
+KREA2V2/
+
+# Generated diagnostic outputs (tools/diag_*.py) — contain project runtime data
+/diag.md
+/*_diag.md
+/chapters.md
+
+# Working audit reports + design blueprints (dev scratch, not for the repo)
+/AUDIT_*.md
+/BLUEPRINT_*.md
+
+# Stray root npm lockfile (real npm project is in frontend/)
+/package-lock.json

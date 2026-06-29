@@ -8,9 +8,11 @@ edit/reference model, so it never replaces FLUX.2 Klein for character
 compositing (Pass 2). When a scene has character references, the app still uses
 Klein.
 
-> Status: integration is wired and selectable in Settings. It activates the
-> moment you drop a tested `KREA2_TURBO_T2I.json` into the `workflows/` folder.
-> Until then, selecting Krea 2 safely falls back to Z-Image Turbo.
+> Status: fully integrated and selectable in Settings. As of v1.15.0 the four
+> tuned V2 workflows ship in `workflows/` (SFW/NSFW × plain/Ideogram). Selecting
+> Krea 2 uses them directly; if a workflow file is ever missing it safely falls
+> back (NSFW → SFW file, or Krea 2 → Z-Image Turbo). The model + node files below
+> must be installed on each ComfyUI server.
 
 ---
 
@@ -62,13 +64,40 @@ Set the active file per deployment in **Settings → Single Image Generator → 
 
 ### Custom nodes (for the ComfyUI workflow)
 
-The Krea 2 community installer adds these. The app's existing workflows already
-use rgthree, KJNodes and ComfyUI-Manager — the genuinely new one is the Krea 2
-conditioning node:
+The Krea 2 community installer (`KREA2_ULTRA-MODELS-NODES_INSTALL-V2.bat`) adds
+these. rgthree, KJNodes and ComfyUI-Manager are already used by the app's other
+workflows; the Krea 2-specific ones are:
 
-- `ComfyUI-ConditioningKrea2Rebalance` (Krea 2-specific) — **new**
-- `ComfyUI-RBG-SmartSeedVariance` — new (optional, seed variance)
-- `ComfyUI_essentials` — common dependency (may already be present)
+- `ComfyUI-Krea2T-Enhancer` (`capitan01R`) — **required for NSFW mode.** Patches
+  the Krea2 text-fusion path on the model line; with `enabled: true` it also
+  bypasses the model's built-in safety checker. Only the NSFW workflows use it.
+- `ComfyUI-RBG-SmartSeedVariance` (`RamonGuthrie`) — `RBG_Smart_Seed_Variance`,
+  used by all four V2 workflows on the conditioning line.
+- `ComfyUI_essentials` — common dependency (may already be present).
+
+> The installer also offers a `krea2_turbo_lora_rank_64_bf16` LoRA. This app does
+> **not** use it (the Power Lora Loader is left empty), so it is optional.
+
+---
+
+### V2 "Ultra" workflows + SFW / NSFW mode (v1.15.0)
+
+The app ships **four** Krea 2 workflows and picks one per render based on the
+SFW toggle and whether Ideogram JSON mode is on:
+
+| File | Mode | Safety checker |
+|---|---|---|
+| `KREA2_TURBO_T2I.json` | plain prompt | **SFW** (active) |
+| `KREA2_TURBO_T2I_NSFW.json` | plain prompt | NSFW (bypassed) |
+| `KREA2_IDEOGRAM_T2I.json` | Ideogram JSON | **SFW** (active) |
+| `KREA2_IDEOGRAM_T2I_NSFW.json` | Ideogram JSON | NSFW (bypassed) |
+
+The NSFW files insert the `ComfyUI-Krea2T-Enhancer` node between the Power Lora
+Loader and the KSampler (`enabled: true`, `strength: 1.0`). The SFW files leave
+the model line going straight to the sampler. Toggle in **Settings → Single
+Image Generator → Krea 2 → "SFW mode (model safety checker on)"** (default ON).
+If a NSFW file is missing, the dispatcher logs a warning and falls back to the
+matching SFW file.
 
 ---
 
@@ -180,7 +209,8 @@ keys on the Z-Image model.)
 
 1. Copy the model files to each generation server (table in §1).
 2. Restart/refresh ComfyUI on each server so it sees the new models + nodes.
-3. Drop your tested `KREA2_TURBO_T2I.json` into the app's `workflows/` folder.
+3. Drop your tested Krea 2 workflows (`KREA2_TURBO_T2I.json` + the `_NSFW` /
+   Ideogram variants) into the app's `workflows/` folder.
 4. Restart the app (registers the workflow; the dispatcher will use it).
 5. In **Settings → Single Image Generator**, choose **Krea 2 Turbo** and set the
    **Krea 2 Model File** to match each server's GPU.

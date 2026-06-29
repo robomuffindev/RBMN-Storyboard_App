@@ -84,6 +84,12 @@ class ConceptData(BaseModel):
     # produced.  Values: "" / "off" / "bw" / "grayscale" / "sepia".
     # Per-scene Scene.parameters.image_color_filter overrides this.
     global_image_color_filter: str = ""
+    # Ideogram / structured-JSON prompting mode (Krea 2 only).  OFF by default.
+    # When ON + the first-pass generator is Krea 2, scenes are prompted with the
+    # Ideogram-4 structured caption format (positional bounding boxes + palettes)
+    # instead of plain natural language.  Per-scene Scene.parameters.json_prompt_mode
+    # overrides this.
+    json_prompt_mode: bool = False
     # Model-generated audio (LTX 2.3 AV-native).  Global gate: when True,
     # scenes whose Video tab has `use_model_audio` set are dispatched via
     # the AV-native workflow that lets the model generate its own audio
@@ -279,6 +285,7 @@ async def get_concept(
         global_color_override=s.get("global_color_override", "") or "",
         custom_color_palette=s.get("custom_color_palette", "") or "",
         global_image_color_filter=s.get("global_image_color_filter", "") or "",
+        json_prompt_mode=bool(s.get("json_prompt_mode", False)),
         enable_model_audio=bool(s.get("enable_model_audio", False)),
         # Symmetric clamp with the PUT side so a hand-edited DB value can't
         # crash or distort the UI slider (range 0..2×).
@@ -340,6 +347,7 @@ async def save_concept(
     settings["custom_color_palette"] = req.custom_color_palette
     # FFmpeg post-process color filter ("" / "bw" / "grayscale" / "sepia")
     settings["global_image_color_filter"] = (req.global_image_color_filter or "").strip().lower()
+    settings["json_prompt_mode"] = bool(req.json_prompt_mode)
     # Model-generated audio (LTX 2.3 AV-native) — global gate + mixer level
     settings["enable_model_audio"] = bool(req.enable_model_audio)
     settings["model_audio_volume"] = max(0.0, min(2.0, float(req.model_audio_volume)))

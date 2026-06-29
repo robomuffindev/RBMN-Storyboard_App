@@ -5072,3 +5072,177 @@ async def upload_srt(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process SRT file: {str(e)}",
         )
+
+
+@router.post(
+    "/import-aaf",
+    summary="Import an ElevenLabs AAF timeline → replace scenes",
+)
+async def import_aaf_timeline(
+    project_id: UUID,
+    file: UploadFile = File(...),
+    audio: Optional[UploadFile] = File(None),
+    audio_asset_id: Optional[str] = Form(None),
+    min_scene_seconds: float = Form(0.0),
+    session: AsyncSession = Depends(get_session),
+):
+    """Parse an AAF (e.g. ElevenLabs Dubbing Studio export) and REPLACE the
+    project's scenes with the AAF's clip boundaries.  Optionally attach a new
+    audio file (or use the project's existing audio); audio is then sliced
+    per-scene and chapters are rebuilt — mirroring Suggest Timeline.
+    """
+    import os
+    import tempfile
+    from backend.services.import_aaf import parse_aaf_clips, clips_to_scenes, AafImportError
+
+    await _get_project_or_404(project_id, session)
+
+    # 1. Persist the uploaded AAF to a temp file for pyaaf2 (needs a path).
+    aaf_bytes = await file.read()
+    if not aaf_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty AAF file.")
+    tmp = tempfile.NamedTemporaryFile(suffix=".aaf", delete=False)
+    tmp.write(aaf_bytes)
+    tmp.flush()
+    tmp.close()
+    tmp_path = tmp.name
+
+    # Validate / parse the AAF FIRST — fail fast before any scene/audio mutation.
+    try:
+        clips = parse_aaf_clips(tmp_path)
+    except AafImportError as _pe:
+        try:
+            import os as _os
+            _os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(_pe))
+
+    project_path = settings.project_dir / str(project_id)
+    audio_attached = False
+    try:
+        # 2. Audio: a new upload replaces the project's primary music asset so
+        #    per-scene slicing uses it.  "Pick existing" sends no file and we
+        #    simply slice whatever MUSIC asset already exists.
+        if audio is not None and audio.filename:
+            existing_music = (await session.execute(
+                select(Asset).where(
+                    Asset.project_id == project_id,
+                    Asset.asset_type == AssetType.MUSIC,
+                )
+            )).scalars().all()
+            for ma in existing_music:
+                if "stems/" not in (ma.rel_path or ""):
+                    try:
+                        (project_path / ma.rel_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    await session.delete(ma)
+            await session.flush()
+
+            audio_dir = project_path / "assets" / "audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            acontent = await audio.read()
+            apath = audio_dir / audio.filename
+            with open(apath, "wb") as af:
+                af.write(acontent)
+            session.add(Asset(
+                project_id=project_id,
+                filename=audio.filename,
+                rel_path=f"assets/audio/{audio.filename}",
+                asset_type=AssetType.MUSIC,
+                sha256=hashlib.sha256(acontent).hexdigest(),
+                file_size=len(acontent),
+            ))
+            await session.flush()
+            audio_attached = True
+
+        # Probe audio duration so the LAST scene can extend to the audio end.
+        audio_end = None
+        try:
+            music = (await session.execute(
+                select(Asset).where(
+                    Asset.project_id == project_id,
+                    Asset.asset_type == AssetType.MUSIC,
+                    ~Asset.rel_path.contains("stems/"),
+                )
+            )).scalars().first()
+            if music:
+                mp = project_path / music.rel_path
+                if mp.exists():
+                    from backend.services.video.ffmpeg import get_media_info
+                    audio_end = float((get_media_info(str(mp)) or {}).get("duration") or 0.0) or None
+        except Exception:
+            audio_end = None
+
+        # 3. Build scene boundaries from the parsed clips (+ audio end).
+        scenes_data = clips_to_scenes(
+            clips, audio_end=audio_end, min_scene_seconds=float(min_scene_seconds or 0.0),
+        )
+        if not scenes_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="AAF parsed but produced no usable scene boundaries.",
+            )
+
+        # 4. REPLACE all existing scenes.
+        existing_scenes = (await session.execute(
+            select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+        )).scalars().all()
+        for sc in existing_scenes:
+            await session.delete(sc)
+        await session.flush()
+
+        created = []
+        for i, sd in enumerate(scenes_data):
+            ns = Scene(
+                project_id=project_id,
+                name=sd["name"],
+                start_time=float(sd["start_time"]),
+                end_time=float(sd["end_time"]),
+                order_index=i,
+                prompt="",
+                parameters={"aaf_label": sd.get("name", "")},
+            )
+            session.add(ns)
+            created.append(ns)
+        await session.flush()
+        scene_ids = [str(s.id) for s in created]
+
+        # 5. Slice audio per scene (best-effort).
+        try:
+            await _slice_audio_for_scenes(project_id, session)
+        except Exception as _se:
+            logger.warning(f"[ImportAAF] audio slice failed (non-fatal): {_se}")
+
+        await session.commit()
+
+        # 6. Rebuild chapters from the new scenes (best-effort, isolated commit).
+        chapter_count = 0
+        chapters_ok = True
+        try:
+            from backend.services.chapters import rebuild_chapters
+            chapters = await rebuild_chapters(session, project_id)
+            chapter_count = len(chapters)
+            await session.commit()
+        except Exception as _ce:
+            logger.warning(f"[ImportAAF] chapter rebuild failed (non-fatal): {_ce}")
+            chapters_ok = False
+            await session.rollback()
+
+        _msg = f"Imported {len(created)} scenes from the AAF timeline."
+        if not chapters_ok:
+            _msg += " (Chapters could not be rebuilt — run 'Re-derive Chapters' from the Chapters panel.)"
+        return {
+            "created_count": len(created),
+            "scene_ids": scene_ids,
+            "audio_attached": audio_attached,
+            "chapter_count": chapter_count,
+            "chapters_ok": chapters_ok,
+            "message": _msg,
+        }
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass

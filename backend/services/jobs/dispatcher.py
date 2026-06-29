@@ -29,6 +29,8 @@ from ..comfyui.workflow import (
     prepare_zimage_workflow,
     prepare_krea2_workflow,
     prepare_sequencer_workflow,
+    prepare_ltx_director_workflow,
+    prepare_klein_inpaint_workflow,
     prepare_workflow_from_config,
     stamp_vhs_unique_prefix,
     flatten_group_nodes,
@@ -615,7 +617,17 @@ class JobDispatcher:
                     # Also store the original user prompt
                     params["two_pass_original_prompt"] = base_prompt
                     params["two_pass_scene_prompt"] = enhanced_base_prompt
-                    # Rebuild workflow with the new prompt
+                    # Rebuild workflow with the new prompt.
+                    # The FIRST _build_workflow above already ran the first-pass
+                    # redirect and mutated params["workflow_type"] away from
+                    # "klein_t2i" (-> z_image_turbo / krea2_turbo).  If we rebuild
+                    # as-is, _build_builtin_workflow sees that resolved type, which
+                    # has no direct handler, and raises "Unknown workflow type" —
+                    # which the except below swallows, SILENTLY DROPPING the
+                    # re-enhanced scene-only prompt.  Reset to klein_t2i so the
+                    # rebuild re-runs the redirect (same model choice) WITH the
+                    # re-enhanced prompt.
+                    params["workflow_type"] = "klein_t2i"
                     workflow = await self._build_workflow(job)
                     # Re-apply post-build transformations
                     workflow = flatten_group_nodes(workflow)
@@ -1167,7 +1179,7 @@ class JobDispatcher:
         # output (0-frame video, corrupt image).  Catch them HERE rather than
         # failing deep in the workflow execution.  Transition clips are not
         # included since they auto-derive dims from the frames.
-        if workflow_type and workflow_type not in ("ltx_transition",):
+        if workflow_type and workflow_type not in ("ltx_transition", "klein_inpaint"):
             _w = params.get("width", 0)
             _h = params.get("height", 0)
             if not isinstance(_w, int) or not isinstance(_h, int) or _w <= 0 or _h <= 0:
@@ -1375,6 +1387,7 @@ class JobDispatcher:
             # Resolve the selected first-pass generator from settings
             generator = "z_image_turbo"
             krea2_model = "krea2_turbo_fp8.safetensors"
+            krea2_sfw = True
             try:
                 async with self._session_factory() as _fp_session:
                     from backend.database.models import AppSettings as _FpAS
@@ -1385,18 +1398,75 @@ class JobDispatcher:
                     if _fp_set:
                         generator = _fp_set.single_image_generator or "z_image_turbo"
                         krea2_model = getattr(_fp_set, "krea2_model_name", None) or krea2_model
+                        krea2_sfw = bool(getattr(_fp_set, "krea2_sfw_mode", True))
             except Exception as e:
                 logger.debug(f"first-pass generator lookup failed: {e} — defaulting Z-Image")
 
             # ── Krea 2 Turbo (gated on workflow file presence) ──
             if generator == "krea2_turbo":
-                krea2_path = workflows_dir / "KREA2_TURBO_T2I.json"
+                # JSON Prompt Mode (Ideogram structured caption) — opt-in per
+                # project/scene.  Builds/loads a caption and routes to the
+                # Ideogram-node workflow.  Falls back to plain Krea 2 on any miss.
+                try:
+                    _caption = await self._build_or_get_ideogram_caption(job, p_text, _job_id or "N/A")
+                except Exception:
+                    _caption = None
+                if _caption:
+                    _ideo_name = "KREA2_IDEOGRAM_T2I.json" if krea2_sfw else "KREA2_IDEOGRAM_T2I_NSFW.json"
+                    _ideo_path = workflows_dir / _ideo_name
+                    if not _ideo_path.exists() and not krea2_sfw:
+                        logger.warning(
+                            f"[{_job_id or 'N/A'}] {_ideo_name} not found — falling back to "
+                            f"SFW KREA2_IDEOGRAM_T2I.json"
+                        )
+                        _ideo_path = workflows_dir / "KREA2_IDEOGRAM_T2I.json"
+                    if _ideo_path.exists():
+                        try:
+                            from backend.services.comfyui.workflow import prepare_krea2_ideogram_workflow
+                            logger.info(
+                                f"[{_job_id or 'N/A'}] Redirecting to Krea 2 + Ideogram JSON prompt "
+                                f"(model={krea2_model}, {'SFW' if krea2_sfw else 'NSFW'})"
+                            )
+                            _params["workflow_type"] = "krea2_turbo"
+                            # Stash the structured caption so it can be saved onto
+                            # the generated asset's meta — used later to feed the
+                            # exact layout/positioning back into prompts that
+                            # reference this image.
+                            _params["ideogram_caption"] = _caption
+                            return prepare_krea2_ideogram_workflow(
+                                workflow_path=str(_ideo_path),
+                                caption=_caption,
+                                width=_params.get("width", 1024),
+                                height=_params.get("height", 1024),
+                                seed=_seed,
+                                model_name=krea2_model,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[{_job_id or 'N/A'}] Ideogram workflow prep failed ({e}) "
+                                f"— falling back to plain Krea 2"
+                            )
+                    else:
+                        logger.warning(
+                            f"[{_job_id or 'N/A'}] JSON mode on but KREA2_IDEOGRAM_T2I.json "
+                            f"not found — using plain Krea 2"
+                        )
+
+                _krea2_name = "KREA2_TURBO_T2I.json" if krea2_sfw else "KREA2_TURBO_T2I_NSFW.json"
+                krea2_path = workflows_dir / _krea2_name
+                if not krea2_path.exists() and not krea2_sfw:
+                    logger.warning(
+                        f"[{_job_id or 'N/A'}] {_krea2_name} not found — falling back to "
+                        f"SFW KREA2_TURBO_T2I.json"
+                    )
+                    krea2_path = workflows_dir / "KREA2_TURBO_T2I.json"
                 if krea2_path.exists():
                     try:
                         _why = "two-pass Pass 1" if _is_two_pass_base else "first-pass T2I"
                         logger.info(
                             f"[{_job_id or 'N/A'}] Redirecting to Krea 2 Turbo "
-                            f"({_why}, model={krea2_model}, negative prompt unsupported)"
+                            f"({_why}, model={krea2_model}, {'SFW' if krea2_sfw else 'NSFW'}, "
+                            f"negative prompt unsupported)"
                         )
                         _params["workflow_type"] = "krea2_turbo"
                         return prepare_krea2_workflow(
@@ -1481,6 +1551,28 @@ class JobDispatcher:
             ref_images = await self._resolve_asset_paths(
                 params.get("reference_asset_ids", [])
             )
+            # Last-frame continuity: prepend the scene's chosen FIRST FRAME image as
+            # Klein reference slot 1 (matches the SceneEditor manual path) so the end
+            # frame stays the same shot. Best-effort — if the FF isn't rendered yet
+            # at dispatch we simply skip it (character refs are still attached).
+            if params.get("frame_type") == "last" and params.get("attach_first_frame_ref") and job and getattr(job, "scene_id", None):
+                try:
+                    async with self._session_factory() as _ff_s:
+                        _ff_scene = await _ff_s.get(Scene, job.scene_id)
+                    _ff_rel = (_ff_scene.parameters or {}).get("chosen_image_path") if _ff_scene else None
+                    if _ff_rel and _ff_rel not in ref_images:
+                        ref_images = [_ff_rel] + ref_images
+                        logger.info(
+                            f"[{job.id}] LF: prepended first-frame image as Klein ref slot 1 "
+                            f"({_ff_rel})"
+                        )
+                    elif not _ff_rel:
+                        logger.info(
+                            f"[{job.id}] LF: attach_first_frame_ref set but no chosen_image_path "
+                            f"yet — generating last frame without the FF reference"
+                        )
+                except Exception as _ff_e:
+                    logger.debug(f"LF first-frame-ref attach skipped: {_ff_e}")
             # Fall back to correct workflow if resolved ref count doesn't match requested
             # (e.g., frontend sent klein_1ref but the character image asset couldn't be found)
             actual_ref_count = len(ref_images)
@@ -1522,6 +1614,202 @@ class JobDispatcher:
                 seed=seed,
                 ref_images=ref_images,
             )
+
+        # ===== Klein inpaint (mask-paint edit of a rendered image) =====
+        if workflow_type == "klein_inpaint":
+            inpaint_path = workflows_dir / "KLEIN_INPAINT.json"
+            if not inpaint_path.exists():
+                raise ValueError(
+                    "workflow_type=klein_inpaint but KLEIN_INPAINT.json is missing from workflows/"
+                )
+            _src = await self._resolve_single_asset_path(params.get("source_masked_asset_id"))
+            _src = _src or params.get("source_masked_path") or ""
+            _ref = await self._resolve_single_asset_path(params.get("reference_asset_id"))
+            _ref = _ref or params.get("reference_path") or _src
+            return prepare_klein_inpaint_workflow(
+                str(inpaint_path),
+                source_masked_path=_src,
+                reference_path=_ref,
+                prompt=params.get("prompt", "") or "",
+                seed=seed,
+                klein_model_gguf=params.get("klein_model_gguf") or None,
+                mask_expand=params.get("mask_expand"),
+                mask_blur=params.get("mask_blur"),
+            )
+
+        # ===== LTX Director Mode (v2.0.0 LTXDirector timeline node) =====
+        # Driven by scene.parameters.ltx_director (the full-screen editor's state).
+        # Grafted onto our existing LTX stack via workflows/LTX_DIRECTOR.json.
+        if workflow_type == "ltx_director":
+            director_path = workflows_dir / "LTX_DIRECTOR.json"
+            if not director_path.exists():
+                logger.error(
+                    f"[{job.id if job else 'N/A'}] workflow_type=ltx_director but "
+                    f"LTX_DIRECTOR.json not found in workflows/ — falling back to ltx_i2v"
+                )
+                workflow_type = "ltx_i2v"
+                params["workflow_type"] = "ltx_i2v"
+            else:
+                # Load the per-scene director config (editor state)
+                cfg: dict = {}
+                if job and job.scene_id:
+                    try:
+                        async with self._session_factory() as _ds:
+                            _dsc = await _ds.get(Scene, job.scene_id)
+                            if _dsc and _dsc.parameters:
+                                cfg = dict(_dsc.parameters.get("ltx_director") or {})
+                    except Exception as _de:
+                        logger.warning(f"LTX Director: could not read scene config: {_de}")
+                if params.get("ltx_director"):
+                    cfg.update(params.get("ltx_director") or {})
+
+                # Quality: optionally use the two-stage (2x upscale + tiled decode)
+                # high-quality / low-VRAM workflow instead of the single-stage one.
+                if str(cfg.get("quality") or "").lower() in ("hq", "high"):
+                    _hq_path = workflows_dir / "LTX_DIRECTOR_HQ.json"
+                    if _hq_path.exists():
+                        director_path = _hq_path
+                        logger.info(f"[{job.id if job else 'N/A'}] LTX Director: using HQ two-stage workflow")
+                    else:
+                        logger.warning("LTX Director: quality=hq but LTX_DIRECTOR_HQ.json missing — using standard single-stage.")
+
+                fps = int(cfg.get("frame_rate") or params.get("framerate", 24) or 24)
+                # Honor an explicit cfg width/height (0 = "auto-size from keyframes").
+                # Only fall back to project dims when the cfg omits the key entirely.
+                _cfg_w = cfg.get("width"); _cfg_h = cfg.get("height")
+                width = int(_cfg_w if _cfg_w is not None else (params.get("width", 0) or 0))
+                height = int(_cfg_h if _cfg_h is not None else (params.get("height", 0) or 0))
+                # Prefer the editor's scene-duration (timeline was built against it).
+                dur_s = float(cfg.get("duration_seconds") or params.get("duration") or 5.0)
+                dur_f = int(round(dur_s * fps))
+
+                # Build main-track segments + the three Prompt-Relay-derived strings.
+                segments: list = []
+                local_prompts: list = []
+                seg_lengths: list = []
+                guide_str: list = []
+                for seg in cfg.get("segments", []):
+                    stype = (seg.get("type") or "image").lower()
+                    start = int(seg.get("frame", seg.get("start", 0)) or 0)
+                    length = int(seg.get("length", 0) or 0)
+                    if stype == "image":
+                        _p = await self._resolve_single_asset_path(seg.get("asset_id"))
+                        image_file = _p or seg.get("imageFile") or ""
+                        strength = float(seg.get("strength", 1.0))
+                        segments.append({
+                            "type": "image", "imageFile": image_file,
+                            "start": start, "length": length, "strength": strength,
+                        })
+                        guide_str.append(str(strength))
+                    else:  # text / prompt-relay segment
+                        prompt_txt = seg.get("prompt", "") or ""
+                        segments.append({
+                            "type": "text", "prompt": prompt_txt,
+                            "start": start, "length": length,
+                        })
+                        local_prompts.append(prompt_txt)
+                        if length:
+                            seg_lengths.append(str(length))
+
+                # Audio: default to the scene's audio slice; override with an asset.
+                use_custom_audio = bool(cfg.get("use_custom_audio", True))
+                audio_segments = list(cfg.get("audioSegments") or [])
+                if not audio_segments and use_custom_audio:
+                    audio_path = None
+                    if cfg.get("audio_source") == "asset" and cfg.get("audio_asset_id"):
+                        audio_path = await self._resolve_single_asset_path(cfg.get("audio_asset_id"))
+                    if not audio_path:
+                        try:
+                            _res = await self._auto_resolve_video_assets(job, params)
+                            audio_path = _res.get("audio")
+                        except Exception:
+                            audio_path = None
+                    if audio_path:
+                        audio_segments = [{
+                            "audioFile": audio_path, "start": 0, "trimStart": 0,
+                            "length": dur_f, "fileName": os.path.basename(audio_path),
+                        }]
+
+                motion_segments = []
+                for _mseg in (cfg.get("motionSegments") or []):
+                    _mm = dict(_mseg)
+                    if _mm.get("asset_id"):
+                        _mp = await self._resolve_single_asset_path(_mm.get("asset_id"))
+                        if _mp:
+                            _ext = os.path.splitext(_mp)[1].lower()
+                            if _ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
+                                _mm["imageFile"] = _mp
+                            else:
+                                _mm["videoFile"] = _mp
+                    elif _mm.get("rel_path") and not (_mm.get("videoFile") or _mm.get("imageFile")):
+                        _mm["videoFile"] = _mm["rel_path"]
+                    motion_segments.append(_mm)
+                timeline_data = {
+                    "mainTrackEnabled": True,
+                    "audioTrackEnabled": bool(audio_segments),
+                    "motionTrackEnabled": bool(motion_segments),
+                    "inpaint_audio": True,
+                    "overrideAudio": False,
+                    "global_prompt": cfg.get("global_prompt", "") or "",
+                    "normalStartFrame": 0,
+                    "normalDurationFrames": dur_f,
+                    "segments": segments,
+                    "motionSegments": motion_segments,
+                    "audioSegments": audio_segments,
+                    "retakeMode": False,
+                }
+                # Retake / in-place editing passthrough (Phase 4)
+                _retake = cfg.get("retake") or {}
+                if _retake.get("video"):
+                    _rv = await self._resolve_single_asset_path(_retake.get("video_asset_id")) or _retake.get("video")
+                    timeline_data.update({
+                        "retakeMode": True,
+                        "retakeStart": int(_retake.get("start", 0) or 0),
+                        "retakeLength": int(_retake.get("length", 0) or 0),
+                        "retakePrompt": _retake.get("prompt", "") or "",
+                        "retakeStrength": float(_retake.get("strength", 1.0)),
+                        "retake_global_prompt": _retake.get("global_prompt", "") or "",
+                        "retakeVideo": _rv,
+                    })
+
+                # Model stack (reuse the sequencer's distilled-LoRA / GGUF settings)
+                _distilled = None
+                _gguf = params.get("ltx_model_gguf") or None
+                try:
+                    async with self._session_factory() as _ms:
+                        from backend.database.models import AppSettings as _DirAS
+                        _mr = await _ms.execute(sfw_select(_DirAS).where(_DirAS.id == 1))
+                        _mst = _mr.scalars().first()
+                        if _mst:
+                            if getattr(_mst, "use_distilled_lora", False):
+                                _distilled = _mst.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+                            if not _gguf and hasattr(_mst, "ltx_model_gguf"):
+                                _gguf = _mst.ltx_model_gguf
+                except Exception as _me:
+                    logger.debug(f"LTX Director: settings read failed: {_me}")
+
+                return prepare_ltx_director_workflow(
+                    str(director_path),
+                    timeline_data=timeline_data,
+                    global_prompt=cfg.get("global_prompt", "") or "",
+                    local_prompts="|".join(local_prompts),
+                    segment_lengths=",".join(seg_lengths),
+                    guide_strength=",".join(guide_str),
+                    duration_frames=dur_f,
+                    duration_seconds=dur_s,
+                    frame_rate=fps,
+                    width=width,
+                    height=height,
+                    use_custom_audio=use_custom_audio,
+                    use_custom_motion=bool(motion_segments),
+                    epsilon=float(cfg.get("epsilon", 0.001)),
+                    img_compression=int(cfg.get("img_compression", 18)),
+                    resize_method=cfg.get("resize_method", "maintain aspect ratio"),
+                    retake_mode=bool(timeline_data.get("retakeMode")),
+                    seed=seed,
+                    ltx_model_gguf=_gguf,
+                    distilled_lora_name=_distilled,
+                )
 
         # LTX video workflows
         ltx_map = {
@@ -2140,29 +2428,29 @@ class JobDispatcher:
             # "brown leather jacket") doesn't pull the composite away from the
             # base scene's palette.
             char_descriptions = []
-            ref_labels = ["second", "third", "fourth", "fifth"]
             for i, char_ref_id in enumerate(char_ref_ids):
-                label = ref_labels[i] if i < len(ref_labels) else f"reference {i + 2}"
-                char_desc = f"Character reference {i + 1}"
+                image_no = i + 2  # Image 1 is the base scene; characters start at Image 2
+                appearance = "a character"
 
-                # Look up the Asset to get its rel_path
+                # Look up the Asset -> match a character -> use its DESCRIPTION
+                # (appearance) ONLY.  The name is deliberately NOT included:
+                # Klein cannot know names, and feeding the name makes the LLM
+                # echo it into the prompt as a wasted, misleading token.
                 try:
                     char_asset = await session.get(Asset, char_ref_id)
                     if char_asset:
                         asset_rel_path = char_asset.rel_path
-                        # Match against character image_paths
                         for c in characters:
                             if c.get("image_path", "") == asset_rel_path:
-                                char_desc = f'{c.get("name", "Character")} — {c.get("description", "no description")}'
+                                appearance = (c.get("description") or "a character").strip()
                                 break
                 except Exception:
-                    pass  # Fall back to generic description
+                    pass  # Fall back to generic appearance
 
                 char_descriptions.append(
-                    f"The {label} reference image is {char_desc}. "
-                    f"Use this reference ONLY for the character's facial identity, body type, and clothing silhouette. "
-                    f"IGNORE the lighting, color cast, skin tone, and clothing colors of the reference photo — "
-                    f"re-render the character under the FIRST reference image's lighting and palette."
+                    f"Image {image_no} = {appearance}. Insert this character into Image 1; use Image {image_no} "
+                    f"ONLY for face/identity, body, and clothing shape, re-lit to match Image 1. "
+                    f"Refer to it as 'Image {image_no}' — never by any name."
                 )
 
             # Build context — lead with the style-preservation directive so
@@ -2171,17 +2459,13 @@ class JobDispatcher:
             # signals from all references, so the prompt MUST explicitly lock
             # the output to the first image's palette.
             context_parts = [
-                "═══ STYLE PRESERVATION CONTRACT ═══",
-                "The FIRST reference image is the AUTHORITATIVE visual baseline. "
-                "Its color palette, lighting direction, exposure, contrast, "
-                "color grade, and atmosphere ARE the look of the composite. "
-                "The character reference images (second and onward) are for "
-                "IDENTITY and POSE only — their colors, skin tones, and "
-                "lighting must be re-rendered to match the first image. Your "
-                "prompt MUST explicitly state the base scene's lighting and "
-                "palette and instruct the model to preserve them.",
-                "════════════════════════════════════",
-                f"BASE SCENE PROMPT (the first reference image was generated from this): {base_prompt}",
+                "TASK: write a short EDIT INSTRUCTION that inserts the character(s) into Image 1 (the base "
+                "scene). Image 1 already exists and is final — KEEP its lighting, exposure, colour grade, and "
+                "palette; do not darken or restyle it. Refer to every subject only as 'Image 1', 'Image 2', "
+                "etc. — never by name. Do NOT re-describe Image 1's contents; only name its lighting/palette to "
+                "lock them, then state where each character goes and what they are doing.",
+                "Image 1 (base scene) was generated from the text below — use it ONLY to recall Image 1's "
+                f"lighting and palette, NOT to re-describe the scene: {base_prompt}",
             ]
             context_parts.extend(char_descriptions)
 
@@ -2263,9 +2547,13 @@ class JobDispatcher:
             # Call LLM with composite system prompt
             from backend.services.llm.prompt_enhancer import PromptEnhancer
 
+            seed_instruction = (
+                "Insert the character(s) from Image 2 onward into the scene shown in Image 1, "
+                "re-lit to match Image 1's lighting and palette, keeping Image 1's exposure and brightness."
+            )
             enhanced = await asyncio.to_thread(
                 PromptEnhancer.enhance,
-                base_prompt,  # Use base prompt as starting point
+                seed_instruction,  # concise edit seed (NOT the full base prose — avoids re-description)
                 context,
                 provider,
                 api_key,
@@ -2284,7 +2572,100 @@ class JobDispatcher:
         except Exception as e:
             logger.warning(f"[{job_id_str}] LLM enhance for Pass 2 failed ({e}) — using base prompt with character insertion prefix")
             # Fallback: prefix base prompt with character insertion language
-            return f"In the scene from the first image, the subject from the second image is present in the composition. {base_prompt}"
+            return (
+                "Insert the character from Image 2 into the scene shown in Image 1, re-lit to match "
+                "Image 1's lighting and exposure; keep Image 1's palette and brightness unchanged, "
+                "do not darken or restyle it."
+            )
+
+    async def _build_or_get_ideogram_caption(self, job, prose_prompt: str, job_id_str: str):
+        """Return the Ideogram structured caption for this scene, or None when
+        JSON Prompt Mode is OFF / unavailable.
+
+        Effective mode = scene.parameters.json_prompt_mode (override) else
+        project.settings.json_prompt_mode.  Uses the stored
+        scene.parameters.json_prompt if present (so manual edits + re-renders are
+        stable); otherwise builds one from the natural-language prompt via the LLM
+        and caches it on the scene.  Returns a normalized caption dict or None
+        (None => caller uses the plain Krea 2 path).
+        """
+        if not job or not job.scene_id:
+            return None
+        try:
+            from backend.services.llm.prompt_enhancer import (
+                PromptEnhancer, JSON_PROMPT_SYSTEM_PROMPT, normalize_ideogram_caption,
+            )
+            from backend.database.models import AppSettings as _IdAS
+            from sqlmodel import select as _id_select
+            async with self._session_factory() as session:
+                scene = await session.get(Scene, job.scene_id)
+                project = await session.get(Project, job.project_id) if job.project_id else None
+                if scene is None:
+                    return None
+                sp = scene.parameters or {}
+                proj_settings = (project.settings or {}) if project else {}
+                proj_mode = bool(proj_settings.get("json_prompt_mode", False))
+                scene_mode = sp.get("json_prompt_mode")  # None => inherit project
+                effective = bool(scene_mode) if scene_mode is not None else proj_mode
+                if not effective:
+                    return None
+
+                # Stored caption (manual edit or prior build) wins.
+                stored = sp.get("json_prompt")
+                if stored:
+                    try:
+                        return normalize_ideogram_caption(stored)
+                    except Exception:
+                        pass  # malformed -> rebuild
+
+                _set = (await session.execute(_id_select(_IdAS).where(_IdAS.id == 1))).scalars().first()
+                if not _set:
+                    return None
+                from backend.api.settings import resolve_llm_config
+                provider, api_key, model = resolve_llm_config(_set)
+                if not api_key:
+                    logger.warning(f"[{job_id_str}] JSON mode on but no LLM key — using plain Krea 2")
+                    return None
+
+                # Palette-override context so the caption honors it.
+                ctx_parts = []
+                co = sp.get("color_override") or proj_settings.get("global_color_override") or ""
+                if co and co != "none":
+                    try:
+                        desc = COLOR_OVERRIDE_DESCRIPTIONS.get(co, co)
+                    except Exception:
+                        desc = co
+                    ctx_parts.append(
+                        f"MANDATORY COLOR PALETTE OVERRIDE (highest priority): {desc}. "
+                        f"Build style_palette and EVERY element palette ONLY from these colors."
+                    )
+
+                raw = await asyncio.to_thread(
+                    PromptEnhancer.enhance,
+                    prose_prompt, "\n".join(ctx_parts), provider, api_key, model,
+                    False, JSON_PROMPT_SYSTEM_PROMPT, "krea2", None, None, None,
+                )
+                caption = normalize_ideogram_caption(raw)
+
+                # Cache on the scene so re-renders + the editor reuse it.
+                sp2 = dict(sp)
+                sp2["json_prompt"] = caption
+                scene.parameters = sp2
+                try:
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(scene, "parameters")
+                except Exception:
+                    pass
+                session.add(scene)
+                await session.commit()
+                logger.info(
+                    f"[{job_id_str}] Built + cached Ideogram caption "
+                    f"({len(caption.get('elements', []))} element(s))"
+                )
+                return caption
+        except Exception as e:
+            logger.warning(f"[{job_id_str}] Ideogram caption build failed ({e}) — using plain Krea 2")
+            return None
 
     async def _build_two_pass_base_prompt(
         self,
@@ -3501,6 +3882,83 @@ class JobDispatcher:
                 )
                 raise
 
+        # ---- LTX Director: upload files embedded in the timeline_data JSON ----
+        # The v2 LTXDirector node reads keyframe images / audio / motion clips from
+        # its timeline_data (imageFile / audioFile / videoFile) rather than from
+        # LoadImage nodes — so upload them here and rewrite to the stored basenames.
+        async def _upload_td_path(file_value):
+            if not file_value or isinstance(file_value, list):
+                return None
+            file_str = str(file_value)
+            project_id_str = str(job.project_id)
+            candidates = [
+                settings.project_dir / file_str,
+                settings.project_dir / project_id_str / file_str,
+            ]
+            local_path = None
+            for c in candidates:
+                if c.exists():
+                    local_path = c
+                    break
+            if local_path is None and os.sep not in file_str and "/" not in file_str:
+                found = list(settings.project_dir.rglob(file_str))
+                if found:
+                    local_path = found[0]
+            if local_path is None:
+                # Already a bare name living on ComfyUI, or genuinely missing —
+                # leave just the basename and let ComfyUI resolve / error clearly.
+                return os.path.basename(file_str)
+            import time as _t
+            up_name = f"{local_path.stem}_{int(_t.time() * 1000)}{local_path.suffix}"
+            try:
+                res = await asyncio.to_thread(client.upload_image, str(local_path), up_name)
+                actual = res.get("name", up_name) if isinstance(res, dict) else up_name
+                uploaded.add(actual)
+                return actual
+            except Exception as _ue:
+                logger.error(f"[{job_id_str}] LTX Director timeline upload failed for {local_path}: {_ue}")
+                return os.path.basename(file_str)
+
+        for _nid, _node in workflow.items():
+            if not isinstance(_node, dict) or _node.get("class_type") != "LTXDirector":
+                continue
+            _td_raw = _node.get("inputs", {}).get("timeline_data")
+            if not isinstance(_td_raw, str) or not _td_raw.strip():
+                continue
+            try:
+                _td = json.loads(_td_raw)
+            except Exception:
+                continue
+            _changed = False
+            for _seg in _td.get("segments", []):
+                if _seg.get("imageFile"):
+                    _new = await _upload_td_path(_seg["imageFile"])
+                    if _new and _new != _seg["imageFile"]:
+                        _seg["imageFile"] = _new
+                        _changed = True
+            for _aseg in _td.get("audioSegments", []):
+                if _aseg.get("audioFile"):
+                    _new = await _upload_td_path(_aseg["audioFile"])
+                    if _new and _new != _aseg["audioFile"]:
+                        _aseg["audioFile"] = _new
+                        _aseg["fileName"] = os.path.basename(_new)
+                        _changed = True
+            for _mseg in _td.get("motionSegments", []):
+                for _k in ("videoFile", "imageFile", "audioFile"):
+                    if _mseg.get(_k):
+                        _new = await _upload_td_path(_mseg[_k])
+                        if _new and _new != _mseg[_k]:
+                            _mseg[_k] = _new
+                            _changed = True
+            if _td.get("retakeVideo"):
+                _new = await _upload_td_path(_td["retakeVideo"])
+                if _new and _new != _td["retakeVideo"]:
+                    _td["retakeVideo"] = _new
+                    _changed = True
+            if _changed:
+                _node["inputs"]["timeline_data"] = json.dumps(_td)
+                logger.info(f"[{job_id_str}] LTX Director: timeline files uploaded + basenames rewritten")
+
     @staticmethod
     def _get_required_caps(workflow_type: str) -> set:
         """Get required capabilities for a workflow type."""
@@ -3523,6 +3981,8 @@ class JobDispatcher:
             "ltx_seq_fflf": {"ltx"},
             "ltx_seq_v2v": {"ltx"},
             "ltx_av_native": {"ltx"},
+            "ltx_director": {"ltx"},
+            "klein_inpaint": {"klein"},
         }
         return caps_map.get(workflow_type, set())
 
@@ -3571,7 +4031,7 @@ class JobDispatcher:
 
         if workflow_type in (
             "klein_1ref", "klein_2ref", "klein_3ref",
-            "klein_4ref", "klein_5ref", "klein_t2i",
+            "klein_4ref", "klein_5ref", "klein_t2i", "klein_inpaint",
         ):
             return {img_model}
         if workflow_type in ("z_image_turbo", "krea2_turbo"):
@@ -3581,7 +4041,7 @@ class JobDispatcher:
             "ltx_v2v_extend", "ltx_v2v_pass1", "ltx_v2v_pass2",
             "ltx_transition",
             "ltx_seq_i2v", "ltx_seq_fflf", "ltx_seq_v2v",
-            "ltx_av_native",
+            "ltx_av_native", "ltx_director",
         ):
             return {vid_model}
         return set()
@@ -3872,6 +4332,32 @@ class JobDispatcher:
                 # Relative path from project_dir
                 rel_path = str(local_path.relative_to(settings.project_dir))
 
+                # Resolve the workflow_type to RECORD on the asset.
+                # A value of "klein_t2i" here means the first-pass redirect ran
+                # but its in-memory workflow_type mutation didn't survive to this
+                # point — this happens on the two-pass base path, which re-enhances
+                # the prompt and rebuilds the workflow (and a session refresh in
+                # between can revert job.parameters back to the stored klein_t2i).
+                # Since klein_t2i is ALWAYS redirected to the configured first-pass
+                # generator, record THAT model so the UI labels the image with the
+                # model that actually produced it (Krea 2 / Z-Image), not "klein_t2i"
+                # (which the frontend maps to "Z-Image Turbo").
+                _recorded_wf = params.get("workflow_type", "") or ""
+                if _recorded_wf == "klein_t2i":
+                    try:
+                        from sqlmodel import select as _wf_select
+                        from backend.database.models import AppSettings as _WfAS
+                        async with self._session_factory() as _wf_sess:
+                            _wf_row = (await _wf_sess.execute(
+                                _wf_select(_WfAS).where(_WfAS.id == 1)
+                            )).scalars().first()
+                        _gen = (_wf_row.single_image_generator if _wf_row else None) or "z_image_turbo"
+                        _recorded_wf = _gen if _gen in ("krea2_turbo", "z_image_turbo") else "z_image_turbo"
+                        logger.info(f"[{job_id_str}] Asset workflow_type resolved klein_t2i -> {_recorded_wf} (first-pass generator)")
+                    except Exception as _wf_e:
+                        logger.debug(f"[{job_id_str}] first-pass resolve for asset meta failed: {_wf_e}")
+                        _recorded_wf = "z_image_turbo"
+
                 # Create Asset record
                 async with self._session_factory() as session:
                     asset = Asset(
@@ -3888,7 +4374,8 @@ class JobDispatcher:
                             "scene_id": str(scene_id) if scene_id else None,
                             "prompt": params.get("prompt", ""),
                             "seed": params.get("seed"),
-                            "workflow_type": params.get("workflow_type", ""),
+                            "workflow_type": _recorded_wf,
+                            **({"ideogram_caption": params.get("ideogram_caption")} if params.get("ideogram_caption") else {}),
                         },
                     )
                     session.add(asset)
@@ -4643,6 +5130,7 @@ class JobDispatcher:
                     "seed": params.get("seed"),
                     "workflow_type": params.get("workflow_type", ""),
                     "vhs_fallback": True,
+                    **({"ideogram_caption": params.get("ideogram_caption")} if params.get("ideogram_caption") else {}),
                 },
             )
             session.add(asset)
@@ -4717,5 +5205,3 @@ class JobDispatcher:
 
             await session.commit()
             created_asset_ids.append(asset.id)
-
-        return created_asset_ids

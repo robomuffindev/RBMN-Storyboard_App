@@ -95,6 +95,10 @@ class EnhancePromptRequest(BaseModel):
     provider: Optional[str] = None  # openai, anthropic, gemini — None = use default
     is_video: bool = False  # Use video-specific system prompt (LTX optimized)
     frame_type: Optional[str] = None  # 'first' or 'last' — selects FF vs LF system prompt
+    # Vision: describe these reference images (via the Ollama vision model) and feed
+    # the descriptions to the enhancer so it understands what each ref actually shows.
+    reference_asset_ids: Optional[list[UUID]] = None
+    vision_describe: Optional[bool] = None  # None = inherit global vision_enabled
 
 
 class BatchGenerationItem(BaseModel):
@@ -691,6 +695,227 @@ async def generate_video(
         )
 
 
+def _vision_ollama_urls(app_settings) -> list:
+    """Ollama URL pool used for vision (reuses the text-LLM Ollama pool)."""
+    try:
+        from backend.api.settings import _get_ollama_urls
+        return _get_ollama_urls(app_settings) or []
+    except Exception:
+        return []
+
+
+async def _describe_asset_cached(asset, session, urls, model):
+    """Return a cached vision description for an asset, generating + caching it on
+    asset.meta.vision_description when missing. Returns the string or None."""
+    try:
+        meta = dict(asset.meta or {})
+        cached = meta.get("vision_description")
+        if cached:
+            _note_vision_activity(getattr(asset, "project_id", None), cached=1, model=model)
+            return cached
+        pid = str(asset.project_id)
+        rel = asset.rel_path or ""
+        if rel.startswith(pid + "/") or rel.startswith(pid + "\\"):
+            path = settings.project_dir / rel
+        else:
+            path = settings.project_dir / pid / rel
+        from backend.services.llm.vision import describe_image_sync
+        logger.info(f"vision: describing reference image {rel or path} with model {model}")
+        desc = await asyncio.to_thread(describe_image_sync, str(path), urls, model)
+        if desc:
+            _note_vision_activity(getattr(asset, "project_id", None), described=1, model=model)
+            meta["vision_description"] = desc
+            asset.meta = meta
+            try:
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(asset, "meta")
+            except Exception:
+                pass
+            session.add(asset)
+            await session.commit()
+        return desc
+    except Exception as e:
+        logger.warning(f"vision: describe asset failed: {e}")
+        return None
+
+
+async def _build_vision_ref_block(asset_ids, session, app_settings) -> str:
+    """Describe the given reference image assets via the vision model and return a
+    context block string (or '' when vision is unavailable / nothing described)."""
+    if not asset_ids:
+        return ""
+    model = getattr(app_settings, "ollama_vision_model", None)
+    urls = _vision_ollama_urls(app_settings)
+    if not model or not urls:
+        return ""
+    parts = []
+    _pid_seen = None
+    logger.info(f"vision: building reference descriptions for {len(asset_ids)} image(s) with model {model}")
+    for i, aid in enumerate(asset_ids):
+        try:
+            _id = aid if not isinstance(aid, str) else UUID(aid)
+            asset = await session.get(Asset, _id)
+        except Exception:
+            asset = None
+        if not asset:
+            continue
+        _pid_seen = getattr(asset, "project_id", None) or _pid_seen
+        if _pid_seen:
+            _note_vision_activity(_pid_seen, model=model,
+                                  msg=f"describing reference image {i + 1}/{len(asset_ids)}")
+        desc = await _describe_asset_cached(asset, session, urls, model)
+        if desc:
+            parts.append(f"Image {i + 1}: {desc}")
+    if not parts:
+        return ""
+    return (
+        "REFERENCE IMAGE DESCRIPTIONS (what each reference image ACTUALLY shows, "
+        "from a vision model — use these to describe the referenced subjects "
+        "accurately; they take precedence over assumptions from the text prompt): "
+        + " | ".join(parts)
+    )
+
+
+def _summarize_caption_layout(cap: dict) -> str:
+    """Turn a stored Ideogram structured caption into a compact, human-readable
+    LAYOUT summary (element + where it sits in the frame) so a prompt that
+    references this image knows how it was composed (positions, the fuller
+    picture), not just a generic visual description."""
+    if not isinstance(cap, dict):
+        return ""
+    pieces: list[str] = []
+    for e in (cap.get("elements") or []):
+        if not isinstance(e, dict):
+            continue
+        d = (str(e.get("desc", "")).strip() or str(e.get("text", "")).strip())
+        if not d:
+            continue
+        try:
+            x = float(e.get("x", 0) or 0); y = float(e.get("y", 0) or 0)
+            w = float(e.get("w", 0) or 0); h = float(e.get("h", 0) or 0)
+        except (TypeError, ValueError):
+            x = y = w = h = 0.0
+        if w >= 0.95 and h >= 0.95:
+            where = "full frame"
+        else:
+            cx, cy = x + w / 2.0, y + h / 2.0
+            hpos = "left" if cx < 0.4 else "right" if cx > 0.6 else "center"
+            vpos = "top" if cy < 0.4 else "lower" if cy > 0.6 else "middle"
+            where = f"{vpos} {hpos}"
+        pieces.append(f"{d} [{where}]")
+    return "; ".join(pieces)
+
+
+async def _build_ref_layout_block(asset_ids, session) -> str:
+    """Context block describing the authored LAYOUT of any reference images that
+    were composed with the Ideogram structured-caption mode (their caption is
+    stored on asset.meta.ideogram_caption). Combined WITH the vision description
+    so a prompt reusing these images respects element positions + the full
+    composition. Returns '' when none of the refs carry a caption."""
+    if not asset_ids:
+        return ""
+    parts: list[str] = []
+    for i, aid in enumerate(asset_ids):
+        try:
+            _id = aid if not isinstance(aid, str) else UUID(aid)
+            asset = await session.get(Asset, _id)
+        except Exception:
+            asset = None
+        if not asset:
+            continue
+        cap = (asset.meta or {}).get("ideogram_caption")
+        if not cap:
+            continue
+        layout = _summarize_caption_layout(cap)
+        if not layout:
+            continue
+        hl = str((cap or {}).get("high_level_description", "")).strip()
+        parts.append(f"Image {i + 1}{(' — ' + hl) if hl else ''}: {layout}")
+    if not parts:
+        return ""
+    return (
+        "REFERENCE IMAGE LAYOUTS (these references were composed with explicit "
+        "positioning via Ideogram structured prompting — element placements are "
+        "in [vertical horizontal] frame regions; respect where each element sits "
+        "and the overall composition when describing or reusing them): "
+        + " | ".join(parts)
+    )
+
+
+async def _autogen_ref_layout_block(scene, project, frame_type: str) -> str:
+    """Self-contained ref-layout block for the auto-gen enhance context (opens its
+    own session, resolves the scene's refs for this frame). Independent of the
+    vision toggle — layout comes from the stored caption, not the vision model."""
+    try:
+        from backend.database.database import async_session as _AS
+        async with _AS() as _s:
+            _aids = await _resolve_scene_ref_asset_ids(scene, project, _s, frame_type)
+            if not _aids:
+                return ""
+            return await _build_ref_layout_block(_aids, _s)
+    except Exception as e:
+        logger.debug(f"autogen ref-layout block skipped: {e}")
+        return ""
+
+
+async def _resolve_scene_ref_asset_ids(scene, project, session, frame_type: str) -> list:
+    """Resolve a scene's selected reference-image asset IDs (character refs +
+    extras) for the given frame, mirroring the frontend collectRefAssetIds."""
+    key = "image_refs_last" if frame_type == "last" else "image_refs_first"
+    refs = (scene.parameters or {}).get(key) or {}
+    if not isinstance(refs, dict):
+        return []
+    char_indices = refs.get("characterIndices") or []
+    extras = refs.get("extras") or []
+    characters = (project.settings or {}).get("characters", []) if (project and project.settings) else []
+    ids: list = []
+    from sqlmodel import select as _s
+    for ix in char_indices:
+        if isinstance(ix, int) and 0 <= ix < len(characters):
+            img_path = (characters[ix].get("image_path", "") or "").strip()
+            if not img_path:
+                continue
+            a = (await session.execute(_s(Asset).where(Asset.project_id == project.id, Asset.rel_path == img_path))).scalars().first()
+            if not a:
+                a = (await session.execute(_s(Asset).where(Asset.project_id == project.id, Asset.rel_path.like(f"%{img_path}")))).scalars().first()
+            if a:
+                ids.append(str(a.id))
+    for ex in extras:
+        if isinstance(ex, dict) and ex.get("asset_id"):
+            ids.append(str(ex["asset_id"]))
+        elif isinstance(ex, str) and ex.strip():
+            ids.append(ex.strip())
+    return ids
+
+
+async def _autogen_vision_block(scene, project, frame_type: str) -> str:
+    """Vision reference-image descriptions for the auto-gen enhance context.
+    Self-contained (opens its own session); honors scene.parameters
+    vision_describe_refs ?? global vision_enabled. Returns a context block or ''."""
+    try:
+        _scene_v = (scene.parameters or {}).get("vision_describe_refs")
+        if _scene_v is False:
+            return ""
+        from backend.database.database import async_session as _AS
+        from backend.database.models import AppSettings as _VAS
+        from sqlmodel import select as _vsel
+        async with _AS() as _vs:
+            _vset = (await _vs.execute(_vsel(_VAS).where(_VAS.id == 1))).scalars().first()
+            if not _vset:
+                return ""
+            _model = getattr(_vset, "ollama_vision_model", None)
+            _eff = _scene_v if _scene_v is not None else bool(getattr(_vset, "vision_enabled", False))
+            if not _model or not _eff:
+                return ""
+            _aids = await _resolve_scene_ref_asset_ids(scene, project, _vs, frame_type)
+            if not _aids:
+                return ""
+            return await _build_vision_ref_block(_aids, _vs, _vset)
+    except Exception as e:
+        logger.debug(f"autogen vision block skipped: {e}")
+        return ""
+
+
 @router.post(
     "/enhance-prompt",
     summary="Enhance prompt using LLM",
@@ -783,12 +1008,14 @@ async def enhance_prompt(
         else:
             gen_model_name = app_settings.image_model_type or "flux2_klein_dev_9b"
             overrides = app_settings.image_system_prompt_overrides or {}
-            # When the first-pass generator is Krea 2 Turbo, a no-reference
-            # image render goes through Krea 2 (not Klein/Z-Image), which needs
-            # its own natural-language prompting rules.  Use the "krea2" prompt
-            # key so the enhanced prompt matches the actual render model.
-            if (app_settings.single_image_generator or "") == "krea2_turbo":
-                gen_model_name = "krea2"
+            # Match the enhance prompt to the model that will ACTUALLY render.
+            # A NO-REFERENCE render does not use the Klein edit model — it goes
+            # through the first-pass T2I generator (Z-Image or Krea 2), each of
+            # which has its own prompting rules.  With references present, Klein
+            # composites them, so keep the Klein prompt.
+            if not req.reference_asset_ids:
+                _sig = (app_settings.single_image_generator or "z_image_turbo")
+                gen_model_name = "krea2" if _sig == "krea2_turbo" else "z_image"
 
         model_override = overrides.get(gen_model_name, {})
         if isinstance(model_override, dict) and model_override.get("enabled") and model_override.get("text", "").strip():
@@ -796,7 +1023,7 @@ async def enhance_prompt(
 
         # When project mode is narration, use narration-specific prompts
         # (only if no user override is already set)
-        if not system_prompt_override and gen_model_name != "krea2" and project.mode in ("narration_images", "narration_video"):
+        if not system_prompt_override and gen_model_name not in ("krea2", "z_image") and project.mode in ("narration_images", "narration_video"):
             from backend.services.llm.prompt_enhancer import (
                 NARRATION_IMAGE_SYSTEM_PROMPT,
                 NARRATION_VIDEO_SYSTEM_PROMPT,
@@ -810,10 +1037,31 @@ async def enhance_prompt(
         from backend.services.llm.prompt_enhancer import PromptEnhancer
 
         enhancer = PromptEnhancer()
+
+        # Vision: describe reference images so the LLM understands what they show.
+        _eff_vision = req.vision_describe if req.vision_describe is not None else bool(getattr(app_settings, "vision_enabled", False))
+        _ctx = req.context or ""
+        if _eff_vision and req.reference_asset_ids:
+            try:
+                _vblock = await _build_vision_ref_block(req.reference_asset_ids, session, app_settings)
+                if _vblock:
+                    _ctx = (_ctx + " | " + _vblock) if _ctx else _vblock
+            except Exception as _ve:
+                logger.warning(f"vision ref block failed: {_ve}")
+        # Ideogram structured-caption layout — combined with vision, independent of
+        # the vision toggle (layout comes from the stored caption on the asset).
+        if req.reference_asset_ids:
+            try:
+                _lblock = await _build_ref_layout_block(req.reference_asset_ids, session)
+                if _lblock:
+                    _ctx = (_ctx + " | " + _lblock) if _ctx else _lblock
+            except Exception as _le:
+                logger.debug(f"ref layout block failed: {_le}")
+
         enhanced_prompt = await asyncio.to_thread(
             enhancer.enhance,
             req.prompt,
-            req.context,
+            _ctx,
             provider_lower,
             api_key,
             model,
@@ -838,6 +1086,201 @@ async def enhance_prompt(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=detail,
         )
+
+
+class JsonPromptRequest(BaseModel):
+    """Request to build/regenerate an Ideogram structured caption for a scene."""
+    scene_id: UUID
+    prompt: Optional[str] = None  # source prose; defaults to the scene's prompt
+
+
+@router.post(
+    "/json-prompt",
+    summary="Build an Ideogram structured JSON caption for a scene (Krea 2 JSON mode)",
+)
+async def build_json_prompt(
+    project_id: UUID,
+    req: JsonPromptRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Generate an Ideogram-4 structured caption from a scene's natural-language
+    prompt via the LLM, store it on scene.parameters.json_prompt, and return it.
+    Used by the image-tab JSON Prompt editor's "Generate with AI" button.
+    """
+    from backend.services.llm.prompt_enhancer import (
+        PromptEnhancer, JSON_PROMPT_SYSTEM_PROMPT, normalize_ideogram_caption,
+    )
+    from backend.api.settings import resolve_llm_config, _get_or_create_settings
+    try:
+        app_settings = await _get_or_create_settings(session)
+        scene = await _get_scene_or_404(req.scene_id, project_id, session)
+        project = await session.get(Project, project_id)
+        sp = scene.parameters or {}
+        proj_settings = (project.settings or {}) if project else {}
+
+        prose = (req.prompt or scene.prompt or sp.get("two_pass_scene_prompt") or "").strip()
+        if not prose:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Scene has no prompt to build a caption from — enhance the prompt first.",
+            )
+
+        provider, api_key, model = resolve_llm_config(app_settings)
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No LLM API key configured. Set one in Settings.",
+            )
+
+        ctx_parts = []
+        co = sp.get("color_override") or proj_settings.get("global_color_override") or ""
+        if co and co != "none":
+            ctx_parts.append(
+                f"MANDATORY COLOR PALETTE OVERRIDE (highest priority): {co}. "
+                f"Build style_palette and EVERY element palette ONLY from these colors."
+            )
+
+        raw = await asyncio.to_thread(
+            PromptEnhancer.enhance,
+            prose, "\n".join(ctx_parts), provider, api_key, model,
+            False, JSON_PROMPT_SYSTEM_PROMPT, "krea2", None, None, None,
+        )
+        caption = normalize_ideogram_caption(raw)
+
+        newp = dict(sp)
+        newp["json_prompt"] = caption
+        scene.parameters = newp
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(scene, "parameters")
+        except Exception:
+            pass
+        await session.commit()
+        return {"json_prompt": caption}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"build_json_prompt failed for scene {req.scene_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to build JSON prompt: {e}",
+        )
+
+
+@router.get(
+    "/prompts-export",
+    summary="Export all prompt data for a scene (troubleshooting JSON)",
+)
+async def export_scene_prompts(
+    project_id: UUID,
+    scene_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Assemble a complete, troubleshooting-friendly JSON of everything that goes
+    into rendering a scene's images/video: the prose prompts (first frame, last
+    frame, video), the exact prompts submitted to ComfyUI, the models/workflow
+    used, resolution, seed, and the resolved reference images. For frames using
+    Ideogram structured-prompt mode it includes the FULL structured caption (the
+    actual layout sent to the ComfyUI Ideogram node), clearly marked as ideogram —
+    not just prose."""
+    from backend.api.settings import _get_or_create_settings
+    app_settings = await _get_or_create_settings(session)
+    scene = await _get_scene_or_404(scene_id, project_id, session)
+    project = await session.get(Project, project_id)
+    sp = scene.parameters or {}
+    proj_settings = (project.settings or {}) if project else {}
+
+    async def _refs(frame: str) -> list[dict]:
+        out = []
+        try:
+            ids = await _resolve_scene_ref_asset_ids(scene, project, session, frame)
+        except Exception:
+            ids = []
+        for aid in ids:
+            try:
+                a = await session.get(Asset, UUID(aid) if isinstance(aid, str) else aid)
+            except Exception:
+                a = None
+            if a:
+                out.append({
+                    "asset_id": str(a.id),
+                    "filename": a.filename,
+                    "rel_path": a.rel_path,
+                    "vision_description": (a.meta or {}).get("vision_description"),
+                    "is_ideogram_made": bool((a.meta or {}).get("ideogram_caption")),
+                })
+        return out
+
+    proj_mode = bool(proj_settings.get("json_prompt_mode", False))
+    scene_mode = sp.get("json_prompt_mode")
+    ideogram_on = bool(scene_mode) if scene_mode is not None else proj_mode
+    krea2 = (app_settings.single_image_generator or "z_image_turbo") == "krea2_turbo"
+    stored_caption = sp.get("json_prompt") if (ideogram_on and krea2) else None
+
+    def _ideogram_block():
+        if not (ideogram_on and krea2):
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "format": "ideogram_structured_caption_v1",
+            "rendered_via": "ComfyUI Ideogram4PromptBuilderKJ node (Krea 2 workflow)",
+            "note": "This frame uses Ideogram structured prompting — the caption "
+                    "below is the actual positioned layout sent to ComfyUI, not prose. "
+                    + ("" if stored_caption else "No caption is stored yet; it is built "
+                       "from the prose prompt at render time (or via the JSON Prompt editor)."),
+            "caption": stored_caption,
+        }
+
+    img_w = sp.get("image_resolution_width") or sp.get("width")
+    img_h = sp.get("image_resolution_height") or sp.get("height")
+    vid_w = sp.get("video_resolution_width") or sp.get("width")
+    vid_h = sp.get("video_resolution_height") or sp.get("height")
+
+    return {
+        "export_version": "1.0",
+        "scene": {
+            "id": str(scene.id),
+            "name": scene.name,
+            "order_index": scene.order_index,
+            "start_time": scene.start_time,
+            "end_time": scene.end_time,
+            "chapter_id": str(scene.chapter_id) if getattr(scene, "chapter_id", None) else None,
+        },
+        "project_mode": getattr(project, "mode", None),
+        "models": {
+            "single_image_generator": app_settings.single_image_generator,
+            "krea2_model_name": getattr(app_settings, "krea2_model_name", None),
+            "krea2_sfw_mode": getattr(app_settings, "krea2_sfw_mode", True),
+            "image_edit_model": getattr(app_settings, "image_model_type", None),
+            "video_model": getattr(app_settings, "video_model_type", None),
+        },
+        "first_frame": {
+            "prompt": scene.prompt or "",
+            "submitted_to_comfy": sp.get("submitted_image_prompt"),
+            "workflow_type": sp.get("workflow_type"),
+            "resolution": {"width": img_w, "height": img_h},
+            "seed": sp.get("seed"),
+            "references": await _refs("first"),
+            "ideogram": _ideogram_block(),
+        },
+        "last_frame": {
+            "enabled": sp.get("video_mode") == "ff_lf" or bool(sp.get("last_frame_prompt")),
+            "prompt": sp.get("last_frame_prompt", ""),
+            "submitted_to_comfy": sp.get("submitted_last_frame_prompt"),
+            "attach_first_frame_ref": sp.get("lf_exclude_first_frame_ref") is not True,
+            "resolution": {"width": img_w, "height": img_h},
+            "references": await _refs("last"),
+            "ideogram": _ideogram_block(),
+        },
+        "video": {
+            "prompt": sp.get("video_prompt", ""),
+            "submitted_to_comfy": sp.get("submitted_video_prompt"),
+            "video_mode": sp.get("video_mode", "single"),
+            "model": getattr(app_settings, "video_model_type", None),
+            "resolution": {"width": vid_w, "height": vid_h},
+            "camera_action": sp.get("camera_action"),
+        },
+    }
 
 
 @router.post(
@@ -1384,6 +1827,60 @@ def _select_scene_characters_from_flow(
     return out or None
 
 
+def _frame_present_char_indices(scene: Scene, characters: list, frame: str, cap: int = 2) -> list[int]:
+    """Which project-character indices are present in the given frame ('first' or
+    'last').  Priority: the frame tab's explicit selection
+    (image_refs_<frame>.characterIndices); else derive from the scene's story
+    flow text (who the flow names); else [].  This is the single source of truth
+    used by BOTH the reference-attachment path and the enhance-context builder so
+    the prompt's described cast always matches the images actually attached.
+    """
+    if not characters:
+        return []
+    key = "image_refs_last" if frame == "last" else "image_refs_first"
+    refs = (scene.parameters or {}).get(key) or {}
+    if isinstance(refs, dict):
+        idxs = [i for i in (refs.get("characterIndices") or [])
+                if isinstance(i, int) and 0 <= i < len(characters)]
+        if idxs:
+            return idxs[:cap]
+    flow = (scene.parameters or {}).get("flow_idea", "") or ""
+    derived = _select_scene_characters_from_flow(flow, characters, cap=cap)
+    return derived or []
+
+
+async def _resolve_lf_ref_asset_ids(scene: Scene, project: Project, session) -> list[str]:
+    """Last-frame reference asset IDs.
+
+    If the Last-Frame tab has an explicit selection (characters and/or extras),
+    resolve exactly that (mirrors the frontend).  Otherwise fall back to the
+    characters the STORY FLOW names — so an auto-gen last frame still attaches the
+    real character reference image(s) instead of letting the video model invent a
+    look.  Character images already exist as assets, so this is safe at queue time.
+    """
+    characters = (project.settings or {}).get("characters", []) if (project and project.settings) else []
+    refs = (scene.parameters or {}).get("image_refs_last") or {}
+    has_explicit = isinstance(refs, dict) and (refs.get("characterIndices") or refs.get("extras"))
+    if has_explicit:
+        return await _resolve_scene_ref_asset_ids(scene, project, session, "last")
+    # Flow-derived fallback (no explicit LF selection)
+    idxs = _frame_present_char_indices(scene, characters, "last")
+    if not idxs:
+        return []
+    from sqlmodel import select as _s
+    ids: list[str] = []
+    for ix in idxs:
+        img_path = (characters[ix].get("image_path", "") or "").strip()
+        if not img_path:
+            continue
+        a = (await session.execute(_s(Asset).where(Asset.project_id == project.id, Asset.rel_path == img_path))).scalars().first()
+        if not a:
+            a = (await session.execute(_s(Asset).where(Asset.project_id == project.id, Asset.rel_path.like(f"%{img_path}")))).scalars().first()
+        if a:
+            ids.append(str(a.id))
+    return ids
+
+
 async def _ensure_video_flow(
     project: Project,
     scenes: list[Scene],
@@ -1727,11 +2224,34 @@ async def _build_auto_enhance_context(
     """Build LLM enhance context for auto-generation."""
     parts: list[str] = []
 
+    # Per-scene user instruction (highest priority) — keeps auto-gen on track,
+    # mirroring the manual Enhance "Include LLM Instruction" button.
+    _ui = ((scene.parameters or {}).get("llm_instruction_image") or "").strip()
+    if _ui:
+        parts.append(
+            f"USER DIRECTION (HIGHEST PRIORITY — follow this exactly; it overrides "
+            f"other guidance when in conflict): \"{_ui}\"."
+        )
+
     # Model info
     parts.append(f"Image generation model: {model_type}. Optimize the prompt for this specific model's strengths, requirements, and quirks.")
 
     # Scene timing
     parts.append(f"Scene timing: {scene.start_time}s to {scene.end_time}s. Frame: {frame_type}.")
+
+    # VIDEO FIRST FRAME (LTX 2.3 I2V best practice): for animated scenes the first
+    # frame is the image the video animates FROM, so it must show the OPENING moment
+    # — not the whole action. Skipped for narration_images (the image is the final
+    # deliverable, so it should depict the full scene).
+    if frame_type == "first" and getattr(project, "mode", "") in ("music_video", "narration_video"):
+        parts.append(
+            "VIDEO STARTING FRAME (important): this image is the FIRST FRAME of a video clip and the video "
+            "step animates the motion FROM it. Depict the OPENING MOMENT / calm starting state only — the key "
+            "subject(s), setting and lighting as the shot opens, BEFORE the action plays out. Do NOT pack in "
+            "every action, character entrance, or element the scene reveals over time (the video prompt handles "
+            "those); an overloaded first frame produces busier, worse video. Frame the subject as the shot should "
+            "open (the model won't reframe) and keep lighting clean and consistent (it propagates through the clip)."
+        )
 
     # Concept & style
     concept_text = project.settings.get("concept_text", "")
@@ -1789,34 +2309,97 @@ async def _build_auto_enhance_context(
                 f"This is NON-NEGOTIABLE — every visual element described must conform to this color restriction."
             )
 
-    # Characters — Klein uses compositional language for reference images
+    # Characters — reference each by IMAGE POSITION, never by name (the model
+    # cannot use names; a name is a wasted, confusing token).
     characters = project.settings.get("characters", [])
-    if characters:
+    if characters and frame_type != "last":
         chars_with_images = [c for c in characters[:2] if c.get("image_path")]
         chars_without_images = [c for c in characters[:2] if not c.get("image_path")]
 
         if chars_with_images:
             ref_labels = ["first", "second", "third", "fourth"]
             parts.append(
-                "REFERENCE IMAGES: Character reference photos are being sent with this prompt. "
-                "Use COMPOSITIONAL language to reference them — describe what the subject from the "
-                "reference image should be doing in the scene. For example: 'the subject from the "
-                "first image stands in the doorway' or 'the person from the second image sits at "
-                "the table'. Do NOT just say 'Image 1' — describe them compositionally. "
-                "Front-load the most important visual elements. Prioritize lighting description."
+                "REFERENCE IMAGES: character reference photo(s) are attached. Reference each one by its "
+                "position — \"the subject from the first image\", \"the person from the second image\", or "
+                "simply \"Image 1\"/\"Image 2\" — then say what they are doing in the scene. "
+                "NEVER write a character's name or any proper noun: the model cannot use names, so a name is "
+                "a wasted, confusing token — describe the character by what the reference shows, not by name. "
+                "Front-load the most important visual elements and prioritise lighting."
             )
             for i, c in enumerate(chars_with_images):
-                name = c.get("name", "Unnamed")
                 desc = c.get("description", "no description")
                 label = ref_labels[i] if i < len(ref_labels) else f"reference {i + 1}"
                 parts.append(
-                    f'The {label} reference image is character "{name}" ({desc}). '
+                    f'The {label} reference image shows {desc}. '
                     f'When this character appears, write "the subject from the {label} image" '
-                    f'followed by what they are doing in this scene.'
+                    f'(or "Image {i + 1}") followed by what they are doing — never their name.'
                 )
 
         for c in chars_without_images:
             parts.append(f'Character "{c.get("name", "Unnamed")}": {c.get("description", "no description")}')
+
+    # ── LAST FRAME — explicit endpoint, cast, and continuity ───────────────
+    # The last frame is a LATER moment of the SAME shot.  Tell the LLM exactly
+    # who is in this final image (selected on the Last-Frame tab, else whoever the
+    # story flow names), who is NOT, and who ENTERS who was not in the first
+    # frame — and never to invent extra people.  Only claim reference images are
+    # attached when they actually are.
+    if frame_type == "last":
+        ff_prompt = (scene.prompt or scene.parameters.get("submitted_image_prompt") or "").strip()
+        if ff_prompt:
+            parts.append(
+                "FIRST FRAME PROMPT (the scene STARTS from this image — the last frame must be a "
+                "DISTINCT LATER MOMENT of this SAME shot: same place, lighting, palette and style, "
+                f'with the action advanced): "{ff_prompt}"'
+            )
+        if characters:
+            lf_idxs = _frame_present_char_indices(scene, characters, "last")
+            ff_idxs = _frame_present_char_indices(scene, characters, "first")
+            ff_attached = (
+                scene.parameters.get("lf_exclude_first_frame_ref") is not True
+                and bool(scene.parameters.get("chosen_image_path"))
+            )
+            ref_labels = ["first", "second", "third", "fourth", "fifth"]
+            slot_offset = 1 if ff_attached else 0  # FF occupies Klein slot 1 when attached
+            present_with_img = [ix for ix in lf_idxs if (characters[ix].get("image_path"))]
+            if ff_attached:
+                parts.append(
+                    "REFERENCE IMAGE 1 is the scene's FIRST FRAME — keep the SAME location, "
+                    "lighting, palette and style as it; the last frame is simply a later moment. "
+                    "Character reference images (if any) come AFTER it."
+                )
+            if present_with_img:
+                lines = []
+                entering = []
+                for n, ix in enumerate(present_with_img):
+                    c = characters[ix]
+                    desc = c.get("description", "no description")
+                    label = ref_labels[min(n + slot_offset, len(ref_labels) - 1)]
+                    lines.append(f'the {label} reference image shows {desc}')
+                    if ix not in ff_idxs:
+                        entering.append(label)
+                parts.append(
+                    "CAST AT THE LAST FRAME — these reference photos ARE attached and these are the "
+                    "ONLY characters in the final image: " + "; ".join(lines) + ". "
+                    "Reference each by image position (\"the subject from the <position> image\" or "
+                    "\"Image N\"), NEVER by name. Do NOT add, invent, or describe ANY other person — "
+                    "anyone not listed here is NOT in this frame."
+                )
+                if entering:
+                    parts.append(
+                        "ENTERS BY THE END: " + ", ".join(f"the {l} image" for l in entering)
+                        + " shows a character who was NOT present in the first frame but is now in "
+                        "frame at the end of the scene — render them clearly present at the endpoint "
+                        "(entering / having arrived), exactly matching their reference image, while "
+                        "keeping the scene continuous with the first frame."
+                    )
+            else:
+                # No attachable character refs — pure-prose continuity, no invented cast.
+                parts.append(
+                    "CAST AT THE LAST FRAME: keep exactly the same subject(s) the first frame "
+                    "established and only advance their position/pose/action. Do NOT introduce any "
+                    "new named character or person that was not in the first frame."
+                )
 
     # Scene lyrics — PRIMARY creative driver
     if lyrics_text:
@@ -1885,6 +2468,12 @@ async def _build_auto_enhance_context(
             "current scene's unique content."
         )
 
+    _vb = await _autogen_vision_block(scene, project, frame_type)
+    if _vb:
+        parts.append(_vb)
+    _lb = await _autogen_ref_layout_block(scene, project, frame_type)
+    if _lb:
+        parts.append(_lb)
     return " | ".join(parts)
 
 
@@ -1897,6 +2486,15 @@ async def _build_video_enhance_context(
 ) -> str:
     """Build LLM enhance context for video auto-generation."""
     parts: list[str] = []
+
+    # Per-scene user instruction (highest priority) — keeps auto-gen on track,
+    # mirroring the manual Enhance "Include LLM Instruction" button.
+    _uiv = ((scene.parameters or {}).get("llm_instruction_video") or "").strip()
+    if _uiv:
+        parts.append(
+            f"USER DIRECTION (HIGHEST PRIORITY — follow this exactly; it overrides "
+            f"other guidance when in conflict): \"{_uiv}\"."
+        )
 
     video_mode = scene.parameters.get("video_mode", "single")
     mode_context = (
@@ -2045,6 +2643,12 @@ async def _build_video_enhance_context(
             "Avoid obscuring the face with objects, heavy shadows, or extreme angles."
         )
 
+    _vb = await _autogen_vision_block(scene, project, "first")
+    _lb_v = await _autogen_ref_layout_block(scene, project, "first")
+    if _lb_v:
+        parts.append(_lb_v)
+    if _vb:
+        parts.append(_vb)
     return " | ".join(parts)
 
 
@@ -2371,8 +2975,18 @@ async def auto_generate(
                 needs_lf = not has_lf if only_missing else True
                 if needs_lf and (uses_ff_lf or not only_missing):
                     lf_prompt = scene.parameters.get("last_frame_prompt", "") or scene.prompt or f"Scene {scene.order_index + 1} - last frame"
-                    ref_ids_lf = _collect_ref_asset_ids(scene, "last")
-                    wf_type_lf = _auto_workflow_type(len(ref_ids_lf))
+                    # Scene-aware LF references: the Last-Frame tab's selected
+                    # characters + extras, else the characters the story flow
+                    # names.  This attaches the REAL character reference image(s)
+                    # so the end frame (and the video that lands on it) shows the
+                    # actual character, not an invented look.
+                    ref_ids_lf = await _resolve_lf_ref_asset_ids(scene, project, session)
+                    # Attach the chosen First Frame image as a continuity
+                    # reference (Klein slot 1) by default; opt out per scene with
+                    # lf_exclude_first_frame_ref. Resolved at dispatch (the FF may
+                    # not be rendered yet at queue time).
+                    _lf_attach_ff = scene.parameters.get("lf_exclude_first_frame_ref") is not True
+                    wf_type_lf = _auto_workflow_type(len(ref_ids_lf) + (1 if _lf_attach_ff else 0))
 
                     if is_enhanced and enhancer and llm_api_key:
                         try:
@@ -2407,6 +3021,7 @@ async def auto_generate(
                             "height": img_h,
                             "reference_asset_ids": ref_ids_lf,
                             "frame_type": "last",
+                            "attach_first_frame_ref": _lf_attach_ff,
                             "auto_save_preview": True,
                         },
                     )
@@ -2531,10 +3146,41 @@ class SeqAutoGenStatusResponse(BaseModel):
     current_step: Optional[str] = None  # 'enhancing', 'generating_image', 'generating_video'
     error: Optional[str] = None
     batch_run_id: Optional[str] = None
+    vision: Optional[dict] = None  # live vision-model activity for this project
 
 
 # In-memory tracking per project
 _seq_auto_jobs: dict[str, dict] = {}
+
+# Live vision-model activity per project (so the UI can show that the vision
+# model is actually being called when describing reference images).  Updated by
+# the vision describe path; read by the sequential status + a dedicated endpoint.
+_vision_activity: dict[str, dict] = {}
+
+
+def _note_vision_activity(pid, *, described: int = 0, cached: int = 0,
+                          model=None, msg: str | None = None) -> None:
+    """Record that the vision model described (or cache-hit) reference image(s)
+    for a project, so the frontend can show a live 'vision is working' indicator."""
+    import time as _vt
+    if not pid:
+        return
+    pid = str(pid)
+    cur = _vision_activity.get(pid) or {"described": 0, "cache_hits": 0, "model": None, "last_msg": None, "updated_at": 0}
+    cur["described"] = int(cur.get("described", 0)) + int(described)
+    cur["cache_hits"] = int(cur.get("cache_hits", 0)) + int(cached)
+    if model:
+        cur["model"] = model
+    if msg:
+        cur["last_msg"] = msg
+    cur["updated_at"] = _vt.time()
+    _vision_activity[pid] = cur
+
+
+def _reset_vision_activity(pid) -> None:
+    """Zero the per-run vision counters at the start of an auto/batch run."""
+    if pid:
+        _vision_activity[str(pid)] = {"described": 0, "cache_hits": 0, "model": None, "last_msg": None, "updated_at": __import__("time").time()}
 
 
 async def _evict_seq_auto_job(pid: str, evict_id: str, delay: float = 1800.0):
@@ -2831,6 +3477,7 @@ async def start_sequential_auto_gen(
         "batch_run_id": batch_run_id,
         "_evict_id": _new_evict_id,
     }
+    _reset_vision_activity(pid)
 
     _track_task(
         _run_sequential_auto_gen(
@@ -2852,6 +3499,19 @@ async def start_sequential_auto_gen(
     )
 
     return SeqAutoGenStatusResponse(**_seq_auto_jobs[pid])
+
+
+@router.get(
+    "/vision-activity",
+    summary="Live vision-model activity for a project",
+)
+async def get_vision_activity(project_id: UUID) -> dict:
+    """Return live vision-model activity (counts of reference images described +
+    cache hits, the model, last message, and updated_at epoch) so the UI can show
+    the vision model is actually being used. Empty/zeroed when idle."""
+    return _vision_activity.get(str(project_id)) or {
+        "described": 0, "cache_hits": 0, "model": None, "last_msg": None, "updated_at": 0,
+    }
 
 
 @router.get(
@@ -2882,7 +3542,7 @@ async def get_sequential_auto_gen_status(
     pid = str(project_id)
     info = _seq_auto_jobs.get(pid)
     if info:
-        return SeqAutoGenStatusResponse(**info)
+        return SeqAutoGenStatusResponse(**{**info, "vision": _vision_activity.get(pid)})
 
     # Fall back to the most recent BatchRun for this project.  Lets
     # users close the browser tab mid-run, come back later, and still
@@ -5431,9 +6091,20 @@ async def rerun_pass2(
 # Resolve character ref IDs from project concept data
         project = await session.get(Project, project_id)
         char_ref_ids: list[str] = []
+        # Cap matches _create_two_pass_composite_job: slot 1 is the base scene
+        # image and Klein ships up to 5REF, so at most 3 character refs.  The
+        # rerun previously gathered ALL project characters -> klein_6ref crash.
+        MAX_CHARS_IN_COMPOSITE = 3
         if project and project.settings:
             characters = project.settings.get("characters", [])
-            for char in characters:
+            # Prefer the scene's explicit selection (the single source of truth
+            # the original Pass 2 used); fall back to all characters if none.
+            _sel = (scene_params.get("image_refs_first") or {}).get("characterIndices")
+            if isinstance(_sel, list) and _sel:
+                _chosen = [characters[i] for i in _sel if isinstance(i, int) and 0 <= i < len(characters)]
+            else:
+                _chosen = list(characters)
+            for char in _chosen:
                 img_path = char.get("image_path", "")
                 if img_path:
                     stmt = select(Asset).where(
@@ -5444,6 +6115,8 @@ async def rerun_pass2(
                     asset = result.scalars().first()
                     if asset:
                         char_ref_ids.append(str(asset.id))
+        if len(char_ref_ids) > MAX_CHARS_IN_COMPOSITE:
+            char_ref_ids = char_ref_ids[:MAX_CHARS_IN_COMPOSITE]
 
         if not char_ref_ids:
             raise HTTPException(
@@ -5453,7 +6126,7 @@ async def rerun_pass2(
 
         # Build ref list: base scene image (slot 1) + character refs (slots 2+)
         all_ref_ids = [str(base_asset_id)] + char_ref_ids
-        ref_count = len(all_ref_ids)
+        ref_count = min(len(all_ref_ids), 5)  # hard clamp to Klein's 5REF ceiling
         workflow_type = f"klein_{ref_count}ref"
 
         # Resolve seed
@@ -5516,4 +6189,97 @@ async def rerun_pass2(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create rerun pass 2 job",
+        )
+
+
+class InpaintRequest(BaseModel):
+    """Klein mask-paint inpaint of an existing rendered image."""
+
+    scene_id: UUID
+    # RGBA PNG = the source image with the paint mask baked into its ALPHA
+    # channel (uploaded as an asset by the client).
+    source_masked_asset_id: UUID
+    # Optional reference image (object / character) to pull into the masked area.
+    reference_asset_id: Optional[UUID] = None
+    prompt: str = ""
+    seed: Optional[int] = None
+    mask_expand: Optional[int] = None
+    mask_blur: Optional[int] = None
+
+
+@router.post(
+    "/inpaint",
+    response_model=GenerationJobResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Klein inpaint (mask-paint edit of a rendered image)",
+)
+async def inpaint_image(
+    project_id: UUID,
+    req: InpaintRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> GenerationJobResponse:
+    """Run a Klein inpaint: regenerate only the masked region of an existing
+    image, optionally guided by a reference image/character.  The result is saved
+    as a new image version on the scene (the user reviews it, then saves as
+    preview)."""
+    try:
+        await _get_project_or_404(project_id, session)
+        await _get_scene_or_404(req.scene_id, project_id, session)
+
+        src = await session.get(Asset, req.source_masked_asset_id)
+        if not src:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inpaint source image not found.",
+            )
+        if req.reference_asset_id:
+            ref = await session.get(Asset, req.reference_asset_id)
+            if not ref:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Inpaint reference image not found.",
+                )
+
+        resolved_seed = await _resolve_seed(
+            project_id, req.scene_id, req.seed, session,
+            job_type="image", frame_type="first",
+        )
+
+        params = {
+            "workflow_type": "klein_inpaint",
+            "source_masked_asset_id": str(req.source_masked_asset_id),
+            "reference_asset_id": str(req.reference_asset_id) if req.reference_asset_id else None,
+            "prompt": req.prompt or "",
+            "seed": resolved_seed,
+            "frame_type": "first",
+            # Don't auto-overwrite the scene preview — surface as a version the
+            # user can review and explicitly save.
+            "auto_save_preview": False,
+            "mask_expand": req.mask_expand,
+            "mask_blur": req.mask_blur,
+        }
+
+        job = Job(
+            project_id=project_id,
+            scene_id=req.scene_id,
+            job_type=JobType.IMAGE,
+            status=JobStatus.PENDING,
+            parameters=params,
+        )
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+
+        logger.info(f"Created klein_inpaint job {job.id} for scene {req.scene_id}")
+        job_queue: JobQueue = request.app.state.job_queue
+        job_queue.notify()
+        return GenerationJobResponse.model_validate(job)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating inpaint job for scene {req.scene_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create inpaint job",
         )

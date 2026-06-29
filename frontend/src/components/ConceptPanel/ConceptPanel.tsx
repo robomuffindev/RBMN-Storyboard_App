@@ -89,6 +89,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   // (which only influences the LLM prompt).  Values: "" / "bw" /
   // "grayscale" / "sepia".  Per-scene image_color_filter overrides.
   const [globalImageColorFilter, setGlobalImageColorFilter] = useState('');
+  // Ideogram structured-JSON prompting mode (Krea 2 only). OFF by default.
+  const [jsonPromptMode, setJsonPromptMode] = useState(false);
   // Global project context — environmental wrapper injected into every
   // LLM enhance call when enabled.  All four fields persist independently;
   // they're only sent to the LLM when globalContextEnabled is true.
@@ -187,6 +189,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        json_prompt_mode: jsonPromptMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -260,6 +263,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setKenBurnsAllowedEffects(conceptData.ken_burns_allowed_effects || []);
       setGlobalColorOverride(conceptData.global_color_override || '');
       setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
+      setJsonPromptMode(!!(conceptData as any).json_prompt_mode);
       setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
       setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
       // Default ON when the field is absent (older projects) so existing
@@ -305,6 +309,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        json_prompt_mode: jsonPromptMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -378,6 +383,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        json_prompt_mode: jsonPromptMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -420,6 +426,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        json_prompt_mode: jsonPromptMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -435,7 +442,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       });
     }
-  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, globalImageColorFilter, projectId, queryClient]);
+  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, globalImageColorFilter, jsonPromptMode, projectId, queryClient]);
 
   const handleImageUpload = async (index: number, file: File) => {
     try {
@@ -626,6 +633,25 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           </select>
           <p className="text-[10px] text-gray-500 mt-1">
             Runs FFmpeg over every newly-generated image. Per-scene override available on each Image tab.
+          </p>
+        </div>
+
+        {/* Ideogram structured-JSON Prompting Mode — Krea 2 only. OFF by default. */}
+        <div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={jsonPromptMode}
+              onChange={(e) => { setJsonPromptMode(e.target.checked); markDirty(); }}
+              className="accent-purple-500"
+            />
+            <span className="text-xs font-medium text-gray-300">Ideogram Prompting Mode</span>
+            <span className="text-[10px] text-purple-300/70">Krea 2 only</span>
+          </label>
+          <p className="text-[10px] text-gray-500 mt-1">
+            Builds prompts as structured Ideogram-4 captions with positional bounding boxes and color
+            palettes for precise composition control. Only applies when your first-pass image model is
+            Krea 2 Turbo. Auto-gen and per-scene generation follow this setting (override per scene on the Image tab).
           </p>
         </div>
 
@@ -1190,6 +1216,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         global_color_override: globalColorOverride,
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
+        json_prompt_mode: jsonPromptMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,

@@ -107,6 +107,21 @@
       "title": "MANUAL PROMPT"
     }
   },
+  "146": {
+    "inputs": {
+      "model": [
+        "82",
+        0
+      ],
+      "enabled": true,
+      "strength": 1.0,
+      "debug": false
+    },
+    "class_type": "ComfyUI-Krea2T-Enhancer",
+    "_meta": {
+      "title": "ComfyUI-Krea2T-Enhancer"
+    }
+  },
   "78:73": {
     "inputs": {
       "conditioning": [
@@ -144,7 +159,7 @@
       "scheduler": "simple",
       "denoise": 1,
       "model": [
-        "82",
+        "146",
         0
       ],
       "positive": [

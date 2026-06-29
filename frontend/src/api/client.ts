@@ -167,6 +167,24 @@ export const rerunPass2 = (projectId: string, data: {
 }) =>
   api.post<{ id: string }>(`/projects/${projectId}/generate/rerun-pass2`, data);
 
+export const inpaintImage = (projectId: string, data: {
+  scene_id: string;
+  source_masked_asset_id: string;   // RGBA source with the paint mask in its alpha
+  reference_asset_id?: string;
+  prompt?: string;
+  seed?: number;
+  mask_expand?: number;
+  mask_blur?: number;
+}) =>
+  api.post<{ id: string }>(`/projects/${projectId}/generate/inpaint`, data);
+
+export const importAaf = (projectId: string, formData: FormData) =>
+  api.post<{ created_count: number; scene_ids: string[]; audio_attached: boolean; chapter_count: number; message: string }>(
+    `/projects/${projectId}/timeline/import-aaf`,
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  );
+
 export const generateVideo = (projectId: string, data: {
   scene_id: string;
   workflow_type?: string;
@@ -190,8 +208,22 @@ export const enhancePrompt = (projectId: string, data: {
   provider?: string;
   is_video?: boolean;
   frame_type?: 'first' | 'last';
+  reference_asset_ids?: string[];
+  vision_describe?: boolean | null;
 }) =>
   api.post<{ enhanced_prompt: string }>(`/projects/${projectId}/generate/enhance-prompt`, data);
+
+// Build/regenerate an Ideogram structured JSON caption for a scene (Krea 2 JSON mode).
+export const buildJsonPrompt = (projectId: string, data: {
+  scene_id: string;
+  prompt?: string;
+}) =>
+  api.post<{ json_prompt: any }>(`/projects/${projectId}/generate/json-prompt`, data);
+
+// Export a complete troubleshooting JSON of a scene's prompts, models, sizes,
+// references, and (for Ideogram mode) the full structured caption sent to ComfyUI.
+export const exportScenePrompts = (projectId: string, sceneId: string) =>
+  api.get<any>(`/projects/${projectId}/generate/prompts-export`, { params: { scene_id: sceneId } });
 
 export const batchGenerate = (projectId: string, data: {
   jobs: Array<{
@@ -257,7 +289,19 @@ export const getSequentialAutoGenStatus = (projectId: string) =>
     current_step?: string;
     error?: string;
     batch_run_id?: string;
+    vision?: VisionActivity | null;
   }>(`/projects/${projectId}/generate/auto-sequential/status`);
+
+// Live vision-model activity (reference-image descriptions) for a project.
+export interface VisionActivity {
+  described: number;
+  cache_hits: number;
+  model: string | null;
+  last_msg: string | null;
+  updated_at: number;
+}
+export const getVisionActivity = (projectId: string) =>
+  api.get<VisionActivity>(`/projects/${projectId}/generate/vision-activity`);
 
 export const cancelSequentialAutoGen = (projectId: string) =>
   api.post<{
@@ -348,6 +392,9 @@ export const testLLM = (data: { provider: string; api_key: string; model: string
 
 export const refreshOllamaModels = (baseUrl?: string) =>
   api.post<{ success: boolean; models: string[]; message: string }>('/settings/ollama/models', { base_url: baseUrl });
+
+export const refreshOllamaVisionModels = (baseUrl?: string) =>
+  api.post<{ success: boolean; models: string[]; message: string }>('/settings/ollama/vision/models', { base_url: baseUrl });
 
 export const testOllamaSingle = (url: string) =>
   api.post<{ success: boolean; message: string }>('/settings/ollama/test-single', { url });
@@ -488,6 +535,7 @@ export const saveConcept = (projectId: string, data: {
   enable_model_audio?: boolean;
   model_audio_volume?: number;
   include_model_audio_in_export?: boolean;
+  json_prompt_mode?: boolean;
 }) =>
   api.put(`/projects/${projectId}/concept`, data);
 

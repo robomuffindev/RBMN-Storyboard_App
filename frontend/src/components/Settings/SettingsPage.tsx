@@ -25,6 +25,7 @@ import {
   getGpuStatus,
   redetectGpu,
   refreshOllamaModels,
+  refreshOllamaVisionModels,
 } from '@/api/client';
 import { ChevronLeft, Check, X, Loader, Upload, Trash2, Download, FolderInput, FolderOpen, BookOpen, Cloud, Play, Square, Plus, RefreshCw, AlertTriangle, Cpu, Monitor, Zap } from 'lucide-react';
 import type { AppSettings, SystemPromptOverrideEntry, RunPodPodConfig, RunPodPodStatus, GpuStatus } from '@/types/index';
@@ -71,6 +72,7 @@ export default function SettingsPage() {
     export_lfff_trim_enabled: true,
     single_image_generator: 'z_image_turbo',
     krea2_model_name: 'krea2_turbo_fp8.safetensors',
+    krea2_sfw_mode: true,
     use_distilled_lora: true,
     distilled_lora_name: 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
     runpod_enabled: false,
@@ -84,6 +86,9 @@ export default function SettingsPage() {
     ollama_urls: [],
     ollama_model: '',
     ollama_available_models: [],
+    ollama_vision_model: '',
+    ollama_vision_available_models: [],
+    vision_enabled: false,
     // ── Chapters / LLM batching ──
     llm_chapter_scene_limit_cloud: 25,
     llm_chapter_scene_limit_ollama: 12,
@@ -120,6 +125,8 @@ export default function SettingsPage() {
   const [projectDirStatus, setProjectDirStatus] = useState<{ type: 'success' | 'error' | 'loading'; message: string } | null>(null);
   // Ollama state
   const [newOllamaUrl, setNewOllamaUrl] = useState('');
+  const [ollamaVisionRefreshing, setOllamaVisionRefreshing] = useState(false);
+  const [ollamaVisionRefreshMsg, setOllamaVisionRefreshMsg] = useState<string | null>(null);
   const [ollamaRefreshing, setOllamaRefreshing] = useState(false);
   const [ollamaRefreshMsg, setOllamaRefreshMsg] = useState<string | null>(null);
   const [ollamaServerTests, setOllamaServerTests] = useState<Record<string, 'testing' | 'ok' | 'fail'>>({});
@@ -172,6 +179,7 @@ export default function SettingsPage() {
         export_lfff_trim_enabled: savedSettings.export_lfff_trim_enabled ?? true,
         single_image_generator: savedSettings.single_image_generator || 'z_image_turbo',
         krea2_model_name: savedSettings.krea2_model_name || 'krea2_turbo_fp8.safetensors',
+        krea2_sfw_mode: savedSettings.krea2_sfw_mode ?? true,
         use_distilled_lora: savedSettings.use_distilled_lora ?? true,
         distilled_lora_name: savedSettings.distilled_lora_name || 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
         runpod_enabled: savedSettings.runpod_enabled || false,
@@ -189,6 +197,9 @@ export default function SettingsPage() {
         chapter_auto_split_threshold: savedSettings.chapter_auto_split_threshold ?? 25,
         chapter_max_depth: savedSettings.chapter_max_depth ?? 2,
         ollama_available_models: savedSettings.ollama_available_models || [],
+        ollama_vision_model: savedSettings.ollama_vision_model || '',
+        ollama_vision_available_models: savedSettings.ollama_vision_available_models || [],
+        vision_enabled: savedSettings.vision_enabled || false,
       });
       // Initialize project directory input
       setProjectDirInput(savedSettings.project_dir || '');
@@ -1052,6 +1063,19 @@ export default function SettingsPage() {
                   <p className="text-xs text-gray-500 mt-1">
                     Overrides the diffusion model in the Krea 2 workflow. Use <span className="text-emerald-400">mxfp8</span> on RTX 50-series (Blackwell) cards and <span className="text-emerald-400">fp8</span> on RTX 40-series and older. Ensure the chosen file is present in each ComfyUI server's models/diffusion_models folder.
                   </p>
+                  <div className="mt-3">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={settings.krea2_sfw_mode !== false}
+                        onChange={(e) => setSettings((prev) => ({ ...prev, krea2_sfw_mode: e.target.checked }))}
+                      />
+                      <span className="text-sm font-medium">SFW mode (model safety checker on)</span>
+                    </label>
+                    <p className="text-xs text-gray-500 mt-1">
+                      ON uses the SFW Krea 2 workflow with the model's built-in safety checker active. Turn OFF to use the NSFW workflow, which inserts the <span className="text-fuchsia-400">Krea2T-Enhancer</span> node to bypass the safety checker. Applies to both plain and Ideogram modes (needs <span className="text-gray-300">KREA2_TURBO_T2I_NSFW.json</span> / <span className="text-gray-300">KREA2_IDEOGRAM_T2I_NSFW.json</span> in the workflows folder — falls back to the SFW file if missing).
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
@@ -2100,6 +2124,68 @@ export default function SettingsPage() {
                   Free local LLM with round-robin dispatch across multiple servers.
                   Recommended: qwen3:14b for 12-16GB VRAM. Prompts are optimized for smaller models.
                 </p>
+
+                {/* Vision model — describe reference images for the prompt LLM */}
+                <div className="mt-4 pt-4 border-t border-gray-700/60">
+                  <label className="flex items-center gap-2 cursor-pointer mb-2">
+                    <input
+                      type="checkbox"
+                      checked={!!settings.vision_enabled}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, vision_enabled: e.target.checked }))}
+                      className="accent-purple-500"
+                    />
+                    <span className="text-sm font-medium text-gray-200">Enable Vision Descriptions for Reference Images</span>
+                  </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Uses a local Ollama vision model to describe each reference image so the prompt LLM understands what it
+                    actually shows — more reliable than the source prompt, and the only signal for images added from outside
+                    the app. Runs on the same Ollama server(s) above; the description is cached per image. Per-image override
+                    available on each Image tab.
+                  </p>
+                  <label className="block text-sm font-medium mb-2">Vision Model</label>
+                  <div className="flex gap-2">
+                    <select
+                      value={settings.ollama_vision_model || ''}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, ollama_vision_model: e.target.value }))}
+                      className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                    >
+                      <option value="">Select a vision model</option>
+                      {(settings.ollama_vision_available_models || []).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={async () => {
+                        setOllamaVisionRefreshing(true);
+                        setOllamaVisionRefreshMsg(null);
+                        try {
+                          const res = await refreshOllamaVisionModels();
+                          const data = res.data;
+                          if (data.success) {
+                            setSettings((prev) => ({ ...prev, ollama_vision_available_models: data.models }));
+                            setOllamaVisionRefreshMsg(`${data.models.length} models found`);
+                          } else {
+                            setOllamaVisionRefreshMsg(data.message || 'Failed');
+                          }
+                        } catch (err: any) {
+                          setOllamaVisionRefreshMsg(err?.response?.data?.message || 'Connection failed');
+                        } finally {
+                          setOllamaVisionRefreshing(false);
+                        }
+                      }}
+                      className="px-3 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm transition-colors flex items-center gap-1"
+                      disabled={ollamaVisionRefreshing || (settings.ollama_urls || []).length === 0}
+                      title="Refresh available models from the Ollama server(s)"
+                    >
+                      <RefreshCw size={14} className={ollamaVisionRefreshing ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                  {ollamaVisionRefreshMsg && (<p className="text-xs mt-1 text-gray-400">{ollamaVisionRefreshMsg}</p>)}
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Recommended: <span className="text-emerald-400">qwen2.5vl:7b</span> (best caption accuracy). Faster:
+                    qwen2.5vl:3b or moondream. Higher quality: llama3.2-vision:11b. Pull the model in Ollama first, then Refresh.
+                  </p>
+                </div>
               </div>
             </div>
           </div>

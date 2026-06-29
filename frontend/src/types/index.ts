@@ -22,7 +22,7 @@ export type ImageWorkflowType =
   | 'klein_4ref'
   | 'klein_t2i'
   | 'custom';
-export type VideoWorkflowType = 'ltx_fflf' | 'ltx_i2v' | 'ltx_v2v_extend' | 'custom';
+export type VideoWorkflowType = 'ltx_fflf' | 'ltx_i2v' | 'ltx_v2v_extend' | 'ltx_director' | 'custom';
 
 // ===== Core Models =====
 
@@ -216,6 +216,11 @@ export interface AppSettings {
   // Single image generator
   single_image_generator?: string;
   krea2_model_name?: string;
+  krea2_sfw_mode?: boolean;
+  json_prompt_mode?: boolean;
+  ollama_vision_model?: string;
+  ollama_vision_available_models?: string[];
+  vision_enabled?: boolean;
   // Distilled LoRA
   use_distilled_lora?: boolean;
   distilled_lora_name?: string;
@@ -601,3 +606,82 @@ export interface ShortcodeResolution {
   frontend_route: string;
 }
 
+
+
+// ─── LTX Director Mode (per-scene timeline editor) ──────────────────────
+// Stored at scene.parameters.ltx_director. The backend dispatcher reads this
+// and builds the LTXDirector node's timeline_data + Prompt-Relay widgets.
+
+export interface LtxDirectorImageSegment {
+  type: 'image';
+  id: string;
+  /** Our asset (preferred — backend resolves to a ComfyUI imageFile). */
+  asset_id?: string;
+  /** Project-relative path (e.g. a previous-scene last frame) when not an asset. */
+  imageFile?: string;
+  /** For thumbnail preview in the editor. */
+  rel_path?: string;
+  /** Frame index where this keyframe is pinned. */
+  frame: number;
+  /** Hold length in frames (1 = single keyframe). */
+  length: number;
+  /** 0..1 — how strongly it pins the picture. */
+  strength: number;
+  label?: string;
+}
+
+export interface LtxDirectorTextSegment {
+  type: 'text';
+  id: string;
+  /** Prompt-Relay local prompt for this time span. */
+  prompt: string;
+  frame: number;
+  length: number;
+}
+
+export type LtxDirectorSegment = LtxDirectorImageSegment | LtxDirectorTextSegment;
+
+export interface LtxDirectorMotionSegment {
+  id: string;
+  asset_id?: string;
+  rel_path?: string;
+  /** A video/image used as a motion guide. */
+  videoFile?: string;
+  imageFile?: string;
+  frame: number;
+  length: number;
+  strength?: number;
+}
+
+export interface LtxDirectorRetake {
+  video_asset_id?: string;
+  video?: string;
+  start: number;
+  length: number;
+  prompt?: string;
+  strength?: number;
+  global_prompt?: string;
+}
+
+export interface LtxDirectorConfig {
+  enabled: boolean;
+  global_prompt: string;
+  epsilon: number;
+  use_custom_audio: boolean;
+  use_custom_motion?: boolean;
+  audio_source: 'scene' | 'asset';
+  audio_asset_id?: string;
+  audio_rel_path?: string;
+  frame_rate: number;
+  width: number;
+  height: number;
+  resize_method: string;
+  img_compression: number;
+  display_mode: 'frames' | 'seconds';
+  /** 'hq' uses the two-stage 2x-upscale low-VRAM workflow. */
+  quality?: 'standard' | 'hq';
+  duration_seconds?: number;
+  segments: LtxDirectorSegment[];
+  motionSegments?: LtxDirectorMotionSegment[];
+  retake?: LtxDirectorRetake;
+}

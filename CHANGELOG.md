@@ -1,5 +1,280 @@
 # Changelog
 
+## [1.18.0] - 2026-06-28
+
+### Added — Editable Prompt tab (full manual control)
+
+The scene Prompt tab is now an editor, not just a read-only view — for scenes that are hard to represent visually you can hand-write every prompt.
+
+- **Editable First Frame / Last Frame / Video prompts** (plus the two-pass Pass 1 / Pass 2 prompts when present), each with its own **Save** button. Edited fields highlight amber and show "unsaved" until saved; Save persists via the coherent scene-update path (backend + React Query cache + store).
+- **Import** button: load a JSON made outside the app to populate the fields. Accepts a flat shape (`{first_frame_prompt, last_frame_prompt, video_prompt, two_pass_scene_prompt, two_pass_composite_prompt}`) or the **Download Prompts JSON** export shape (`{first_frame:{prompt}, …}`). Imported values fill the fields for review, then you Save each.
+- The exact strings sent to ComfyUI (Final Submitted Image/Last-Frame/Video, Two-Pass Original) remain below as **read-only** diagnostics under a "What was actually sent to ComfyUI" divider.
+
+
+## [1.17.1] - 2026-06-28
+
+### Changed — First/last-frame prompts tuned for LTX 2.3 image-to-video
+
+Per LTX 2.3's own image-to-video guidance, the source (first frame) image should show the scene's STARTING moment — the video step animates the motion from it — and an overloaded first frame produces busier, worse video. Our first-frame prompts were cramming the full scene/action into the still.
+
+- **First frame = opening moment.** For animated scenes (music_video / narration_video), the enhance context now instructs the model to depict the calm starting state — the key subject(s), setting, and lighting as the shot opens, BEFORE the action — and NOT to pack in every action/character/element the video will reveal (the video prompt handles those). Applies to both auto-gen and manual Enhance, across all first-pass generators (Z-Image / Krea 2 / Klein). Standalone stills (narration_images) keep depicting the full scene.
+- Softened the shared image prompt's "all actions MUST appear" rule and added the video-first-frame role to `IMAGE_SYSTEM_PROMPT`, `Z_IMAGE_SYSTEM_PROMPT`, and `KREA2_IMAGE_SYSTEM_PROMPT`.
+- **Last frame = clean end keyframe.** `LAST_FRAME_IMAGE_SYSTEM_PROMPT` now notes the last frame is the keyframe the video resolves to — depict one clean endpoint, not a packed montage; keep it as uncluttered as the first frame, with the video prompt carrying the motion in between.
+
+
+## [1.17.0] - 2026-06-28
+
+### Added — Ideogram structured-prompt improvements + prompt-tab tooling
+
+- **Enhance builds the structured caption.** When Ideogram (structured-JSON) mode is on for a Krea 2 scene, the main image **Enhance** now also builds/refreshes the structured caption from the freshly enhanced prose — one click gives you the curated, positioned prompt, ready to hand-edit in the JSON Prompt editor. (Previously Enhance only produced prose; the caption was built separately or at render.)
+- **References carry their Ideogram layout.** A generated image's structured caption is now stored on the asset (`meta.ideogram_caption`). When that image is later used as a reference, its authored element **layout/positioning** is fed into the prompt context — combined with the vision-model description — so the model respects the fuller composition, not just a generic description.
+- **Reference vision-scan audit panel** on the Image tab: each reference shows a clickable thumbnail of the exact image scanned next to the vision model's description (and an "ideogram" badge when the image was composed with structured prompting), so you can audit what the vision model sees.
+- **"Download Prompts JSON"** button on the Image tab: exports a troubleshooting JSON of the scene's first-frame / last-frame / video prompts, the exact strings submitted to ComfyUI, models, resolution, seed, and resolved references. Ideogram-mode frames include the **full structured caption** (the actual positioned layout sent to ComfyUI), clearly marked — not just prose. New endpoint: `GET /generate/prompts-export`.
+
+### Fixed
+
+- Restored a pre-existing truncation in `pyproject.toml` (the `[tool.setuptools.packages.find]` section and ruff `select` line had been cut off by an earlier edit).
+
+
+## [1.16.0] - 2026-06-28
+
+### Changed — Last Frame generation is now cast-aware (introduce characters at the end)
+
+Reworked how the Last Frame (FF/LF mode) image is generated so it respects who is actually in the scene and can introduce a character who was not in the first frame (e.g. a second character enters by the end), giving the video model a real reference instead of an invented look.
+
+- **Scene-aware LF references.** Auto-gen now attaches the Last-Frame tab's selected character reference images (or, when nothing is picked, the characters the story flow names) — previously it attached only "extras", so the video model hallucinated any character that entered at the end.
+- **Explicit cast in the prompt context.** The LF enhancer is now told exactly which characters are present at the end, that no one else is in frame, and which character ENTERS who was not in the first frame — and it only claims reference images are attached when they actually are. The First Frame prompt is passed in explicitly for continuity.
+- **System prompt allows cast changes.** `LAST_FRAME_IMAGE_SYSTEM_PROMPT` no longer forces "keep all characters identical to the first frame"; a character may exit or a referenced character may enter by the end, but the model must never invent anyone not in the cast list.
+- **First Frame attached by default.** The chosen first-frame image is now used as a Klein reference (slot 1) for the last frame by default for tight continuity (dispatch-time, resolved when the FF is ready). The per-scene "Don't reference first frame image" toggle now defaults OFF (attach); flip it on for a freer end-point.
+
+### Added — Vision-model activity indicator
+
+The reference-image vision model (Ollama) was already wired into every enhance path but had no visible signal. Now there is one:
+
+- A live **vision activity tracker** per project (count of reference images described + cache hits, the model, and a last-activity message), exposed at `GET /generate/vision-activity` and merged into the sequential auto-gen status.
+- INFO logging whenever the vision model describes a reference image.
+- A small **eye badge** on the running auto-gen button showing how many reference images the vision model has described this run (hover for the model + last message).
+
+
+## [1.15.0] - 2026-06-28
+
+### Added — Krea 2 "Ultra" V2 workflows + SFW/NSFW mode
+
+Replaced the Krea 2 Turbo workflows with the tuned V2 ("Ultra") graphs and added an SFW/NSFW switch.
+
+- **Four workflow files** now ship in `workflows/`: `KREA2_TURBO_T2I.json` (SFW) / `KREA2_TURBO_T2I_NSFW.json` and `KREA2_IDEOGRAM_T2I.json` (SFW) / `KREA2_IDEOGRAM_T2I_NSFW.json`. The V2 graphs drop the separate `ConditioningKrea2Rebalance` node, route the prompt through `RBG_Smart_Seed_Variance` directly, and sharpen at 0.75.
+- **NSFW variants** insert the `ComfyUI-Krea2T-Enhancer` node (`capitan01R`) on the model path (`enabled: true`, `strength: 1.0`), which patches the Krea2 text-fusion path and bypasses the model's built-in safety checker. SFW variants omit the node entirely (safety checker active).
+- **Settings → Single Image Generator → Krea 2**: new **"SFW mode (model safety checker on)"** toggle (default ON). When OFF, the dispatcher loads the NSFW workflow for both plain and Ideogram modes, falling back to the SFW file if the NSFW one is missing.
+- New `krea2_sfw_mode` app setting (DB column + migration + API schemas).
+
+### Fixed
+
+- `prepare_krea2_ideogram_workflow` now sets the `EmptyLatentImage` width/height (the actual render resolution) so Ideogram-mode renders follow the scene resolution instead of being pinned at the workflow's baked 1920×1080.
+
+### Notes
+
+- The V2 install `.bat` also offers a `krea2_turbo_lora_rank_64_bf16` LoRA; per the user it is intentionally **not** used here (the Power Lora Loader stays empty).
+- The `KREA2V2/` source-export folder is gitignored.
+
+
+## [1.14.2] - 2026-06-28
+
+### Fixed — AAF parser validated against a real ElevenLabs export
+
+Tested the importer against a real ~238MB ElevenLabs Dubbing Studio AAF and fixed two issues it surfaced (the parser now produces 377 clean, contiguous scenes from that file):
+
+- **Composition discovery** — pyaaf2's `content.toplevel()` returns *nothing* for ElevenLabs AAFs, so the parser now falls back to scanning all mobs for the `CompositionMob` (then any mob with a Sound sequence). Without this, real imports failed with "no top-level composition".
+- **Scene names** — ElevenLabs AAF clips are named generically ("Render") and the track name is uniform, so scenes now fall back to clean "Scene 1…N" names instead of repeating a meaningless label. (The dialogue text lives in ElevenLabs' separate CSV export, not the AAF.)
+- Added `sampleaaf/` and `*.aaf` to `.gitignore` so large/personal AAF files are never committed.
+
+
+## [1.14.1] - 2026-06-28
+
+### Fixed — AAF import + manual scene editing (post-audit hardening)
+
+An independent audit of 1.14.0 found no blockers; these robustness fixes were applied:
+
+- **Manually-added / split scenes are now bound to a chapter.** `create_scene` assigns the new scene to the chapter whose time range contains it (deepest match, else the last chapter) and extends that chapter — so manual add and split no longer leave a scene with `chapter_id=NULL` that chapter-scoped Auto-Gen / Export / Story Flow would skip. Add/Split also refresh the Chapters view.
+- **New scenes are clamped to the audio length.** `create_scene` now clamps a scene's end to the master audio's duration (in addition to the min/max bounds), preventing a manually-added scene from extending past the audio and slicing a silent tail.
+- **AAF import no longer leaks the old audio file.** When you upload replacement audio during import, the previous music file is removed from disk (not just its DB row).
+- **AAF import validates the AAF first** (before any scene/audio change) and **surfaces a clear warning** if chapters couldn't be rebuilt (so you can run "Re-derive Chapters").
+
+
+## [1.14.0] - 2026-06-27
+
+### Added — Import ElevenLabs AAF timeline + manual timeline editing
+
+**AAF import.** The project 3-dots menu has a new **Import AAF (ElevenLabs)** option. It parses an ElevenLabs Dubbing Studio AAF (binary, via `pyaaf2`) into scene boundaries and **replaces** the project's scenes with that timeline, then slices audio per scene and rebuilds chapters — mirroring Suggest Timeline. The dialog lets you **use the project's existing audio or upload a new file** (sliced to the new boundaries). Clip cut points become scene cuts; clip names become scene names. (Requires `pyaaf2` in the backend env; a clear message tells you to `pip install pyaaf2` if it's missing.)
+
+**Manual timeline editing (power users).** You can now build/adjust timelines by hand without the auto flows:
+
+- **Add Scene** button in the timeline toolbar — appends a new blank scene.
+- **Numeric Start/End entry** per scene (Scene → Tools tab) — type exact times; the scene's audio re-slices to match.
+- Plus the existing **Split at playhead**, **Delete** (with merge), and **drag scene boundaries** — all confirmed working and unchanged.
+
+None of this affects the existing auto pipeline (audio analysis, SRT/lyrics, Suggest Timeline) — they remain the default. See `docs/TIMELINE_EDITING.md`.
+
+
+## [1.13.0] - 2026-06-27
+
+### Added — Klein inpaint (mask-paint editing of rendered images)
+
+Review a generated image and fix/replace part of it by painting a mask — like ComfyUI's mask editor, right in the app.
+
+- **Inpaint button** in the image lightbox (where you review a generated image full-size). Opens a full **InpaintModal**.
+- **Mask painting** over the displayed image: brush (size slider), eraser, clear. The mask is baked into the source's alpha channel (ComfyUI clipspace convention) at full resolution.
+- **Prompt** for what should appear in the masked area.
+- **Reference (optional)** to place a specific object/character into the masked area: **upload** an image, pick from **project assets**, or pick from your **characters list** — and optionally **crop a region** of the reference to use just a part of it. With no reference, it inpaints from the source image + prompt alone.
+- **Result** comes back as a new image **version** on the scene; review it and **Save as scene preview**, or inpaint again.
+- **Backend**: `workflows/KLEIN_INPAINT.json` (FLUX.2 Klein), `prepare_klein_inpaint_workflow`, a `klein_inpaint` dispatch route (source + reference uploaded as LoadImage files; result composited back over only the masked region), and a `POST /generate/inpaint` endpoint.
+
+
+## [1.12.5] - 2026-06-27
+
+### Fixed — First-pass image prompts optimized per model (no more blown-out fluff)
+
+Researched each model's official + community prompting guidance and reworked our LLM system prompts so each one is written for the model that actually renders — concise, and free of the quality-booster spam that was causing the blown-out look.
+
+- **New `Z_IMAGE_SYSTEM_PROMPT`** (Tongyi Z-Image Turbo): structured camera-direction prose, no reference language, "negatives" written positively, motivated lighting — and an explicit ban on booster terms (`masterpiece/8k/HDR/ultra-contrast`), which on Z-Image directly cause highlight clipping/oversaturation. **Fixes a real bug**: no-reference Z-Image renders were being enhanced with the *Klein reference* prompt.
+- **New `QWEN_EDIT_SYSTEM_PROMPT`** (Qwen-Image-Edit): imperative edit instructions, `image 1/2/3` roles, quoted literal text.
+- **`IMAGE_SYSTEM_PROMPT` (Klein / FLUX.1) de-fluffed**: ~30–90 words, edit-instruction phrasing with `image 1/2` references (say what *changes/combines*, don't re-describe), graceful no-reference handling, no boosters/weight-syntax, no character names, lighting-first.
+- **Krea 2 / two-pass-base / last-frame / narration** prompts tightened (word counts trimmed, booster spam banned). Krea 2 in particular was trained to *remove* the AI look, so booster words are counter-productive.
+- **Routing fix**: the manual Enhance now picks the prompt by what will render — no references → first-pass generator (Z-Image/Krea 2); with references → Klein. (Auto-gen uses the shared, now-graceful Klein image prompt; per-model auto-gen routing is a documented follow-up.)
+
+See `docs/MODEL_PROMPTING.md` for the per-model rules + sources.
+
+
+## [1.12.4] - 2026-06-27
+
+### Fixed — Klein two-pass (Pass 2) prompts: edit instructions, not T2I descriptions
+
+The Pass-2 (Klein composite) LLM prompt was being written like a from-scratch T2I description — long, blown-out paragraphs that re-described everything Klein already sees in the reference images, and that echoed character **names** the edit model can't possibly use. Reworked to treat Klein as the **edit model it is**:
+
+- The Pass-2 system prompt now asks for a **short edit instruction** (~20–60 words): Image 1 = the finished base scene (keep its exact lighting/exposure/palette, don't darken or restyle), Image 2+ = the character(s) to insert. It explicitly forbids re-describing what the images already show.
+- **No more character names.** The dispatcher no longer feeds character *names* into the composite context — characters are referenced only as "Image 2", "Image 3", … by appearance. A hard "never use a name / proper noun" rule is in the system prompt too (names are wasted, misleading tokens for an image model).
+- The composite is now **seeded with a concise edit instruction** instead of the entire base-scene prose, so the LLM stops re-describing the environment.
+- Single-pass Klein image prompts also stop emitting character names (reference subjects by image position instead).
+
+
+## [1.12.3] - 2026-06-27
+
+### Added — Player: follow-playback scene selection + prev/next scene
+
+- The main stage now **selects the scene under the playhead while playing**, so if you spot a problem you can just pause and that scene is already open in the editor to fix — no clicking around the timeline.
+- Added **Previous scene** / **Next scene** buttons to the main player controls (alongside play/seek/fullscreen). Previous jumps to the current scene's start when you're more than ~0.5s in, otherwise to the previous scene; Next jumps to the next scene's start. Both also select the target scene. (The Timeline toolbar already had equivalent prev/next-section skip buttons; this brings them to the player bar.)
+
+
+## [1.12.2] - 2026-06-27
+
+### Added — Main stage: full-screen toggle + player controls
+
+The main preview stage (the canvas at the top-centre that plays the timeline) now has its own controls overlay: a **play/pause** button, a **seek** scrubber, current/total **time**, and a **full-screen toggle**. Controls fade in on hover (and stay visible while paused or in full-screen). Full-screen uses the browser Fullscreen API on the stage; everything stays wired to the same timeline playback state, so it's in sync with the timeline transport.
+
+
+## [1.12.1] - 2026-06-27
+
+### Added — LTX Director: Retake/editing + High-Quality two-stage
+
+- **Retake / edit an existing clip** — in the Director editor, enable Retake to re-generate a chosen span (start + length) of an existing video with a new prompt and strength, keeping the rest. Source video = this scene's current video, or pick/upload one. Wires the node's `retakeMode`/`retakeVideo`/`retakeStart`/`retakeLength`/`retakePrompt`/`retakeStrength` and flips `LTXDirectorGuide.retake_mode`; the source video is uploaded with the timeline files.
+- **Quality toggle** — Standard (single-stage, fast) vs **High (2× upscale)**, a two-stage workflow (`LTX_DIRECTOR_HQ.json`) that adds an `LTXVLatentUpsampler` 2× spatial upscale + refine pass and tiled VAE decode (sharper, low-VRAM friendly). Selected per scene; the dispatcher routes to the HQ workflow when set (falls back to single-stage if the file is absent).
+
+### Fixed (LTX Director audit)
+
+- Motion-track guides now resolve their `asset_id` to a file (`videoFile`/`imageFile`) so they're uploaded and actually reach the node.
+- Fixed an autosave feedback loop in the Director editor (debounced save no longer re-fires on parent re-render).
+- "Auto-size from keyframes" is now honored — the editor defaults to pinned project dims, and an explicit auto (0) is passed through instead of always falling back to project dims.
+- Project **text export/import now preserves advanced per-scene config** — Director Mode timelines, LLM instructions, and vision / JSON-prompt toggles survive a round-trip (carried under a per-scene `advanced_params` block). Previously these were silently dropped.
+
+### Notes
+
+- Auto-gen / batch video generation intentionally ignores Director Mode and produces a standard LTX video; regenerating a Director-enabled scene via auto-gen overwrites its result (the saved Director config is preserved, just not used by auto-gen).
+
+
+## [1.12.0] - 2026-06-27
+
+### Added — LTX Director Mode (per-scene timeline editor)
+
+A full-screen timeline editor on the Video tab that drives the v2.0.0 LTXDirector ComfyUI node, grafted onto our existing LTX stack (GGUF unet + distilled LoRA + gemma DualCLIP + KJ VAEs + VHS output). Enable it per scene and it replaces the normal video options with direct timeline control.
+
+- **Video tab toggle** "Enable LTX Director Mode" — greys out the normal video controls and reveals an "Open Director Timeline" button + an inline Generate.
+- **Full-screen editor** (`LTXDirectorModal`): zoomable timeline with frames/seconds display and three lanes —
+  - **Prompt Relay** — time-segmented prompts (draggable/resizable blocks); each conditions its own span of the clip while a **global prompt** anchors what's constant. Per-segment epsilon transition control.
+  - **Keyframes** — image guides from project assets, uploads, or the **previous scene's last frame** (one-click "Continue from previous scene"); each pinned at a frame with a strength slider; drag to reposition.
+  - **Audio** — defaults to the scene's audio (conditioning / lip-sync), overridable by picking or uploading an audio asset; or let LTX generate its own.
+  - **Motion track** (advanced) + output controls (pin size / resize method / keyframe CRF).
+- **Saves on every edit** to `scene.parameters.ltx_director` (reopen any time); **Generate** enqueues an `ltx_director` video job to the batch like normal.
+- **Backend:** new `ltx_director` workflow_type → `workflows/LTX_DIRECTOR.json` (validated API export on our stack), `prepare_ltx_director_workflow`, dispatch route that builds `timeline_data` + Prompt-Relay strings from the scene config and resolves keyframe/audio assets, plus a timeline-file uploader. Gated on the workflow file existing.
+
+
+## [1.11.0] - 2026-06-21
+
+### Added — Vision model (Ollama) to describe reference images for the prompt LLM
+
+Reference images now get described by a local vision model and the description is fed to the prompt-enhancer LLM, so it understands what a reference image actually shows — more reliable than the source prompt alone, and the only signal for images imported from outside the app.
+
+- **Settings → LLM:** a new Vision section under the existing Ollama config (reuses the same Ollama server pool). Global **"Enable Vision Descriptions for Reference Images"** toggle + a **Vision Model** selector with a Refresh button (lists models from the Ollama pool via `/settings/ollama/vision/models`). Recommended **qwen2.5vl:7b** (best caption accuracy; faster: qwen2.5vl:3b / moondream; higher quality: llama3.2-vision:11b).
+- **Per-image override** on each Image tab (Project default / On / Off), shown when a vision model is configured. Saved on the scene and overrides the global setting.
+- **Auto-gen** honors it: the image and video auto-gen enhance contexts describe the scene's selected reference images. A toggle is also surfaced in the Auto-Gen panel's advanced options.
+- The description is **cached on the asset** (`asset.meta.vision_description`) so each image is described at most once; the call is a single low-temperature Ollama `/api/chat` request with a tight factual-caption prompt. Everything degrades gracefully (no model / unreachable → plain enhance).
+- Schema: `ollama_vision_model`, `ollama_vision_available_models`, `vision_enabled` on app_settings (+ migration); new `backend/services/llm/vision.py`; manual + auto-gen enhance injection.
+
+## [1.10.2] - 2026-06-21
+
+### Added — "Include LLM Instruction" for prompt enhancement
+
+A per-scene custom instruction you can hand the LLM to keep it on track when Enhance drifts from what you want.
+
+- A compact button (pencil icon) sits next to the **Enhance** button on both the **image** and **video** tabs. Click it to open a small lightbox showing the current prompt plus a box for your direction (e.g. "keep her seated", "wide shot only", "no text"). It's saved on the scene and reused every Enhance until cleared.
+- The button **lights up amber with a dot when an instruction is set**, so you can see at a glance that one is active.
+- The instruction is injected as the **highest-priority** line of the enhance context (it overrides other guidance on conflict). Stored separately for image (`llm_instruction_image`) and video (`llm_instruction_video`).
+- **Auto-gen honors it too:** the same per-scene instruction is prepended to the auto-generation enhance context for both image and video, so the LLM stays on track during batch runs — not just manual Enhance.
+
+## [1.10.1] - 2026-06-21
+
+### Improved — Last Frame image generation (distinct end-point + first-frame reference control)
+
+Last Frame renders were coming out too similar to the First Frame. Two changes:
+
+- **Stronger Last Frame prompting:** `LAST_FRAME_IMAGE_SYSTEM_PROMPT` now leads with how to *derive* the last frame — read the First Frame prompt **and** the scene's story flow, then advance the action to a CLEARLY DIFFERENT moment (subject position/pose/action/expression and/or camera framing) rather than restating the first frame. The First-Frame-image reference is now treated as optional (rely on the First Frame prompt for continuity when it isn't attached). The Enhance call also injects the scene's story flow + an explicit "distinct end-state" directive into the Last Frame context.
+- **New per-scene toggle "Don't reference first frame image"** (under "Reference: First frame set" on the Last Frame tab), **ON by default**. On = the last frame is generated freely from the prompt + character refs (no pixel over-anchoring to the first frame — the prior behavior). Off = the chosen first-frame image is prepended as Klein reference slot 1 for tight visual continuity (the workflow auto-bumps a ref tier). Character reference selections continue to apply to the last frame as before.
+
+## [1.10.0] - 2026-06-21
+
+### Added — Ideogram Prompting Mode (Krea 2 structured-JSON captions)
+
+Opt-in mode that prompts Krea 2 with the Ideogram-4 structured caption format — positional bounding boxes + per-element color palettes — for precise composition control, instead of plain natural language. OFF by default; only engages when the first-pass model is Krea 2.
+
+- **Concept tab:** global "Ideogram Prompting Mode" toggle (stored in project.settings.json_prompt_mode).
+- **Image tab (Krea 2 only):** per-scene override (Project default / On / Off) plus a **JSON Prompt** button opening a simple editor — view/edit the caption, **✨ Generate with AI** (drafts it from the scene prompt), and an **Instructions** panel.
+- **Auto-gen honors the setting:** the dispatcher checks the effective mode (scene override ▸ project default) and, when on, builds/loads a structured caption and routes to a Krea 2 workflow with the Ideogram Prompt Builder node — so auto-gen needs no special handling.
+- **LLM prompting:** new `JSON_PROMPT_SYSTEM_PROMPT` teaches any LLM the format (coordinate system, layered decomposition, color rules, palette-override priority) + `normalize_ideogram_caption` validator (uppercase hex, clamped 0-1 coords, palette caps). Captions are cached on the scene; manual edits are respected. Graceful fallback to plain Krea 2 if the caption can't be built.
+- `prepare_krea2_ideogram_workflow` populates the Ideogram4PromptBuilderKJ node (x/y/w/h fractions → the node converts to Ideogram bbox), leaving all tuned sampler/variance/model settings untouched. New `POST /generate/json-prompt` endpoint. Workflow `KREA2_IDEOGRAM_T2I.json` registered when present. Full design in `docs/IDEOGRAM_JSON_PROMPT_MODE.md`.
+
+### Fixed — Pass-2 rerun crashed with "Unknown workflow type: klein_6ref"
+
+The "Re-run Pass 2" path gathered ALL project characters with no cap (1 base + 5 chars = klein_6ref, which doesn't exist — Klein ships up to 5REF). Now it uses the scene's selected characters (image_refs_first.characterIndices, the single source of truth), caps at 3 (matching the auto-chain), and hard-clamps the workflow to klein_5ref.
+
+## [1.9.3] - 2026-06-21
+
+### Fixed — two-pass Pass-1 mislabeled "Z-Image Turbo" when actually rendered by Krea 2
+
+The image was rendering correctly on Krea 2 (confirmed in logs: `Redirecting to Krea 2 Turbo (two-pass Pass 1...)` → `Krea2_*.png`), but the UI labeled the Pass-1 image "Z-Image Turbo". Root cause: the two-pass base re-enhances its prompt and rebuilds the workflow; the first-pass redirect's in-memory `workflow_type="krea2_turbo"` mutation didn't survive the rebuild + session refresh, so the asset recorded `klein_t2i`, which the frontend maps to "Z-Image Turbo".
+
+- **Backend** (`dispatcher.py`): when an asset's resolved `workflow_type` is `klein_t2i`, record the configured first-pass generator (`krea2_turbo`/`z_image_turbo`) instead — since `klein_t2i` is always redirected to it. Fixes the stored model on all new renders.
+- **Frontend** (`SceneEditor.tsx`): the Pass-1 base label treats `klein_t2i`/missing as the configured first-pass generator, so already-generated images also label correctly.
+- **Hardening** (`workflow.py`): `prepare_krea2_workflow` now coerces width/height/seed defensively so a null value can never raise and cause a silent Z-Image fallback.
+
+> Existing two-pass images keep their stored value but now label correctly via the frontend fix; regenerate to also correct the stored metadata.
+
+## [1.9.2] - 2026-06-21
+
+### Fixed — two-pass base re-enhanced prompt silently dropped; Krea 2 first-pass diagnostic
+
+- **Two-pass base double-build bug** (`dispatcher.py`): for two-pass scenes, Pass 1 re-enhances the prompt to scene-only, then rebuilt the workflow. But the first build had already redirected `workflow_type` away from `klein_t2i` (to `z_image_turbo`/`krea2_turbo`), so the rebuild raised "Unknown workflow type" — caught and ignored — which silently discarded the re-enhanced scene-only prompt (Pass 1 ran with the original, character-laden prompt). Fixed by resetting `workflow_type` to `klein_t2i` before the rebuild so the first-pass redirect re-runs (same model choice) with the re-enhanced prompt. Affected both Z-Image and Krea 2 first passes.
+- **New `tools/diag_krea2.py`**: pinpoints why a first pass still renders as Z-Image when Krea 2 is selected — checks the saved `single_image_generator`, the presence of `KREA2_TURBO_T2I.json`, and the on-disk VERSION (to confirm the backend was restarted on the new code).
+
+> Note: the "first pass shows Z-Image" label is driven by the dispatcher's first-pass redirect, which chooses Krea 2 only when `single_image_generator == 'krea2_turbo'` AND `KREA2_TURBO_T2I.json` exists. If either is false at runtime — or the backend is still running pre-1.9.0 code — it falls back to Z-Image. Run `tools/diag_krea2.py` to see which.
+
 ## [1.9.1] - 2026-06-21
 
 ### Added — Chapter scope picker for Auto-Gen (All / Single / Multiple)

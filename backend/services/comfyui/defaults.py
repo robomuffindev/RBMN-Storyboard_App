@@ -115,9 +115,33 @@ async def register_default_workflows(session: AsyncSession) -> None:
     if (workflows_dir / "KREA2_TURBO_T2I.json").exists():
         defaults.append({
             "filename": "KREA2_TURBO_T2I.json",
-            "name": "Krea 2 Turbo - Text to Image",
+            "name": "Krea 2 Turbo - Text to Image (SFW)",
             "workflow_type": "krea2_t2i",
-            "description": "Krea 2 Turbo single-pass text-to-image (first-pass generator, no reference images, no negative prompt).",
+            "description": "Krea 2 Turbo single-pass text-to-image (first-pass generator, no reference images, no negative prompt). SFW: model safety checker active.",
+        })
+    if (workflows_dir / "KREA2_TURBO_T2I_NSFW.json").exists():
+        defaults.append({
+            "filename": "KREA2_TURBO_T2I_NSFW.json",
+            "name": "Krea 2 Turbo - Text to Image (NSFW)",
+            "workflow_type": "krea2_t2i",
+            "description": "Krea 2 Turbo text-to-image with the Krea2T-Enhancer node bypassing the model safety checker (used when SFW mode is OFF).",
+        })
+
+    # Krea 2 Turbo + Ideogram structured-JSON prompt builder (positional captions).
+    # Registered only once the workflow file is present.
+    if (workflows_dir / "KREA2_IDEOGRAM_T2I.json").exists():
+        defaults.append({
+            "filename": "KREA2_IDEOGRAM_T2I.json",
+            "name": "Krea 2 Turbo - Ideogram JSON Prompt (SFW)",
+            "workflow_type": "krea2_ideogram_t2i",
+            "description": "Krea 2 Turbo first-pass text-to-image driven by the Ideogram 4 structured-caption builder (bounding-box positioning + color palettes). SFW: model safety checker active.",
+        })
+    if (workflows_dir / "KREA2_IDEOGRAM_T2I_NSFW.json").exists():
+        defaults.append({
+            "filename": "KREA2_IDEOGRAM_T2I_NSFW.json",
+            "name": "Krea 2 Turbo - Ideogram JSON Prompt (NSFW)",
+            "workflow_type": "krea2_ideogram_t2i",
+            "description": "Krea 2 Turbo + Ideogram structured caption with the Krea2T-Enhancer node bypassing the model safety checker (used when SFW mode is OFF).",
         })
 
     # Register each default workflow

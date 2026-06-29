@@ -59,6 +59,7 @@ class SettingsResponse(BaseModel):
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     single_image_generator: str = "z_image_turbo"
     krea2_model_name: str = "krea2_turbo_fp8.safetensors"
+    krea2_sfw_mode: bool = True
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
@@ -100,6 +101,9 @@ class SettingsResponse(BaseModel):
     ollama_urls: Optional[list[str]] = None  # multi-server pool
     ollama_model: Optional[str] = None
     ollama_available_models: Optional[list[str]] = None
+    ollama_vision_model: Optional[str] = None
+    ollama_vision_available_models: Optional[list[str]] = None
+    vision_enabled: bool = False
     # ── Chapters / LLM batching ──
     llm_chapter_scene_limit_cloud: int = 25
     llm_chapter_scene_limit_ollama: int = 12
@@ -131,6 +135,7 @@ class SettingsUpdate(BaseModel):
     ltx_model_gguf: Optional[str] = None
     single_image_generator: Optional[str] = None
     krea2_model_name: Optional[str] = None
+    krea2_sfw_mode: Optional[bool] = None
     use_distilled_lora: Optional[bool] = None
     distilled_lora_name: Optional[str] = None
     default_llm_provider: Optional[str] = None
@@ -167,6 +172,8 @@ class SettingsUpdate(BaseModel):
     ollama_base_url: Optional[str] = None  # legacy single URL
     ollama_urls: Optional[list[str]] = None  # multi-server pool
     ollama_model: Optional[str] = None
+    ollama_vision_model: Optional[str] = None
+    vision_enabled: Optional[bool] = None
     # ── Chapters / LLM batching ──
     llm_chapter_scene_limit_cloud: Optional[int] = None
     llm_chapter_scene_limit_ollama: Optional[int] = None
@@ -342,6 +349,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
         single_image_generator=settings.single_image_generator or "z_image_turbo",
         krea2_model_name=settings.krea2_model_name or "krea2_turbo_fp8.safetensors",
+        krea2_sfw_mode=settings.krea2_sfw_mode if settings.krea2_sfw_mode is not None else True,
         use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
         distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
         default_llm_provider=settings.default_llm_provider,
@@ -378,6 +386,9 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         chapter_auto_split_threshold=getattr(settings, "chapter_auto_split_threshold", 25) or 25,
         chapter_max_depth=getattr(settings, "chapter_max_depth", 2) or 2,
         ollama_available_models=settings.ollama_available_models,
+        ollama_vision_model=settings.ollama_vision_model,
+        ollama_vision_available_models=settings.ollama_vision_available_models,
+        vision_enabled=bool(getattr(settings, "vision_enabled", False)),
     )
 
 
@@ -536,6 +547,8 @@ async def update_settings(
             settings.single_image_generator = req.single_image_generator
         if req.krea2_model_name is not None:
             settings.krea2_model_name = req.krea2_model_name
+        if req.krea2_sfw_mode is not None:
+            settings.krea2_sfw_mode = req.krea2_sfw_mode
         if req.use_distilled_lora is not None:
             settings.use_distilled_lora = req.use_distilled_lora
         if req.distilled_lora_name is not None:
@@ -605,6 +618,10 @@ async def update_settings(
             settings.ollama_urls = [u.rstrip("/") for u in req.ollama_urls if u and u.strip()]
         if req.ollama_model is not None:
             settings.ollama_model = req.ollama_model or None
+        if req.ollama_vision_model is not None:
+            settings.ollama_vision_model = req.ollama_vision_model or None
+        if req.vision_enabled is not None:
+            settings.vision_enabled = req.vision_enabled
 
         # ── Chapter / LLM batching ──
         if req.llm_chapter_scene_limit_cloud is not None:
@@ -1239,6 +1256,54 @@ async def refresh_ollama_models(
         return {"success": False, "models": [], "message": f"Failed to connect: {str(e)}"}
 
 
+@router.post(
+    "/ollama/vision/models",
+    summary="Refresh available Ollama vision models",
+)
+async def refresh_ollama_vision_models(
+    req: OllamaRefreshRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Scan the Ollama pool (/api/tags) and cache the model list as the VISION
+    model options. Ollama's /api/tags doesn't flag which models are vision-capable,
+    so the user picks the vision model (e.g. qwen2.5vl:7b) from the list."""
+    settings = await _get_or_create_settings(session)
+    if req.base_url:
+        urls = [req.base_url.rstrip("/")]
+    else:
+        urls = _get_ollama_urls(settings)
+    if not urls:
+        return {"success": False, "models": [], "message": "No Ollama URL configured"}
+    try:
+        import httpx
+        all_models: set[str] = set()
+        ok_count = 0
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for url in urls:
+                try:
+                    resp = await client.get(f"{url}/api/tags")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    for m in data.get("models", []):
+                        name = m.get("name", "")
+                        if name:
+                            all_models.add(name)
+                    ok_count += 1
+                except Exception as url_err:
+                    logger.warning(f"Failed to fetch Ollama vision models from {url}: {url_err}")
+        models = sorted(all_models)
+        settings.ollama_vision_available_models = models
+        await session.commit()
+        if ok_count == 0:
+            return {"success": False, "models": [], "message": f"All {len(urls)} server(s) unreachable"}
+        msg = f"{len(models)} model(s) from {ok_count}/{len(urls)} server(s)"
+        logger.info(f"Refreshed Ollama vision models: {msg}")
+        return {"success": True, "models": models, "message": msg}
+    except Exception as e:
+        logger.error(f"Failed to fetch Ollama vision models: {e}")
+        return {"success": False, "models": [], "message": f"Failed to connect: {str(e)}"}
+
+
 # ── Settings Export / Import ────────────────────────────────────────
 
 
@@ -1265,6 +1330,7 @@ class SettingsExportData(BaseModel):
     ltx_model_gguf: str = "ltx-2.3-22b-dev-Q8_0.gguf"
     single_image_generator: str = "z_image_turbo"
     krea2_model_name: str = "krea2_turbo_fp8.safetensors"
+    krea2_sfw_mode: bool = True
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
@@ -1308,6 +1374,9 @@ class SettingsExportData(BaseModel):
     ollama_base_url: Optional[str] = None
     ollama_urls: Optional[list[str]] = None
     ollama_model: Optional[str] = None
+    ollama_vision_model: Optional[str] = None
+    ollama_vision_available_models: Optional[list[str]] = None
+    vision_enabled: bool = False
 
 
 @router.get(
@@ -1345,6 +1414,7 @@ async def export_settings(
             ltx_model_gguf=settings.ltx_model_gguf or "ltx-2.3-22b-dev-Q8_0.gguf",
             single_image_generator=settings.single_image_generator or "z_image_turbo",
             krea2_model_name=settings.krea2_model_name or "krea2_turbo_fp8.safetensors",
+        krea2_sfw_mode=settings.krea2_sfw_mode if settings.krea2_sfw_mode is not None else True,
             use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
             distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
             default_llm_provider=settings.default_llm_provider,
@@ -1382,6 +1452,9 @@ async def export_settings(
             ollama_base_url=settings.ollama_base_url,
             ollama_urls=settings.ollama_urls,
             ollama_model=settings.ollama_model,
+            ollama_vision_model=settings.ollama_vision_model,
+            ollama_vision_available_models=settings.ollama_vision_available_models,
+            vision_enabled=bool(getattr(settings, "vision_enabled", False)),
         )
 
         # Build filename with date stamp
@@ -1479,6 +1552,8 @@ async def import_settings(
             settings.single_image_generator = data["single_image_generator"]
         if "krea2_model_name" in data:
             settings.krea2_model_name = data["krea2_model_name"]
+        if "krea2_sfw_mode" in data:
+            settings.krea2_sfw_mode = data["krea2_sfw_mode"]
         if "use_distilled_lora" in data:
             settings.use_distilled_lora = data["use_distilled_lora"]
         if "distilled_lora_name" in data:
@@ -1558,6 +1633,10 @@ async def import_settings(
             settings.ollama_urls = data["ollama_urls"]
         if "ollama_model" in data:
             settings.ollama_model = data["ollama_model"]
+        if "ollama_vision_model" in data:
+            settings.ollama_vision_model = data["ollama_vision_model"]
+        if "vision_enabled" in data:
+            settings.vision_enabled = bool(data["vision_enabled"])
 
         await session.commit()
         await session.refresh(settings)

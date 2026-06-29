@@ -344,6 +344,10 @@ class AppSettings(SQLModel, table=True):
     # Krea 2 Turbo first-pass model file (overrides UNETLoader in the Krea2
     # workflow). fp8 = RTX 40xx/30xx/older, mxfp8 = RTX 50xx Blackwell.
     krea2_model_name: str = Field(default="krea2_turbo_fp8.safetensors")
+    # Krea 2 SFW mode. True = SFW workflow (model safety checker active). False =
+    # NSFW workflow (Krea2T-Enhancer node bypasses the safety checker). Picks
+    # which Krea2 workflow file the dispatcher loads.
+    krea2_sfw_mode: bool = Field(default=True)
     use_distilled_lora: bool = Field(default=True)
     distilled_lora_name: str = Field(default="ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
     # Network access — when True, server binds to 0.0.0.0 (LAN/WAN accessible)
@@ -414,6 +418,10 @@ class AppSettings(SQLModel, table=True):
     ollama_urls: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # list of server URLs
     ollama_model: Optional[str] = Field(default=None)  # e.g. "qwen3:14b"
     ollama_available_models: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # cached model list
+    # Ollama Vision — multimodal model for describing reference images (reuses ollama_urls pool)
+    ollama_vision_model: Optional[str] = Field(default=None)  # e.g. "qwen2.5vl:7b"
+    ollama_vision_available_models: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # cached vision model list
+    vision_enabled: bool = Field(default=False)  # global: describe reference images for the prompt LLM
     # ── Chapters / LLM batching ─────────────────────────────────
     llm_chapter_scene_limit_cloud: int = Field(default=25)
     llm_chapter_scene_limit_ollama: int = Field(default=12)

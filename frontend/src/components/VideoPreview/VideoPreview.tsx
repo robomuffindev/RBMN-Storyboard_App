@@ -1,8 +1,15 @@
 import { useRef, useState, useMemo, useEffect, useCallback } from 'react';
-import { Image, Film, X, MonitorPlay } from 'lucide-react';
+import { Image, Film, X, MonitorPlay, Maximize2, Minimize2, Play, Pause, SkipBack, SkipForward } from 'lucide-react';
 import { useAppStore } from '@/store';
 import { handleImgError } from '@/utils/brokenImage';
 import type { WordTimestamp, SrtBlock } from '@/types';
+
+function fmtClock(sec: number): string {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 export interface SubtitleStyle {
   font?: string;
@@ -47,6 +54,8 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
   const videoBRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [hovered, setHovered] = useState(false);
 
   // Which video buffer is active: 'A' or 'B'
   const [activeBuffer, setActiveBuffer] = useState<'A' | 'B'>('A');
@@ -62,6 +71,9 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
   const scenes = useAppStore(s => s.scenes);
   const playbackPosition = useAppStore(s => s.playbackPosition);
   const isPlaying = useAppStore(s => s.isPlaying);
+  const togglePlay = useAppStore(s => s.togglePlay);
+  const setPlaybackPosition = useAppStore(s => s.setPlaybackPosition);
+  const setActiveScene = useAppStore(s => s.setActiveScene);
   // Narration Images mode: the deliverable is a still-image slideshow.
   // Even if a scene has a leftover chosen_video_path from before the
   // mode lock, the preview must show the image, not the video — matches
@@ -79,6 +91,51 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
     ? currentProject?.mode === 'narration_images'
     : true;
 
+  // ─── Fullscreen + playback controls for the main stage ────────────
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else el.requestFullscreen?.().catch(() => {});
+  }, []);
+  const totalDuration = useMemo(
+    () => Math.max(...((scenes || []).map((s) => s.end_time || 0)), 1),
+    [scenes],
+  );
+  const sceneStarts = useMemo(
+    () => (scenes || []).map((s) => s.start_time).sort((a, b) => a - b),
+    [scenes],
+  );
+  // Select the scene that contains (or starts at) a given time so the editor
+  // follows the player — pause and the playing scene is already selected to fix.
+  const selectSceneAt = useCallback((t: number) => {
+    const list = scenes || [];
+    let sc = list.find((x) => x.start_time <= t && x.end_time > t);
+    if (!sc) {
+      const before = list.filter((x) => x.start_time <= t + 0.001).sort((a, b) => b.start_time - a.start_time);
+      sc = before[0];
+    }
+    if (sc) setActiveScene(sc);
+  }, [scenes, setActiveScene]);
+  const skipPrevScene = useCallback(() => {
+    // >0.5s into a scene → jump to its start; otherwise to the previous scene.
+    const prev = sceneStarts.filter((t) => t < playbackPosition - 0.5).sort((a, b) => b - a);
+    const target = prev.length ? prev[0] : 0;
+    setPlaybackPosition(target);
+    selectSceneAt(target);
+  }, [sceneStarts, playbackPosition, setPlaybackPosition, selectSceneAt]);
+  const skipNextScene = useCallback(() => {
+    const next = sceneStarts.filter((t) => t > playbackPosition + 0.5).sort((a, b) => a - b);
+    const target = next.length ? next[0] : totalDuration;
+    setPlaybackPosition(target);
+    selectSceneAt(target);
+  }, [sceneStarts, playbackPosition, setPlaybackPosition, totalDuration, selectSceneAt]);
+
   // ─── Scene resolution ──────────────────────────────────────────
   const sceneAtPlayhead = useMemo(() => {
     if (!scenes || scenes.length === 0) return null;
@@ -88,6 +145,15 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
   }, [scenes, playbackPosition]);
 
   const displayScene = sceneAtPlayhead || activeScene;
+
+  // While playing, keep the scene under the playhead SELECTED so the editor
+  // shows it — pause on a bad frame and you're already editing that scene.
+  useEffect(() => {
+    if (assembledPreviewUrl || !isPlaying) return;
+    if (sceneAtPlayhead && sceneAtPlayhead.id !== activeScene?.id) {
+      setActiveScene(sceneAtPlayhead);
+    }
+  }, [isPlaying, sceneAtPlayhead, activeScene?.id, assembledPreviewUrl, setActiveScene]);
 
   // ─── Determine what to display ──────────────────────────────────
   // In narration_images mode, force image regardless of what's stored
@@ -429,7 +495,59 @@ export default function VideoPreview({ assembledPreviewUrl, onExitPreview, words
           }
         `}</style>
       )}
-      <div ref={containerRef} className="flex-1 flex items-center justify-center bg-black relative overflow-hidden">
+      <div
+        ref={containerRef}
+        className="flex-1 flex items-center justify-center bg-black relative overflow-hidden"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+
+        {/* ── Player controls bar (play / seek / time / fullscreen) ── */}
+        <div
+          className="absolute bottom-0 left-0 right-0 px-4 pt-10 pb-3 flex items-center gap-3 bg-gradient-to-t from-black/80 via-black/40 to-transparent transition-opacity duration-200"
+          style={{ zIndex: 20, opacity: (hovered || !isPlaying || isFullscreen) ? 1 : 0, pointerEvents: (hovered || !isPlaying || isFullscreen) ? 'auto' : 'none' }}
+        >
+          <button
+            onClick={skipPrevScene}
+            title="Previous scene"
+            className="p-1.5 rounded bg-white/10 hover:bg-white/25 text-white shrink-0"
+          >
+            <SkipBack size={15} />
+          </button>
+          <button
+            onClick={togglePlay}
+            title={isPlaying ? 'Pause' : 'Play'}
+            className="p-1.5 rounded-full bg-white/15 hover:bg-white/30 text-white shrink-0"
+          >
+            {isPlaying ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
+          </button>
+          <button
+            onClick={skipNextScene}
+            title="Next scene"
+            className="p-1.5 rounded bg-white/10 hover:bg-white/25 text-white shrink-0"
+          >
+            <SkipForward size={15} />
+          </button>
+          <span className="text-[11px] text-gray-300 tabular-nums w-10 text-right shrink-0">{fmtClock(playbackPosition)}</span>
+          <input
+            type="range"
+            min={0}
+            max={totalDuration}
+            step={0.05}
+            value={Math.min(playbackPosition, totalDuration)}
+            onChange={(e) => setPlaybackPosition(parseFloat(e.target.value))}
+            className="flex-1 h-1 accent-blue-500 cursor-pointer"
+            title="Seek"
+          />
+          <span className="text-[11px] text-gray-400 tabular-nums w-10 shrink-0">{fmtClock(totalDuration)}</span>
+          <button
+            onClick={toggleFullscreen}
+            title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+            className="p-1.5 rounded bg-white/15 hover:bg-white/30 text-white shrink-0"
+          >
+            {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+        </div>
 
         {/* ── Image layer (z-index 1) ── */}
         {displayImageUrl && (

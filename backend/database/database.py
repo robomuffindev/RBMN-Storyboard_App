@@ -253,6 +253,7 @@ async def init_db() -> None:
             "ALTER TABLE app_settings ADD COLUMN ltx_model_gguf VARCHAR DEFAULT 'ltx-2.3-22b-dev-Q8_0.gguf'",
             "ALTER TABLE app_settings ADD COLUMN single_image_generator VARCHAR DEFAULT 'z_image_turbo'",
             "ALTER TABLE app_settings ADD COLUMN krea2_model_name VARCHAR DEFAULT 'krea2_turbo_fp8.safetensors'",
+            "ALTER TABLE app_settings ADD COLUMN krea2_sfw_mode BOOLEAN DEFAULT 1",
             "ALTER TABLE app_settings ADD COLUMN use_distilled_lora BOOLEAN DEFAULT 1",
             "ALTER TABLE app_settings ADD COLUMN distilled_lora_name VARCHAR DEFAULT 'ltx-2.3-22b-distilled-lora-384.safetensors'",
             "ALTER TABLE app_settings ADD COLUMN restrict_explicit_content BOOLEAN DEFAULT 0",
@@ -315,6 +316,9 @@ async def init_db() -> None:
             "ALTER TABLE app_settings ADD COLUMN ollama_urls JSON DEFAULT NULL",
             "ALTER TABLE app_settings ADD COLUMN ollama_model VARCHAR DEFAULT NULL",
             "ALTER TABLE app_settings ADD COLUMN ollama_available_models JSON DEFAULT NULL",
+            "ALTER TABLE app_settings ADD COLUMN ollama_vision_model VARCHAR DEFAULT NULL",
+            "ALTER TABLE app_settings ADD COLUMN ollama_vision_available_models JSON DEFAULT NULL",
+            "ALTER TABLE app_settings ADD COLUMN vision_enabled BOOLEAN DEFAULT 0",
         ]:
             try:
                 await conn.execute(text(col_sql))

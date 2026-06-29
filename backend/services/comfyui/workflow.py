@@ -1385,6 +1385,18 @@ def prepare_krea2_workflow(
     with open(workflow_path, "r", encoding="utf-8") as f:
         workflow = json.load(f)
 
+    # Defensive numeric coercion — NEVER raise on a null/odd width/height/seed.
+    # A raise here would be caught by the dispatcher's redirect and silently fall
+    # back to Z-Image, which looks like "Krea 2 isn't working".
+    def _as_int(v, default):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return int(default)
+    width = _as_int(width, 1024)
+    height = _as_int(height, 1024)
+    seed = _as_int(seed, 0)
+
     anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
     full_prompt = (prompt + anti_text_suffix) if prompt else prompt
 
@@ -1425,13 +1437,13 @@ def prepare_krea2_workflow(
         workflow,
         ["Empty Latent Image", "EmptySD3LatentImage", "Empty SD3 Latent Image"],
         {"EmptySD3LatentImage", "EmptyLatentImage"},
-        "width", int(width), "latent width",
+        "width", width, "latent width",
     )
     _krea2_set_by_title_or_class(
         workflow,
         ["Empty Latent Image", "EmptySD3LatentImage", "Empty SD3 Latent Image"],
         {"EmptySD3LatentImage", "EmptyLatentImage"},
-        "height", int(height), "latent height",
+        "height", height, "latent height",
     )
 
     # ── Seed ── set EVERY seed slot in the sampling chain so the app's per-scene
@@ -1445,11 +1457,11 @@ def prepare_krea2_workflow(
         ct = node.get("class_type", "")
         inp = node.get("inputs", {})
         if ct == "KSampler" and not isinstance(inp.get("seed"), list) and "seed" in inp:
-            inp["seed"] = int(seed); _seed_targets += 1
+            inp["seed"] = seed; _seed_targets += 1
         elif ct == "RBG_Smart_Seed_Variance" and not isinstance(inp.get("seed"), list) and "seed" in inp:
-            inp["seed"] = int(seed); _seed_targets += 1
+            inp["seed"] = seed; _seed_targets += 1
         elif ct in ("RandomNoise", "KSamplerSelect") and not isinstance(inp.get("noise_seed"), list) and "noise_seed" in inp:
-            inp["noise_seed"] = int(seed); _seed_targets += 1
+            inp["noise_seed"] = seed; _seed_targets += 1
     if not _seed_targets:
         logger.warning("Krea2: no seed node found to set")
     else:
@@ -1465,6 +1477,140 @@ def prepare_krea2_workflow(
         )
 
     logger.info("Krea2 workflow prepared")
+    return workflow
+
+
+def prepare_krea2_ideogram_workflow(
+    workflow_path: str,
+    caption: dict,
+    width: int,
+    height: int,
+    seed: int,
+    model_name: Optional[str] = None,
+) -> dict:
+    """Prepare a Krea 2 workflow that uses the Ideogram 4 Prompt Builder node.
+
+    ``caption`` is the normalized Ideogram caption (see
+    prompt_enhancer.normalize_ideogram_caption): high_level_description,
+    background, style ("photo"/"art"), style_detail, aesthetics, lighting,
+    medium, style_palette (list of hex), elements (list of
+    {type,text,desc,palette,x,y,w,h} with x/y = top-left, w/h = size, all 0-1).
+
+    Populates the Ideogram4PromptBuilderKJ node; the node assembles + converts to
+    the final structured caption and the Any Switch feeds it to the CLIP encoder.
+    Leaves all tuned sampler / variance / model settings untouched (only fills the
+    prompt-builder fields, dims, seed, and the diffusion model file).
+    """
+    import json as _json
+
+    def _as_int(v, default):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return int(default)
+    width = _as_int(width, 1024)
+    height = _as_int(height, 1024)
+    seed = _as_int(seed, 0)
+
+    logger.info(f"Preparing Krea2+Ideogram workflow from {workflow_path}")
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    caption = caption or {}
+    style = "photo" if str(caption.get("style", "photo")).lower().startswith("photo") else "art"
+    # Element list in the node's expected shape (obj gets text:"").
+    elements = []
+    for e in (caption.get("elements") or []):
+        if not isinstance(e, dict):
+            continue
+        elements.append({
+            "type": "text" if e.get("type") == "text" else "obj",
+            "text": str(e.get("text", "") or ""),
+            "desc": str(e.get("desc", "") or ""),
+            "palette": list(e.get("palette") or []),
+            "x": float(e.get("x", 0) or 0),
+            "y": float(e.get("y", 0) or 0),
+            "w": float(e.get("w", 0) or 0),
+            "h": float(e.get("h", 0) or 0),
+        })
+
+    # Locate the Ideogram4PromptBuilderKJ node and fill its widgets.
+    _found = False
+    for node in workflow.values():
+        if not isinstance(node, dict) or node.get("class_type") != "Ideogram4PromptBuilderKJ":
+            continue
+        inp = node.setdefault("inputs", {})
+        inp["width"] = width
+        inp["height"] = height
+        inp["high_level_description"] = str(caption.get("high_level_description", "") or "")
+        inp["background"] = str(caption.get("background", "") or "")
+        inp["style"] = "photo" if style == "photo" else "art_style"
+        # Set the matching detail field; unknown keys are ignored by ComfyUI.
+        if style == "photo":
+            inp["style.photo"] = str(caption.get("style_detail", "") or "")
+        else:
+            inp["style.art_style"] = str(caption.get("style_detail", "") or "")
+        inp["aesthetics"] = str(caption.get("aesthetics", "") or "")
+        inp["lighting"] = str(caption.get("lighting", "") or "")
+        inp["medium"] = str(caption.get("medium", "photograph") or "photograph")
+        inp["style_palette_data"] = _json.dumps(list(caption.get("style_palette") or []))
+        inp["elements_data"] = _json.dumps(elements)
+        # Keep the node's conversion widgets as authored, but enforce the
+        # contract our coords assume (normalized x/y/w/h, yx output order).
+        inp["coord_mode"] = "normalized"
+        inp["bbox_order"] = "yx"
+        inp.setdefault("output_format", "compact")
+        inp.setdefault("import_mode", "when empty")
+        _found = True
+        break
+    if not _found:
+        logger.warning("Krea2+Ideogram: Ideogram4PromptBuilderKJ node not found in workflow")
+
+    # Backstop: also write the high-level description into the MANUAL PROMPT
+    # primitive (the Any Switch falls back to it if the builder yields nothing).
+    hld = str(caption.get("high_level_description", "") or "")
+    if hld:
+        for node in workflow.values():
+            if isinstance(node, dict) and node.get("class_type") in ("PrimitiveStringMultiline", "PrimitiveString"):
+                ip = node.setdefault("inputs", {})
+                if not isinstance(ip.get("value"), list):
+                    ip["value"] = hld
+                    break
+
+    # Seeds (KSampler + RBG variance + RandomNoise) — seed fields only.
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        ip = node.get("inputs", {})
+        if ct == "KSampler" and "seed" in ip and not isinstance(ip.get("seed"), list):
+            ip["seed"] = seed
+        elif ct == "RBG_Smart_Seed_Variance" and "seed" in ip and not isinstance(ip.get("seed"), list):
+            ip["seed"] = seed
+        elif ct in ("RandomNoise", "KSamplerSelect") and "noise_seed" in ip and not isinstance(ip.get("noise_seed"), list):
+            ip["noise_seed"] = seed
+
+    # Latent dims — the EmptyLatentImage drives the actual render resolution, so it
+    # must follow the scene resolution (the Ideogram node's width/height only feed
+    # the caption builder's coordinate context). Mirrors prepare_krea2_workflow.
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in ("EmptyLatentImage", "EmptySD3LatentImage"):
+            ip = node.setdefault("inputs", {})
+            if not isinstance(ip.get("width"), list):
+                ip["width"] = width
+            if not isinstance(ip.get("height"), list):
+                ip["height"] = height
+
+    # Diffusion model file (fp8 / mxfp8) override.
+    if model_name:
+        for node in workflow.values():
+            if isinstance(node, dict) and node.get("class_type") == "UNETLoader":
+                node.setdefault("inputs", {})["unet_name"] = model_name
+                break
+
+    logger.info(f"Krea2+Ideogram workflow prepared ({len(elements)} element(s))")
     return workflow
 
 
@@ -1622,4 +1768,185 @@ def prepare_sequencer_workflow(
     _fix_image_resize_stretch(workflow)
 
     logger.info("Sequencer workflow prepared")
+    return workflow
+
+
+def prepare_ltx_director_workflow(
+    workflow_path: str,
+    *,
+    timeline_data: dict,
+    global_prompt: str = "",
+    local_prompts: str = "",
+    segment_lengths: str = "",
+    guide_strength: str = "",
+    duration_frames: int = 120,
+    duration_seconds: float = 5.0,
+    frame_rate: int = 24,
+    width: int = 0,
+    height: int = 0,
+    use_custom_audio: bool = True,
+    use_custom_motion: bool = False,
+    epsilon: float = 0.001,
+    img_compression: int = 18,
+    resize_method: str = "maintain aspect ratio",
+    retake_mode: bool = False,
+    seed: int = 0,
+    audio_path: str = "",
+    ltx_model_gguf: Optional[str] = None,
+    distilled_lora_name: Optional[str] = None,
+) -> dict:
+    """Prepare the LTX **Director Mode** (v2.0.0 LTXDirector node) workflow.
+
+    Unlike ``prepare_sequencer_workflow`` (which drives the *v1* LTXDirector via
+    ``text``/``segments``), this targets the **v2.0.0** node whose timeline is
+    driven by a single ``timeline_data`` JSON plus Prompt-Relay widgets
+    (``global_prompt`` / ``local_prompts`` / ``segment_lengths``) and per-keyframe
+    ``guide_strength``.
+
+    ``timeline_data`` is the editor state already resolved for ComfyUI: image
+    keyframes reference ``imageFile`` basenames and audio references ``audioFile``
+    basenames (the dispatcher uploads those files to ComfyUI's input dir first).
+
+    The workflow is grafted onto **our** existing LTX stack (GGUF unet + distilled
+    LoRA + gemma DualCLIP + KJ VAE loaders + ``VHS_VideoCombine`` output), so it
+    runs with the same models as the rest of the app's LTX pipeline. Every mutation
+    is best-effort: a missing node/field warns and continues so a slightly
+    different (re-exported) workflow still works.
+    """
+    logger.info(f"Preparing LTX Director workflow from {workflow_path}")
+
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    def _try(title: str, field: str, value: Any) -> None:
+        try:
+            set_node_input(workflow, title, field, value)
+        except ValueError:
+            logger.warning(f"LTX Director: node '{title}' not found — skipping {field}")
+
+    # --- Model stack overrides (same knobs as the rest of our LTX pipeline) ---
+    if ltx_model_gguf:
+        _try("Unet Loader (GGUF)", "unet_name", ltx_model_gguf)
+    if distilled_lora_name:
+        _try("Distilled LoRA", "lora_name", distilled_lora_name)
+        _update_power_lora_distilled(workflow, distilled_lora_name)
+
+    # --- The v2.0.0 LTXDirector node (timeline + Prompt Relay) ---
+    # global_prompt is NOT a node widget — it lives inside timeline_data (confirmed
+    # against a real API export). Fold the param in so either call style works.
+    if global_prompt:
+        timeline_data = {**timeline_data, "global_prompt": global_prompt}
+    elif "global_prompt" not in timeline_data:
+        timeline_data["global_prompt"] = ""
+    _try("LTXDirector", "timeline_data", json.dumps(timeline_data))
+    _try("LTXDirector", "local_prompts", local_prompts or "")
+    _try("LTXDirector", "segment_lengths", segment_lengths or "")
+    _try("LTXDirector", "guide_strength", guide_strength or "")
+    _try("LTXDirector", "use_custom_audio", bool(use_custom_audio))
+    _try("LTXDirector", "use_custom_motion", bool(use_custom_motion))
+    _try("LTXDirector", "epsilon", float(epsilon))
+    _try("LTXDirector", "img_compression", int(img_compression))
+    _try("LTXDirector", "resize_method", resize_method)
+
+    # Duration / framerate — ceil seconds→frames consistency (see prepare_ltx_workflow).
+    _dur_frames = int(duration_frames) if duration_frames else int(math.ceil(duration_seconds * frame_rate))
+    _dur_seconds = float(duration_seconds) if duration_seconds else (_dur_frames / float(frame_rate or 24))
+    _try("LTXDirector", "frame_rate", int(frame_rate))
+    _try("LTXDirector", "display_mode", "seconds")
+    _try("LTXDirector", "duration_frames", _dur_frames)
+    _try("LTXDirector", "duration_seconds", _dur_seconds)
+    _try("LTXDirector", "end_frame", _dur_frames)
+    _try("LTXDirector", "end_second", _dur_seconds)
+    _try("LTXDirector", "start_frame", 0)
+    _try("LTXDirector", "start_second", 0)
+
+    # Dimensions: the v2 node derives size from keyframes when custom_* == 0.
+    # Only pin them when the caller passes an explicit scene resolution.
+    if width and height:
+        _try("LTXDirector", "custom_width", int(width))
+        _try("LTXDirector", "custom_height", int(height))
+
+    # --- Retake / in-place editing: flip the (stage-1) guide node into retake mode ---
+    if retake_mode:
+        _try("LTXDirectorGuide", "retake_mode", True)
+
+    # --- Our output framerate constant (feeds VHS_VideoCombine via IntToFloat) ---
+    _try("Framerate", "value", int(frame_rate))
+
+    # --- Seed + audio ---
+    _try("RandomNoise", "noise_seed", int(seed))
+    if audio_path:
+        _try("Load Audio", "audio", audio_path)
+
+    logger.info(
+        f"LTX Director workflow prepared: "
+        f"{len(timeline_data.get('segments', []))} segment(s), "
+        f"{len(timeline_data.get('audioSegments', []))} audio clip(s), "
+        f"{len(timeline_data.get('motionSegments', []))} motion clip(s), "
+        f"custom_audio={use_custom_audio}, frames={_dur_frames}@{frame_rate}fps"
+    )
+    return workflow
+
+
+def prepare_klein_inpaint_workflow(
+    workflow_path: str,
+    *,
+    source_masked_path: str,
+    reference_path: str,
+    prompt: str,
+    seed: int = 0,
+    klein_model_gguf: Optional[str] = None,
+    mask_expand: Optional[int] = None,
+    mask_blur: Optional[int] = None,
+) -> dict:
+    """Prepare the Klein **inpaint** workflow (KLEIN_INPAINT.json).
+
+    The source image carries the paint mask in its ALPHA channel (ComfyUI
+    clipspace convention: painted/inpaint region = transparent → LoadImage MASK
+    = 1 there).  An optional reference image (node 'INPAINT REFERENCE') is
+    VAE-encoded and chained via ReferenceLatent so Klein can pull a specific
+    object / character into the masked area.  When the caller has no reference,
+    pass the original (un-masked) source as ``reference_path`` so the reference
+    latent simply reinforces the existing image.
+
+    Mutates by node title:
+    - "INPAINT SOURCE"  -> image (RGBA source + mask-in-alpha)
+    - "INPAINT REFERENCE" -> image (reference, or the source when none)
+    - "CLIP Text Encode (Positive Prompt)" -> text
+    - "RandomNoise" -> noise_seed
+    - "GrowMaskWithBlur" -> expand / blur_radius (optional)
+    - "Unet Loader (GGUF)" -> unet_name (optional Klein model override)
+
+    Image files are uploaded to ComfyUI by the dispatcher's file-upload pass
+    (both nodes are LoadImage), so we set local paths/basenames here.
+    """
+    logger.info(f"Preparing Klein inpaint workflow from {workflow_path}")
+
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    def _try(title: str, field: str, value: Any) -> None:
+        try:
+            set_node_input(workflow, title, field, value)
+        except ValueError:
+            logger.warning(f"Klein inpaint: node '{title}' not found — skipping {field}")
+
+    _try("INPAINT SOURCE", "image", source_masked_path)
+    _try("INPAINT REFERENCE", "image", reference_path or source_masked_path)
+    _try("CLIP Text Encode (Positive Prompt)", "text", prompt or "")
+    _try("RandomNoise", "noise_seed", int(seed))
+
+    if klein_model_gguf:
+        _try("Unet Loader (GGUF)", "unet_name", klein_model_gguf)
+
+    if mask_expand is not None:
+        _try("GrowMaskWithBlur", "expand", int(mask_expand))
+    if mask_blur is not None:
+        _try("GrowMaskWithBlur", "blur_radius", int(mask_blur))
+
+    logger.info(
+        f"Klein inpaint prepared: source={os.path.basename(source_masked_path)}, "
+        f"reference={os.path.basename(reference_path or source_masked_path)}, "
+        f"prompt={'yes' if prompt else 'no'}, seed={seed}"
+    )
     return workflow

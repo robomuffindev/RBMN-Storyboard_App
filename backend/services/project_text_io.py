@@ -54,6 +54,19 @@ _VIDEO_ONLY_SCENE_FIELDS = (
     "transition_out",
 )
 
+# Opaque/advanced per-scene config that should survive a text export→import
+# round-trip but is NOT meant for human hand-editing (carried under a single
+# `advanced_params` block per scene rather than as readable fields).
+_ADVANCED_SCENE_PARAM_KEYS = (
+    "ltx_director",                 # LTX Director Mode timeline config
+    "llm_instruction_image",        # per-scene Enhance direction (image)
+    "llm_instruction_video",        # per-scene Enhance direction (video)
+    "vision_describe_refs",         # per-scene vision-describe override
+    "json_prompt_mode",             # Ideogram JSON-prompt toggle
+    "json_prompt",                  # Ideogram JSON-prompt payload
+    "lf_exclude_first_frame_ref",   # last-frame "don't reference FF" toggle
+)
+
 
 def _project_is_narration(mode: str) -> bool:
     return mode in ("narration_video", "narration_images")
@@ -220,6 +233,15 @@ async def build_export(project: Project, session: AsyncSession) -> dict:
                 "transition_in": params.get("transition_in") or None,
                 "transition_out": params.get("transition_out") or None,
             })
+
+        # Preserve opaque/advanced per-scene config so a text round-trip keeps
+        # Director Mode, LLM instructions, vision / JSON-prompt toggles, etc.
+        _adv = {
+            k: params[k] for k in _ADVANCED_SCENE_PARAM_KEYS
+            if params.get(k) not in (None, "", {}, [])
+        }
+        if _adv:
+            scene_dict["advanced_params"] = _adv
 
         # Per-scene narration / lyrics text for context.  The LLM agent
         # uses this as the ground truth for what to visualize in this
@@ -565,6 +587,18 @@ async def apply_import(
             if mode == "override" or not (cur and (cur.get("characterIndices") if isinstance(cur, dict) else [])):
                 params["image_refs_last"] = _names_to_refs(inc["character_refs_last"], cur if isinstance(cur, dict) else None)
                 touched_params = True
+
+        # Advanced/opaque per-scene config passthrough (round-trips Director Mode,
+        # LLM instructions, vision / JSON-prompt toggles, etc.).
+        _adv_in = inc.get("advanced_params")
+        if isinstance(_adv_in, dict):
+            for _k, _v in _adv_in.items():
+                if _k not in _ADVANCED_SCENE_PARAM_KEYS:
+                    continue
+                if mode == "override" or _is_empty(params.get(_k)):
+                    if params.get(_k) != _v:
+                        params[_k] = _v
+                        touched_params = True
 
         if touched_scalar or touched_params:
             sc_row.parameters = params

@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import IdeogramPromptModal from './IdeogramPromptModal';
+import LlmInstructionModal from './LlmInstructionModal';
+import LTXDirectorModal from './LTXDirectorModal';
+import InpaintModal from './InpaintModal';
 import { useAppStore } from '@/store';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -21,6 +25,8 @@ import {
   sliceSingleSceneAudio,
   colorCorrectSceneVideo,
   retrimScene,
+  buildJsonPrompt,
+  exportScenePrompts,
 } from '@/api/client';
 import ReferenceSelector, {
   autoWorkflowType,
@@ -35,6 +41,7 @@ import {
   ChevronUp,
   ChevronDown,
   Wand2,
+  Brush,
   Zap,
   Music,
   ImageIcon,
@@ -98,12 +105,14 @@ function ImageLightbox({
   onClose,
   onSave,
   onDelete,
+  onInpaint,
 }: {
   versions: any[];
   initialIndex: number;
   onClose: () => void;
   onSave: (version: any) => void;
   onDelete: (version: any, index: number) => void;
+  onInpaint?: (version: any) => void;
 }) {
   const [index, setIndex] = useState(initialIndex);
   const version = versions[index];
@@ -246,6 +255,22 @@ function ImageLightbox({
         </span>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {onInpaint && (
+            <button
+              onClick={() => onInpaint(version)}
+              style={{
+                padding: '10px 20px', backgroundColor: '#db2777', border: 'none', borderRadius: '6px',
+                color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '8px',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#be185d')}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#db2777')}
+              title="Inpaint — mask-paint an area to fix or replace"
+            >
+              <Brush size={18} />
+              Inpaint
+            </button>
+          )}
           <button
             onClick={() => onDelete(version, index)}
             style={{
@@ -533,6 +558,28 @@ function ToolsTabContent({ scene, projectId }: { scene: any; projectId: string }
   const audioClipPath = scene.parameters?.audio_clip_path;
   const hasAudioClip = !!audioClipPath;
   const hasTimingData = scene.start_time != null && scene.end_time != null;
+  // Manual numeric timing entry (power-user timeline control).
+  const _tlQueryClient = useQueryClient();
+  const [tStart, setTStart] = useState<string>('');
+  const [tEnd, setTEnd] = useState<string>('');
+  const [savingTime, setSavingTime] = useState(false);
+  useEffect(() => {
+    setTStart(scene.start_time != null ? String(Number(scene.start_time)) : '');
+    setTEnd(scene.end_time != null ? String(Number(scene.end_time)) : '');
+  }, [scene.id, scene.start_time, scene.end_time]);
+  const saveTiming = async () => {
+    const st = parseFloat(tStart); const en = parseFloat(tEnd);
+    if (isNaN(st) || isNaN(en) || en <= st) { alert('End time must be greater than start time.'); return; }
+    setSavingTime(true);
+    try {
+      await updateScene(projectId, scene.id, { start_time: st, end_time: en });
+      try { await sliceSingleSceneAudio(projectId, scene.id); } catch { /* audio slice is best-effort */ }
+      _tlQueryClient.invalidateQueries({ queryKey: ['scenes', projectId] });
+      _tlQueryClient.invalidateQueries({ queryKey: ['scene-versions', projectId, scene.id] });
+    } catch {
+      alert('Failed to update scene timing.');
+    } finally { setSavingTime(false); }
+  };
   const sceneDuration = hasTimingData ? (scene.end_time - scene.start_time).toFixed(2) : null;
   const hasVideo = !!(scene.parameters?.chosen_video_path || scene.parameters?.generated_video_path);
   const hasRef = !!(scene.parameters?.chosen_image_path || scene.parameters?.use_prev_lf_as_ff);
@@ -594,11 +641,20 @@ function ToolsTabContent({ scene, projectId }: { scene: any; projectId: string }
         {/* Scene timing info */}
         {hasTimingData ? (
           <div className="p-3 bg-gray-800 rounded space-y-1">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-400">Scene Position</span>
-              <span className="text-gray-300 font-mono">
-                {scene.start_time.toFixed(2)}s – {scene.end_time.toFixed(2)}s
-              </span>
+            <div className="flex items-center justify-between text-xs gap-2">
+              <span className="text-gray-400 shrink-0">Start / End (s)</span>
+              <div className="flex items-center gap-1">
+                <input type="number" step="0.01" min={0} value={tStart} onChange={(e) => setTStart(e.target.value)}
+                  className="w-[4.5rem] px-1.5 py-0.5 bg-gray-950 border border-gray-700 rounded text-gray-100 font-mono text-right" />
+                <span className="text-gray-500">–</span>
+                <input type="number" step="0.01" min={0} value={tEnd} onChange={(e) => setTEnd(e.target.value)}
+                  className="w-[4.5rem] px-1.5 py-0.5 bg-gray-950 border border-gray-700 rounded text-gray-100 font-mono text-right" />
+                <button onClick={saveTiming} disabled={savingTime}
+                  className="ml-1 px-2 py-0.5 rounded bg-cyan-600 hover:bg-cyan-700 text-white text-[11px] disabled:opacity-50"
+                  title="Set this scene's exact start/end times (re-slices its audio)">
+                  {savingTime ? '…' : 'Set'}
+                </button>
+              </div>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">Duration</span>
@@ -727,6 +783,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
   // First frame state
   const [prompt, setPrompt] = useState('');
+  // Prompt-tab manual edits (key -> edited value); cleared when the scene changes.
+  const [promptEdits, setPromptEdits] = useState<Record<string, string>>({});
+  const promptImportRef = useRef<HTMLInputElement>(null);
   const [negativePrompt, setNegativePrompt] = useState('');
   // Last frame state
   const [lastFramePrompt, setLastFramePrompt] = useState('');
@@ -766,6 +825,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const [lastFrameHistoryIndex, setLastFrameHistoryIndex] = useState(0);
   const [allVersions, setAllVersions] = useState<any[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [inpaintUrl, setInpaintUrl] = useState<string | null>(null);
   const [savingPreview, setSavingPreview] = useState(false);
   // Reserved for the same "rerun from details modal" feature (see
   // _GenerationDetailsModal above).  Underscore-prefixed to silence TS6133
@@ -807,6 +867,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const emptyRefs: ReferenceState = { characterIndices: [], extras: [] };
   const [firstFrameRefs, setFirstFrameRefs] = useState<ReferenceState>(emptyRefs);
   const [lastFrameRefs, setLastFrameRefs] = useState<ReferenceState>(emptyRefs);
+  // Last Frame: when true (default), the First Frame image is NOT used as a Klein
+  // reference so the last frame doesn't over-anchor to the start. False = use it.
+  const [lfExcludeFirstFrameRef, setLfExcludeFirstFrameRef] = useState(false);
   const activeRefs = frameSubTab === 'first' ? firstFrameRefs : lastFrameRefs;
   const setActiveRefsLocal = frameSubTab === 'first' ? setFirstFrameRefs : setLastFrameRefs;
 
@@ -815,6 +878,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const assets = useAppStore(s => s.assets);
   const jobs = useAppStore(s => s.jobs);
   const scenes = useAppStore(s => s.scenes);
+  const [directorModalOpen, setDirectorModalOpen] = useState(false);
+  const directorEnabled = !!((activeScene?.parameters as any)?.ltx_director?.enabled);
 
   // "Use Story Flow" — persisted in scene.parameters.use_story_flow
   const useStoryFlow = activeScene?.parameters?.use_story_flow || false;
@@ -883,6 +948,22 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const videoModelType = appSettings?.video_model_type || 'ltx_2.3';
   // First-pass (0-ref) generator label, mirrors dispatcher single_image_generator routing
   const firstPassLabel = appSettings?.single_image_generator === 'krea2_turbo' ? 'Krea 2 Turbo' : 'Z-Image Turbo';
+  const isKrea2FirstPass = appSettings?.single_image_generator === 'krea2_turbo';
+  // Ideogram structured-JSON mode effective for THIS scene (Krea2 only): scene
+  // override (on/off) else the project default. When on, Enhance also builds the
+  // structured caption so one click gives you the curated, positioned prompt.
+  const ideogramModeEffective = isKrea2FirstPass && (() => {
+    const m = activeScene?.parameters?.json_prompt_mode;
+    return (m === undefined || m === null) ? !!currentProject?.settings?.json_prompt_mode : !!m;
+  })();
+  const hasVisionModel = !!appSettings?.ollama_vision_model;
+  const [showJsonModal, setShowJsonModal] = useState(false);
+  // Per-scene custom LLM direction for the Enhance step (keeps the LLM on track).
+  const [llmInstructionImage, setLlmInstructionImage] = useState('');
+  const [llmInstructionVideo, setLlmInstructionVideo] = useState('');
+  const [instructionModalKind, setInstructionModalKind] = useState<null | 'image' | 'video'>(null);
+  // Per-scene vision-description override (null = inherit global vision_enabled).
+  const [visionDescribeRefs, setVisionDescribeRefs] = useState<null | boolean>(null);
 
   // Sync video framerate from global settings
   useEffect(() => {
@@ -1118,7 +1199,12 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     if (activeScene) {
       setPrompt(activeScene.prompt || '');
       setNegativePrompt(activeScene.negative_prompt || '');
+      setPromptEdits({});
       setLastFramePrompt(activeScene.parameters?.last_frame_prompt || '');
+      setLfExcludeFirstFrameRef(activeScene.parameters?.lf_exclude_first_frame_ref === true);
+      setLlmInstructionImage(activeScene.parameters?.llm_instruction_image || '');
+      setLlmInstructionVideo(activeScene.parameters?.llm_instruction_video || '');
+      setVisionDescribeRefs(activeScene.parameters?.vision_describe_refs ?? null);
       setLastFrameNegPrompt(activeScene.parameters?.last_frame_negative_prompt || '');
       // Default video prompt: use saved video_prompt, else fall back to image prompt
       setVideoPrompt(activeScene.parameters?.video_prompt || activeScene.prompt || '');
@@ -1834,11 +1920,25 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       const updatedRefs = autoSelectCharactersForScene();
 
       // Recompute ref asset IDs and workflow with the updated refs
-      const updatedRefAssetIds = collectRefAssetIds(updatedRefs, conceptCharacters, safeAssets);
+      let updatedRefAssetIds = collectRefAssetIds(updatedRefs, conceptCharacters, safeAssets);
       const updatedWorkflowType = autoWorkflowType(updatedRefs, conceptCharacters);
 
       // Always use auto-selected workflow based on reference count
-      const effectiveWorkflow = updatedWorkflowType;
+      let effectiveWorkflow: string = updatedWorkflowType;
+
+      // Last Frame: optionally use the chosen First Frame image as Klein reference
+      // slot 1 (for tight visual continuity). Default is OFF (lfExcludeFirstFrameRef
+      // = true) so the last frame is generated freely from the prompt + character
+      // refs and does NOT over-anchor to the first frame.
+      if (frameSubTab === 'last' && !lfExcludeFirstFrameRef && chosenFirstFramePath) {
+        const ffAsset = (safeAssets as any[]).find(
+          (a) => a.rel_path === chosenFirstFramePath || (a.rel_path && a.rel_path.endsWith(chosenFirstFramePath)),
+        );
+        if (ffAsset && !updatedRefAssetIds.includes(ffAsset.id)) {
+          updatedRefAssetIds = [ffAsset.id, ...updatedRefAssetIds];
+          effectiveWorkflow = `klein_${Math.min(updatedRefAssetIds.length, 5)}ref`;
+        }
+      }
 
       // Use the updated refs for saving
       const updatedFirstFrameRefs = frameSubTab === 'first' ? updatedRefs : firstFrameRefs;
@@ -1863,6 +1963,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       if (frameSubTab === 'last') {
         paramUpdates.last_frame_prompt = lastFramePrompt;
         paramUpdates.last_frame_negative_prompt = lastFrameNegPrompt;
+        paramUpdates.lf_exclude_first_frame_ref = lfExcludeFirstFrameRef;
       }
 
       const sceneUpdate: any = { parameters: paramUpdates };
@@ -2025,6 +2126,13 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       const updatedRefDescriptions = buildRefDescriptions(updatedRefs, conceptCharacters);
 
       let base = `Image generation model: ${imageModelType}. Optimize the prompt for this specific model's strengths, requirements, and quirks. Scene timing: ${activeScene?.start_time}s to ${activeScene?.end_time}s. Frame: ${frameSubTab}.`;
+      // LTX 2.3 I2V best practice: a first frame for an ANIMATED scene is the image
+      // the video animates FROM — depict the opening moment, not the full action.
+      // (narration_images = stills, so keep the full scene there.)
+      const _animatedMode = currentProject?.mode === 'music_video' || currentProject?.mode === 'narration_video';
+      if (frameSubTab === 'first' && _animatedMode) {
+        base += ' VIDEO STARTING FRAME (important): this image is the FIRST FRAME of a video clip and the video step animates the motion FROM it. Depict the OPENING MOMENT / calm starting state only — the key subject(s), setting and lighting as the shot opens, BEFORE the action plays out. Do NOT pack in every action, character entrance, or element the scene reveals over time (the video prompt handles those); an overloaded first frame produces busier, worse video. Frame the subject as the shot should open (the model will not reframe) and keep lighting clean and consistent (it propagates through the clip).';
+      }
       if (updatedRefDescriptions) {
         base += ` REFERENCE IMAGES: ${updatedRefDescriptions}. `
           + 'IMPORTANT: In the prompt, refer to each reference image by number using "Image 1", "Image 2", etc. '
@@ -2063,20 +2171,48 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           base += `Generate a prompt for a NEW image that shares the visual style of the previous scene but depicts entirely new content for this scene.`;
         }
       }
-      // When enhancing last frame, include the first frame prompt as context for visual continuity
+      // When enhancing last frame, include the first frame prompt + the scene's
+      // story flow so the LLM determines a DISTINCT end-point (not a copy of the
+      // first frame).
       if (frameSubTab === 'last' && prompt) {
-        base += ` FIRST FRAME PROMPT (the starting image this last frame must be visually continuous with): "${prompt}"`;
+        base += ` FIRST FRAME PROMPT (the starting image this last frame must be visually continuous with): "${prompt}".`;
+        if (sceneFlowIdea) {
+          base += ` SCENE MOTION ARC / STORY FLOW (use this to decide where the subjects and camera END UP — the last frame is the endpoint of this motion): "${sceneFlowIdea}".`;
+        }
+        base += ` Produce a CLEARLY DIFFERENT moment from the first frame: advance the subject's position, pose, action, expression, and/or camera framing to a distinct end state, while keeping the same scene, subjects, lighting and style.`;
         // If the first frame is linked from a previous scene, note that for additional context
         if (usePrevSceneLastFrame && !isFirstScene) {
           base += ` NOTE: The first frame for this scene was carried over from the previous scene's last frame, so this last frame should transition from that visual context into the current scene's unique content.`;
         }
       }
+      if (llmInstructionImage.trim()) {
+        base = `USER DIRECTION (HIGHEST PRIORITY — follow this exactly; it overrides other guidance when in conflict): "${llmInstructionImage.trim()}". ` + base;
+      }
+      const _enhRefIds = collectRefAssetIds(updatedRefs, conceptCharacters, safeAssets);
       const response = await enhancePrompt(currentProject.id, {
         prompt: activePrompt,
         context: buildEnhanceContext(base),
         frame_type: frameSubTab,
+        reference_asset_ids: _enhRefIds,
+        vision_describe: visionDescribeRefs,
       });
       setActivePrompt(response.data.enhanced_prompt);
+      // Ideogram mode: also build/refresh the structured JSON caption from the
+      // freshly enhanced prose so the curated, positioned prompt is ready to use
+      // or hand-edit in the JSON Prompt editor (first frame only — the caption is
+      // the scene's main image layout).
+      if (ideogramModeEffective && frameSubTab === 'first' && activeScene && currentProject) {
+        try {
+          await buildJsonPrompt(currentProject.id, {
+            scene_id: activeScene.id,
+            prompt: response.data.enhanced_prompt,
+          });
+          queryClient.invalidateQueries({ queryKey: ['scenes', currentProject.id] });
+        } catch (e) {
+          // Non-fatal: prose enhance still succeeded; the caption builds at render time.
+          console.warn('Ideogram caption build after enhance failed', e);
+        }
+      }
       return response.data;
     },
   });
@@ -2102,6 +2238,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
             base += ` CONTINUITY: The starting frame of this video is the ending frame of the previous scene. Previous scene described: "${prevPrompt}". The video should visually continue from that context.`;
           }
         }
+      }
+      if (llmInstructionVideo.trim()) {
+        base = `USER DIRECTION (HIGHEST PRIORITY — follow this exactly; it overrides other guidance when in conflict): "${llmInstructionVideo.trim()}". ` + base;
       }
       const response = await enhancePrompt(currentProject.id, {
         prompt: videoPrompt,
@@ -2129,7 +2268,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       const isV2VExtend = vModePre === 'v2v_extend';
       const hasChosenImage = !!sceneParams.chosen_image_path;
       const hasPrevLfRef = !!sceneParams.use_prev_lf_as_ff;
-      if (!isV2VExtend && !hasChosenImage && !hasPrevLfRef) {
+      const directorOn = !!(sceneParams.ltx_director?.enabled);
+      if (!isV2VExtend && !directorOn && !hasChosenImage && !hasPrevLfRef) {
         const msg =
           'This scene has no start image set yet.\n\n'
           + 'Generate or select an image on the Image tab first, then try '
@@ -2171,10 +2311,12 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       } else if (!isUUID && vMode === 'ff_lf' && ffAsset && lfAsset) {
         resolvedWorkflowType = 'ltx_fflf';
       }
+      // LTX Director Mode overrides everything — drives the timeline workflow.
+      if (directorOn) resolvedWorkflowType = 'ltx_director';
 
       const response = await generateVideo(currentProject.id, {
         scene_id: activeScene.id,
-        ...(isUUID
+        ...((isUUID && !directorOn)
           ? { workflow_config_id: videoWorkflowType }
           : { workflow_type: resolvedWorkflowType }),
         prompt: videoPrompt,
@@ -2257,6 +2399,109 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   // Auto workflow type based on reference count
   const computedWorkflowType = autoWorkflowType(activeRefs, conceptCharacters);
   const refAssetIds = collectRefAssetIds(activeRefs, conceptCharacters, safeAssets);
+
+  // Scene-wide references (BOTH frames) for the prompt-tab vision-scan audit.
+  const allFrameRefAssets = (() => {
+    const ids = new Set<string>([
+      ...collectRefAssetIds(firstFrameRefs, conceptCharacters, safeAssets),
+      ...collectRefAssetIds(lastFrameRefs, conceptCharacters, safeAssets),
+    ]);
+    return Array.from(ids)
+      .map((id) => (safeAssets as any[]).find((a) => a.id === id))
+      .filter(Boolean) as any[];
+  })();
+
+  // Save one manually-edited prompt field from the Prompt tab. key === 'prompt'
+  // writes the scene's first-frame prompt column; any other key is a parameter.
+  const savePromptField = async (key: string) => {
+    if (!activeScene || !currentProject) return;
+    const val = promptEdits[key];
+    if (val === undefined) return;
+    try {
+      if (key === 'prompt') {
+        await updateSceneAndSync(activeScene.id, { prompt: val });
+      } else {
+        await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, [key]: val } });
+      }
+      setPromptEdits((p) => { const n = { ...p }; delete n[key]; return n; });
+    } catch (e) {
+      console.error('save prompt failed', e);
+      alert('Failed to save prompt.');
+    }
+  };
+
+  // Import prompt values from a JSON file made outside the app. Accepts a flat
+  // shape ({first_frame_prompt, last_frame_prompt, video_prompt, ...}) OR the
+  // Download-Prompts export shape ({first_frame:{prompt}, ...}). Populates the
+  // editable fields (does NOT auto-save — user reviews then clicks Save).
+  const handleImportPrompts = async (file: File) => {
+    try {
+      const data = JSON.parse(await file.text());
+      const next: Record<string, string> = {};
+      const fp = data.first_frame_prompt ?? data.first_frame?.prompt ?? data.prompt;
+      const lp = data.last_frame_prompt ?? data.last_frame?.prompt;
+      const vp = data.video_prompt ?? data.video?.prompt;
+      const tps = data.two_pass_scene_prompt;
+      const tpc = data.two_pass_composite_prompt;
+      if (fp !== undefined && fp !== null) next['prompt'] = String(fp);
+      if (lp !== undefined && lp !== null) next['last_frame_prompt'] = String(lp);
+      if (vp !== undefined && vp !== null) next['video_prompt'] = String(vp);
+      if (tps !== undefined && tps !== null) next['two_pass_scene_prompt'] = String(tps);
+      if (tpc !== undefined && tpc !== null) next['two_pass_composite_prompt'] = String(tpc);
+      if (Object.keys(next).length === 0) { alert('No recognized prompt fields found in that JSON.'); return; }
+      setPromptEdits((p) => ({ ...p, ...next }));
+      alert(`Imported ${Object.keys(next).length} prompt field(s). Review the highlighted fields and click Save under each to apply.`);
+    } catch (e) {
+      console.error('import prompts failed', e);
+      alert('Could not read that file as prompt JSON.');
+    }
+  };
+
+  // Render one editable prompt field with a Save button (Prompt tab).
+  const renderEditablePrompt = (key: string, label: string, hint: string, original: string) => {
+    const edited = promptEdits[key];
+    const val = edited !== undefined ? edited : (original || '');
+    const dirty = edited !== undefined && edited !== (original || '');
+    return (
+      <div>
+        <label className="block text-sm font-medium mb-1 text-gray-200">{label}</label>
+        <textarea
+          value={val}
+          onChange={(e) => setPromptEdits((p) => ({ ...p, [key]: e.target.value }))}
+          placeholder="(empty — write a prompt or Import one)"
+          className={`w-full px-3 py-2 bg-gray-800 border rounded text-gray-100 text-sm h-24 resize-y font-mono ${dirty ? 'border-amber-500' : 'border-gray-700'}`}
+        />
+        <div className="flex items-center justify-between mt-1 gap-2">
+          <p className="text-xs text-gray-500">{hint}{dirty ? ' • unsaved' : ''}</p>
+          <button
+            onClick={() => savePromptField(key)}
+            disabled={!dirty}
+            className="shrink-0 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-default text-white text-xs font-medium"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const handleDownloadPrompts = async () => {
+    if (!activeScene || !currentProject) return;
+    try {
+      const res = await exportScenePrompts(currentProject.id, activeScene.id);
+      const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const aEl = document.createElement('a');
+      aEl.href = url;
+      const safeName = (activeScene.name || `scene-${activeScene.order_index + 1}`).replace(/[^a-z0-9]+/gi, '_');
+      aEl.download = `prompts_${safeName}.json`;
+      document.body.appendChild(aEl); aEl.click(); aEl.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Download prompts failed', e);
+      alert('Failed to export prompts JSON.');
+    }
+  };
   // Note: refDescriptions is computed inside enhance/generate mutations via autoSelectCharactersForScene()
 
   // Check if current version is saved
@@ -2561,6 +2806,24 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                     {usePrevSceneLastFrame && prevSceneLastFramePath && (
                       <p className="text-amber-400 mt-0.5">First frame is linked from previous scene</p>
                     )}
+                    <label className="flex items-center gap-1.5 mt-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={lfExcludeFirstFrameRef}
+                        onChange={async (e) => {
+                          const v = e.target.checked;
+                          setLfExcludeFirstFrameRef(v);
+                          if (activeScene && currentProject) {
+                            await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, lf_exclude_first_frame_ref: v } });
+                          }
+                        }}
+                        className="accent-purple-500"
+                      />
+                      <span className="text-gray-300">Don&apos;t reference first frame image</span>
+                    </label>
+                    <p className="text-[10px] text-gray-500 mt-0.5">
+                      Off (default): the first frame image is used as a Klein reference (slot 1) for tight continuity, plus any character refs. On: a freer end-point from the prompt + character refs only (use if the last frame looks too similar to the first).
+                    </p>
                   </div>
                 </div>
               )}
@@ -2755,6 +3018,86 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 />
               </div>
 
+              {/* Vision reference descriptions — per-scene override (any model) */}
+              {hasVisionModel && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Vision Reference Descriptions
+                    <span className="text-[10px] text-gray-500 ml-2 font-normal">Describe reference images for the Enhance LLM</span>
+                  </label>
+                  <select
+                    value={visionDescribeRefs === null || visionDescribeRefs === undefined ? 'inherit' : (visionDescribeRefs ? 'on' : 'off')}
+                    onChange={async (e) => {
+                      if (!activeScene || !currentProject) return;
+                      const v = e.target.value;
+                      const np: Record<string, any> = { ...activeScene.parameters };
+                      if (v === 'inherit') delete np.vision_describe_refs;
+                      else np.vision_describe_refs = (v === 'on');
+                      setVisionDescribeRefs(v === 'inherit' ? null : v === 'on');
+                      await updateSceneAndSync(activeScene.id, { parameters: np });
+                    }}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                  >
+                    <option value="inherit">Project default ({appSettings?.vision_enabled ? 'On' : 'Off'})</option>
+                    <option value="on">On for this scene</option>
+                    <option value="off">Off for this scene</option>
+                  </select>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    When on, each selected reference image is described by the vision model and fed to Enhance so the LLM understands what it shows. Cached per image; overrides the global setting.
+                  </p>
+                </div>
+              )}
+
+              {/* Ideogram Prompting (Krea 2 only) — per-scene mode + JSON editor */}
+              {isKrea2FirstPass && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Ideogram Prompting
+                    <span className="text-[10px] text-gray-500 ml-2 font-normal">Structured JSON caption — positional control (Krea 2)</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={(() => { const m = activeScene?.parameters?.json_prompt_mode; return (m === undefined || m === null) ? 'inherit' : (m ? 'on' : 'off'); })()}
+                      onChange={async (e) => {
+                        if (!activeScene || !currentProject) return;
+                        const v = e.target.value;
+                        const np: Record<string, any> = { ...activeScene.parameters };
+                        if (v === 'inherit') delete np.json_prompt_mode;
+                        else np.json_prompt_mode = (v === 'on');
+                        await updateSceneAndSync(activeScene.id, { parameters: np });
+                      }}
+                      className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                    >
+                      <option value="inherit">Project default ({currentProject?.settings?.json_prompt_mode ? 'On' : 'Off'})</option>
+                      <option value="on">On for this scene</option>
+                      <option value="off">Off for this scene</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setShowJsonModal(true)}
+                      className="px-3 py-2 rounded bg-purple-700 hover:bg-purple-600 text-white text-sm whitespace-nowrap"
+                    >
+                      JSON Prompt
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    View, edit, or auto-generate the structured caption for this scene. Applies when Ideogram mode is on (set globally in the Concept tab, override above).
+                  </p>
+                  {showJsonModal && activeScene && currentProject && (
+                    <IdeogramPromptModal
+                      projectId={currentProject.id}
+                      sceneId={activeScene.id}
+                      initial={activeScene.parameters?.json_prompt}
+                      onClose={() => setShowJsonModal(false)}
+                      onSave={async (caption) => {
+                        const np: Record<string, any> = { ...activeScene.parameters, json_prompt: caption };
+                        await updateSceneAndSync(activeScene.id, { parameters: np });
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="block text-sm font-medium mb-2">
                   Workflow
@@ -2878,6 +3221,29 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
               )}
 
               <div className="flex gap-2">
+                <button
+                  type="button"
+                  title="Include LLM Instruction — extra direction for the Enhance LLM"
+                  onClick={() => setInstructionModalKind('image')}
+                  className={`px-3 py-2 rounded text-sm flex items-center gap-1 transition-colors ${llmInstructionImage.trim() ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                >
+                  <Pencil size={14} />
+                  {llmInstructionImage.trim() ? <span className="w-1.5 h-1.5 rounded-full bg-white" /> : null}
+                </button>
+                {instructionModalKind === 'image' && (
+                  <LlmInstructionModal
+                    title="LLM Instruction — Image Enhance"
+                    promptText={activePrompt}
+                    value={llmInstructionImage}
+                    onClose={() => setInstructionModalKind(null)}
+                    onSave={async (t) => {
+                      setLlmInstructionImage(t);
+                      if (activeScene && currentProject) {
+                        await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, llm_instruction_image: t } });
+                      }
+                    }}
+                  />
+                )}
                 <button
                   onClick={() => enhancePromptMutation.mutate()}
                   disabled={enhancePromptMutation.isPending}
@@ -3061,6 +3427,34 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           {/* ══════════ VIDEO TAB ══════════ */}
           {activeTab === 'video' && (
             <>
+              {/* ── LTX Director Mode ── */}
+              <div className="p-3 rounded border border-blue-700/50 bg-blue-950/30">
+                <label className="flex items-center gap-2 text-sm font-medium text-blue-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={directorEnabled}
+                    onChange={async (e) => {
+                      if (!activeScene) return;
+                      const enabled = e.target.checked;
+                      const prev = (activeScene.parameters as any)?.ltx_director || {};
+                      await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, ltx_director: { ...prev, enabled } } });
+                      if (enabled) setDirectorModalOpen(true);
+                    }}
+                  />
+                  <Film size={15} /> Enable LTX Director Mode
+                </label>
+                <p className="text-[11px] text-gray-400 mt-1 ml-6">Full timeline control: time-segmented prompts (Prompt Relay), keyframes, and audio sync. Replaces the normal video options below.</p>
+                {directorEnabled && (
+                  <div className="mt-2 ml-6 flex flex-wrap items-center gap-2">
+                    <button onClick={() => setDirectorModalOpen(true)} className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium flex items-center gap-1.5"><Film size={13} /> Open Director Timeline</button>
+                    <button onClick={() => generateVideoMutation.mutate()} disabled={generateVideoMutation.isPending} className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-100 text-xs flex items-center gap-1.5 disabled:opacity-50"><Zap size={13} /> {generateVideoMutation.isPending ? 'Generating…' : 'Generate'}</button>
+                    {(() => { const segs = ((activeScene?.parameters as any)?.ltx_director?.segments || []) as any[]; const imgs = segs.filter((x) => x.type === 'image').length; const txt = segs.filter((x) => x.type === 'text').length; return <span className="text-[11px] text-gray-500">{txt} prompt · {imgs} keyframe{imgs === 1 ? '' : 's'}</span>; })()}
+                  </div>
+                )}
+              </div>
+
+              {/* Normal video controls (greyed while Director Mode is on) */}
+              <div className={directorEnabled ? 'opacity-40 pointer-events-none select-none' : ''}>
               {/* Video mode toggle */}
               <div>
                 <label className="block text-sm font-medium mb-2">Video Mode</label>
@@ -3519,6 +3913,29 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
               <div className="flex gap-2">
                 <button
+                  type="button"
+                  title="Include LLM Instruction — extra direction for the Enhance LLM"
+                  onClick={() => setInstructionModalKind('video')}
+                  className={`px-3 py-2 rounded text-sm flex items-center gap-1 transition-colors ${llmInstructionVideo.trim() ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                >
+                  <Pencil size={14} />
+                  {llmInstructionVideo.trim() ? <span className="w-1.5 h-1.5 rounded-full bg-white" /> : null}
+                </button>
+                {instructionModalKind === 'video' && (
+                  <LlmInstructionModal
+                    title="LLM Instruction — Video Enhance"
+                    promptText={videoPrompt}
+                    value={llmInstructionVideo}
+                    onClose={() => setInstructionModalKind(null)}
+                    onSave={async (t) => {
+                      setLlmInstructionVideo(t);
+                      if (activeScene && currentProject) {
+                        await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, llm_instruction_video: t } });
+                      }
+                    }}
+                  />
+                )}
+                <button
                   onClick={() => enhanceVideoPromptMutation.mutate()}
                   disabled={enhanceVideoPromptMutation.isPending}
                   className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
@@ -3563,6 +3980,25 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   <RefreshCw size={14} className={isRetrimming ? 'animate-spin' : ''} />
                   {isRetrimming ? 'Retrimming...' : 'Retrim Video'}
                 </button>
+              )}
+
+              </div>{/* end greyed normal video controls */}
+
+              {directorModalOpen && activeScene && currentProject && (
+                <LTXDirectorModal
+                  projectId={currentProject.id}
+                  scene={activeScene}
+                  assets={assets}
+                  isFirstScene={isFirstScene}
+                  durationSeconds={Math.max(0.5, ((activeScene.end_time || 0) - (activeScene.start_time || 0)) || videoDuration)}
+                  framerate={videoFramerate}
+                  width={effectiveWidth}
+                  height={effectiveHeight}
+                  isGenerating={generateVideoMutation.isPending}
+                  onClose={() => setDirectorModalOpen(false)}
+                  onSaveConfig={async (c) => { if (activeScene) await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, ltx_director: { ...c, enabled: true } } }); }}
+                  onGenerate={() => { setDirectorModalOpen(false); generateVideoMutation.mutate(); }}
+                />
               )}
 
               {/* ─── Video Gallery ─────────────────────────────────── */}
@@ -4105,6 +4541,78 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           {/* ══════════ PROMPT TAB ══════════ */}
           {activeTab === 'prompt' && activeScene && (
             <div className="text-sm space-y-4">
+              {/* Export + reference vision-scan audit */}
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-gray-800">
+                <div className="min-w-0">
+                  <span className="text-sm font-medium text-gray-200">Scene prompts</span>
+                  <p className="text-[11px] text-gray-500">Everything sent to ComfyUI for this scene — export for troubleshooting.</p>
+                </div>
+                <div className="shrink-0 flex items-center gap-2">
+                  <input
+                    ref={promptImportRef}
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportPrompts(f); e.currentTarget.value = ''; }}
+                  />
+                  <button
+                    onClick={() => promptImportRef.current?.click()}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded bg-gray-700 hover:bg-gray-600 text-gray-100 text-sm font-medium"
+                    title="Import prompt values from a JSON file made outside the app (flat or the Download-Prompts export shape). Fills the fields below; review then Save."
+                  >
+                    <Upload size={15} /> Import
+                  </button>
+                  <button
+                    onClick={handleDownloadPrompts}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium"
+                    title="Download a JSON of all prompts, models, sizes, references, and (for Ideogram mode) the structured caption sent to ComfyUI"
+                  >
+                    <Download size={15} /> Download Prompts JSON
+                  </button>
+                </div>
+              </div>
+
+              {/* Reference vision scans (clickable image + what the vision model saw) */}
+              {allFrameRefAssets.length > 0 && (
+                <div className="space-y-1.5">
+                  <span className="text-[11px] font-semibold text-gray-400">Reference vision scans</span>
+                  {allFrameRefAssets.map((a: any) => {
+                    const vd = a.meta?.vision_description;
+                    const isIdeo = !!a.meta?.ideogram_caption;
+                    return (
+                      <div key={a.id} className="flex gap-2 items-start bg-gray-800/50 rounded p-1.5">
+                        <a href={`/api/files/${a.rel_path}`} target="_blank" rel="noreferrer" className="shrink-0" title="Open the exact image the vision model scanned">
+                          <img src={`/api/files/${a.rel_path}`} alt={a.filename} className="w-12 h-12 object-cover rounded border border-gray-700 hover:border-cyan-400" />
+                        </a>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-gray-400 truncate">{a.filename}</span>
+                            {isIdeo && <span className="text-[9px] px-1 rounded bg-purple-600/30 text-purple-200 border border-purple-500/40">ideogram</span>}
+                          </div>
+                          {vd ? (
+                            <p className="text-[10px] text-cyan-200/80 mt-0.5">👁 {vd}</p>
+                          ) : (
+                            <p className="text-[10px] text-gray-600 mt-0.5">Not scanned yet — runs on next Enhance/Generate when Vision is enabled in Settings.</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {/* ── Editable prompts — full manual control ── */}
+              <div className="space-y-4">
+                {renderEditablePrompt('prompt', 'First Frame Prompt', 'The image prompt for the first frame (the scene image / where the video starts).', activeScene.prompt || '')}
+                {renderEditablePrompt('last_frame_prompt', 'Last Frame Prompt', 'Endpoint image for first-frame / last-frame video mode.', activeScene.parameters?.last_frame_prompt || '')}
+                {renderEditablePrompt('video_prompt', 'Video Prompt', 'Video generation prompt (motion, camera, action, audio).', activeScene.parameters?.video_prompt || '')}
+                {(activeScene.parameters?.two_pass_scene_prompt !== undefined || promptEdits['two_pass_scene_prompt'] !== undefined) &&
+                  renderEditablePrompt('two_pass_scene_prompt', 'Two-Pass Scene Prompt (Pass 1)', 'Scene composition for Pass 1 (environment, lighting, atmosphere).', activeScene.parameters?.two_pass_scene_prompt || '')}
+                {(activeScene.parameters?.two_pass_composite_prompt !== undefined || promptEdits['two_pass_composite_prompt'] !== undefined) &&
+                  renderEditablePrompt('two_pass_composite_prompt', 'Two-Pass Composite Prompt (Pass 2)', 'Character compositing edit instruction for Pass 2.', activeScene.parameters?.two_pass_composite_prompt || '')}
+              </div>
+
+              <div className="text-[11px] font-semibold text-gray-500 pt-3 border-t border-gray-800">What was actually sent to ComfyUI (read-only)</div>
+
               {/* Final Submitted Image Prompt (sent to ComfyUI) */}
               {activeScene.parameters?.submitted_image_prompt && (
                 <div>
@@ -4144,17 +4652,6 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 </div>
               )}
 
-              {/* Original Prompt */}
-              {activeScene.prompt && (
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-gray-300">Original Prompt (User Input)</label>
-                  <textarea
-                    value={activeScene.prompt}
-                    readOnly
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm h-24 resize-none"
-                  />
-                </div>
-              )}
 
               {/* Two-Pass Original Prompt */}
               {activeScene.parameters?.two_pass_original_prompt && (
@@ -4169,57 +4666,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 </div>
               )}
 
-              {/* Two-Pass Scene Prompt (Pass 1) */}
-              {activeScene.parameters?.two_pass_scene_prompt && (
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-blue-300">Two-Pass Scene Prompt (Pass 1)</label>
-                  <textarea
-                    value={activeScene.parameters.two_pass_scene_prompt}
-                    readOnly
-                    className="w-full px-3 py-2 bg-blue-950/30 border border-blue-700/50 rounded text-blue-100 text-sm h-24 resize-none"
-                  />
-                  <p className="text-xs text-blue-600 mt-1">Scene composition (environment, lighting, atmosphere) — LLM-enhanced for Pass 1</p>
-                </div>
-              )}
 
-              {/* Two-Pass Composite Prompt (Pass 2) */}
-              {activeScene.parameters?.two_pass_composite_prompt && (
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-green-300">Two-Pass Composite Prompt (Pass 2)</label>
-                  <textarea
-                    value={activeScene.parameters.two_pass_composite_prompt}
-                    readOnly
-                    className="w-full px-3 py-2 bg-green-950/30 border border-green-700/50 rounded text-green-100 text-sm h-24 resize-none"
-                  />
-                  <p className="text-xs text-green-600 mt-1">Character compositing (placing characters into scene) — LLM-enhanced for Pass 2</p>
-                </div>
-              )}
 
-              {/* Video Prompt */}
-              {activeScene.parameters?.video_prompt && (
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-purple-300">Video Prompt</label>
-                  <textarea
-                    value={activeScene.parameters.video_prompt}
-                    readOnly
-                    className="w-full px-3 py-2 bg-purple-950/30 border border-purple-700/50 rounded text-purple-100 text-sm h-24 resize-none"
-                  />
-                  <p className="text-xs text-purple-600 mt-1">Video generation prompt (motion, camera, action)</p>
-                </div>
-              )}
 
-              {/* Last Frame Prompt */}
-              {activeScene.parameters?.last_frame_prompt && (
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-pink-300">Last Frame Prompt</label>
-                  <textarea
-                    value={activeScene.parameters.last_frame_prompt}
-                    readOnly
-                    className="w-full px-3 py-2 bg-pink-950/30 border border-pink-700/50 rounded text-pink-100 text-sm h-24 resize-none"
-                  />
-                  <p className="text-xs text-pink-600 mt-1">Endpoint image for first frame / last frame video generation</p>
-                </div>
-              )}
 
               {/* Info Box */}
               {!activeScene.parameters?.submitted_image_prompt && !activeScene.parameters?.submitted_video_prompt && !activeScene.parameters?.two_pass_scene_prompt && !activeScene.parameters?.video_prompt && !activeScene.parameters?.last_frame_prompt && (
@@ -4241,8 +4690,26 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           onClose={() => setLightboxOpen(false)}
           onSave={handleSaveAsPreview}
           onDelete={handleDeleteVersion}
+          onInpaint={(v) => { if (v?.output_path) { setInpaintUrl(`/api/files/${v.output_path}`); setLightboxOpen(false); } }}
         />,
         document.body
+      )}
+
+      {inpaintUrl && activeScene && currentProject && (
+        <InpaintModal
+          projectId={currentProject.id}
+          sceneId={activeScene.id}
+          imageUrl={inpaintUrl}
+          assets={assets}
+          characters={conceptCharacters as any}
+          onClose={() => setInpaintUrl(null)}
+          onSaveAsPreview={async (outputPath) => {
+            if (!activeScene) return;
+            await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, chosen_image_path: outputPath } });
+            if (currentProject) queryClient.invalidateQueries({ queryKey: ['scene-versions', currentProject.id, activeScene.id] });
+          }}
+          onComplete={() => { if (currentProject && activeScene) queryClient.invalidateQueries({ queryKey: ['scene-versions', currentProject.id, activeScene.id] }); }}
+        />
       )}
 
       {/* Two-Pass Base Image Lightbox (View Original) */}
@@ -4267,7 +4734,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 ? (assets as any[]).find((a: any) => a?.id === _baseAssetId)
                 : null;
               const _wt = _baseAsset?.meta?.workflow_type as string | undefined;
-              const _modelLabel = _wt ? labelWorkflow(_wt) : firstPassLabel;
+              // klein_t2i (or missing) = the redirect's resolved model wasn't
+              // recorded; it's always the configured first-pass generator.
+              const _modelLabel = (!_wt || _wt === 'klein_t2i') ? firstPassLabel : labelWorkflow(_wt);
               return (
                 <div style={{ position: 'absolute', top: '12px', left: '12px', backgroundColor: 'rgba(79,70,229,0.9)', color: 'white', padding: '4px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}>
                   Pass 1 · {_modelLabel} — Scene Only (Before Character Compositing)

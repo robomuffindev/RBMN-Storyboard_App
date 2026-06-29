@@ -3,15 +3,16 @@ import { useAppStore } from '@/store';
 import WaveformDisplay from '@/components/Timeline/WaveformDisplay';
 import TimelineOverlay from '@/components/Timeline/TimelineOverlay';
 import { suggestTimeline, sliceSceneAudio, getScenes, cleanupScenes, updateProject, retrimAllScenes } from '@/api/client';
-import { Play, Pause, ZoomIn, ZoomOut, Scissors, SkipBack, SkipForward, RotateCcw, RefreshCw, Trash2, Wand2, Lock, Unlock, Music, Zap } from 'lucide-react';
+import { Play, Pause, ZoomIn, ZoomOut, Scissors, SkipBack, SkipForward, RotateCcw, RefreshCw, Trash2, Wand2, Lock, Unlock, Music, Zap, Plus } from 'lucide-react';
 
 interface TimelineProps {
   onSplitScene?: (sceneId: string, splitTime: number) => void;
   onBoundaryDrag?: (leftSceneId: string, rightSceneId: string, newTime: number) => void;
   onDeleteScene?: () => void;
+  onAddScene?: () => void;
 }
 
-export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }: TimelineProps) {
+export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene, onAddScene }: TimelineProps) {
   const [duration, setDuration] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [isSuggesting, setIsSuggesting] = useState(false);
@@ -237,6 +238,18 @@ export default function Timeline({ onSplitScene, onBoundaryDrag, onDeleteScene }
             >
               <Scissors size={14} />
               Split
+            </button>
+          )}
+
+          {/* Add Scene Button — appends a new blank scene at the end of the timeline */}
+          {onAddScene && (
+            <button
+              onClick={onAddScene}
+              className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-emerald-600 hover:bg-emerald-700 text-white"
+              title="Add a new blank scene at the end of the timeline (manually build your own timeline)"
+            >
+              <Plus size={14} />
+              Add Scene
             </button>
           )}
 

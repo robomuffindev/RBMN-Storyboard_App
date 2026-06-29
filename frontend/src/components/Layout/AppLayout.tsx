@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp, Film } from 'lucide-react';
-import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getBackingTracks, listExports, deleteExportFile, convertToNarrationVideo } from '@/api/client';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp, Film, Eye } from 'lucide-react';
+import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getSettings, updateSettings, getBackingTracks, listExports, deleteExportFile, convertToNarrationVideo } from '@/api/client';
 import type { ExportFileInfo } from '@/api/client';
 import { useAppStore } from '@/store';
 import SceneDeleteModal from '@/components/SceneEditor/SceneDeleteModal';
@@ -19,6 +19,7 @@ import AutoGenStatusBar from '@/components/BatchMode/AutoGenStatusBar';
 import BackingTrackTimeline from '@/components/BackingTrackTimeline/BackingTrackTimeline';
 import AssetGeneratorModal from '@/components/AssetGenerator/AssetGeneratorModal';
 import ProjectTextIOModal from '@/components/Layout/ProjectTextIOModal';
+import ImportAafModal from '@/components/Layout/ImportAafModal';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { useBackingTrackPlayer } from '@/hooks/useBackingTrackPlayer';
 import type { BackingTrackData } from '@/hooks/useBackingTrackPlayer';
@@ -53,6 +54,7 @@ export default function AppLayout() {
   const [activeTimeline, setActiveTimeline] = useState<'scenes' | 'backing'>('scenes');
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [textIOOpen, setTextIOOpen] = useState(false);
+  const [aafImportOpen, setAafImportOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const [renameModalOpen, setRenameModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
@@ -153,6 +155,7 @@ export default function AppLayout() {
   const [autoGenCompleted, setAutoGenCompleted] = useState(0);
   const [autoGenTotal, setAutoGenTotal] = useState(0);
   const [autoGenStep, setAutoGenStep] = useState<string | null>(null);
+  const [visionActivity, setVisionActivity] = useState<import('@/api/client').VisionActivity | null>(null);
   const [autoGenSceneName, setAutoGenSceneName] = useState<string | null>(null);
   const [autoGenBatchRunId, setAutoGenBatchRunId] = useState<string | null>(null);
   const [autoGenMinimized, setAutoGenMinimized] = useState(false);
@@ -411,6 +414,7 @@ export default function AppLayout() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scenes', id] });
+      queryClient.invalidateQueries({ queryKey: ['chapters', id] });
     },
   });
 
@@ -435,6 +439,7 @@ export default function AppLayout() {
       });
 
       queryClient.invalidateQueries({ queryKey: ['scenes', id] });
+      queryClient.invalidateQueries({ queryKey: ['chapters', id] });
     } catch (err) {
       console.error('Failed to split scene:', err);
     }
@@ -581,6 +586,7 @@ export default function AppLayout() {
         setAutoGenTotal(d.total_scenes);
         setAutoGenStep(d.current_step || null);
         setAutoGenSceneName(d.current_scene_name || null);
+        setVisionActivity((d as any).vision || null);
         setAutoGenBatchRunId(d.batch_run_id || null);
 
         // Stop polling when terminal
@@ -841,6 +847,14 @@ export default function AppLayout() {
                 <span className="sm:hidden font-mono text-xs">
                   {autoGenTotal > 0 ? `${Math.round((autoGenCompleted / autoGenTotal) * 100)}%` : '...'}
                 </span>
+                {visionActivity && (visionActivity.described > 0 || visionActivity.cache_hits > 0) && (
+                  <span
+                    title={`Vision model ${visionActivity.model || ''} described reference images${visionActivity.last_msg ? ' — ' + visionActivity.last_msg : ''}`}
+                    className="hidden sm:inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-600/30 border border-cyan-400/40 text-cyan-200"
+                  >
+                    <Eye size={11} /> {visionActivity.described + visionActivity.cache_hits}
+                  </span>
+                )}
               </button>
             ) : (
               <button
@@ -972,6 +986,14 @@ export default function AppLayout() {
                 >
                   <span aria-hidden>📤</span>
                   Import / Export Project Text Details
+                </button>
+                <button
+                  onClick={() => { setAafImportOpen(true); setToolsMenuOpen(false); }}
+                  title="Import an ElevenLabs (Dubbing Studio) AAF timeline — replaces this project's scenes with the AAF's clip boundaries, and optionally attaches audio."
+                  className="w-full px-4 py-3 text-sm text-gray-200 hover:bg-gray-700 text-left transition-colors border-t border-gray-700 flex items-center gap-2"
+                >
+                  <span aria-hidden>🎬</span>
+                  Import AAF (ElevenLabs)
                 </button>
               </div>
             )}
@@ -1406,7 +1428,7 @@ export default function AppLayout() {
         )}
         {/* Both timelines stay mounted (to preserve WaveSurfer playback state); CSS hides the inactive one */}
         <div className={`flex-1 overflow-hidden ${activeTimeline !== 'scenes' && project && project.mode !== 'music_video' && id ? 'hidden' : ''}`}>
-          <Timeline onSplitScene={handleSplitScene} onBoundaryDrag={handleBoundaryDrag} onDeleteScene={handleDeleteScene} />
+          <Timeline onSplitScene={handleSplitScene} onBoundaryDrag={handleBoundaryDrag} onDeleteScene={handleDeleteScene} onAddScene={() => addSceneMutation.mutate()} />
           {deleteTarget && (
             <SceneDeleteModal
               scene={deleteTarget as any}
@@ -1586,6 +1608,18 @@ export default function AppLayout() {
           projectMode={String(project.mode)}
           projectName={project.name}
           onClose={() => setTextIOOpen(false)}
+        />
+      )}
+
+      {aafImportOpen && id && (
+        <ImportAafModal
+          projectId={id}
+          onClose={() => setAafImportOpen(false)}
+          onImported={() => {
+            queryClient.invalidateQueries({ queryKey: ['scenes', id] });
+            queryClient.invalidateQueries({ queryKey: ['chapters', id] });
+            queryClient.invalidateQueries({ queryKey: ['project', id] });
+          }}
         />
       )}
 
@@ -3218,6 +3252,13 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   });
   // Set true by Cancel so a multi-chapter queue stops between chapters.
   const cancelRequestedRef = useRef(false);
+  // Settings (drives the vision-description option below).
+  const _vgQC = useQueryClient();
+  const { data: vgSettings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: async () => (await getSettings()).data,
+    staleTime: 60_000,
+  });
 
   const isBackendRunning = autoGenStatus === 'running';
   const isBackendDone = autoGenStatus === 'done' || autoGenStatus === 'completed';
@@ -3614,6 +3655,20 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
 
             {showAdvanced && (
               <div className="mb-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg space-y-2.5">
+                {vgSettings?.ollama_vision_model && (
+                  <label className="flex items-center gap-2.5 cursor-pointer">
+                    <input type="checkbox" checked={!!vgSettings?.vision_enabled} disabled={isStarting}
+                      onChange={async (e) => {
+                        const v = e.target.checked;
+                        try { await updateSettings({ vision_enabled: v } as any); _vgQC.invalidateQueries({ queryKey: ['settings'] }); } catch (err) { console.error('vision toggle failed', err); }
+                      }}
+                      className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-purple-500" />
+                    <div>
+                      <span className="text-sm text-gray-200">Describe reference images (vision)</span>
+                      <p className="text-xs text-gray-500">Global: use the vision model (<span className="text-purple-300">{vgSettings.ollama_vision_model}</span>) to describe reference images so the LLM understands them. Per-scene overrides still apply.</p>
+                    </div>
+                  </label>
+                )}
                 <label className="flex items-center gap-2.5 cursor-pointer">
                   <input type="checkbox" checked={overrideFullSet} onChange={e => setOverrideFullSet(e.target.checked)} disabled={isStarting}
                     className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-amber-500" />

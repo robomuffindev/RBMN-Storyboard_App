@@ -354,6 +354,29 @@ async def create_scene(
             context=f"POST /scenes (project {project_id})",
         )
 
+        # Also clamp the end to the master audio's duration so a manually-added
+        # scene can't extend PAST the audio (which would slice an empty/silent
+        # tail and ship a silent gap in the final video).  Best-effort.
+        try:
+            _music = (await session.execute(
+                select(Asset).where(
+                    Asset.project_id == project_id,
+                    Asset.asset_type == AssetType.MUSIC,
+                    ~Asset.rel_path.contains("stems/"),
+                )
+            )).scalars().first()
+            if _music:
+                _mp = settings.project_dir / str(project_id) / _music.rel_path
+                if _mp.exists():
+                    from backend.services.video.ffmpeg import get_media_info
+                    _adur = float((get_media_info(str(_mp)) or {}).get("duration") or 0.0)
+                    if _adur > 0 and _clamped_end > _adur:
+                        _clamped_end = _adur
+                        if _clamped_start >= _clamped_end:
+                            _clamped_start = max(0.0, _clamped_end - 1.0)
+        except Exception:
+            pass
+
         scene = Scene(
             project_id=project_id,
             order_index=next_order_index,
@@ -375,6 +398,34 @@ async def create_scene(
             other=True,
         )
         session.add(stem_selection)
+
+        # Bind the new scene to a chapter so chapter-scoped operations
+        # (Auto-Gen / Export / per-chapter Story Flow) include it — otherwise a
+        # manually-added or split scene sits with chapter_id=NULL and is skipped.
+        # Pick the deepest chapter whose time range contains the scene start;
+        # fall back to the last chapter.  Best-effort.
+        try:
+            from backend.database.models import Chapter
+            _chs = (await session.execute(
+                select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order_index)
+            )).scalars().all()
+            if _chs:
+                _target = None
+                _best_depth = -1
+                for _ch in _chs:
+                    if (_ch.start_time is not None and _ch.end_time is not None
+                            and _ch.start_time <= _clamped_start < _ch.end_time
+                            and (getattr(_ch, "depth", 0) or 0) >= _best_depth):
+                        _target = _ch
+                        _best_depth = getattr(_ch, "depth", 0) or 0
+                if _target is None:
+                    _target = _chs[-1]
+                scene.chapter_id = _target.id
+                if _target.end_time is None or _clamped_end > _target.end_time:
+                    _target.end_time = _clamped_end
+                    session.add(_target)
+        except Exception:
+            pass
 
         await session.commit()
 
