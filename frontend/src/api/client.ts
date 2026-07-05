@@ -178,12 +178,19 @@ export const inpaintImage = (projectId: string, data: {
 }) =>
   api.post<{ id: string }>(`/projects/${projectId}/generate/inpaint`, data);
 
-export const importAaf = (projectId: string, formData: FormData) =>
+export const importAaf = (
+  projectId: string,
+  formData: FormData,
+  config?: { onUploadProgress?: (e: { loaded: number; total?: number }) => void },
+) =>
   api.post<{ created_count: number; scene_ids: string[]; audio_attached: boolean; chapter_count: number; message: string }>(
     `/projects/${projectId}/timeline/import-aaf`,
     formData,
-    { headers: { 'Content-Type': 'multipart/form-data' } },
+    { headers: { 'Content-Type': 'multipart/form-data' }, ...(config || {}) },
   );
+
+export const detachAaf = (projectId: string) =>
+  api.post<{ detached: boolean }>(`/projects/${projectId}/timeline/detach-aaf`);
 
 export const generateVideo = (projectId: string, data: {
   scene_id: string;
@@ -210,8 +217,17 @@ export const enhancePrompt = (projectId: string, data: {
   frame_type?: 'first' | 'last';
   reference_asset_ids?: string[];
   vision_describe?: boolean | null;
+  scene_id?: string;
 }) =>
   api.post<{ enhanced_prompt: string }>(`/projects/${projectId}/generate/enhance-prompt`, data);
+
+// Build/regenerate a structured Scene Intent for a scene (opt-in Scene Intent mode).
+export const buildSceneIntent = (projectId: string, data: { scene_id: string; frame_type?: string }) =>
+  api.post<{ scene_intent: any }>(`/projects/${projectId}/generate/scene-intent`, data);
+
+// Build/regenerate a structured LTX video-JSON prompt for a scene (opt-in Video JSON mode).
+export const buildVideoJson = (projectId: string, data: { scene_id: string; prompt?: string }) =>
+  api.post<{ video_json: any }>(`/projects/${projectId}/generate/video-json`, data);
 
 // Build/regenerate an Ideogram structured JSON caption for a scene (Krea 2 JSON mode).
 export const buildJsonPrompt = (projectId: string, data: {
@@ -465,6 +481,7 @@ export const getConcept = (projectId: string) =>
       // hydrates the last prompt + reference image list on reopen.
       last_prompt?: string;
       reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
+      extra_images?: string[];
     }>;
     resolution_width: number;
     resolution_height: number;
@@ -510,6 +527,7 @@ export const saveConcept = (projectId: string, data: {
       // hydrates the last prompt + reference image list on reopen.
       last_prompt?: string;
       reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
+      extra_images?: string[];
     }>;
   resolution_width: number;
   resolution_height: number;
@@ -536,6 +554,8 @@ export const saveConcept = (projectId: string, data: {
   model_audio_volume?: number;
   include_model_audio_in_export?: boolean;
   json_prompt_mode?: boolean;
+  scene_intent_mode?: boolean;
+  video_json_mode?: boolean;
 }) =>
   api.put(`/projects/${projectId}/concept`, data);
 
@@ -560,6 +580,7 @@ export const autogenerateCharacters = (projectId: string) =>
       // hydrates the last prompt + reference image list on reopen.
       last_prompt?: string;
       reference_images?: Array<{ asset_id: string; image_path: string; description: string }>;
+      extra_images?: string[];
     }>;
     job_ids: string[];
     message: string;

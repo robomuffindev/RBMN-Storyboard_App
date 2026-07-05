@@ -109,3 +109,4 @@ KREA2V2/
 
 # Stray root npm lockfile (real npm project is in frontend/)
 /package-lock.json
+diagnostics/

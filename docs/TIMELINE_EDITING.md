@@ -1,3 +1,10 @@
+> **v1.24.0 — AAF-first audio setup.** For narration projects the Audio tab now offers the AAF import
+> directly (recommended for ElevenLabs) with an upload progress bar and optional SRT in the same step.
+> While an AAF is attached it is **authoritative**: Whisper/SRT never move scene boundaries, and Suggest
+> Timeline / create-from-sections are blocked (409) until you *Detach AAF timeline*. The AAF carries
+> timing + embedded audio (extracted automatically) — the narration text ships in ElevenLabs' SRT/CSV
+> export, so upload the SRT for narration text + subtitles (it will not move boundaries).
+
 # Timeline editing — full feature map
 
 This is the complete set of ways to build and edit a project's scene timeline.

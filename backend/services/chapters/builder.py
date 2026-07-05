@@ -234,6 +234,11 @@ async def _create_chapters_from_headers(
     await session.flush()
 
     # Create / update chapter rows from headers
+    # Manual-respect: header chapters the user customized were flipped to
+    # source='manual' and survive cleanup — adopt them instead of creating
+    # time-overlapping duplicates (dedup keys include the name, so a renamed
+    # chapter would never collapse on its own).
+    _manual_survivors = [c for c in existing_chapters if c.source == "manual"]
     result_chapters: List[Chapter] = []
     for i, h in enumerate(parsed.headers):
         start_t = times[i]
@@ -266,6 +271,25 @@ async def _create_chapters_from_headers(
             ch.updated_at = datetime.utcnow()
             session.add(ch)
         else:
+            _dup = next(
+                (m for m in _manual_survivors
+                 if abs(float(m.start_time or 0.0) - start_t) < 0.5),
+                None,
+            )
+            if _dup is not None:
+                logger.info(
+                    f"Header '{h.name}' overlaps surviving manual chapter "
+                    f"'{_dup.name}' at {start_t:.1f}s — respecting the manual "
+                    f"chapter instead of creating a duplicate."
+                )
+                _manual_survivors.remove(_dup)
+                order_counter[h.depth] += 1
+                parent_stack[h.depth] = _dup
+                for d in range(h.depth + 1, settings_.max_depth + 1):
+                    parent_stack[d] = None
+                    order_counter[d] = 0
+                result_chapters.append(_dup)
+                continue
             # Create new
             sc = await allocate_shortcode(session, project_id, "ch")
             ch = Chapter(
@@ -544,6 +568,19 @@ async def _rebuild_chapters_locked(
     # references a dead row.  Use a high explicit depth ceiling rather
     # than the settings_.max_depth (which can be reduced between
     # sessions and leave deeper rows behind).
+    # FK-safety: a manual sub-chapter can survive this delete while its
+    # non-manual parent does not — NULL those parent links first, or the
+    # parent DELETE hits a FK IntegrityError and aborts the whole rebuild.
+    await session.execute(
+        text(
+            "UPDATE chapters SET parent_chapter_id = NULL "
+            "WHERE project_id = :pid AND source = 'manual' "
+            "AND parent_chapter_id IN ("
+            "  SELECT id FROM chapters WHERE project_id = :pid "
+            "  AND (source IS NULL OR source != 'manual'))"
+        ),
+        {"pid": _pid_hex_pre},
+    )
     _deleted_total = 0
     for d in range(10, -1, -1):
         del_res = await session.execute(
@@ -995,7 +1032,8 @@ async def _apply_auto_split(
                 text("UPDATE scenes SET chapter_id = :cid WHERE id IN ({})".format(
                     ", ".join(f":id{i}" for i in range(len(plan.scene_ids)))
                 )),
-                {"cid": str(sub.id), **{f"id{i}": sid for i, sid in enumerate(plan.scene_ids)}},
+                # SQLite stores GUIDs as 32-char hex (no dashes) — bind .hex
+                {"cid": sub.id.hex, **{f"id{i}": (sid.hex if hasattr(sid, "hex") else str(sid).replace("-", "")) for i, sid in enumerate(plan.scene_ids)}},
             )
         logger.info(
             f"Auto-split leaf '{leaf.name}' into {len(plans)} parts"

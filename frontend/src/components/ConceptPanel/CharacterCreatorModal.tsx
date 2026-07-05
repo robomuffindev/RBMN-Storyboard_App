@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { handleImgError } from '@/utils/brokenImage';
@@ -50,6 +50,9 @@ interface CharacterData {
   // Persisted across save/close so the modal hydrates on reopen.
   last_prompt?: string;
   reference_images?: ReferenceImage[];
+  // Additional reference-ANGLE images of this character (rel_paths). Auto-balanced
+  // into a scene's reference slots for stronger identity lock.
+  extra_images?: string[];
 }
 
 interface ReferenceImage {
@@ -93,10 +96,23 @@ export default function CharacterCreatorModal({
   const [name, setName] = useState(character.name);
   const [description, setDescription] = useState(character.description);
   const [prompt, setPrompt] = useState(character.last_prompt || '');
+  // Version-poll bookkeeping (cleared on re-generate and on unmount)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollStopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (pollStopRef.current) clearTimeout(pollStopRef.current);
+    };
+  }, []);
 
   // Reference images (up to 4) — hydrated from character.reference_images
   const [refImages, setRefImages] = useState<ReferenceImage[]>(
     Array.isArray(character.reference_images) ? character.reference_images : []
+  );
+  // Extra reference-angle images (rel_paths) for identity lock.
+  const [extraImages, setExtraImages] = useState<string[]>(
+    Array.isArray(character.extra_images) ? character.extra_images : []
   );
 
   // Resolution
@@ -155,6 +171,27 @@ export default function CharacterCreatorModal({
     accept: 'image/*',
     imagesOnly: true,
     title: 'Set Character Image',
+  });
+
+  // ── Extra reference angles (identity lock) ──────────────────────
+  const handleExtraAngleUpload = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('asset_type', 'character');
+    try {
+      const resp = await uploadAsset(projectId, formData);
+      setExtraImages((prev) => (prev.includes(resp.data.rel_path) ? prev : [...prev, resp.data.rel_path]));
+    } catch (err) {
+      console.error('Failed to upload extra angle:', err);
+    }
+  };
+  const { openPicker: openExtraPicker, PickerModals: ExtraPickerModals } = useAssetPicker({
+    assets: assets || [],
+    onFileUpload: (file) => handleExtraAngleUpload(file),
+    onAssetSelect: (asset: Asset) => setExtraImages((prev) => (prev.includes(asset.rel_path) ? prev : [...prev, asset.rel_path])),
+    accept: 'image/*',
+    imagesOnly: true,
+    title: 'Add reference angle',
   });
 
   // Seed from editing existing character's last generation
@@ -231,11 +268,18 @@ export default function CharacterCreatorModal({
       return resp.data;
     },
     onSuccess: () => {
-      // Poll versions after a short delay for the job to complete
-      const poll = setInterval(() => {
+      // Poll versions after a short delay for the job to complete.
+      // Track the ids so repeated Generates don't stack intervals and
+      // unmount cleans them up (this used to leak).
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (pollStopRef.current) clearTimeout(pollStopRef.current);
+      pollRef.current = setInterval(() => {
         refetchVersions();
       }, 3000);
-      setTimeout(() => clearInterval(poll), 60_000);
+      pollStopRef.current = setTimeout(() => {
+        if (pollRef.current) clearInterval(pollRef.current);
+        pollRef.current = null;
+      }, 60_000);
     },
   });
 
@@ -289,11 +333,16 @@ export default function CharacterCreatorModal({
   // tweaking the same setup instead of starting over.
   const handleSaveAndClose = () => {
     onSave(characterIndex, {
+      // Spread first: fields this modal doesn't edit (library_origin_id,
+      // future additions) must survive the round-trip instead of being
+      // silently dropped (the Pydantic-truncation bug class).
+      ...(character ?? {}),
       name,
       description,
       image_path: activeImagePath,
       last_prompt: prompt,
       reference_images: refImages,
+      extra_images: extraImages,
     });
     onClose();
   };
@@ -378,6 +427,7 @@ export default function CharacterCreatorModal({
   return (<>
     <RefPickerModals />
     <MainImagePickerModals />
+    <ExtraPickerModals />
     {createPortal(
     <div style={overlay} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={modal} onClick={(e) => e.stopPropagation()}>
@@ -482,6 +532,40 @@ export default function CharacterCreatorModal({
             </div>
             <div style={{ fontSize: '0.65rem', color: '#6b7280', marginTop: '0.25rem' }}>
               Workflow auto-selects: {autoWorkflowType(refImages.length)} ({refImages.length} ref{refImages.length !== 1 ? 's' : ''})
+            </div>
+          </div>
+
+          {/* Extra reference angles — identity lock across scenes */}
+          <div style={sectionGap}>
+            <label style={labelStyle}>Extra reference angles (identity lock)</label>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {extraImages.map((path, i) => (
+                <div key={i} style={{ position: 'relative', width: 64, height: 64 }}>
+                  <img
+                    src={`/api/files/${path}`}
+                    alt={`Angle ${i + 1}`}
+                    style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: '0.375rem', border: '1px solid #374151' }}
+                    onError={handleImgError}
+                  />
+                  <button
+                    onClick={() => setExtraImages((prev) => prev.filter((_, j) => j !== i))}
+                    style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%', background: '#dc2626', border: 'none', color: '#fff', fontSize: '0.6rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {extraImages.length < 4 && (
+                <button
+                  onClick={() => openExtraPicker()}
+                  style={{ width: 64, height: 64, background: '#1f2937', border: '2px dashed #374151', borderRadius: '0.375rem', color: '#6b7280', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.5rem' }}
+                >
+                  +
+                </button>
+              )}
+            </div>
+            <div style={{ fontSize: '0.65rem', color: '#6b7280', marginTop: '0.25rem' }}>
+              Additional angles/expressions of THIS character. The scene's ref slots are auto-balanced — one main character fills its slots with these angles for stronger consistency.
             </div>
           </div>
 

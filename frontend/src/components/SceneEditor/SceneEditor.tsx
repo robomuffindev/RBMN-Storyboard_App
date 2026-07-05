@@ -27,6 +27,8 @@ import {
   retrimScene,
   buildJsonPrompt,
   exportScenePrompts,
+  buildSceneIntent,
+  buildVideoJson,
 } from '@/api/client';
 import ReferenceSelector, {
   autoWorkflowType,
@@ -785,6 +787,11 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const [prompt, setPrompt] = useState('');
   // Prompt-tab manual edits (key -> edited value); cleared when the scene changes.
   const [promptEdits, setPromptEdits] = useState<Record<string, string>>({});
+  const [promptAudit, setPromptAudit] = useState<any>(null);
+  const [intentText, setIntentText] = useState<string>('');
+  const [intentBusy, setIntentBusy] = useState(false);
+  const [videoJsonText, setVideoJsonText] = useState<string>('');
+  const [videoJsonBusy, setVideoJsonBusy] = useState(false);
   const promptImportRef = useRef<HTMLInputElement>(null);
   const [negativePrompt, setNegativePrompt] = useState('');
   // Last frame state
@@ -1200,6 +1207,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       setPrompt(activeScene.prompt || '');
       setNegativePrompt(activeScene.negative_prompt || '');
       setPromptEdits({});
+      try { const _si = (activeScene.parameters as any)?.scene_intent; setIntentText(_si ? JSON.stringify(_si, null, 2) : ''); } catch { setIntentText(''); }
+      try { const _vj = (activeScene.parameters as any)?.video_json_prompt; setVideoJsonText(_vj ? JSON.stringify(_vj, null, 2) : ''); } catch { setVideoJsonText(''); }
       setLastFramePrompt(activeScene.parameters?.last_frame_prompt || '');
       setLfExcludeFirstFrameRef(activeScene.parameters?.lf_exclude_first_frame_ref === true);
       setLlmInstructionImage(activeScene.parameters?.llm_instruction_image || '');
@@ -1936,7 +1945,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         );
         if (ffAsset && !updatedRefAssetIds.includes(ffAsset.id)) {
           updatedRefAssetIds = [ffAsset.id, ...updatedRefAssetIds];
-          effectiveWorkflow = `klein_${Math.min(updatedRefAssetIds.length, 5)}ref`;
+          effectiveWorkflow = `klein_${Math.min(updatedRefAssetIds.length, 4)}ref`;
         }
       }
 
@@ -2014,8 +2023,27 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   });
 
   // ─── Shared context builder for enhance calls ─────────────────────
-  const buildEnhanceContext = (extra: string) => {
+  const buildEnhanceContext = (extra: string, isVideo = false) => {
     const parts: string[] = [extra];
+    // Priority stack (mirrors the backend auto-gen context)
+    parts.push("PRIORITY ORDER when guidance conflicts (higher wins): (1) safety + model limits; (2) THIS image's role (first/last frame or standalone still); (3) hard constraints (colour palette, target canvas, attached references, the 3-character reference limit); (4) USER DIRECTION above; (5) lyrics/narration content; (6) story-flow composition + camera; (7) project style + global context. When two constraints cannot BOTH be satisfied, DROP the lower-priority one entirely — never merge contradictions into one sentence.");
+    // Target canvas / aspect ratio
+    {
+      const _rw = isVideo ? 'video_resolution_width' : 'image_resolution_width';
+      const _rh = isVideo ? 'video_resolution_height' : 'image_resolution_height';
+      const cw = ((activeScene?.parameters as any)?.[_rw] as number) || (activeScene?.parameters?.width as number) || (currentProject?.settings as any)?.[_rw] || (currentProject?.settings as any)?.resolution_width || 1536;
+      const ch = ((activeScene?.parameters as any)?.[_rh] as number) || (activeScene?.parameters?.height as number) || (currentProject?.settings as any)?.[_rh] || (currentProject?.settings as any)?.resolution_height || 864;
+      if (cw && ch) {
+        const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
+        const d = gcd(cw, ch) || 1;
+        const orient = cw > ch ? 'landscape' : ch > cw ? 'portrait' : 'square';
+        parts.push(`TARGET CANVAS: ${cw}x${ch} px (${Math.round(cw / d)}:${Math.round(ch / d)}, ${orient}). Compose for THIS frame shape — do not describe an ultra-wide panorama for a near-square canvas, or a tall composition for a wide one.`);
+      }
+    }
+    // Narration mode — make the script the visual driver
+    if (currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video') {
+      parts.push("NARRATION MODE: the spoken script (the lyrics/narration below) is the PRIMARY content. Compose visuals that make the narration's meaning clear WITHOUT on-screen text or captions; illustrate the specific people, objects, actions and settings it names; avoid generic mood-only shots unless the narration is abstract.");
+    }
     // Concept & style
     if (conceptData?.concept_text) {
       parts.push(`Video concept: ${conceptData.concept_text}`);
@@ -2040,6 +2068,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         .map((c, i) => `Character ${i + 1}: "${c.name || 'Unnamed'}" — ${c.description || 'no description'}`)
         .join('. ');
       parts.push(`Characters: ${charBlock}`);
+      if (conceptCharacters.length > 3) {
+        parts.push(`NOTE: at most 3 character reference images are attached (the ones selected in the reference picker); build the scene around the selected characters and do not invent the others.`);
+      }
     }
     // Scene lyrics — PRIMARY creative driver
     if (sceneLyrics && !sceneLyrics.startsWith('(No lyrics')) {
@@ -2048,6 +2079,25 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     // Story flow — scene composition and framing
     if (useStoryFlow && sceneFlowIdea) {
       parts.push(`SCENE STORYBOARD (describes HOW to compose and frame the scene — use this alongside the lyrics to create a visually unique scene that depicts the lyrical content): ${sceneFlowIdea}`);
+    }
+    // Colour palette / grade (mirrors backend; dispatch also enforces it)
+    {
+      const co = (activeScene?.parameters?.color_override as string) || (currentProject?.settings as any)?.global_color_override || '';
+      if (co && co !== 'full_color' && co !== 'none') {
+        const customPal = (activeScene?.parameters?.custom_color_palette as string) || (currentProject?.settings as any)?.custom_color_palette || '';
+        const palText = co === 'custom' ? customPal : co.replace(/_/g, ' ');
+        if (palText) {
+          const strict = /black.?and.?white|monochrome|grayscale|greyscale|duotone|sepia/i.test(palText);
+          parts.push(strict
+            ? `⚠️ COLOUR PALETTE OVERRIDE (HARD CONSTRAINT — STRICT): ${palText}. Every element, including skin tones, must use ONLY these tones.`
+            : `⚠️ COLOUR GRADE (HARD CONSTRAINT): ${palText}. Governs lighting, mood, wardrobe and environment colour; keep skin and material tones believable within the grade.`);
+        }
+      }
+    }
+    // Camera action
+    if (cameraAction && cameraAction !== 'none') {
+      const cam = cameraAction === 'custom' ? customCameraAction : (CAMERA_ACTIONS.find((a) => a.value === cameraAction)?.label || cameraAction);
+      if (cam) parts.push(`Requested camera movement: ${cam}`);
     }
     return parts.filter(Boolean).join(' | ');
   };
@@ -2079,7 +2129,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       .toLowerCase();
     if (!searchText.trim()) return activeRefs;
 
-    const maxRefs = frameSubTab === 'first' ? 5 : 4;
+    const maxRefs = frameSubTab === 'first' ? 4 : 3; // BFL 4-ref limit; LF reserves slot 1 for the FF ref
     const maxCharRefs = 3; // up to 3 character references (Klein composite)
     const currentCharIndices = [...activeRefs.characterIndices];
     let changed = false;
@@ -2131,7 +2181,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       // (narration_images = stills, so keep the full scene there.)
       const _animatedMode = currentProject?.mode === 'music_video' || currentProject?.mode === 'narration_video';
       if (frameSubTab === 'first' && _animatedMode) {
-        base += ' VIDEO STARTING FRAME (important): this image is the FIRST FRAME of a video clip and the video step animates the motion FROM it. Depict the OPENING MOMENT / calm starting state only — the key subject(s), setting and lighting as the shot opens, BEFORE the action plays out. Do NOT pack in every action, character entrance, or element the scene reveals over time (the video prompt handles those); an overloaded first frame produces busier, worse video. Frame the subject as the shot should open (the model will not reframe) and keep lighting clean and consistent (it propagates through the clip).';
+        base += ' VIDEO STARTING FRAME (important): this image is the FIRST FRAME of a video clip and the video step animates the motion FROM it. Depict the OPENING MOMENT / calm starting state only — the key subject(s), setting and lighting as the shot opens, BEFORE the action plays out. Do NOT pack in every action, character entrance, or element the scene reveals over time (the video prompt handles those); an overloaded first frame produces busier, worse video. Frame the subject as the shot should open (the model will not reframe) and keep lighting clean and consistent (it propagates through the clip). IF the lyrics/flow describe heavy motion or a dramatic event (running, an explosion, a fall), do NOT freeze that action into this still — depict the CHARGED MOMENT JUST BEFORE it (the held breath, the first step, the calm before) so the video has somewhere to go. Keep it ONE coherent frame.';
       }
       if (updatedRefDescriptions) {
         base += ` REFERENCE IMAGES: ${updatedRefDescriptions}. `
@@ -2195,7 +2245,14 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         frame_type: frameSubTab,
         reference_asset_ids: _enhRefIds,
         vision_describe: visionDescribeRefs,
+        scene_id: activeScene?.id,
       });
+      // Rapid scene switching: only apply the result if this scene is
+      // still the active one (otherwise the enhanced prompt of scene A
+      // lands in scene B's textarea).
+      if (useAppStore.getState().activeScene?.id !== activeScene?.id) {
+        return response.data;
+      }
       setActivePrompt(response.data.enhanced_prompt);
       // Ideogram mode: also build/refresh the structured JSON caption from the
       // freshly enhanced prose so the curated, positioned prompt is ready to use
@@ -2244,10 +2301,16 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       }
       const response = await enhancePrompt(currentProject.id, {
         prompt: videoPrompt,
-        context: buildEnhanceContext(base),
+        context: buildEnhanceContext(
+          base + " | CAMERA IS MANDATORY: the prompt MUST contain an explicit camera clause — if no movement was requested, choose one deliberate simple move or a locked shot and SAY it (e.g. 'static camera, locked-off frame'). An unspecified camera drifts randomly.",
+          true,
+        ),
         is_video: true,
+        scene_id: activeScene?.id,
       });
-      setVideoPrompt(response.data.enhanced_prompt);
+      if (useAppStore.getState().activeScene?.id === activeScene?.id) {
+        setVideoPrompt(response.data.enhanced_prompt);
+      }
       return response.data;
     },
   });
@@ -2381,6 +2444,21 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     },
   });
 
+  // Fetch the read-only prompt audit (validator warnings + dispatch mutations)
+  // when the Prompt tab is open, so issues surface before spending GPU time.
+  // NOTE: must live ABOVE the !activeScene early return — a hook after a
+  // conditional return breaks the Rules of Hooks (crash on the null→scene
+  // transition when SceneEditor first mounts with no active scene).
+  useEffect(() => {
+    let cancelled = false;
+    if (activeTab === 'prompt' && activeScene && currentProject) {
+      exportScenePrompts(currentProject.id, activeScene.id)
+        .then((r) => { if (!cancelled) setPromptAudit(r.data); })
+        .catch(() => { if (!cancelled) setPromptAudit(null); });
+    }
+    return () => { cancelled = true; };
+  }, [activeTab, activeScene?.id, currentProject?.id]);
+
   if (!activeScene) {
     return (
       <div className="h-full flex items-center justify-center text-gray-400">
@@ -2483,6 +2561,48 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
         </div>
       </div>
     );
+  };
+
+  const generateSceneIntent = async () => {
+    if (!activeScene || !currentProject) return;
+    setIntentBusy(true);
+    try {
+      const _sid = activeScene.id;
+      const r = await buildSceneIntent(currentProject.id, { scene_id: _sid, frame_type: frameSubTab });
+      if (useAppStore.getState().activeScene?.id === _sid) {
+        setIntentText(JSON.stringify(r.data.scene_intent, null, 2));
+      }
+      queryClient.invalidateQueries({ queryKey: ['scenes', currentProject.id] });
+    } catch (e) { console.error('scene intent gen failed', e); alert('Failed to generate scene intent.'); }
+    finally { setIntentBusy(false); }
+  };
+  const saveSceneIntent = async () => {
+    if (!activeScene || !currentProject) return;
+    try {
+      const parsed = JSON.parse(intentText);
+      await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, scene_intent: parsed } });
+    } catch (e) { alert('Invalid JSON — fix the syntax or click Generate with AI.'); }
+  };
+
+  const generateVideoJson = async () => {
+    if (!activeScene || !currentProject) return;
+    setVideoJsonBusy(true);
+    try {
+      const _sid = activeScene.id;
+      const r = await buildVideoJson(currentProject.id, { scene_id: _sid });
+      if (useAppStore.getState().activeScene?.id === _sid) {
+        setVideoJsonText(JSON.stringify(r.data.video_json, null, 2));
+      }
+      queryClient.invalidateQueries({ queryKey: ['scenes', currentProject.id] });
+    } catch (e) { console.error('video json gen failed', e); alert('Failed to generate video JSON prompt.'); }
+    finally { setVideoJsonBusy(false); }
+  };
+  const saveVideoJson = async () => {
+    if (!activeScene || !currentProject) return;
+    try {
+      const parsed = JSON.parse(videoJsonText);
+      await updateSceneAndSync(activeScene.id, { parameters: { ...activeScene.parameters, video_json_prompt: parsed } });
+    } catch (e) { alert('Invalid JSON — fix the syntax or click Generate with AI.'); }
   };
 
   const handleDownloadPrompts = async () => {
@@ -3705,8 +3825,9 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                         const val = e.target.value || undefined;
                         const newParams = { ...activeScene.parameters, ltx_model_gguf: val };
                         if (!val) delete newParams.ltx_model_gguf;
-                        updateScene(currentProject.id, activeScene.id, { parameters: newParams });
-                        useAppStore.getState().updateSceneInStore(activeScene.id, { parameters: newParams });
+                        updateSceneAndSync(activeScene.id, { parameters: newParams }).catch((err) =>
+                          console.error('GGUF override save failed', err)
+                        );
                       }}
                       className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
                     >
@@ -4571,6 +4692,98 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                   </button>
                 </div>
               </div>
+
+              {((activeScene?.parameters?.scene_intent_mode ?? (currentProject?.settings as any)?.scene_intent_mode) === true) && (
+                <div className="bg-cyan-950/20 border border-cyan-800/40 rounded p-2.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-cyan-300">Scene Intent (structured plan — prompts compile from this)</span>
+                    <button
+                      onClick={generateSceneIntent}
+                      disabled={intentBusy}
+                      className="px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white text-[11px] font-medium"
+                    >
+                      {intentBusy ? 'Generating…' : '✨ Generate with AI'}
+                    </button>
+                  </div>
+                  <textarea
+                    value={intentText}
+                    onChange={(e) => setIntentText(e.target.value)}
+                    placeholder="(empty — click Generate with AI, then edit any field)"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-cyan-100 text-[11px] h-40 resize-y font-mono"
+                  />
+                  <div className="flex justify-end">
+                    <button onClick={saveSceneIntent} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium">Save Intent</button>
+                  </div>
+                </div>
+              )}
+
+              {((activeScene?.parameters?.video_json_mode ?? (currentProject?.settings as any)?.video_json_mode) === true) && (
+                <div className="bg-emerald-950/20 border border-emerald-800/40 rounded p-2.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-emerald-300">Video JSON Prompt (sent to LTX as structured JSON)</span>
+                    <button
+                      onClick={generateVideoJson}
+                      disabled={videoJsonBusy}
+                      className="px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-[11px] font-medium"
+                    >
+                      {videoJsonBusy ? 'Generating…' : '✨ Generate with AI'}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-gray-500">
+                    Structured LTX video prompt (setting, subject + timed action, camera, style, timing/negatives).
+                    When Video JSON mode is on this object is sent to LTX in place of the prose video prompt. Edit any
+                    field and Save. <span className="text-emerald-300/70">preserve_from_input_image</span> is auto-filled from the first frame if left empty.
+                  </p>
+                  <textarea
+                    value={videoJsonText}
+                    onChange={(e) => setVideoJsonText(e.target.value)}
+                    placeholder="(empty — click Generate with AI, then edit any field)"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-emerald-100 text-[11px] h-48 resize-y font-mono"
+                  />
+                  <div className="flex justify-end">
+                    <button onClick={saveVideoJson} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium">Save Video JSON</button>
+                  </div>
+                </div>
+              )}
+
+              {conceptCharacters.length > 3 && (
+                <div className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/40 rounded p-2">
+                  ⚠️ This project has {conceptCharacters.length} characters, but at most <span className="font-semibold">3 character references</span> are attached per scene. Auto-Gen/Enhance use the ones the story flow names (or your explicit selection); pick the three you want on the Image tab's reference selector to control which appear.
+                </div>
+              )}
+
+              {/* Validator warnings + dispatch mutations (read-only pre-flight) */}
+              {(() => {
+                if (!promptAudit) return null;
+                const warns: string[] = [
+                  ...((promptAudit.first_frame?.validator_warnings) || []),
+                  ...((promptAudit.last_frame?.validator_warnings) || []),
+                ];
+                const muts: string[] = [
+                  ...((promptAudit.first_frame?.dispatch_mutations) || []),
+                  ...((promptAudit.last_frame?.dispatch_mutations) || []),
+                  ...((promptAudit.video?.dispatch_mutations) || []),
+                ];
+                const uWarns = Array.from(new Set(warns));
+                const uMuts = Array.from(new Set(muts));
+                return (
+                  <div className="space-y-1.5">
+                    {uWarns.length > 0 ? (
+                      <div className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/40 rounded p-2 space-y-0.5">
+                        <div className="font-semibold">⚠️ Pre-flight checks ({uWarns.length})</div>
+                        {uWarns.map((w, i) => (<div key={i}>• {w}</div>))}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-emerald-400/80">✓ Pre-flight checks passed.</div>
+                    )}
+                    {uMuts.length > 0 && (
+                      <div className="text-[10px] text-gray-500">
+                        Dispatch changes: {uMuts.join('; ')}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Reference vision scans (clickable image + what the vision model saw) */}
               {allFrameRefAssets.length > 0 && (

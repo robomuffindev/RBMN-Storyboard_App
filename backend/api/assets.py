@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime
 from typing import Optional
+from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID
 
@@ -140,10 +141,11 @@ async def upload_assets(
 
             file_sha256 = sha.hexdigest() if total_bytes > 0 else None
 
+            _safe_name = Path(file.filename or "upload.bin").name
             if file_sha256:
-                target_path = content_addressed_path(type_path, file_sha256, file.filename)
+                target_path = content_addressed_path(type_path, file_sha256, _safe_name)
             else:
-                target_path = type_path / file.filename
+                target_path = type_path / _safe_name
 
             target_path.parent.mkdir(parents=True, exist_ok=True)
             if target_path.exists():

@@ -92,6 +92,7 @@ class EnhancePromptRequest(BaseModel):
 
     prompt: str
     context: Optional[str] = None
+    scene_id: Optional[UUID] = None  # enables Scene Intent injection (parity with auto-gen)
     provider: Optional[str] = None  # openai, anthropic, gemini — None = use default
     is_video: bool = False  # Use video-specific system prompt (LTX optimized)
     frame_type: Optional[str] = None  # 'first' or 'last' — selects FF vs LF system prompt
@@ -1057,6 +1058,46 @@ async def enhance_prompt(
                     _ctx = (_ctx + " | " + _lblock) if _ctx else _lblock
             except Exception as _le:
                 logger.debug(f"ref layout block failed: {_le}")
+        # Global project context — project-level, so the manual enhance gets the
+        # same MANDATORY environmental wrapper the auto-gen context injects (parity).
+        if not req.is_video:
+            try:
+                from backend.api.concept import resolve_global_context
+                _gc = resolve_global_context((project.settings or {}) if project else {})
+                if _gc:
+                    _gline = (f"⚠️ MANDATORY GLOBAL PROJECT CONTEXT (applies to every scene): {_gc}. "
+                              f"Lighting, sky, season, weather and time-of-day cues must reflect it.")
+                    _ctx = (_ctx + " | " + _gline) if _ctx else _gline
+            except Exception as _ge:
+                logger.debug(f"global context inject failed: {_ge}")
+        # Scene Intent (opt-in) — authoritative brief, parity with auto-gen.
+        try:
+            _si_scene = await session.get(Scene, req.scene_id) if req.scene_id else None
+            if _si_scene is not None:
+                _siblock = _scene_intent_block(
+                    _si_scene, project,
+                    ("video" if req.is_video else (req.frame_type or "first")),
+                )
+                if _siblock:
+                    _ctx = (_siblock + " | " + _ctx) if _ctx else _siblock
+        except Exception as _sie:
+            logger.debug(f"scene intent inject failed: {_sie}")
+
+        # Per-model prompt guidance (Settings) — parity with autogen, which
+        # has always passed it; the manual button silently dropped it.
+        _pg = ""
+        try:
+            _pg_dict = (
+                app_settings.video_prompt_guidance if req.is_video
+                else app_settings.image_prompt_guidance
+            ) or {}
+            _pg_entry = _pg_dict.get(gen_model_name or "", "") or _pg_dict.get(
+                (app_settings.video_model_type if req.is_video else app_settings.image_model_type) or "",
+                "",
+            )
+            _pg = _pg_entry if isinstance(_pg_entry, str) else ""
+        except Exception:
+            _pg = ""
 
         enhanced_prompt = await asyncio.to_thread(
             enhancer.enhance,
@@ -1069,6 +1110,7 @@ async def enhance_prompt(
             system_prompt_override,
             gen_model_name,
             req.frame_type,
+            _pg or None,
         )
 
         return {
@@ -1167,6 +1209,135 @@ async def build_json_prompt(
         )
 
 
+class SceneIntentRequest(BaseModel):
+    """Request to build/regenerate a structured Scene Intent for a scene."""
+    scene_id: UUID
+    frame_type: str = "first"
+    prompt: Optional[str] = None
+
+
+@router.post(
+    "/scene-intent",
+    summary="Build a structured Scene Intent for a scene (opt-in Scene Intent mode)",
+)
+async def build_scene_intent(
+    project_id: UUID,
+    req: SceneIntentRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Generate a structured scene-intent brief from the scene context via the LLM,
+    store it on scene.parameters.scene_intent, and return it. Mirrors build_json_prompt;
+    used by the Scene Intent editor's "Generate with AI" button."""
+    from backend.services.llm.prompt_enhancer import (
+        PromptEnhancer, SCENE_INTENT_SYSTEM_PROMPT, normalize_scene_intent,
+    )
+    from backend.api.settings import resolve_llm_config, _get_or_create_settings
+    try:
+        app_settings = await _get_or_create_settings(session)
+        scene = await _get_scene_or_404(req.scene_id, project_id, session)
+        project = await session.get(Project, project_id)
+        sp = scene.parameters or {}
+        prov, api_key, model = resolve_llm_config(app_settings)
+        if not api_key:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No LLM API key configured. Set one in Settings.")
+        # Context: reuse the rich auto-gen context so the intent reflects everything.
+        imodel = app_settings.single_image_generator or getattr(app_settings, "image_model_type", "flux2_klein_dev_9b")
+        try:
+            ctx = await _build_auto_enhance_context(project, scene, "", req.frame_type, imodel, None)
+        except Exception:
+            ctx = sp.get("flow_idea") or ""
+        prose = (req.prompt or scene.prompt or sp.get("flow_idea") or "").strip()
+        raw = await asyncio.to_thread(
+            PromptEnhancer.enhance,
+            prose, ctx, prov, api_key, model,
+            False, SCENE_INTENT_SYSTEM_PROMPT, "flux2_klein_dev_9b", None, None, None,
+        )
+        intent = normalize_scene_intent(raw)
+        intent["role"] = "last_frame" if req.frame_type == "last" else ("video" if req.frame_type == "video" else "first_frame")
+        newp = dict(sp)
+        newp["scene_intent"] = intent
+        scene.parameters = newp
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(scene, "parameters")
+        except Exception:
+            pass
+        await session.commit()
+        return {"scene_intent": intent}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"build_scene_intent failed for scene {req.scene_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to build scene intent: {e}")
+
+
+class VideoJsonRequest(BaseModel):
+    """Request to build/regenerate a structured LTX video-JSON prompt for a scene."""
+    scene_id: UUID
+    prompt: Optional[str] = None
+
+
+@router.post(
+    "/video-json",
+    summary="Build a structured LTX video-JSON prompt for a scene (opt-in Video JSON mode)",
+)
+async def build_video_json(
+    project_id: UUID,
+    req: VideoJsonRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Generate a structured LTX video-JSON prompt from the scene's video context via the
+    LLM, store it on scene.parameters.video_json_prompt, and return it. Mirrors
+    build_scene_intent; used by the Video JSON editor's "Generate with AI" button. At
+    dispatch the stored object is serialized and sent to LTX in place of prose."""
+    from backend.services.llm.prompt_enhancer import (
+        PromptEnhancer, VIDEO_JSON_SYSTEM_PROMPT, normalize_video_json,
+    )
+    from backend.api.settings import resolve_llm_config, _get_or_create_settings
+    try:
+        app_settings = await _get_or_create_settings(session)
+        scene = await _get_scene_or_404(req.scene_id, project_id, session)
+        project = await session.get(Project, project_id)
+        sp = scene.parameters or {}
+        prov, api_key, model = resolve_llm_config(app_settings)
+        if not api_key:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No LLM API key configured. Set one in Settings.")
+        vmodel = getattr(app_settings, "video_model_type", "ltx_2.3") or "ltx_2.3"
+        try:
+            ctx = await _build_video_enhance_context(project, scene, "", vmodel, None)
+        except Exception:
+            ctx = sp.get("flow_idea") or ""
+        # Tell the model the real scene duration so the duration field + action pacing are right.
+        try:
+            _dur = round((scene.end_time or 0) - (scene.start_time or 0), 1)
+            if _dur and _dur > 0:
+                ctx = f"Scene duration: {_dur} seconds (use this for the duration field and action-beat pacing).\n" + (ctx or "")
+        except Exception:
+            pass
+        prose = (req.prompt or sp.get("video_prompt") or scene.prompt or sp.get("flow_idea") or "").strip()
+        raw = await asyncio.to_thread(
+            PromptEnhancer.enhance,
+            prose, ctx, prov, api_key, model,
+            False, VIDEO_JSON_SYSTEM_PROMPT, "ltx_2.3", None, None, None,
+        )
+        vj = normalize_video_json(raw)
+        newp = dict(sp)
+        newp["video_json_prompt"] = vj
+        scene.parameters = newp
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(scene, "parameters")
+        except Exception:
+            pass
+        await session.commit()
+        return {"video_json": vj}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"build_video_json failed for scene {req.scene_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to build video JSON: {e}")
+
+
 @router.get(
     "/prompts-export",
     summary="Export all prompt data for a scene (troubleshooting JSON)",
@@ -1231,6 +1402,57 @@ async def export_scene_prompts(
             "caption": stored_caption,
         }
 
+    def _dispatch_mutations(stored: str, submitted: str) -> list:
+        """Detect which mechanical suffixes dispatch appended (stored prose ->
+        exact ComfyUI string) so users can see why they differ."""
+        stored = (stored or "").strip()
+        submitted = (submitted or "").strip()
+        if not submitted or submitted == stored:
+            return []
+        muts = []
+        low = submitted.lower()
+        if "sfw, fully clothed" in low or ", sfw," in low:
+            muts.append("SFW phrasing appended (safety)")
+        # image direction / colour are folded into the tail; flag any extra tail.
+        if stored and submitted.startswith(stored):
+            tail = submitted[len(stored):].strip(" ,")
+            if tail and "sfw" not in tail.lower():
+                muts.append(f"style/colour tail appended: \"{tail[:80]}\"")
+        elif stored and stored not in submitted:
+            muts.append("prompt body differs from stored (re-enhanced or edited at dispatch)")
+        return muts
+
+    import re as _vre
+    def _validate(prompt_text: str, refs: list, frame: str) -> list:
+        """Read-only pre-flight warnings (no GPU spent): reference mismatches,
+        palette contradictions, accidental text/signage, character truncation."""
+        warns = []
+        pt = (prompt_text or "")
+        low = pt.lower()
+        # 1. "Image N" referenced but fewer/zero references attached
+        nums = set(int(n) for n in _vre.findall(r"\bimage\s*(\d+)", low))
+        if nums and max(nums) > len(refs):
+            warns.append(f"prompt references 'Image {max(nums)}' but only {len(refs)} reference image(s) are attached")
+        if nums and not refs:
+            warns.append("prompt uses 'Image N' wording but NO reference images are attached")
+        # 2. Palette contradiction (strict monochrome palette but chromatic hue named)
+        co = sp.get("color_override") or proj_settings.get("global_color_override") or ""
+        cpal = (sp.get("custom_color_palette") or proj_settings.get("custom_color_palette") or "")
+        ptxt = f"{co} {cpal}".lower()
+        strict = any(k in ptxt for k in ("black and white", "black-and-white", "monochrome", "grayscale", "greyscale", "sepia"))
+        if strict:
+            hues = [h for h in ("red", "orange", "amber", "gold", "yellow", "green", "blue", "teal", "purple", "pink", "crimson", "scarlet") if _vre.search(rf"\b{h}\b", low)]
+            if hues:
+                warns.append(f"palette is strict {co or cpal} but the prompt names chromatic colour(s): {', '.join(hues[:4])}")
+        # 3. Accidental rendered-text request
+        if any(_vre.search(rf"\b{w}\b", low) for w in ("poster", "billboard", "signage", "caption", "subtitle", "title card", "label reading", "text reading")):
+            warns.append("prompt mentions text/signage — confirm rendered text is intended (these models render text poorly)")
+        # 4. Character truncation
+        chars = proj_settings.get("characters", [])
+        if len(chars) > 3 and frame == "first":
+            warns.append(f"project has {len(chars)} characters; at most 3 are referenced per scene")
+        return warns
+
     img_w = sp.get("image_resolution_width") or sp.get("width")
     img_h = sp.get("image_resolution_height") or sp.get("height")
     vid_w = sp.get("video_resolution_width") or sp.get("width")
@@ -1247,6 +1469,10 @@ async def export_scene_prompts(
             "chapter_id": str(scene.chapter_id) if getattr(scene, "chapter_id", None) else None,
         },
         "project_mode": getattr(project, "mode", None),
+        "scene_intent_mode": _scene_intent_effective(scene, project),
+        "scene_intent": sp.get("scene_intent"),
+        "video_json_mode": _video_json_effective(scene, project),
+        "video_json": sp.get("video_json_prompt"),
         "models": {
             "single_image_generator": app_settings.single_image_generator,
             "krea2_model_name": getattr(app_settings, "krea2_model_name", None),
@@ -1257,6 +1483,8 @@ async def export_scene_prompts(
         "first_frame": {
             "prompt": scene.prompt or "",
             "submitted_to_comfy": sp.get("submitted_image_prompt"),
+            "dispatch_mutations": _dispatch_mutations(scene.prompt or "", sp.get("submitted_image_prompt") or ""),
+            "validator_warnings": _validate(scene.prompt or "", await _refs("first"), "first"),
             "workflow_type": sp.get("workflow_type"),
             "resolution": {"width": img_w, "height": img_h},
             "seed": sp.get("seed"),
@@ -1267,6 +1495,8 @@ async def export_scene_prompts(
             "enabled": sp.get("video_mode") == "ff_lf" or bool(sp.get("last_frame_prompt")),
             "prompt": sp.get("last_frame_prompt", ""),
             "submitted_to_comfy": sp.get("submitted_last_frame_prompt"),
+            "dispatch_mutations": _dispatch_mutations(sp.get("last_frame_prompt") or "", sp.get("submitted_last_frame_prompt") or ""),
+            "validator_warnings": _validate(sp.get("last_frame_prompt") or "", await _refs("last"), "last"),
             "attach_first_frame_ref": sp.get("lf_exclude_first_frame_ref") is not True,
             "resolution": {"width": img_w, "height": img_h},
             "references": await _refs("last"),
@@ -1275,6 +1505,7 @@ async def export_scene_prompts(
         "video": {
             "prompt": sp.get("video_prompt", ""),
             "submitted_to_comfy": sp.get("submitted_video_prompt"),
+            "dispatch_mutations": _dispatch_mutations(sp.get("video_prompt") or "", sp.get("submitted_video_prompt") or ""),
             "video_mode": sp.get("video_mode", "single"),
             "model": getattr(app_settings, "video_model_type", None),
             "resolution": {"width": vid_w, "height": vid_h},
@@ -1711,11 +1942,72 @@ def _collect_ref_asset_ids(scene: Scene, frame: str) -> list[str]:
     return ids
 
 
+# Klein reference-image ceiling — total refs attached to one image job.
+# BFL's official FLUX.2 Klein reference limit is 4 images (multi-reference
+# guide) — slot 5 is undocumented and may condition weakly or not at all.
+# Decision 2026-07-01: follow the official limit. klein_5ref stays in the
+# workflow maps for legacy queued jobs only; nothing new produces 5 refs.
+MAX_TOTAL_REF_IMAGES = 4
+
+
+def _character_ref_paths(char: dict) -> list[str]:
+    """Primary + extra-angle reference rel_paths for a character (order-preserving, deduped)."""
+    out: list[str] = []
+    p = char.get("image_path") or ""
+    p = p.strip() if isinstance(p, str) else ""
+    if p:
+        out.append(p)
+    for e in (char.get("extra_images") or []):
+        e = e.strip() if isinstance(e, str) else ""
+        if e and e not in out:
+            out.append(e)
+    return out
+
+
+def _auto_balance_ref_paths(per_char_paths: list[list[str]], budget: int) -> list[str]:
+    """Spend the reference budget intelligently: each character's PRIMARY image first,
+    then extra angles round-robin. One main character with several angles fills its
+    slots for identity lock; several characters each get one ref before any extra angles."""
+    result: list[str] = []
+    if budget <= 0:
+        return result
+    for paths in per_char_paths:
+        if paths and len(result) < budget:
+            result.append(paths[0])
+    angle = 1
+    while len(result) < budget:
+        added = False
+        for paths in per_char_paths:
+            if angle < len(paths) and len(result) < budget:
+                result.append(paths[angle])
+                added = True
+        if not added:
+            break
+        angle += 1
+    return result[:budget]
+
+
+async def _lookup_asset_id_by_path(image_path: str, project_id, session) -> Optional[str]:
+    """Resolve a reference image rel_path to an Asset id (exact -> suffix -> basename)."""
+    image_path = (image_path or "").strip()
+    if not image_path:
+        return None
+    a = (await session.execute(select(Asset).where(Asset.project_id == project_id, Asset.rel_path == image_path))).scalars().first()
+    if not a:
+        a = (await session.execute(select(Asset).where(Asset.project_id == project_id, Asset.rel_path.like(f"%{image_path}")))).scalars().first()
+    if not a:
+        import os as _osb
+        _bn = _osb.basename(image_path)
+        if _bn and _bn != image_path:
+            a = (await session.execute(select(Asset).where(Asset.project_id == project_id, Asset.rel_path.like(f"%{_bn}")))).scalars().first()
+    return str(a.id) if a else None
+
+
 async def _resolve_character_asset_ids(
     characters: list[dict],
     project_id,
     session,
-    max_chars: int = 2,
+    max_chars: int = 3,  # keep in sync with MAX_SCENE_CHARACTER_REFS
 ) -> list[str]:
     """Resolve character image paths to Asset IDs for use as references.
 
@@ -1727,53 +2019,24 @@ async def _resolve_character_asset_ids(
     """
     if not characters:
         return []
-
+    # Multi-angle auto-balance: gather primary + extra angles per character, then
+    # spend the MAX_TOTAL_REF_IMAGES budget (primary of each first, then angles).
+    per_char = [pp for pp in (_character_ref_paths(c) for c in characters[:max_chars]) if pp]
+    balanced = _auto_balance_ref_paths(per_char, MAX_TOTAL_REF_IMAGES)
     asset_ids: list[str] = []
-    for char in characters[:max_chars]:
-        image_path = char.get("image_path", "")
-        if not image_path:
-            continue
-
-        # Look up the asset by rel_path.  Try exact match first, then
-        # fall back to suffix match (handles leading slashes / prefix variants)
-        # so character->Asset resolution is as forgiving as the frontend's
-        # collectRefAssetIds() which uses endsWith semantics.
-        stmt = select(Asset).where(
-            Asset.project_id == project_id,
-            Asset.rel_path == image_path,
-        )
-        result = await session.execute(stmt)
-        asset = result.scalars().first()
-        if not asset:
-            stmt = select(Asset).where(
-                Asset.project_id == project_id,
-                Asset.rel_path.like(f"%{image_path}"),  # type: ignore
-            )
-            result = await session.execute(stmt)
-            asset = result.scalars().first()
-        if not asset:
-            # Last resort: match on filename only
-            import os as _os_basename
-            _bn = _os_basename.basename(image_path)
-            if _bn and _bn != image_path:
-                stmt = select(Asset).where(
-                    Asset.project_id == project_id,
-                    Asset.rel_path.like(f"%{_bn}"),  # type: ignore
-                )
-                result = await session.execute(stmt)
-                asset = result.scalars().first()
-        if asset:
-            asset_ids.append(str(asset.id))
+    for path in balanced:
+        aid = await _lookup_asset_id_by_path(path, project_id, session)
+        if aid:
+            asset_ids.append(aid)
         else:
-            logger.warning(f"Character image asset not found for path: {image_path}")
-
+            logger.warning(f"Character image asset not found for path: {path}")
     return asset_ids
 
 
 def _select_scene_characters_from_flow(
     idea_text: str,
     characters: list,
-    cap: int = 2,
+    cap: int = 3,  # keep in sync with MAX_SCENE_CHARACTER_REFS
 ) -> list[int] | None:
     """Pick the (<= ``cap``) most important characters for a scene by which
     ones the flow LLM named in ``idea_text``.
@@ -1827,7 +2090,14 @@ def _select_scene_characters_from_flow(
     return out or None
 
 
-def _frame_present_char_indices(scene: Scene, characters: list, frame: str, cap: int = 2) -> list[int]:
+# Max distinct character reference images attached per scene/frame. The Klein
+# model officially supports 4 refs; 3 covers the vast majority of scenes while
+# keeping prompts focused. Applied consistently to context + ref resolution so
+# the described cast always matches the attached references.
+MAX_SCENE_CHARACTER_REFS = 3
+
+
+def _frame_present_char_indices(scene: Scene, characters: list, frame: str, cap: int = MAX_SCENE_CHARACTER_REFS) -> list[int]:
     """Which project-character indices are present in the given frame ('first' or
     'last').  Priority: the frame tab's explicit selection
     (image_refs_<frame>.characterIndices); else derive from the scene's story
@@ -1844,42 +2114,50 @@ def _frame_present_char_indices(scene: Scene, characters: list, frame: str, cap:
                 if isinstance(i, int) and 0 <= i < len(characters)]
         if idxs:
             return idxs[:cap]
+        # An EMPTY stored selection only counts as the user's explicit
+        # "character-free frame" when the UI's manual lock is set (the
+        # reference picker writes image_refs_*_manual on user edits).
+        # Auto-seeded empties (e.g. a run before flow/SRT existed) fall
+        # through so the auto-pick can try again with today's text.
+        if refs.get("characterIndices") is not None and (scene.parameters or {}).get(f"{key}_manual"):
+            return []
     flow = (scene.parameters or {}).get("flow_idea", "") or ""
     derived = _select_scene_characters_from_flow(flow, characters, cap=cap)
     return derived or []
 
 
-async def _resolve_lf_ref_asset_ids(scene: Scene, project: Project, session) -> list[str]:
-    """Last-frame reference asset IDs.
+async def _resolve_frame_ref_asset_ids(scene: Scene, project: Project, session, frame: str) -> list[str]:
+    """Reference asset IDs for a frame (first/last), MULTI-ANGLE aware + auto-balanced.
 
-    If the Last-Frame tab has an explicit selection (characters and/or extras),
-    resolve exactly that (mirrors the frontend).  Otherwise fall back to the
-    characters the STORY FLOW names — so an auto-gen last frame still attaches the
-    real character reference image(s) instead of letting the video model invent a
-    look.  Character images already exist as assets, so this is safe at queue time.
+    Cast = the frame tab's explicit characterIndices, else the characters the story
+    flow names. For each character we gather primary + extra-angle images and spend
+    the MAX_TOTAL_REF_IMAGES budget (one main character fills its slots with angles
+    for identity lock; several characters get one each first). Non-character extras
+    consume the budget first. Backward compatible: a character with no extra_images
+    yields exactly one ref, as before.
     """
     characters = (project.settings or {}).get("characters", []) if (project and project.settings) else []
-    refs = (scene.parameters or {}).get("image_refs_last") or {}
-    has_explicit = isinstance(refs, dict) and (refs.get("characterIndices") or refs.get("extras"))
-    if has_explicit:
-        return await _resolve_scene_ref_asset_ids(scene, project, session, "last")
-    # Flow-derived fallback (no explicit LF selection)
-    idxs = _frame_present_char_indices(scene, characters, "last")
-    if not idxs:
-        return []
-    from sqlmodel import select as _s
-    ids: list[str] = []
-    for ix in idxs:
-        img_path = (characters[ix].get("image_path", "") or "").strip()
-        if not img_path:
-            continue
-        a = (await session.execute(_s(Asset).where(Asset.project_id == project.id, Asset.rel_path == img_path))).scalars().first()
-        if not a:
-            a = (await session.execute(_s(Asset).where(Asset.project_id == project.id, Asset.rel_path.like(f"%{img_path}")))).scalars().first()
-        if a:
-            ids.append(str(a.id))
-    return ids
+    extra_ids = _collect_ref_asset_ids(scene, frame)
+    char_budget = max(0, MAX_TOTAL_REF_IMAGES - len(extra_ids))
+    idxs = _frame_present_char_indices(scene, characters, frame)
+    char_ids: list[str] = []
+    if idxs and char_budget > 0:
+        per_char = [pp for pp in (_character_ref_paths(characters[i]) for i in idxs if 0 <= i < len(characters)) if pp]
+        for path in _auto_balance_ref_paths(per_char, char_budget):
+            aid = await _lookup_asset_id_by_path(path, project.id, session)
+            if aid and aid not in char_ids:
+                char_ids.append(aid)
+    return (char_ids + [e for e in extra_ids if e not in char_ids])[:MAX_TOTAL_REF_IMAGES]
 
+
+async def _resolve_lf_ref_asset_ids(scene: Scene, project: Project, session) -> list[str]:
+    """Last-frame references (multi-angle auto-balanced)."""
+    return await _resolve_frame_ref_asset_ids(scene, project, session, "last")
+
+
+async def _resolve_ff_ref_asset_ids(scene: Scene, project: Project, session) -> list[str]:
+    """First-frame references (multi-angle auto-balanced) — symmetric with LF."""
+    return await _resolve_frame_ref_asset_ids(scene, project, session, "first")
 
 async def _ensure_video_flow(
     project: Project,
@@ -2213,6 +2491,110 @@ async def _ensure_video_flow(
     return True
 
 
+def _resolve_canvas(scene: Scene, project: Project, is_video: bool = False) -> tuple[int, int]:
+    """Resolve the target render canvas (w, h): scene params → project settings → 1536x864."""
+    sp = (scene.parameters or {})
+    ps = (project.settings or {}) if project else {}
+    if is_video:
+        w = sp.get("video_resolution_width") or sp.get("width") or ps.get("video_resolution_width") or ps.get("resolution_width") or 1536
+        h = sp.get("video_resolution_height") or sp.get("height") or ps.get("video_resolution_height") or ps.get("resolution_height") or 864
+    else:
+        w = sp.get("image_resolution_width") or sp.get("width") or ps.get("image_resolution_width") or ps.get("resolution_width") or 1536
+        h = sp.get("image_resolution_height") or sp.get("height") or ps.get("image_resolution_height") or ps.get("resolution_height") or 864
+    try:
+        return int(w or 1536), int(h or 864)
+    except (TypeError, ValueError):
+        return 1536, 864
+
+
+def _canvas_hint(w: int, h: int) -> str:
+    """One-line target-canvas directive so the LLM composes for the real frame shape."""
+    import math
+    if not w or not h:
+        return ""
+    g = math.gcd(int(w), int(h)) or 1
+    ar = f"{int(w) // g}:{int(h) // g}"
+    orient = "landscape" if w > h else "portrait" if h > w else "square"
+    return (
+        f"TARGET CANVAS: {int(w)}x{int(h)} px ({ar}, {orient}). Compose for THIS frame shape — "
+        f"choose subject scale, headroom and composition that suit a {orient} {ar} frame; do NOT "
+        f"describe an ultra-wide panorama for a near-square canvas, or a tall composition for a wide one."
+    )
+
+
+def _scene_intent_effective(scene, project) -> bool:
+    sp = (scene.parameters or {})
+    sm = sp.get("scene_intent_mode")
+    if sm is not None:
+        return bool(sm)
+    return bool((project.settings or {}).get("scene_intent_mode", False)) if project else False
+
+
+def _video_json_effective(scene, project) -> bool:
+    sp = (scene.parameters or {})
+    sm = sp.get("video_json_mode")
+    if sm is not None:
+        return bool(sm)
+    return bool((project.settings or {}).get("video_json_mode", False)) if project else False
+
+
+def _scene_intent_block(scene, project, frame_type: str = "first") -> str:
+    """Authoritative SCENE INTENT brief for the enhancer when Scene Intent mode is on
+    and a stored intent exists. The prompt is compiled to realize this exactly."""
+    if not _scene_intent_effective(scene, project):
+        return ""
+    intent = (scene.parameters or {}).get("scene_intent")
+    if not intent:
+        return ""
+    try:
+        from backend.services.llm.prompt_enhancer import normalize_scene_intent, scene_intent_to_brief
+        brief = scene_intent_to_brief(normalize_scene_intent(intent))
+    except Exception:
+        return ""
+    if not brief:
+        return ""
+    # Role gating: an intent authored for the FIRST frame must not be declared
+    # authoritative for a last-frame or video prompt (its "opening moment"
+    # framing fights LF distinctness / motion).  Same role => authoritative;
+    # cross-role => continuity-reference phrasing.
+    _want = {"first": "first_frame", "last": "last_frame", "video": "video"}.get(frame_type, "first_frame")
+    try:
+        _have = (intent.get("role") if isinstance(intent, dict) else None) or "first_frame"
+    except Exception:
+        _have = "first_frame"
+    if _have != _want:
+        return (
+            f"SCENE INTENT (structured plan authored for the {_have.replace('_', ' ')} of this shot — "
+            f"use it for continuity of setting, cast, palette and camera, but compose THIS "
+            f"{_want.replace('_', ' ')} prompt for its own role): " + brief
+        )
+    return (
+        "SCENE INTENT (AUTHORITATIVE structured brief — compose the prompt to realize this "
+        "EXACTLY; it is the plan for this shot, and outranks looser guidance below): " + brief
+    )
+
+
+def _palette_is_strict(text: str) -> bool:
+    """Monochrome/graphic palettes constrain EVERY element incl. skin; a named colour
+    grade governs mood but leaves skin/material tones believable."""
+    t = (text or "").lower()
+    return any(k in t for k in (
+        "black and white", "black-and-white", "monochrome", "monochromatic",
+        "grayscale", "greyscale", "duotone", "duo-tone", "sepia", "single color", "single colour",
+    ))
+
+
+def _first_pass_gen_key(app_settings) -> str:
+    """System-prompt registry key for the first-pass T2I generator.
+
+    0-ref renders NEVER run on Klein (dispatch always redirects to Z-Image /
+    Krea 2) — so their prompts must be written under the rules of the model
+    that will actually render them.  Mirrors the manual /enhance-prompt
+    routing."""
+    _sig = (getattr(app_settings, "single_image_generator", None) or "z_image_turbo")
+    return "krea2" if _sig == "krea2_turbo" else "z_image"
+
+
 async def _build_auto_enhance_context(
     project: Project,
     scene: Scene,
@@ -2236,8 +2618,29 @@ async def _build_auto_enhance_context(
     # Model info
     parts.append(f"Image generation model: {model_type}. Optimize the prompt for this specific model's strengths, requirements, and quirks.")
 
+    # Scene Intent (opt-in) — authoritative structured brief, injected high.
+    _si = _scene_intent_block(scene, project, frame_type)
+    if _si:
+        parts.append(_si)
+
     # Scene timing
     parts.append(f"Scene timing: {scene.start_time}s to {scene.end_time}s. Frame: {frame_type}.")
+
+    # Explicit priority stack — resolves the competing HIGHEST/MANDATORY/PRIMARY labels.
+    parts.append(
+        "PRIORITY ORDER when guidance conflicts (higher wins): (1) safety + model limits; "
+        "(2) THIS image's role (first frame / last frame / standalone still); (3) hard constraints "
+        f"(colour palette, target canvas, attached reference images, the {MAX_SCENE_CHARACTER_REFS}-character reference limit); "
+        "(4) the USER DIRECTION above; (5) lyrics/narration content; (6) story-flow composition + camera; "
+        "(7) project style + global context. When two constraints cannot BOTH be satisfied, "
+        "DROP the lower-priority one entirely — never merge contradictions into one sentence."
+    )
+
+    # Target canvas / aspect ratio.
+    _cw, _ch = _resolve_canvas(scene, project, is_video=False)
+    _ch_hint = _canvas_hint(_cw, _ch)
+    if _ch_hint:
+        parts.append(_ch_hint)
 
     # VIDEO FIRST FRAME (LTX 2.3 I2V best practice): for animated scenes the first
     # frame is the image the video animates FROM, so it must show the OPENING moment
@@ -2250,7 +2653,23 @@ async def _build_auto_enhance_context(
             "subject(s), setting and lighting as the shot opens, BEFORE the action plays out. Do NOT pack in "
             "every action, character entrance, or element the scene reveals over time (the video prompt handles "
             "those); an overloaded first frame produces busier, worse video. Frame the subject as the shot should "
-            "open (the model won't reframe) and keep lighting clean and consistent (it propagates through the clip)."
+            "open (the model won't reframe) and keep lighting clean and consistent (it propagates through the clip). "
+            "IF the lyrics/flow describe heavy motion or a dramatic event (running, an explosion, a fall), do NOT "
+            "freeze that action into this still — depict the CHARGED MOMENT JUST BEFORE it (the held breath, the "
+            "first step, the calm before) so the video has somewhere to go. Keep it ONE coherent frame."
+        )
+
+    # KEYFRAME PAIR (FF/LF video mode): this image is keyframe A of an A→B
+    # interpolated shot — compose it so keyframe B is reachable.
+    if frame_type == "first" and scene.parameters.get("video_mode") == "ff_lf":
+        _lfp = (scene.parameters.get("last_frame_prompt") or "").strip()
+        parts.append(
+            "KEYFRAME PAIR (FF/LF video): this image is KEYFRAME A of a two-keyframe shot — the video will "
+            "move continuously from THIS image to a separate last-frame image of the SAME shot. Keep the "
+            "location, lighting, palette, wardrobe and art style stable enough that a later moment of this "
+            "same shot can be rendered consistently; put the changeable energy in the subject's pose and "
+            "action, not in the setting."
+            + (f' The shot will END on: "{_lfp[:300]}" — compose an opening that can reach that end state.' if _lfp else "")
         )
 
     # Concept & style
@@ -2260,6 +2679,15 @@ async def _build_auto_enhance_context(
         parts.append(f"Video concept: {concept_text}")
     if style_text:
         parts.append(f"Visual style: {style_text}")
+
+    # Narration mode — make the script the visual driver regardless of first-pass model.
+    if getattr(project, "mode", "") in ("narration_images", "narration_video"):
+        parts.append(
+            "NARRATION MODE: the spoken script (the lyrics/narration text below) is the PRIMARY content. "
+            "Compose visuals that make the narration's meaning clear to a viewer WITHOUT any on-screen text "
+            "or captions — illustrate the specific people, objects, actions and settings the script names; "
+            "avoid generic mood-only shots unless the narration itself is abstract."
+        )
 
     # Global project context — explicit user-set environmental wrapper
     # (time of day, season, weather, custom).  Only fires when the user
@@ -2298,23 +2726,54 @@ async def _build_auto_enhance_context(
         if color_override == "custom":
             custom_palette = scene.parameters.get("custom_color_palette", "") or project.settings.get("custom_color_palette", "")
             if custom_palette:
-                parts.append(
-                    f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {custom_palette}. "
-                    f"You MUST strictly follow this color palette. Do NOT introduce any colors outside this specification. "
-                    f"Every visual element — lighting, materials, clothing, environment — must conform to this palette."
-                )
+                if _palette_is_strict(custom_palette):
+                    parts.append(
+                        f"⚠️ COLOUR PALETTE OVERRIDE (HARD CONSTRAINT — STRICT): {custom_palette}. "
+                        f"Graphic/monochrome palette: EVERY element — lighting, materials, clothing, environment AND "
+                        f"skin tones — must use ONLY these tones. Introduce no other hue."
+                    )
+                else:
+                    parts.append(
+                        f"⚠️ COLOUR GRADE (HARD CONSTRAINT): {custom_palette}. Treat as the colour GRADE — governs "
+                        f"lighting, mood, wardrobe and environment colour. Keep skin and natural material tones "
+                        f"BELIEVABLE within the grade (no unnatural skin); add no colours that fight it."
+                    )
         elif color_override in COLOR_OVERRIDE_DESCRIPTIONS:
-            parts.append(
-                f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {COLOR_OVERRIDE_DESCRIPTIONS[color_override]} "
-                f"This is NON-NEGOTIABLE — every visual element described must conform to this color restriction."
-            )
+            _cdesc = COLOR_OVERRIDE_DESCRIPTIONS[color_override]
+            if _palette_is_strict(color_override) or _palette_is_strict(_cdesc):
+                parts.append(
+                    f"⚠️ COLOUR PALETTE OVERRIDE (HARD CONSTRAINT — STRICT): {_cdesc} "
+                    f"Every visual element, INCLUDING skin tones, must conform — introduce no other hue."
+                )
+            else:
+                parts.append(
+                    f"⚠️ COLOUR GRADE (HARD CONSTRAINT): {_cdesc} It governs lighting, mood, wardrobe and "
+                    f"environment colour; keep skin and natural material tones believable within the grade."
+                )
 
     # Characters — reference each by IMAGE POSITION, never by name (the model
     # cannot use names; a name is a wasted, confusing token).
     characters = project.settings.get("characters", [])
     if characters and frame_type != "last":
-        chars_with_images = [c for c in characters[:2] if c.get("image_path")]
-        chars_without_images = [c for c in characters[:2] if not c.get("image_path")]
+        _ff_idxs = _frame_present_char_indices(scene, characters, "first")
+        if _ff_idxs:
+            _ff_sel = [characters[i] for i in _ff_idxs]
+            chars_with_images = [c for c in _ff_sel if c.get("image_path")]
+            chars_without_images = [c for c in _ff_sel if not c.get("image_path")]
+        else:
+            # No explicit or flow-derived selection: the ref resolver
+            # (_resolve_frame_ref_asset_ids) attaches NOTHING in this case,
+            # so never claim reference images are attached (cast == refs).
+            # Describe the characters textually instead.
+            _ff_sel = characters[:MAX_SCENE_CHARACTER_REFS]
+            chars_with_images = []
+            chars_without_images = list(_ff_sel)
+        if len(characters) > len(_ff_sel) and _ff_sel:
+            logger.info(f"scene {scene.order_index}: {len(characters)} project characters, {len(_ff_sel)} referenced this scene (cap {MAX_SCENE_CHARACTER_REFS})")
+            parts.append(
+                f"NOTE: this project has {len(characters)} characters; only the {len(_ff_sel)} in THIS scene are "
+                f"referenced here. Build the scene around them; do not invent the others."
+            )
 
         if chars_with_images:
             ref_labels = ["first", "second", "third", "fourth"]
@@ -2351,6 +2810,20 @@ async def _build_auto_enhance_context(
                 "FIRST FRAME PROMPT (the scene STARTS from this image — the last frame must be a "
                 "DISTINCT LATER MOMENT of this SAME shot: same place, lighting, palette and style, "
                 f'with the action advanced): "{ff_prompt}"'
+            )
+        if scene.parameters.get("video_mode") == "ff_lf":
+            try:
+                _kf_dur = max(0.0, float(scene.end_time or 0) - float(scene.start_time or 0))
+            except Exception:
+                _kf_dur = 0.0
+            parts.append(
+                "KEYFRAME PAIR (FF/LF video): this image is KEYFRAME B — the EXACT FINAL FRAME of the clip. "
+                "The video interpolates continuously from the first frame to THIS image"
+                + (f" over ~{_kf_dur:.0f} seconds" if _kf_dur else "")
+                + ", so it must be REACHABLE from the first frame by continuous motion: same location and "
+                "lighting, no wardrobe or prop teleports, no impossible jumps. Advance the action DECISIVELY "
+                "(clearly different pose, position, expression or camera distance — near-identical endpoints "
+                "produce a static, boring clip) while staying the same continuous shot."
             )
         if characters:
             lf_idxs = _frame_present_char_indices(scene, characters, "last")
@@ -2509,12 +2982,89 @@ async def _build_video_enhance_context(
         f"Enhance for smooth cinematic video motion and transitions."
     )
 
+    # KEYFRAME INTERPOLATION (FF/LF mode): the render receives BOTH keyframe
+    # images — the clip starts EXACTLY on the first and ends EXACTLY on the
+    # last.  Give the LLM both frame prompts so it writes the motion BRIDGE
+    # between two fixed endpoints instead of a free-form scene description.
+    if video_mode == "ff_lf":
+        _kf_a = (scene.prompt or scene.parameters.get("submitted_image_prompt") or "").strip()
+        _kf_b = (scene.parameters.get("last_frame_prompt") or scene.parameters.get("submitted_last_frame_prompt") or "").strip()
+        _kf_block = (
+            "KEYFRAME INTERPOLATION (CRITICAL — this is a First-Frame→Last-Frame render): the video STARTS "
+            "EXACTLY on the first keyframe image and ENDS EXACTLY on the last keyframe image; the model "
+            "interpolates between them. Write ONE CONTINUOUS SHOT (a single paragraph — never multiple "
+            "segments/line breaks) that plausibly carries frame A into frame B within the clip duration: "
+            "describe the subject motion AND the camera move that bridge the two compositions. Do NOT "
+            "introduce subjects, props or settings that appear in NEITHER keyframe; do NOT describe a cut, "
+            "dissolve or location change (both frames are moments of the same shot). If the keyframes differ "
+            "in framing, the camera move must account for it (e.g. a push-in from wide to close-up)."
+        )
+        if _kf_a:
+            _kf_block += f' FIRST KEYFRAME shows: "{_kf_a[:400]}".'
+        if _kf_b:
+            _kf_block += f' LAST KEYFRAME shows: "{_kf_b[:400]}".'
+        parts.append(_kf_block)
+
+    # Clip pacing — LTX official guidance: ONE main action per 2-3 seconds.
+    try:
+        _clip_dur = max(0.0, float(scene.end_time or 0) - float(scene.start_time or 0))
+        if _clip_dur > 0:
+            _beats = max(1, min(4, int(round(_clip_dur / 2.5))))
+            parts.append(
+                f"CLIP LENGTH {_clip_dur:.1f}s: plan roughly {_beats} main action beat(s) "
+                f"(one per 2-3 seconds), written chronologically in present tense. Do not "
+                f"overload a short clip or stretch a single action across a long one."
+            )
+    except Exception:
+        pass
+
+    # Explicit priority stack — parity with the image context builder.
+    parts.append(
+        "PRIORITY ORDER when guidance conflicts (higher wins): (1) safety + model limits; "
+        "(2) motion continuity from the source/first frame; (3) hard constraints "
+        "(colour palette, target canvas, camera directive); (4) the USER DIRECTION above; "
+        "(5) lyrics/narration content; (6) story-flow composition + camera; (7) project style "
+        "+ global context. When two constraints cannot BOTH be satisfied, DROP the "
+        "lower-priority one entirely — never merge contradictions into one sentence."
+    )
+
+    # Scene Intent (video role) — parity with the image context builder.
+    _vi_block = _scene_intent_block(scene, project, "video")
+    if _vi_block:
+        parts.append(_vi_block)
+
+    # Target canvas / aspect ratio (video resolution).
+    _vcw, _vch = _resolve_canvas(scene, project, is_video=True)
+    _vc_hint = _canvas_hint(_vcw, _vch)
+    if _vc_hint:
+        parts.append(_vc_hint)
+
     concept_text = project.settings.get("concept_text", "")
     style_text = project.settings.get("style_text", "")
     if concept_text:
         parts.append(f"Video concept: {concept_text}")
     if style_text:
         parts.append(f"Visual style: {style_text}")
+
+    # Narration mode — keep the video motion illustrating the spoken script.
+    if getattr(project, "mode", "") in ("narration_images", "narration_video"):
+        parts.append(
+            "NARRATION MODE: the spoken script (the narration text below) is the PRIMARY content. The motion "
+            "and camera should illustrate what the narration describes so it reads clearly without on-screen text."
+        )
+
+    # Global project context — parity with the image builder (time of day,
+    # season, weather, custom wrapper; only when explicitly enabled).
+    try:
+        from backend.api.concept import resolve_global_context as _vgc
+        _vgctx = _vgc(project.settings or {})
+        if _vgctx:
+            parts.append(
+                f"⚠️ MANDATORY GLOBAL PROJECT CONTEXT (applies to EVERY scene "
+                f"unless explicitly overridden by per-scene direction): {_vgctx}."
+            )
+    except Exception:
+        pass
 
     # Image direction
     image_direction = project.settings.get("image_direction", "")
@@ -2533,24 +3083,44 @@ async def _build_video_enhance_context(
         if color_override == "custom":
             custom_palette = scene.parameters.get("custom_color_palette", "") or project.settings.get("custom_color_palette", "")
             if custom_palette:
-                parts.append(
-                    f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {custom_palette}. "
-                    f"You MUST strictly follow this color palette. Do NOT introduce any colors outside this specification. "
-                    f"Every visual element — lighting, materials, clothing, environment — must conform to this palette."
-                )
+                if _palette_is_strict(custom_palette):
+                    parts.append(
+                        f"⚠️ COLOUR PALETTE OVERRIDE (HARD CONSTRAINT — STRICT): {custom_palette}. "
+                        f"Graphic/monochrome palette: EVERY element — lighting, materials, clothing, environment AND "
+                        f"skin tones — must use ONLY these tones throughout the whole clip. Introduce no other hue."
+                    )
+                else:
+                    parts.append(
+                        f"⚠️ COLOUR GRADE (HARD CONSTRAINT): {custom_palette}. Treat as the colour GRADE — it governs "
+                        f"lighting, mood, wardrobe and environment colour for the whole clip. Keep skin and natural "
+                        f"material tones BELIEVABLE within the grade; add no colours that fight it."
+                    )
         elif color_override in COLOR_OVERRIDE_DESCRIPTIONS:
-            parts.append(
-                f"⚠️ MANDATORY COLOR PALETTE OVERRIDE (HIGHEST PRIORITY): {COLOR_OVERRIDE_DESCRIPTIONS[color_override]} "
-                f"This is NON-NEGOTIABLE — every visual element described must conform to this color restriction."
-            )
+            _vcdesc = COLOR_OVERRIDE_DESCRIPTIONS[color_override]
+            if _palette_is_strict(color_override) or _palette_is_strict(_vcdesc):
+                parts.append(
+                    f"⚠️ COLOUR PALETTE OVERRIDE (HARD CONSTRAINT — STRICT): {_vcdesc} "
+                    f"Every visual element, INCLUDING skin tones, must conform for the whole clip — introduce no other hue."
+                )
+            else:
+                parts.append(
+                    f"⚠️ COLOUR GRADE (HARD CONSTRAINT): {_vcdesc} It governs lighting, mood, wardrobe and "
+                    f"environment colour; keep skin and natural material tones believable within the grade."
+                )
 
+    # Cast — appearance only, NEVER names (LTX can no more use a name than
+    # Klein can); capped to the scene's selection / reference limit for focus.
     characters = project.settings.get("characters", [])
     if characters:
+        _vc_idxs = _frame_present_char_indices(scene, characters, "first")
+        _vc_sel = ([characters[i] for i in _vc_idxs] if _vc_idxs else characters)[:MAX_SCENE_CHARACTER_REFS]
         char_block = ". ".join(
-            f'Character {i + 1}: "{c.get("name", "Unnamed")}" — {c.get("description", "no description")}'
-            for i, c in enumerate(characters)
+            f"Subject {i + 1}: {c.get('description', 'no description')}"
+            for i, c in enumerate(_vc_sel)
         )
-        parts.append(f"Characters: {char_block}")
+        parts.append(
+            f"CAST (describe each by APPEARANCE only — NEVER write these or any other names): {char_block}"
+        )
 
     # Scene lyrics — PRIMARY creative driver for video content
     if lyrics_text:
@@ -2641,6 +3211,29 @@ async def _build_video_enhance_context(
             "Emphasize close-up or medium shots showing the character's face and mouth clearly. "
             "Describe the character singing, speaking, or vocalizing the lyrics. "
             "Avoid obscuring the face with objects, heavy shadows, or extreme angles."
+        )
+
+    # Camera is mandatory — an unspecified camera drifts randomly (LTX).
+    parts.append(
+        "CAMERA IS MANDATORY: the prompt MUST contain an explicit camera clause. If no camera "
+        "directive was given above, choose one deliberate simple move or a locked shot and SAY it "
+        "(e.g. 'static camera, locked-off frame' or 'slow dolly in') — never leave the camera unspecified."
+    )
+
+    # AV-native: the model generates this clip's audio from the prompt.
+    try:
+        _pm_audio = bool((project.settings or {}).get("enable_model_audio")) and bool(
+            (scene.parameters or {}).get("use_model_audio")
+        )
+    except Exception:
+        _pm_audio = False
+    if _pm_audio:
+        parts.append(
+            "MODEL AUDIO IS ON (AV-native): the model also generates this clip's AUDIO from the prompt. "
+            "End the prompt with ONE audio sentence — ambient bed, key sound effects tied to the visible "
+            "action, and room tone; describe any voice by volume and tone and put spoken lines in double "
+            "quotes (split long lines into short phrases with acting directions between). Never ask for "
+            "background music — the project soundtrack is mixed separately."
         )
 
     _vb = await _autogen_vision_block(scene, project, "first")
@@ -2808,6 +3401,7 @@ async def auto_generate(
         app_settings = settings_result.scalars().first()
 
         image_model = (app_settings.image_model_type if app_settings else None) or "flux2_klein_dev_9b"
+        first_pass_gm = _first_pass_gen_key(app_settings)
         video_model = (app_settings.video_model_type if app_settings else None) or "ltx_2.3"
 
         # Get project resolution
@@ -2892,9 +3486,14 @@ async def auto_generate(
             await _ensure_video_flow(
                 project, scenes, session, llm_provider, llm_api_key, llm_model
             )
-            # Re-read scenes to get updated flow ideas
-            scenes_result = await session.execute(scenes_stmt)
-            scenes = list(scenes_result.scalars().all())
+            # Re-read scenes to get updated flow ideas (chapter-aware:
+            # scenes_stmt only exists in the non-chapter branch)
+            if req.chapter_id is not None:
+                from backend.services.chapters import scenes_in_chapter_tree
+                scenes = await scenes_in_chapter_tree(session, req.chapter_id)
+            else:
+                scenes_result = await session.execute(scenes_stmt)
+                scenes = list(scenes_result.scalars().all())
 
         created_jobs: list[Job] = []
         enhanced_count = 0
@@ -2912,34 +3511,30 @@ async def auto_generate(
             needs_ff = not has_ff if only_missing else True
             if needs_ff:
                 prompt = scene.prompt or f"Scene {scene.order_index + 1}"
-                # Include character image refs + scene extras
-                characters_list = project.settings.get("characters", [])
-                char_aids = []
-                if characters_list:
-                    for c in characters_list[:2]:
-                        cp = c.get("image_path", "")
-                        if cp:
-                            aid_stmt = select(Asset).where(Asset.project_id == project_id, Asset.rel_path == cp)
-                            aid_r = await session.execute(aid_stmt)
-                            aid_a = aid_r.scalars().first()
-                            if aid_a:
-                                char_aids.append(str(aid_a.id))
-                extra_ids = _collect_ref_asset_ids(scene, "first")
-                ref_ids = char_aids + extra_ids
+                # Scene-aware first-frame references (selected chars + extras, else
+                # the characters the story flow names) — symmetric with the LF path
+                # and aligned with what the enhance context describes.
+                ref_ids = await _resolve_ff_ref_asset_ids(scene, project, session)
                 wf_type = _auto_workflow_type(len(ref_ids))
 
                 if is_enhanced and enhancer and llm_api_key:
                     try:
+                        # 0-ref renders never run on Klein (dispatch redirects
+                        # to the first-pass generator) — route the prompt to
+                        # that model's rules, like manual enhance does.  The
+                        # narration override is skipped for first-pass models
+                        # (the context still carries NARRATION MODE).
+                        _gm = image_model if ref_ids else first_pass_gm
                         context = await _build_auto_enhance_context(
-                            project, scene, scene_lyrics, "first", image_model, prev_scene
+                            project, scene, scene_lyrics, "first", _gm, prev_scene
                         )
-                        if _should_enhance(skip_existing_prompts, prompt):
+                        if _should_enhance(req.skip_existing_prompts, prompt):
                             prompt = await asyncio.to_thread(
                                 enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                False, image_sys_override, image_model, "first",
+                                False, (image_sys_override if ref_ids else None), _gm, "first",
                                 image_prompt_guidance_text or None,
                             )
-                        enhanced_count += 1
+                            enhanced_count += 1
                     except Exception as e:
                         logger.warning(f"Auto-enhance failed for scene {scene.order_index}: {e}")
 
@@ -2986,6 +3581,9 @@ async def auto_generate(
                     # lf_exclude_first_frame_ref. Resolved at dispatch (the FF may
                     # not be rendered yet at queue time).
                     _lf_attach_ff = scene.parameters.get("lf_exclude_first_frame_ref") is not True
+                    if _lf_attach_ff and len(ref_ids_lf) >= MAX_TOTAL_REF_IMAGES:
+                        # Reserve slot 1 for the FF continuity ref (4-ref limit)
+                        ref_ids_lf = ref_ids_lf[:MAX_TOTAL_REF_IMAGES - 1]
                     wf_type_lf = _auto_workflow_type(len(ref_ids_lf) + (1 if _lf_attach_ff else 0))
 
                     if is_enhanced and enhancer and llm_api_key:
@@ -2993,13 +3591,13 @@ async def auto_generate(
                             context = await _build_auto_enhance_context(
                                 project, scene, scene_lyrics, "last", image_model, prev_scene
                             )
-                            if _should_enhance(skip_existing_prompts, lf_prompt):
+                            if _should_enhance(req.skip_existing_prompts, lf_prompt):
                                 lf_prompt = await asyncio.to_thread(
                                     enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
                                     False, image_sys_override, image_model, "last",
                                     image_prompt_guidance_text or None,
                                 )
-                            enhanced_count += 1
+                                enhanced_count += 1
                         except Exception as e:
                             logger.warning(f"Auto-enhance LF failed for scene {scene.order_index}: {e}")
 
@@ -3040,14 +3638,14 @@ async def auto_generate(
                         vid_context = await _build_video_enhance_context(
                             project, scene, scene_lyrics, video_model, prev_scene
                         )
-                        if _should_enhance(skip_existing_prompts, video_prompt):
+                        if _should_enhance(req.skip_existing_prompts, video_prompt):
                             video_prompt = await asyncio.to_thread(
                                 enhancer.enhance, video_prompt, vid_context, llm_provider, llm_api_key, llm_model,
                                 True, video_sys_override, video_model,
                                 None,  # frame_type (not applicable for video)
                                 video_prompt_guidance_text or None,
                             )
-                        enhanced_count += 1
+                            enhanced_count += 1
                     except Exception as e:
                         logger.warning(f"Auto-enhance video failed for scene {scene.order_index}: {e}")
 
@@ -3057,7 +3655,7 @@ async def auto_generate(
                 scene.parameters = scene_params
 
                 duration = await _scene_duration_for_dispatch(
-                    session_factory, scene, label="auto_gen")
+                    None, scene, label="auto_gen")  # first arg is ignored (no session_factory in this scope)
                 vid_wf = "ltx_fflf" if uses_ff_lf else "ltx_i2v"
 
                 job = Job(
@@ -3116,7 +3714,7 @@ async def auto_generate(
 
 class SeqAutoGenRequest(BaseModel):
     """Request model for sequential auto-generation."""
-    mode: str  # 'all_video_fflf', 'all_video_v2v', 'all_video_single', 'all_images', 'missing_videos_single', 'missing_images_independent'
+    mode: str  # 'all_video_fflf', 'all_video_fflf_keyframes', 'all_video_v2v', 'all_video_single', 'all_images', 'missing_videos_single', 'missing_images_independent'
     override_full_set: bool = False  # If True, regenerate ALL scenes (ignore existing images/videos)
     vocals_only_audio: bool = False  # If True, send only vocal stems to video generator (better lip-sync)
     skip_audio_mux: bool = False  # If True, keeps LTX model-generated audio (better for lip-sync testing)
@@ -3356,6 +3954,9 @@ async def start_sequential_auto_gen(
     Modes:
     - all_video_fflf: Generate videos using previous video's last frame as
       first frame.  Generates first frame image for scene 1 if missing.
+    - all_video_fflf_keyframes: Generate FF + LF keyframe images per scene
+      (independent, no chaining), then render via the FF/LF interpolation
+      workflow (ltx_fflf).
     - all_video_single: Generate videos from single first-frame image (no LF).
       Generates first frame image for each scene if missing.
     - all_images: Generate first-frame images only (still-image video).
@@ -3677,6 +4278,58 @@ _IMAGE_JOB_TIMEOUT = 600    # 10 minutes — enough for image generation
 _VIDEO_JOB_TIMEOUT = 1800   # 30 minutes — accounts for RunPod cold start + LTX + post-processing
 
 
+async def _await_scene_first_frame(
+    session_factory,
+    scene_id: UUID,
+    timeout: float = 900.0,
+    poll: float = 3.0,
+) -> str:
+    """Wait until the scene ACTUALLY carries chosen_image_path.
+
+    Two-pass FF generation completes in TWO jobs: the Pass-1 (base) job the
+    caller awaited spawns a Pass-2 (composite) job at its completion, and only
+    Pass 2 sets chosen_image_path (Pass 1 stores two_pass_base_image_path).
+    Returning at Pass-1 completion therefore RACES the composite — v1.25.1
+    bug: FF/LF Keyframes died with "requires a first frame image" on the
+    first two-pass scene of a run (earlier char-less scenes downgraded to
+    single-pass and sailed through).
+
+    Returns:
+      "ok"       — first frame present (immediate for single-pass)
+      "fallback" — composite FAILED; fell back to the Pass-1 base image as
+                   the first frame (loud warning; two_pass_composite_failed
+                   stays set for the UI retry affordance)
+      "failed"   — timeout, or composite failed with no base image either
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while True:
+        async with session_factory() as _s:
+            _sc = await _s.get(Scene, scene_id)
+            _sp = dict(_sc.parameters or {}) if _sc else {}
+            if _sp.get("chosen_image_path"):
+                return "ok"
+            if _sp.get("two_pass_composite_failed"):
+                _base = _sp.get("two_pass_base_image_path")
+                if _base and _sc is not None:
+                    _sp["chosen_image_path"] = _base
+                    _sc.parameters = _sp
+                    await _s.commit()
+                    logger.warning(
+                        f"Scene {scene_id}: two-pass composite FAILED — falling back to "
+                        f"the Pass-1 base image as the first frame so the run can continue"
+                    )
+                    return "fallback"
+                return "failed"
+        if _time.monotonic() >= deadline:
+            logger.error(
+                f"Scene {scene_id}: first frame still missing after {timeout:.0f}s "
+                f"(two-pass composite job stuck or never spawned)"
+            )
+            return "failed"
+        await asyncio.sleep(poll)
+
+
 async def _wait_for_jobs_batch(
     job_ids: list[UUID],
     session_factory,
@@ -3779,6 +4432,7 @@ async def _run_windowed_batch(
     llm_api_key=None,
     llm_model=None,
     image_model: str = "flux2_klein_dev_9b",
+    first_pass_gm: str = "z_image",
     video_model: str = "ltx_2.3",
     image_sys_override=None,
     video_sys_override=None,
@@ -3909,12 +4563,17 @@ async def _run_windowed_batch(
             _scene_params_read = dict(scene.parameters or {})
             _existing_refs = _scene_params_read.get("image_refs_first", {})
             _selected_indices = _existing_refs.get("characterIndices") if isinstance(_existing_refs, dict) else None
-            if _selected_indices is not None:
-                # Explicit selection (incl. []) is ALWAYS respected as-is.
-                _used_indices = [
-                    i for i in _selected_indices
-                    if isinstance(i, int) and 0 <= i < len(characters)
-                ]
+            _manual_lock = bool(_scene_params_read.get("image_refs_first_manual"))
+            _valid_sel = (
+                [i for i in _selected_indices if isinstance(i, int) and 0 <= i < len(characters)]
+                if _selected_indices is not None else None
+            )
+            if _valid_sel is not None and (_valid_sel or _manual_lock):
+                # A NON-EMPTY stored selection, or a user-locked one (incl.
+                # the explicit "no characters" case), is respected as-is.
+                # An UNLOCKED empty selection is just an auto-seed from a run
+                # that had no flow/text yet — fall through and re-pick.
+                _used_indices = _valid_sel
             else:
                 # No explicit selection yet → AUTO-PICK the most relevant
                 # characters for this scene from its own text (flow + prompt +
@@ -3934,7 +4593,13 @@ async def _run_windowed_batch(
                 _selected_chars, project_id, session, max_chars=3
             )
             extra_ref_ids = _collect_ref_asset_ids(scene, "first")
-            ref_ids = char_asset_ids + extra_ref_ids  # Characters first = Image 1, Image 2
+            # Budget order (v1.23.0): extras consume the Klein slot budget first
+            # and characters fill the remainder — appending extras after a full
+            # character balance could exceed the slot budget entirely.
+            _budget = max(0, MAX_TOTAL_REF_IMAGES - len(extra_ref_ids))
+            if len(char_asset_ids) > _budget:
+                char_asset_ids = char_asset_ids[:_budget]
+            ref_ids = (char_asset_ids + extra_ref_ids)[:MAX_TOTAL_REF_IMAGES]  # Characters first = Image 1, Image 2
             wf_type = _auto_workflow_type(len(ref_ids))
 
             # Reset flags — auto-gen starts fresh, but preserve user's manual
@@ -3949,10 +4614,12 @@ async def _run_windowed_batch(
             # Only seed default character indices for scenes that have NO prior
             # selection.  Scenes with an explicit selection (including []) are
             # preserved so the user can keep a scene character-free.
-            # Persist an EXPLICIT empty selection when the scene has none, so
-            # the Image tab reflects "no characters" (the single source of
-            # truth) instead of silently defaulting to project characters.
-            if "image_refs_first" not in scene_params:
+            # Seed the pick so the Image tab shows what auto-gen used — but
+            # ONLY when the pick found someone.  Persisting an EMPTY seed used
+            # to masquerade as the user's explicit "no characters" choice and
+            # permanently locked refs off for scenes whose first run predated
+            # the flow/SRT text (the AAF-import poisoning).
+            if "image_refs_first" not in scene_params and _used_indices:
                 scene_params["image_refs_first"] = {"characterIndices": list(_used_indices), "extras": []}
             scene.parameters = scene_params
             await session.commit()
@@ -4010,14 +4677,16 @@ async def _run_windowed_batch(
                     if enhancer and llm_api_key:
                         try:
                             _seq_auto_jobs[pid]["current_step"] = f"enhancing FF prompt for scene {i + 1}/{len(scenes)}"
+                            _gm = image_model if ref_ids else first_pass_gm
                             context = await _build_auto_enhance_context(
-                                project_fresh, scene, scene_lyrics, "first", image_model, None
+                                project_fresh, scene, scene_lyrics, "first", _gm, None
                             )
                             enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                False, image_sys_override, image_model, "first",
+                                False, (image_sys_override if ref_ids else None), _gm, "first",
                                 image_prompt_guidance or None)
-                            if two_pass and ref_ids:
-                                enhance_args += ("base",)
+                            # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                            # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                            # phase caused a redundant second LLM call + prompt drift.
                             if _should_enhance(skip_existing_prompts, prompt):
                                 # 90-second cap — see video enhance below
                                 # for rationale.  Fall through to the raw
@@ -4233,14 +4902,16 @@ async def _run_windowed_batch(
                 prompt = scene.prompt or f"Scene {scene.order_index + 1}"
                 if enhancer and llm_api_key:
                     try:
+                        _gm = image_model if ref_ids else first_pass_gm
                         context = await _build_auto_enhance_context(
-                            project_fresh, scene, scene_lyrics, "first", image_model, None
+                            project_fresh, scene, scene_lyrics, "first", _gm, None
                         )
                         enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                            False, image_sys_override, image_model, "first",
+                            False, (image_sys_override if ref_ids else None), _gm, "first",
                             image_prompt_guidance or None)
-                        if two_pass and ref_ids:
-                            enhance_args += ("base",)
+                        # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                        # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                        # phase caused a redundant second LLM call + prompt drift.
                         if _should_enhance(skip_existing_prompts, prompt):
                             prompt = await asyncio.to_thread(*enhance_args)
                     except Exception as e:
@@ -4258,7 +4929,7 @@ async def _run_windowed_batch(
                 img_params = {
                     "workflow_type": wf_type,
                     "prompt": prompt,
-                    "width": vid_w, "height": vid_h,
+                    "width": img_w, "height": img_h,
                     "reference_asset_ids": ref_ids,
                     "frame_type": "first",
                     "auto_save_preview": True,
@@ -4790,6 +5461,7 @@ async def _run_sequential_auto_gen(
             app_settings = settings_result.scalars().first()
 
             image_model = (app_settings.image_model_type if app_settings else None) or "flux2_klein_dev_9b"
+            first_pass_gm = _first_pass_gen_key(app_settings)
             video_model = (app_settings.video_model_type if app_settings else None) or "ltx_2.3"
 
             res_w = project.settings.get("resolution_width", 1536)
@@ -4943,6 +5615,7 @@ async def _run_sequential_auto_gen(
             "missing_videos_single", "missing_images_independent",
             "all_video_single", "all_images",
             "all_video_fflf", "all_video_v2v",
+            "all_video_fflf_keyframes",
         }
         if mode not in _VALID_MODES:
             err = (
@@ -4990,6 +5663,7 @@ async def _run_sequential_auto_gen(
                 enhancer=enhancer, llm_provider=llm_provider,
                 llm_api_key=llm_api_key, llm_model=llm_model,
                 image_model=image_model, video_model=video_model,
+                first_pass_gm=first_pass_gm,
                 image_sys_override=image_sys_override,
                 video_sys_override=video_sys_override,
                 res_w=res_w, res_h=res_h,
@@ -5055,12 +5729,16 @@ async def _run_sequential_auto_gen(
                 # "user wants no characters on this scene".
                 _seq_existing_refs = (scene.parameters or {}).get("image_refs_first", {})
                 _seq_selected_indices = _seq_existing_refs.get("characterIndices") if isinstance(_seq_existing_refs, dict) else None
-                if _seq_selected_indices is not None:
-                    # Explicit selection (incl. []) is ALWAYS respected.
-                    _seq_used_indices = [
-                        i for i in _seq_selected_indices
-                        if isinstance(i, int) and 0 <= i < len(proj_chars)
-                    ]
+                _seq_manual_lock = bool((scene.parameters or {}).get("image_refs_first_manual"))
+                _seq_valid_sel = (
+                    [i for i in _seq_selected_indices if isinstance(i, int) and 0 <= i < len(proj_chars)]
+                    if _seq_selected_indices is not None else None
+                )
+                if _seq_valid_sel is not None and (_seq_valid_sel or _seq_manual_lock):
+                    # Non-empty, or user-locked empty ("no characters"),
+                    # respected as-is; unlocked empty = stale auto-seed →
+                    # fall through and re-pick from today's flow/text.
+                    _seq_used_indices = _seq_valid_sel
                 else:
                     # No explicit selection yet → AUTO-PICK the most relevant
                     # characters from this scene's text (flow + prompt +
@@ -5078,7 +5756,11 @@ async def _run_sequential_auto_gen(
                     _seq_selected_chars, project_id, session, max_chars=3
                 )
                 extra_ids = _collect_ref_asset_ids(scene, "first")
-                ref_ids = seq_char_aids + extra_ids
+                # Budget order (v1.23.0) — see windowed batch note.
+                _budget = max(0, MAX_TOTAL_REF_IMAGES - len(extra_ids))
+                if len(seq_char_aids) > _budget:
+                    seq_char_aids = seq_char_aids[:_budget]
+                ref_ids = (seq_char_aids + extra_ids)[:MAX_TOTAL_REF_IMAGES]
                 wf_type = _auto_workflow_type(len(ref_ids))
 
                 # Reset flags for auto-gen — preserve user's manual
@@ -5088,11 +5770,10 @@ async def _run_sequential_auto_gen(
                 scene_params["use_prev_scene_last_frame"] = False
                 # Persist use_story_flow so per-scene checkbox reflects auto-gen setting
                 scene_params["use_story_flow"] = use_story_flow
-                # Set character indices so UI shows them as selected
-                # Only seed default characterIndices on scenes with no prior
-                # selection — preserves user's explicit per-scene choice
-                # (including the "no characters" case via empty list).
-                if "image_refs_first" not in scene_params:
+                # Set character indices so UI shows them as selected — but
+                # only seed NON-EMPTY picks (an empty seed would masquerade as
+                # an explicit user "no characters" choice; see windowed note).
+                if "image_refs_first" not in scene_params and _seq_used_indices:
                     scene_params["image_refs_first"] = {"characterIndices": list(_seq_used_indices), "extras": []}
                 scene.parameters = scene_params
                 await session.commit()
@@ -5113,12 +5794,13 @@ async def _run_sequential_auto_gen(
                     if enhancer and llm_api_key:
                         try:
                             context = await _build_auto_enhance_context(
-                                project, scene, scene_lyrics, "first", image_model, prev_scene
+                                project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
                             )
                             enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
-                            if two_pass and ref_ids:
-                                enhance_args += ("base",)
+                                False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first", image_prompt_guidance_text or None)
+                            # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                            # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                            # phase caused a redundant second LLM call + prompt drift.
                             if _should_enhance(skip_existing_prompts, prompt):
                                 prompt = await asyncio.to_thread(*enhance_args)
                         except Exception as e:
@@ -5183,12 +5865,13 @@ async def _run_sequential_auto_gen(
                         if enhancer and llm_api_key:
                             try:
                                 context = await _build_auto_enhance_context(
-                                    project, scene, scene_lyrics, "first", image_model, prev_scene
+                                    project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
                                 )
                                 enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                    False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
-                                if two_pass and ref_ids:
-                                    enhance_args += ("base",)
+                                    False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first", image_prompt_guidance_text or None)
+                                # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                                # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                                # phase caused a redundant second LLM call + prompt drift.
                                 if _should_enhance(skip_existing_prompts, prompt):
                                     prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
@@ -5225,6 +5908,12 @@ async def _run_sequential_auto_gen(
                         if not ok:
                             _seq_auto_jobs[pid]["status"] = "failed"
                             _seq_auto_jobs[pid]["error"] = f"First frame generation failed for {scene_name}"
+                            return
+                        # Two-pass FF = TWO jobs; only Pass 2 sets chosen_image_path.
+                        _ff_state = await _await_scene_first_frame(session_factory, scene.id)
+                        if _ff_state == "failed":
+                            _seq_auto_jobs[pid]["status"] = "failed"
+                            _seq_auto_jobs[pid]["error"] = f"First-frame image never landed for {scene_name} (two-pass composite missing or failed)"
                             return
 
                     # Step 2: Set scene to single-image video mode, then generate video
@@ -5316,12 +6005,13 @@ async def _run_sequential_auto_gen(
                         if enhancer and llm_api_key:
                             try:
                                 context = await _build_auto_enhance_context(
-                                    project, scene, scene_lyrics, "first", image_model, prev_scene
+                                    project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
                                 )
                                 enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                    False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
-                                if two_pass and ref_ids:
-                                    enhance_args += ("base",)
+                                    False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first", image_prompt_guidance_text or None)
+                                # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                                # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                                # phase caused a redundant second LLM call + prompt drift.
                                 if _should_enhance(skip_existing_prompts, prompt):
                                     prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
@@ -5334,7 +6024,7 @@ async def _run_sequential_auto_gen(
                         img_params = {
                             "workflow_type": wf_type,
                             "prompt": prompt,
-                            "width": vid_w, "height": vid_h,
+                            "width": img_w, "height": img_h,
                             "reference_asset_ids": ref_ids,
                             "frame_type": "first",
                             "auto_save_preview": True,
@@ -5358,6 +6048,12 @@ async def _run_sequential_auto_gen(
                         if not ok:
                             _seq_auto_jobs[pid]["status"] = "failed"
                             _seq_auto_jobs[pid]["error"] = f"First frame generation failed for {scene_name}"
+                            return
+                        # Two-pass FF = TWO jobs; only Pass 2 sets chosen_image_path.
+                        _ff_state = await _await_scene_first_frame(session_factory, scene.id)
+                        if _ff_state == "failed":
+                            _seq_auto_jobs[pid]["status"] = "failed"
+                            _seq_auto_jobs[pid]["error"] = f"First-frame image never landed for {scene_name} (two-pass composite missing or failed)"
                             return
 
                     # For non-first scenes: set use_prev_lf_as_ff and copy previous
@@ -5389,12 +6085,13 @@ async def _run_sequential_auto_gen(
                                 if enhancer and llm_api_key:
                                     try:
                                         context = await _build_auto_enhance_context(
-                                            project, scene, scene_lyrics, "first", image_model, prev_scene
+                                            project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
                                         )
                                         enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                            False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
-                                        if two_pass and ref_ids:
-                                            enhance_args += ("base",)
+                                            False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first", image_prompt_guidance_text or None)
+                                        # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                                        # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                                        # phase caused a redundant second LLM call + prompt drift.
                                         if _should_enhance(skip_existing_prompts, prompt):
                                             prompt = await asyncio.to_thread(*enhance_args)
                                     except Exception as e:
@@ -5431,6 +6128,12 @@ async def _run_sequential_auto_gen(
                                 if not ok:
                                     _seq_auto_jobs[pid]["status"] = "failed"
                                     _seq_auto_jobs[pid]["error"] = f"FF image fallback failed for {scene_name}"
+                                    return
+                                # Two-pass FF = TWO jobs; only Pass 2 sets chosen_image_path.
+                                _ff_state = await _await_scene_first_frame(session_factory, scene.id)
+                                if _ff_state == "failed":
+                                    _seq_auto_jobs[pid]["status"] = "failed"
+                                    _seq_auto_jobs[pid]["error"] = f"First-frame image never landed for {scene_name} (two-pass composite missing or failed)"
                                     return
                                 # Re-read scene (expire cache to get dispatcher's updates)
                                 scene_id = scene.id
@@ -5510,6 +6213,215 @@ async def _run_sequential_auto_gen(
                         _seq_auto_jobs[pid]["error"] = f"Video generation failed for {scene_name}"
                         return
 
+                # ── MODE: all_video_fflf_keyframes ──
+                # Independent per scene: generate a First-Frame image AND a
+                # Last-Frame image as two keyframes of ONE continuous shot,
+                # then render the video with the FF→LF interpolation workflow
+                # (ltx_fflf).  No cross-scene chaining — each scene stands on
+                # its own generated frames.
+                elif mode == "all_video_fflf_keyframes":
+                    if has_video and not override_full_set:
+                        logger.info(f"Sequential auto-gen: Scene {i} already has video, skipping")
+                        prev_scene = scene
+                        continue
+
+                    # Mark the scene FF/LF FIRST so every enhance context and
+                    # the dispatcher see keyframe mode (contexts read video_mode).
+                    scene_params = dict(scene.parameters or {})
+                    scene_params["video_mode"] = "ff_lf"
+                    scene_params["scene_source_type"] = "video"
+                    scene.parameters = scene_params
+                    await session.commit()
+
+                    # Step 1: First Frame image (keyframe A)
+                    if (not has_ff) or override_full_set:
+                        _seq_auto_jobs[pid]["current_step"] = "generating first frame (keyframe A)"
+                        prompt = scene.prompt or f"Scene {scene.order_index + 1}"
+                        if enhancer and llm_api_key:
+                            try:
+                                context = await _build_auto_enhance_context(
+                                    project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
+                                )
+                                if _should_enhance(skip_existing_prompts, prompt):
+                                    prompt = await asyncio.to_thread(
+                                        enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
+                                        False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first",
+                                        image_prompt_guidance_text or None,
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Sequential auto-gen (fflf_keyframes): enhance FF failed: {e}")
+
+                        scene.prompt = prompt
+                        await session.commit()
+
+                        img_params = {
+                            "workflow_type": wf_type,
+                            "prompt": prompt,
+                            "width": img_w, "height": img_h,
+                            "reference_asset_ids": ref_ids,
+                            "frame_type": "first",
+                            "auto_save_preview": True,
+                        }
+                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
+                        await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                        job = Job(
+                            project_id=project_id,
+                            scene_id=scene.id,
+                            job_type=JobType.IMAGE,
+                            status=JobStatus.PENDING,
+                            priority=0,
+                            parameters=img_params,
+                        )
+                        session.add(job)
+                        await session.commit()
+                        await session.refresh(job)
+                        job_queue.notify()
+
+                        ok = await _wait_for_job(job.id, session_factory)
+                        if not ok:
+                            _seq_auto_jobs[pid]["status"] = "failed"
+                            _seq_auto_jobs[pid]["error"] = f"First-frame keyframe failed for {scene_name}"
+                            return
+                        # Two-pass FF = TWO jobs; only Pass 2 sets the scene's
+                        # first frame.  Wait for it before building LF/video.
+                        _ff_state = await _await_scene_first_frame(session_factory, scene.id)
+                        if _ff_state == "failed":
+                            _seq_auto_jobs[pid]["status"] = "failed"
+                            _seq_auto_jobs[pid]["error"] = f"First-frame image never landed for {scene_name} (two-pass composite missing or failed)"
+                            return
+                        # Re-read scene (dispatcher wrote chosen_image_path)
+                        scene_id = scene.id
+                        session.expire(scene)
+                        scene = await session.get(Scene, scene_id)
+
+                    # Step 2: Last Frame image (keyframe B)
+                    if (not _scene_has_last_frame(scene)) or override_full_set:
+                        _seq_auto_jobs[pid]["current_step"] = "generating last frame (keyframe B)"
+                        lf_prompt = scene.parameters.get("last_frame_prompt", "") or scene.prompt or f"Scene {scene.order_index + 1} - last frame"
+                        ref_ids_lf = await _resolve_lf_ref_asset_ids(scene, project, session)
+                        # FF continuity ref occupies Klein slot 1 unless opted out
+                        _lf_attach_ff = scene.parameters.get("lf_exclude_first_frame_ref") is not True
+                        if _lf_attach_ff and len(ref_ids_lf) >= MAX_TOTAL_REF_IMAGES:
+                            ref_ids_lf = ref_ids_lf[:MAX_TOTAL_REF_IMAGES - 1]
+                        wf_type_lf = _auto_workflow_type(len(ref_ids_lf) + (1 if _lf_attach_ff else 0))
+
+                        if enhancer and llm_api_key:
+                            try:
+                                context = await _build_auto_enhance_context(
+                                    project, scene, scene_lyrics, "last", image_model, prev_scene
+                                )
+                                if _should_enhance(skip_existing_prompts, lf_prompt):
+                                    lf_prompt = await asyncio.to_thread(
+                                        enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
+                                        False, image_sys_override, image_model, "last",
+                                        image_prompt_guidance_text or None,
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Sequential auto-gen (fflf_keyframes): enhance LF failed: {e}")
+
+                        scene_params = dict(scene.parameters or {})
+                        scene_params["last_frame_prompt"] = lf_prompt
+                        scene.parameters = scene_params
+                        await session.commit()
+
+                        job = Job(
+                            project_id=project_id,
+                            scene_id=scene.id,
+                            job_type=JobType.IMAGE,
+                            status=JobStatus.PENDING,
+                            priority=0,
+                            parameters={
+                                "workflow_type": wf_type_lf,
+                                "prompt": lf_prompt,
+                                "width": img_w, "height": img_h,
+                                "reference_asset_ids": ref_ids_lf,
+                                "frame_type": "last",
+                                "attach_first_frame_ref": _lf_attach_ff,
+                                "auto_save_preview": True,
+                            },
+                        )
+                        session.add(job)
+                        await session.commit()
+                        await session.refresh(job)
+                        job_queue.notify()
+
+                        ok = await _wait_for_job(job.id, session_factory)
+                        if not ok:
+                            _seq_auto_jobs[pid]["status"] = "failed"
+                            _seq_auto_jobs[pid]["error"] = f"Last-frame keyframe failed for {scene_name}"
+                            return
+
+                    # Step 3: video — FF→LF interpolation (both frames must exist)
+                    _seq_auto_jobs[pid]["current_step"] = "generating video (FF→LF interpolation)"
+                    scene_id = scene.id
+                    session.expire(scene)
+                    scene = await session.get(Scene, scene_id)
+                    # Grace poll: LF completion writes the scene param moments
+                    # around the job flipping DONE — give it up to 30s.
+                    for _lf_try in range(10):
+                        if (scene.parameters or {}).get("chosen_last_frame_path"):
+                            break
+                        await asyncio.sleep(3)
+                        session.expire(scene)
+                        scene = await session.get(Scene, scene_id)
+                    if not (scene.parameters or {}).get("chosen_last_frame_path"):
+                        _seq_auto_jobs[pid]["status"] = "failed"
+                        _seq_auto_jobs[pid]["error"] = f"No last-frame image for {scene_name} (FF/LF video needs both keyframes)"
+                        return
+
+                    video_prompt = scene.parameters.get("video_prompt", "") or scene.prompt or f"Cinematic scene {scene.order_index + 1}"
+                    if enhancer and llm_api_key:
+                        try:
+                            vid_ctx = await _build_video_enhance_context(
+                                project, scene, scene_lyrics, video_model, prev_scene
+                            )
+                            if _should_enhance(skip_existing_prompts, video_prompt):
+                                video_prompt = await asyncio.to_thread(
+                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                    True, video_sys_override, video_model,
+                                    None,  # frame_type
+                                    video_prompt_guidance_text or None,
+                                )
+                        except Exception as e:
+                            logger.warning(f"Sequential auto-gen (fflf_keyframes): enhance video failed: {e}")
+
+                    scene_params = dict(scene.parameters or {})
+                    scene_params["video_prompt"] = video_prompt
+                    scene_params["lipsync_enabled"] = lipsync_enabled
+                    scene_params["vocals_only_for_lipsync"] = vocals_only_for_lipsync
+                    scene.parameters = scene_params
+                    await session.commit()
+
+                    duration = await _scene_duration_for_dispatch(
+                        session_factory, scene, label="auto_gen")
+                    job = Job(
+                        project_id=project_id,
+                        scene_id=scene.id,
+                        job_type=JobType.VIDEO,
+                        status=JobStatus.PENDING,
+                        priority=0,
+                        parameters={
+                            "workflow_type": "ltx_fflf",
+                            "prompt": video_prompt,
+                            "width": vid_w, "height": vid_h,
+                            "duration": duration,
+                            "framerate": 24,
+                            "skip_audio_mux": skip_audio_mux,
+                            "lipsync_enabled": lipsync_enabled,
+                            "vocals_only_for_lipsync": vocals_only_for_lipsync,
+                        },
+                    )
+                    session.add(job)
+                    await session.commit()
+                    await session.refresh(job)
+                    job_queue.notify()
+
+                    ok = await _wait_for_job(job.id, session_factory, timeout=_VIDEO_JOB_TIMEOUT)
+                    if not ok:
+                        _seq_auto_jobs[pid]["status"] = "failed"
+                        _seq_auto_jobs[pid]["error"] = f"FF/LF video generation failed for {scene_name}"
+                        return
+
                 # ── MODE: all_video_v2v ──
                 elif mode == "all_video_v2v":
                     if has_video and not override_full_set:
@@ -5527,12 +6439,13 @@ async def _run_sequential_auto_gen(
                         if enhancer and llm_api_key:
                             try:
                                 context = await _build_auto_enhance_context(
-                                    project, scene, scene_lyrics, "first", image_model, prev_scene
+                                    project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
                                 )
                                 enhance_args = (enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                    False, image_sys_override, image_model, "first", image_prompt_guidance_text or None)
-                                if two_pass and ref_ids:
-                                    enhance_args += ("base",)
+                                    False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first", image_prompt_guidance_text or None)
+                                # (v1.23.0) two-pass base enhancement happens ONCE at dispatch
+                                # (_build_two_pass_base_prompt); pre-enhancing here with the base
+                                # phase caused a redundant second LLM call + prompt drift.
                                 if _should_enhance(skip_existing_prompts, prompt):
                                     prompt = await asyncio.to_thread(*enhance_args)
                             except Exception as e:
@@ -5544,7 +6457,7 @@ async def _run_sequential_auto_gen(
                         img_params = {
                             "workflow_type": wf_type,
                             "prompt": prompt,
-                            "width": vid_w, "height": vid_h,
+                            "width": img_w, "height": img_h,
                             "reference_asset_ids": ref_ids,
                             "frame_type": "first",
                             "auto_save_preview": True,
@@ -5568,6 +6481,12 @@ async def _run_sequential_auto_gen(
                         if not ok:
                             _seq_auto_jobs[pid]["status"] = "failed"
                             _seq_auto_jobs[pid]["error"] = f"First frame generation failed for {scene_name}"
+                            return
+                        # Two-pass FF = TWO jobs; only Pass 2 sets chosen_image_path.
+                        _ff_state = await _await_scene_first_frame(session_factory, scene.id)
+                        if _ff_state == "failed":
+                            _seq_auto_jobs[pid]["status"] = "failed"
+                            _seq_auto_jobs[pid]["error"] = f"First-frame image never landed for {scene_name} (two-pass composite missing or failed)"
                             return
 
                     # Step 2: Generate video
@@ -6092,15 +7011,17 @@ async def rerun_pass2(
         project = await session.get(Project, project_id)
         char_ref_ids: list[str] = []
         # Cap matches _create_two_pass_composite_job: slot 1 is the base scene
-        # image and Klein ships up to 5REF, so at most 3 character refs.  The
+        # image and Klein officially supports 4 refs, so at most 3 character refs.  The
         # rerun previously gathered ALL project characters -> klein_6ref crash.
         MAX_CHARS_IN_COMPOSITE = 3
         if project and project.settings:
             characters = project.settings.get("characters", [])
             # Prefer the scene's explicit selection (the single source of truth
-            # the original Pass 2 used); fall back to all characters if none.
+            # the original Pass 2 used). An explicit EMPTY list means the user
+            # chose a character-free scene; only fall back to all characters
+            # when the key was never set (None).
             _sel = (scene_params.get("image_refs_first") or {}).get("characterIndices")
-            if isinstance(_sel, list) and _sel:
+            if isinstance(_sel, list):
                 _chosen = [characters[i] for i in _sel if isinstance(i, int) and 0 <= i < len(characters)]
             else:
                 _chosen = list(characters)
@@ -6126,7 +7047,7 @@ async def rerun_pass2(
 
         # Build ref list: base scene image (slot 1) + character refs (slots 2+)
         all_ref_ids = [str(base_asset_id)] + char_ref_ids
-        ref_count = min(len(all_ref_ids), 5)  # hard clamp to Klein's 5REF ceiling
+        ref_count = min(len(all_ref_ids), 4)  # hard clamp to Klein's official 4-ref limit
         workflow_type = f"klein_{ref_count}ref"
 
         # Resolve seed
@@ -6135,9 +7056,10 @@ async def rerun_pass2(
             job_type="image", frame_type="first",
         )
 
-        # Get dimensions from scene params or defaults
-        width = scene_params.get("width", 1024)
-        height = scene_params.get("height", 576)
+        # Get dimensions: scene params, else the project image-resolution chain
+        _ps = (project.settings if project else None) or {}
+        width = scene_params.get("width") or _ps.get("image_resolution_width") or _ps.get("resolution_width") or 1024
+        height = scene_params.get("height") or _ps.get("image_resolution_height") or _ps.get("resolution_height") or 576
 
 # Get the original prompt used for this scene
         original_prompt = scene_params.get("two_pass_original_prompt", scene.prompt or "")

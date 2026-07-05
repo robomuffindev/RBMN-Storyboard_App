@@ -91,6 +91,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [globalImageColorFilter, setGlobalImageColorFilter] = useState('');
   // Ideogram structured-JSON prompting mode (Krea 2 only). OFF by default.
   const [jsonPromptMode, setJsonPromptMode] = useState(false);
+  const [sceneIntentMode, setSceneIntentMode] = useState(false);
+  const [videoJsonMode, setVideoJsonMode] = useState(false);
   // Global project context — environmental wrapper injected into every
   // LLM enhance call when enabled.  All four fields persist independently;
   // they're only sent to the LLM when globalContextEnabled is true.
@@ -190,6 +192,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
         json_prompt_mode: jsonPromptMode,
+        scene_intent_mode: sceneIntentMode,
+        video_json_mode: videoJsonMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -264,6 +268,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       setGlobalColorOverride(conceptData.global_color_override || '');
       setGlobalImageColorFilter(((conceptData as any).global_image_color_filter || '') as string);
       setJsonPromptMode(!!(conceptData as any).json_prompt_mode);
+      setSceneIntentMode(!!(conceptData as any).scene_intent_mode);
+      setVideoJsonMode(!!(conceptData as any).video_json_mode);
       setEnableModelAudio(Boolean((conceptData as any).enable_model_audio));
       setModelAudioVolume(typeof (conceptData as any).model_audio_volume === 'number' ? (conceptData as any).model_audio_volume : 1.0);
       // Default ON when the field is absent (older projects) so existing
@@ -310,6 +316,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
         json_prompt_mode: jsonPromptMode,
+        scene_intent_mode: sceneIntentMode,
+        video_json_mode: videoJsonMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -384,6 +392,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
         json_prompt_mode: jsonPromptMode,
+        scene_intent_mode: sceneIntentMode,
+        video_json_mode: videoJsonMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -427,6 +437,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
         json_prompt_mode: jsonPromptMode,
+        scene_intent_mode: sceneIntentMode,
+        video_json_mode: videoJsonMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -442,7 +454,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       });
     }
-  }, [characters, conceptText, styleText, resWidth, resHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, globalImageColorFilter, jsonPromptMode, projectId, queryClient]);
+  }, [characters, conceptText, styleText, songTitle, resWidth, resHeight, imgResWidth, imgResHeight, vidResWidth, vidResHeight, projectFps, imageDirection, customImageDirection, globalSeedEnabled, globalSeed, useTransitionLora, transitionLoraStrength, randomKenBurns, kenBurnsAllowedEffects, globalColorOverride, customColorPalette, globalImageColorFilter, globalContextEnabled, globalContextTimeOfDay, globalContextSeason, globalContextWeather, globalContextCustom, enableModelAudio, modelAudioVolume, includeModelAudioInExport, jsonPromptMode, sceneIntentMode, videoJsonMode, projectId, queryClient]);
 
   const handleImageUpload = async (index: number, file: File) => {
     try {
@@ -652,6 +664,45 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
             Builds prompts as structured Ideogram-4 captions with positional bounding boxes and color
             palettes for precise composition control. Only applies when your first-pass image model is
             Krea 2 Turbo. Auto-gen and per-scene generation follow this setting (override per scene on the Image tab).
+          </p>
+        </div>
+
+        {/* Scene Intent Mode — opt-in structured scene plan that prompts compile from. */}
+        <div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={sceneIntentMode}
+              onChange={(e) => { setSceneIntentMode(e.target.checked); markDirty(); }}
+              className="accent-cyan-500"
+            />
+            <span className="text-xs font-medium text-gray-300">Scene Intent Mode</span>
+            <span className="text-[10px] text-cyan-300/70">structured plan</span>
+          </label>
+          <p className="text-[10px] text-gray-500 mt-1">
+            Each scene builds a structured intent (cast, environment, lighting, camera, palette, must-include)
+            that the image/video prompt compiles from — editable on the Prompt tab. More consistent and
+            debuggable. Override per scene on the Prompt tab. Off by default.
+          </p>
+        </div>
+
+        {/* Video JSON Prompt Mode — opt-in structured LTX video prompt (JSON sent to the model). */}
+        <div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={videoJsonMode}
+              onChange={(e) => { setVideoJsonMode(e.target.checked); markDirty(); }}
+              className="accent-emerald-500"
+            />
+            <span className="text-xs font-medium text-gray-300">Video JSON Prompt Mode</span>
+            <span className="text-[10px] text-emerald-300/70">LTX only</span>
+          </label>
+          <p className="text-[10px] text-gray-500 mt-1">
+            Sends the video prompt to LTX as a structured JSON object (setting, subject + timed action,
+            camera, style, timing/negatives) instead of prose — LTX parses these fields with higher fidelity
+            for camera control, timing and motion. Auto-gen and per-scene video follow this setting
+            (override and edit per scene on the Prompt tab). Off by default.
           </p>
         </div>
 
@@ -1195,6 +1246,7 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
                   const newChars = [...characters, newChar];
                   setCharacters(newChars);
                   saveConcept(projectId, {
+                    song_title: songTitle,
                     concept_text: conceptText,
                     style_text: styleText,
                     characters: newChars,
@@ -1217,6 +1269,8 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
         custom_color_palette: customColorPalette,
         global_image_color_filter: globalImageColorFilter,
         json_prompt_mode: jsonPromptMode,
+        scene_intent_mode: sceneIntentMode,
+        video_json_mode: videoJsonMode,
         global_context_enabled: globalContextEnabled,
         global_context_time_of_day: globalContextTimeOfDay,
         global_context_season: globalContextSeason,
@@ -1368,14 +1422,6 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
           character={creatorOpen.character}
           onClose={() => setCreatorOpen(null)}
           onSave={handleCreatorSave}
-        />
-      )}
-
-      {/* Global Character Library — browse + import */}
-      {libraryOpen && (
-        <GlobalCharacterLibraryModal
-          projectId={projectId}
-          onClose={() => setLibraryOpen(false)}
         />
       )}
 

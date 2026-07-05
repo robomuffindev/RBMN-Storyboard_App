@@ -714,7 +714,10 @@ class JobDispatcher:
                 # picked for image jobs (or vice versa).
                 # Re-read workflow_type from params — it may have been updated
                 # by _build_workflow (e.g. klein_t2i → z_image_turbo redirect)
-                _effective_wf_type = params.get("workflow_type", "")
+                _effective_wf_type = (
+                    params.get("_effective_workflow_type")
+                    or params.get("workflow_type", "")
+                )
                 required_caps = self._get_required_caps(_effective_wf_type)
                 # Resolve the user-facing model name for this workflow so
                 # routing honors the per-worker multiselect under each
@@ -1200,7 +1203,29 @@ class JobDispatcher:
                         f"duration={_dur!r}. Must be positive (seconds)."
                     )
 
+        # ── Routing/record channel vs local build copy (v1.22.1) ─────────
+        # `params` becomes a LOCAL copy: prompt suffixes (SFW / style /
+        # colour / pass-2 anchor) and workflow_type redirects must never
+        # leak back into job.parameters — retries rebuild from pristine
+        # parameters (a leaked "z_image_turbo" redirect would hit "Unknown
+        # workflow type", a leaked suffix would double-append).  Keys the
+        # worker-caps routing or the completion handler DO need are
+        # propagated to the original via _record().
+        _orig_params = params
+        params = dict(params)
+
+        def _record(**kv) -> None:
+            params.update(kv)
+            _orig_params.update(kv)
+
+        # Dispatch-time prompt tails (SFW / style / colour) — collected so
+        # Video-JSON mode can re-inject them after replacing the prose prompt.
+        _dispatch_prompt_tails: list = []
+
         seed = params.get("seed") or random.randint(0, 2**32 - 1)
+        # Record the actual seed: asset meta stops logging None, and retries
+        # reuse the same seed instead of silently drawing a new one.
+        _record(seed=seed)
 
         # Check if SFW content restriction is enabled — append suffix to prompt
         # Also read global negative prompt for image generation
@@ -1215,7 +1240,7 @@ class JobDispatcher:
                 sfw_settings = sfw_result.scalars().first()
                 if sfw_settings:
                     if sfw_settings.restrict_explicit_content:
-                        sfw_suffix = ", SFW, safe for work, fully clothed, no nudity, no explicit content, no NSFW"
+                        sfw_suffix = ", SFW, fully clothed, modest, tasteful, family-friendly"
                     if sfw_settings.global_negative_prompt:
                         global_negative_prompt = sfw_settings.global_negative_prompt.strip()
         except Exception:
@@ -1225,8 +1250,8 @@ class JobDispatcher:
         if sfw_suffix:
             prompt_val = params.get("prompt", "")
             if prompt_val:
-                params = dict(params)
                 params["prompt"] = prompt_val + sfw_suffix
+                _dispatch_prompt_tails.append(sfw_suffix)
 
         # Inject image direction / art style into prompt at dispatch time
         # This ensures the style tag always reaches ComfyUI regardless of whether
@@ -1250,8 +1275,8 @@ class JobDispatcher:
                         if style_tag:
                             prompt_val = params.get("prompt", "")
                             if prompt_val:
-                                params = dict(params)
                                 params["prompt"] = prompt_val + style_tag
+                                _dispatch_prompt_tails.append(style_tag)
                                 logger.info(f"[{job.id}] Injected image direction style tag: {style_tag.strip(', ')}")
         except Exception as e:
             logger.debug(f"Could not inject image direction: {e}")
@@ -1302,8 +1327,8 @@ class JobDispatcher:
                             )
                         prompt_val = params.get("prompt", "")
                         if prompt_val:
-                            params = dict(params)
                             params["prompt"] = prompt_val + color_suffix
+                            _dispatch_prompt_tails.append(color_suffix)
                             logger.info(
                                 f"[{job.id if job else 'N/A'}] Injected custom color palette override"
                                 f"{' (pass2-strong)' if _is_pass2_composite else ''}"
@@ -1321,8 +1346,8 @@ class JobDispatcher:
                         )
                     prompt_val = params.get("prompt", "")
                     if prompt_val:
-                        params = dict(params)
                         params["prompt"] = prompt_val + color_suffix
+                        _dispatch_prompt_tails.append(color_suffix)
                         logger.info(
                             f"[{job.id if job else 'N/A'}] Injected color override: {color_override}"
                             f"{' (pass2-strong)' if _is_pass2_composite else ''}"
@@ -1350,7 +1375,6 @@ class JobDispatcher:
                         "scene. Insert ONLY the character(s) from the other reference images, "
                         "re-lit to match the scene; change nothing else about the base image."
                     )
-                    params = dict(params)
                     params["prompt"] = _pv + _preserve
                     logger.info(
                         f"[{job.id if job else 'N/A'}] Pass-2 composite: appended "
@@ -1380,9 +1404,11 @@ class JobDispatcher:
             _is_two_pass_base = _params.get("two_pass_phase") == "base"
             p_text = _params.get("prompt", "")
             # First-pass models have no negative prompt node
-            _params["effective_negative_prompt"] = ""
-            anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-            _params["submitted_image_prompt"] = (p_text + anti_text_suffix) if p_text else p_text
+            _record(effective_negative_prompt="")
+            # The submitted record matches what is ACTUALLY sent (no phantom anti-text
+            # suffix — these models forbid rendered text via their system prompt, and
+            # appending negatives is against FLUX/Krea best practice).
+            _record(submitted_image_prompt=p_text)
 
             # Resolve the selected first-pass generator from settings
             generator = "z_image_turbo"
@@ -1408,7 +1434,14 @@ class JobDispatcher:
                 # project/scene.  Builds/loads a caption and routes to the
                 # Ideogram-node workflow.  Falls back to plain Krea 2 on any miss.
                 try:
-                    _caption = await self._build_or_get_ideogram_caption(job, p_text, _job_id or "N/A")
+                    _caption = await self._build_or_get_ideogram_caption(
+                        job,
+                        # clean stored prompt — never the tail-suffixed dispatch
+                        # text (SFW/style/colour tails were leaking into the
+                        # structured caption's source prose)
+                        (_orig_params.get("prompt") or p_text),
+                        _job_id or "N/A",
+                    )
                 except Exception:
                     _caption = None
                 if _caption:
@@ -1428,11 +1461,12 @@ class JobDispatcher:
                                 f"(model={krea2_model}, {'SFW' if krea2_sfw else 'NSFW'})"
                             )
                             _params["workflow_type"] = "krea2_turbo"
+                            _orig_params["_effective_workflow_type"] = "krea2_turbo"
                             # Stash the structured caption so it can be saved onto
                             # the generated asset's meta — used later to feed the
                             # exact layout/positioning back into prompts that
                             # reference this image.
-                            _params["ideogram_caption"] = _caption
+                            _record(ideogram_caption=_caption)
                             return prepare_krea2_ideogram_workflow(
                                 workflow_path=str(_ideo_path),
                                 caption=_caption,
@@ -1469,6 +1503,7 @@ class JobDispatcher:
                             f"negative prompt unsupported)"
                         )
                         _params["workflow_type"] = "krea2_turbo"
+                        _orig_params["_effective_workflow_type"] = "krea2_turbo"
                         return prepare_krea2_workflow(
                             workflow_path=str(krea2_path),
                             prompt=p_text,
@@ -1498,6 +1533,7 @@ class JobDispatcher:
                 )
                 logger.info(f"[{_job_id or 'N/A'}] Redirecting to Z-Image Turbo ({_why}, negative prompt ignored — unsupported)")
                 _params["workflow_type"] = "z_image_turbo"
+                _orig_params["_effective_workflow_type"] = "z_image_turbo"
                 return prepare_zimage_workflow(
                     workflow_path=wf_path,
                     prompt=p_text,
@@ -1573,11 +1609,20 @@ class JobDispatcher:
                         )
                 except Exception as _ff_e:
                     logger.debug(f"LF first-frame-ref attach skipped: {_ff_e}")
+            # BFL documents Klein's reference limit as 4 — clamp the resolved
+            # list (the LF first-frame prepend can push it past the budget) and
+            # keep slot 1 (FF/base) + the earliest identity refs.
+            if len(ref_images) > 4:
+                logger.info(
+                    f"[{job.id if job else 'N/A'}] clamping {len(ref_images)} Klein refs "
+                    f"to 4 (BFL official limit)"
+                )
+                ref_images = ref_images[:4]
             # Fall back to correct workflow if resolved ref count doesn't match requested
             # (e.g., frontend sent klein_1ref but the character image asset couldn't be found)
             actual_ref_count = len(ref_images)
             ref_count_map = {0: "klein_t2i", 1: "klein_1ref", 2: "klein_2ref", 3: "klein_3ref", 4: "klein_4ref", 5: "klein_5ref"}
-            effective_workflow = ref_count_map.get(actual_ref_count, "klein_5ref")
+            effective_workflow = ref_count_map.get(actual_ref_count, "klein_4ref")
             if effective_workflow != workflow_type:
                 logger.warning(
                     f"Workflow mismatch: requested {workflow_type} but only resolved "
@@ -1602,10 +1647,11 @@ class JobDispatcher:
                     f"[{job.id if job else 'N/A'}] Klein workflow has no negative prompt node — "
                     f"scene/global negative prompt ignored"
                 )
-            params["effective_negative_prompt"] = ""
-            # Capture the final submitted prompt (includes SFW + image direction + anti-text suffix, NO neg prompt)
-            anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-            params["submitted_image_prompt"] = (prompt_text + anti_text_suffix) if prompt_text else prompt_text
+            _record(effective_negative_prompt="")
+            # The submitted record matches what is ACTUALLY sent (SFW + image direction +
+            # colour are folded into params["prompt"]; no phantom anti-text negatives —
+            # Klein forbids text via its system prompt and prefers positive phrasing).
+            _record(submitted_image_prompt=prompt_text)
             return prepare_klein_workflow(
                 workflow_path=workflow_path,
                 prompt=prompt_text,
@@ -1832,7 +1878,7 @@ class JobDispatcher:
         # AV-native auto-sets skip_audio_mux so the post-download "replace model
         # audio with scene audio" step doesn't overwrite what we just generated.
         if workflow_type == "ltx_av_native":
-            params["skip_audio_mux"] = True
+            _record(skip_audio_mux=True)
 
         if workflow_type in ltx_map:
             workflow_path = str(workflows_dir / ltx_map[workflow_type])
@@ -1916,8 +1962,11 @@ class JobDispatcher:
                     # Use a truncated version of the prompt as image context
                     scene_prompt = params.get("prompt", "")
                     if scene_prompt:
-                        # Take first 200 chars as a concise description of what's in the image
-                        image_desc = scene_prompt[:200].strip()
+                        # Concise description — cut at a sentence boundary near
+                        # 200 chars instead of mid-word/mid-sentence.
+                        _head = scene_prompt[:300]
+                        _cut = max(_head.rfind(". ", 0, 220), _head.rfind("; ", 0, 220))
+                        image_desc = (_head[:_cut + 1] if _cut > 40 else scene_prompt[:200]).strip()
 
                 if scene_gguf_override:
                     logger.info(f"Sequencer per-scene GGUF override: {scene_gguf_override}")
@@ -2038,13 +2087,12 @@ class JobDispatcher:
                 f"duration={base_duration}s + tail={video_tail}s + v2v_overlap={v2v_overlap_compensation:.2f}s = {effective_duration:.2f}s"
             )
 
-            # Store video_tail in job params so completion handler knows to trim
+            # Record video_tail so the completion handler knows to trim.
+            # (Previously this snapshotted the WHOLE local dict into
+            # job.parameters — losing every later mutation, incl. the
+            # submitted video prompt — and leaked suffixed prompts.)
             if video_tail > 0:
-                params_copy = dict(params)
-                params_copy["video_tail"] = video_tail
-                params_copy["original_duration"] = base_duration
-                # Update the job's parameters
-                job.parameters = params_copy
+                _record(video_tail=video_tail, original_duration=base_duration)
 
                 # Re-slice audio clip to include tail duration so the video model
                 # has music for the full generation length (base + tail).
@@ -2057,8 +2105,37 @@ class JobDispatcher:
                     if extended_audio:
                         audio_path = extended_audio
 
+            # Video JSON Prompt mode (opt-in) — send a structured JSON object to LTX
+            # instead of prose (LTX parses JSON fields with higher fidelity).
+            # Gated to the standard scene-video flavors: transition clips
+            # (whose prompt carries the zhuanchang LoRA trigger), V2V pass-2
+            # refinement, AV-native and the sequencer keep their purpose-built
+            # prose prompts.
+            _vjson = None
+            if workflow_type in ("ltx_i2v", "ltx_fflf", "ltx_v2v_extend"):
+                _vjson = await self._build_or_get_video_json(job)
+            if _vjson:
+                import json as _vjson_mod
+                # The JSON replaces the prose prompt wholesale — re-inject the
+                # dispatch constraints (SFW / style / colour) folded into the
+                # prose above so JSON mode cannot bypass them.
+                if _dispatch_prompt_tails:
+                    _tail_txt = ", ".join(
+                        t.strip().strip(",").strip() for t in _dispatch_prompt_tails if t
+                    )
+                    _csc = _vjson.get("scene")
+                    if not isinstance(_csc, dict):
+                        _csc = {}
+                        _vjson["scene"] = _csc
+                    _csc["style_constraints"] = (
+                        (_csc.get("style_constraints", "") + ", " if _csc.get("style_constraints") else "")
+                        + _tail_txt
+                    )
+                params["prompt"] = _vjson_mod.dumps(_vjson, ensure_ascii=False)
+                logger.info(f"[{job.id}] Video JSON prompt mode — sending structured JSON to LTX")
+
             # Capture the final submitted video prompt (includes SFW + image direction suffixes)
-            params["submitted_video_prompt"] = params.get("prompt", "")
+            _record(submitted_video_prompt=params.get("prompt", ""))
 
             # V2V extend: uses I2V workflow with previous scene's last frame
             # as image conditioning.  This gives us precise control over which
@@ -2075,8 +2152,6 @@ class JobDispatcher:
                         "Ensure scene A has a generated video with an extracted last frame."
                     )
                 logger.info(f"V2V extend: using previous scene last frame image: {v2v_first_frame}")
-
-                job.parameters = params
 
                 # Route through I2V workflow with prev scene's last frame as input
                 i2v_path = str(workflows_dir / ltx_map["ltx_i2v"])
@@ -2270,6 +2345,7 @@ class JobDispatcher:
                     select(Asset)
                     .where(Asset.project_id == job.project_id)
                     .where(Asset.asset_type == AssetType.MUSIC)
+                    .where(~Asset.rel_path.contains("stems/"))  # desc order would otherwise pick a NEWER stem row
                     .order_by(Asset.created_at.desc())  # type: ignore
                 )
                 audio_result = await session.execute(stmt)
@@ -2324,7 +2400,7 @@ class JobDispatcher:
             logger.warning(
                 f"[{job_id_str}] Two-pass composite has {len(dropped)} extra "
                 f"character ref(s) beyond the {MAX_CHARS_IN_COMPOSITE}-character "
-                f"limit (Klein ships up to 5REF and slot 1 is the scene image) "
+                f"limit (Klein officially supports 4 refs and slot 1 is the scene image) "
                 f"— dropping: {dropped}"
             )
 
@@ -2577,6 +2653,131 @@ class JobDispatcher:
                 "Image 1's lighting and exposure; keep Image 1's palette and brightness unchanged, "
                 "do not darken or restyle it."
             )
+
+    async def _build_or_get_video_json(self, job):
+        """Structured LTX video-JSON prompt for this scene as a dict, or None when
+        Video JSON mode is OFF. Stored scene.parameters.video_json_prompt wins (manual
+        edits stable); else built from the prose video prompt via the LLM and cached.
+        Auto-fills preserve_from_input_image when empty + a first frame exists."""
+        if not job or not job.scene_id:
+            return None
+        try:
+            from backend.services.llm.prompt_enhancer import (
+                PromptEnhancer, VIDEO_JSON_SYSTEM_PROMPT, normalize_video_json,
+            )
+            async with self._session_factory() as session:
+                scene = await session.get(Scene, job.scene_id)
+                project = await session.get(Project, job.project_id) if job.project_id else None
+                if scene is None:
+                    return None
+                sp = scene.parameters or {}
+                proj = (project.settings or {}) if project else {}
+                _sm = sp.get("video_json_mode")
+                eff = bool(_sm) if _sm is not None else bool(proj.get("video_json_mode", False))
+                if not eff:
+                    return None
+                vj = None
+                stored = sp.get("video_json_prompt")
+                if stored:
+                    try:
+                        vj = normalize_video_json(stored)
+                    except Exception:
+                        vj = None
+                if vj is None:
+                    from backend.database.models import AppSettings as _VJAS
+                    from sqlmodel import select as _vj_sel
+                    _set = (await session.execute(_vj_sel(_VJAS).where(_VJAS.id == 1))).scalars().first()
+                    if not _set:
+                        return None
+                    from backend.api.settings import resolve_llm_config
+                    prov, key, model = resolve_llm_config(_set)
+                    if not key:
+                        logger.warning(f"[{job.id}] Video JSON mode on but no LLM key — using prose video prompt")
+                        return None
+                    prose = sp.get("video_prompt") or scene.prompt or ""
+                    try:
+                        _dur = (
+                            f"Scene duration: {round((scene.end_time or 0) - (scene.start_time or 0), 1)} seconds "
+                            f"(use this for the duration field and action pacing).\n"
+                        )
+                    except Exception:
+                        _dur = ""
+                    # Build the FULL video enhance context (same builder the
+                    # /video-json endpoint uses) — the old build passed only a
+                    # duration line, so autogen-built JSON prompts were far
+                    # weaker than editor-built ones.
+                    _ctx = _dur
+                    try:
+                        from backend.api.generation import (
+                            _build_video_enhance_context as _vjc_ctx,
+                            _get_scene_lyrics as _vjc_lyrics,
+                        )
+                        from backend.database.models import Lyrics as _VJLyr
+                        _lyr = (await session.execute(
+                            _vj_sel(_VJLyr).where(_VJLyr.project_id == job.project_id)
+                        )).scalars().first()
+                        _scene_lyrics = ""
+                        if _lyr is not None:
+                            _scene_lyrics = _vjc_lyrics(scene, list(_lyr.words or []), _lyr.full_text or "")
+                        _prev = None
+                        try:
+                            if (scene.order_index or 0) > 0:
+                                _prev = (await session.execute(
+                                    _vj_sel(Scene).where(
+                                        Scene.project_id == job.project_id,
+                                        Scene.order_index == scene.order_index - 1,
+                                    )
+                                )).scalars().first()
+                        except Exception:
+                            _prev = None
+                        _vmt = getattr(_set, "video_model_type", None) or "ltx_2.3"
+                        _full = await _vjc_ctx(project, scene, _scene_lyrics, _vmt, _prev)
+                        if _full:
+                            _ctx = _dur + _full
+                    except Exception as _ctx_err:
+                        logger.warning(
+                            f"[{job.id}] video-json full context build failed ({_ctx_err}) "
+                            f"— using duration-only context"
+                        )
+                    raw = await asyncio.to_thread(
+                        PromptEnhancer.enhance, prose, _ctx, prov, key, model,
+                        False, VIDEO_JSON_SYSTEM_PROMPT, "ltx_2.3", None, None, None,
+                    )
+                    try:
+                        vj = normalize_video_json(raw)
+                    except Exception:
+                        return None
+                    sp2 = dict(sp)
+                    sp2["video_json_prompt"] = vj
+                    scene.parameters = sp2
+                    try:
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(scene, "parameters")
+                    except Exception:
+                        pass
+                    await session.commit()
+                # Auto-fill preserve_from_input_image from the known first
+                # frame (official LTX schema: lives under "scene"); backfill
+                # duration when the model left it at 0.
+                try:
+                    _sc = vj.get("scene")
+                    if isinstance(_sc, dict) and not _sc.get("preserve_from_input_image") and sp.get("chosen_image_path"):
+                        _sc["preserve_from_input_image"] = [
+                            "overall composition", "subject placement", "lighting direction",
+                            "color palette", "background geometry",
+                        ]
+                        vj["scene"] = _sc
+                except Exception:
+                    pass
+                try:
+                    if not vj.get("duration"):
+                        vj["duration"] = round(float((scene.end_time or 0) - (scene.start_time or 0)), 2)
+                except Exception:
+                    pass
+                return vj
+        except Exception as e:
+            logger.warning(f"video json build failed (falling back to prose prompt): {e}")
+            return None
 
     async def _build_or_get_ideogram_caption(self, job, prose_prompt: str, job_id_str: str):
         """Return the Ideogram structured caption for this scene, or None when
@@ -3113,6 +3314,7 @@ class JobDispatcher:
                 .where(Asset.project_id == project_id)
                 .where(Asset.asset_type == AssetType.MUSIC)
                 .where(~Asset.rel_path.contains("stems/"))
+                .order_by(Asset.created_at.desc())  # newest master
             )
             res = await session.execute(stmt)
             music_asset = res.scalars().first()
@@ -3127,7 +3329,11 @@ class JobDispatcher:
             clips_dir = app_settings.project_dir / str(project_id) / "audio_clips"
             clips_dir.mkdir(parents=True, exist_ok=True)
 
-            clip_filename = f"scene_{scene.order_index:03d}_{scene.start_time:.2f}_{scene.end_time:.2f}.wav"
+            try:
+                _clip_ver = int(audio_path.stat().st_mtime)
+            except Exception:
+                _clip_ver = 0
+            clip_filename = f"scene_{scene.order_index:03d}_{scene.start_time:.2f}_{scene.end_time:.2f}_{_clip_ver}.wav"
             clip_path = clips_dir / clip_filename
             rel_clip_path = str(clip_path.relative_to(app_settings.project_dir))
 
@@ -4688,13 +4894,18 @@ class JobDispatcher:
                                             audio_abs = candidate
                                             logger.info(f"[{job_id_str}] Auto-sliced scene audio: {sliced}")
 
-                                # 3. Fall back to full master audio asset
+                                # 3. Fall back to the master audio — SLICED to the
+                                # scene's own time range.  Muxing the FULL master
+                                # unseeked baked "the beginning of the entire audio
+                                # file" into every scene clip whenever slicing had
+                                # failed earlier (observed on AAF-imported projects).
                                 if not audio_abs:
                                     from sqlmodel import select as mux_select
                                     stmt = (
                                         mux_select(Asset)
                                         .where(Asset.project_id == project_id)
                                         .where(Asset.asset_type == AssetType.MUSIC)
+                                        .where(~Asset.rel_path.contains("stems/"))
                                         .order_by(Asset.created_at.desc())
                                     )
                                     result = await session.execute(stmt)
@@ -4703,8 +4914,42 @@ class JobDispatcher:
                                         # rel_path is relative to project subfolder (project_dir/project_id/)
                                         candidate = settings.project_dir / str(project_id) / music_asset.rel_path
                                         if candidate.exists():
-                                            audio_abs = candidate
-                                            logger.info(f"[{job_id_str}] Using master audio: {music_asset.rel_path}")
+                                            _st = getattr(scene, "start_time", None)
+                                            _en = getattr(scene, "end_time", None)
+                                            if _st is not None and _en is not None and float(_en) > float(_st):
+                                                try:
+                                                    from backend.services.video.ffmpeg import slice_audio as _mux_slice
+                                                    _mux_clip = output_dir / (Path(filename).stem + "_muxsrc.wav")
+                                                    await asyncio.to_thread(
+                                                        _mux_slice, str(candidate), str(_mux_clip),
+                                                        float(_st), float(_en),
+                                                    )
+                                                    if _mux_clip.exists() and _mux_clip.stat().st_size > 1024:
+                                                        audio_abs = _mux_clip
+                                                        logger.warning(
+                                                            f"[{job_id_str}] Scene clip missing AND auto-slice failed — "
+                                                            f"sliced master inline {float(_st):.2f}-{float(_en):.2f}s for mux"
+                                                        )
+                                                except Exception as _msl_err:
+                                                    logger.warning(f"[{job_id_str}] inline master slice failed: {_msl_err}")
+                                            if not audio_abs:
+                                                # Truly last resort — scene has no usable time
+                                                # range.  Full-master mux is only correct for
+                                                # scene 1; refuse for later scenes (model audio
+                                                # beats wrong audio).
+                                                if float(getattr(scene, "start_time", 0) or 0) < 0.5:
+                                                    audio_abs = candidate
+                                                    logger.warning(
+                                                        f"[{job_id_str}] Using FULL master audio for mux "
+                                                        f"(scene starts at 0 — positionally correct)"
+                                                    )
+                                                else:
+                                                    logger.warning(
+                                                        f"[{job_id_str}] REFUSING full-master mux for a "
+                                                        f"mid-timeline scene (would bake audio from 0:00); "
+                                                        f"keeping model audio. Re-slice audio on the Audio "
+                                                        f"tab, then regenerate this video."
+                                                    )
 
                                 if audio_abs:
                                     from backend.services.video.ffmpeg import mux_audio
@@ -5205,3 +5450,5 @@ class JobDispatcher:
 
             await session.commit()
             created_asset_ids.append(asset.id)
+
+        return created_asset_ids

@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 DESCRIBE_PROMPT = (
     "Describe this image factually and concisely so it can be used as a REFERENCE "
     "for image generation. Cover, in order: the main subject(s) and their visible "
-    "appearance (apparent age, build, hair, skin tone, clothing, distinctive "
-    "features), the setting/background, the composition and framing (shot type, "
+    "appearance (apparent age, build, face shape and facial structure, hair style "
+    "and colour, skin tone, clothing with colours, and distinctive features or "
+    "marks), the setting/background, the composition and framing (shot type, "
     "angle), the dominant colors, and the lighting. Be specific and literal — only "
     "describe what is visibly present; do not invent details or interpret mood. "
     "Respond with 2-4 plain sentences, no preamble, no markdown."

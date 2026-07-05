@@ -2,9 +2,9 @@
  * ReferenceSelector — character + extra-image reference picker for image generation.
  *
  * Rules:
- *   First Frame  → max 4 total references  (characters + extras)
+ *   First Frame  → max 4 total references  (BFL's official Klein limit)
  *   Last Frame   → max 3 total references  (first-frame image occupies slot 1)
- *   Characters   → max 2 per frame (too many character refs confuses Klein)
+ *   Characters   → max 3 per frame (Klein composite budget)
  */
 import { useState, useCallback } from 'react';
 import { Plus, Trash2, Wand2, User, X } from 'lucide-react';
@@ -20,6 +20,8 @@ export interface CharacterInfo {
   name: string;
   description: string;
   image_path: string | null;
+  /** Extra reference angles for identity lock (1.21.0 multi-angle refs). */
+  extra_images?: string[] | null;
 }
 
 export interface ExtraRef {
@@ -55,7 +57,7 @@ export default function ReferenceSelector({
   frameType,
   projectId,
 }: ReferenceSelectorProps) {
-  const maxRefs = frameType === 'first' ? 5 : 4;
+  const maxRefs = frameType === 'first' ? 4 : 3; // BFL 4-ref limit; LF reserves slot 1 for the FF ref
   const maxCharRefs = 3; // up to 3 character references (Klein composite)
   const totalUsed = value.characterIndices.length + value.extras.length;
   const slotsLeft = maxRefs - totalUsed;
@@ -372,7 +374,30 @@ export function collectRefAssetIds(
   for (const extra of refs.extras) {
     ids.push(extra.asset_id);
   }
-  return ids;
+  // Multi-angle identity refs (1.21.0) — appended AFTER extras so the
+  // "Image N" numbering of characters + extras stays aligned with the
+  // descriptions; angles are identity-lock refs where slot position
+  // matters least. Budget-capped at Klein's official 4-ref limit (BFL).
+  const MAX_REFS = 4;
+  const findAsset = (pth?: string | null) =>
+    pth ? allAssets.find((a) => a.rel_path === pth || a.rel_path?.endsWith(pth)) : undefined;
+  let angle = 0;
+  let added = true;
+  while (ids.length < MAX_REFS && added && angle < 8) {
+    added = false;
+    for (const idx of refs.characterIndices) {
+      if (ids.length >= MAX_REFS) break;
+      const ch = characters[idx];
+      const extraPath = ch?.extra_images?.[angle];
+      const asset = findAsset(extraPath);
+      if (asset && !ids.includes(asset.id)) {
+        ids.push(asset.id);
+        added = true;
+      }
+    }
+    angle++;
+  }
+  return ids.slice(0, MAX_REFS);
 }
 
 /**
@@ -389,8 +414,10 @@ export function buildRefDescriptions(
   let n = 1;
   for (const idx of refs.characterIndices) {
     const ch = characters[idx];
+    // Appearance only — every image system prompt forbids names (the model
+    // cannot use them; they leak into prompts as wasted, confusing tokens).
     parts.push(
-      `Image ${n} is character "${ch?.name || 'Unnamed'}" — ${ch?.description || 'no description'}`
+      `Image ${n} shows: ${ch?.description || 'no description'}`
     );
     n++;
   }

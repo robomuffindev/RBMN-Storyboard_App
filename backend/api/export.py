@@ -71,6 +71,7 @@ class ExportRequest(BaseModel):
     subtitle_color: str = "white"       # white, yellow, cyan, etc.
     subtitle_position: str = "bottom"   # bottom, top, center
     subtitle_outline: int = 2
+    subtitle_bold: bool = False
     # Audio normalization
     normalize_audio: bool = False
     # Backing track mixer overrides (None = use project.settings defaults)
@@ -1399,16 +1400,41 @@ async def _run_export_task(
                     normalize_audio as ffmpeg_normalize_audio,
                 )
 
-                norm_output = str(
-                    Path(output_path).parent
-                    / f"norm_{Path(output_path).name}"
-                )
-                await asyncio.to_thread(
-                    ffmpeg_normalize_audio, output_path, norm_output
-                )
+                # normalize_audio emits PCM WAV audio, which is not
+                # muxable into MP4 — extract the audio, normalize the WAV,
+                # then re-mux with the video stream copied (no re-encode).
+                _tmp_dir = Path(output_path).parent
+                _extract_wav = str(_tmp_dir / f"norm_src_{Path(output_path).stem}.wav")
+                _norm_wav = str(_tmp_dir / f"norm_out_{Path(output_path).stem}.wav")
+                norm_output = str(_tmp_dir / f"norm_{Path(output_path).name}")
 
-                import shutil
-                shutil.move(norm_output, output_path)
+                def _normalize_mp4_audio() -> None:
+                    import subprocess as _sp
+                    _sp.run(
+                        ["ffmpeg", "-y", "-i", output_path, "-vn",
+                         "-c:a", "pcm_s16le", "-ar", "48000", _extract_wav],
+                        check=True, capture_output=True, timeout=1800,
+                    )
+                    ffmpeg_normalize_audio(_extract_wav, _norm_wav)
+                    _sp.run(
+                        ["ffmpeg", "-y", "-i", output_path, "-i", _norm_wav,
+                         "-map", "0:v:0", "-map", "1:a:0",
+                         "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",
+                         norm_output],
+                        check=True, capture_output=True, timeout=1800,
+                    )
+
+                try:
+                    await asyncio.to_thread(_normalize_mp4_audio)
+
+                    import shutil
+                    shutil.move(norm_output, output_path)
+                finally:
+                    for _t in (_extract_wav, _norm_wav):
+                        try:
+                            Path(_t).unlink()
+                        except Exception:
+                            pass
                 logger.info("Audio normalization applied to export")
 
             # Compute relative path for download URL
@@ -1612,6 +1638,11 @@ async def export_project(
                 "subtitle_color": req.subtitle_color,
                 "subtitle_position": req.subtitle_position,
                 "subtitle_outline": req.subtitle_outline,
+                "subtitle_bold": req.subtitle_bold,
+                "chapter_selection": (
+                    req.chapter_selection.model_dump()
+                    if req.chapter_selection is not None else None
+                ),
                 "normalize_audio": req.normalize_audio,
                 "backing_track_loop": req.backing_track_loop,
                 "audio_only_remix": req.audio_only_remix,
@@ -1956,7 +1987,10 @@ async def resume_export(
 
     # Map quality to CRF if not already present
     if "final_crf" not in export_params:
-        quality_to_crf = {"lossless": 0, "highest": 10, "high": 16, "medium": 20, "low": 26}
+        quality_to_crf = {
+            "lossless": 0, "highest": 10, "high": 16,
+            "standard": 20, "medium": 20, "draft": 26, "low": 26,
+        }
         export_params["final_crf"] = quality_to_crf.get(export_params.get("quality", "high"), 16)
 
     # Initialize progress with chunk data from manifest
@@ -2163,7 +2197,10 @@ async def recover_export(
 
     # Map quality to CRF if not already present
     if "final_crf" not in export_params:
-        quality_to_crf = {"lossless": 0, "highest": 10, "high": 16, "medium": 20, "low": 26}
+        quality_to_crf = {
+            "lossless": 0, "highest": 10, "high": 16,
+            "standard": 20, "medium": 20, "draft": 26, "low": 26,
+        }
         export_params["final_crf"] = quality_to_crf.get(export_params.get("quality", "high"), 16)
 
     # Create new job

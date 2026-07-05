@@ -152,6 +152,19 @@ def parse_aaf_clips(aaf_path: str) -> list[dict]:
                                 ref_mob = comp_obj.mob
                                 if ref_mob is not None:
                                     name = _clean_name(getattr(ref_mob, "name", None))
+                                    # Best-effort: some producers embed the
+                                    # spoken text in mob user comments rather
+                                    # than the name (ElevenLabs currently does
+                                    # NOT — its text ships in the CSV/SRT —
+                                    # but read it when present).
+                                    if not name:
+                                        _cm = getattr(ref_mob, "comments", None)
+                                        if _cm:
+                                            for _cv in dict(_cm).values():
+                                                _cand = _clean_name(_cv)
+                                                if _cand:
+                                                    name = _cand
+                                                    break
                             except Exception:
                                 pass
                             # NB: we deliberately do NOT fall back to the track
@@ -171,6 +184,220 @@ def parse_aaf_clips(aaf_path: str) -> list[dict]:
     if not clips:
         raise AafImportError("No audio clips found in the AAF timeline.")
     return clips
+
+
+def extract_aaf_embedded_audio(aaf_path: str, out_wav: str) -> bool:
+    """Reconstruct the timeline audio from essence EMBEDDED in the AAF.
+
+    ElevenLabs AAF exports embed each clip's rendered audio as essence
+    (that's why the file is ~25x the size of the MP3 export).  We pull every
+    SourceClip's essence out to a temp file, then rebuild the full-length
+    track with ffmpeg by placing each clip at its exact timeline position
+    over silence (adelay + amix, no normalization).
+
+    Returns True when ``out_wav`` was written.  Timeline-only AAFs (no
+    embedded essence) return False — the caller decides how to fail.
+    Best-effort by design: any parse hiccup returns False rather than
+    raising, so the import endpoint can fall back to a clear error.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    import wave as wave_mod
+
+    try:
+        import aaf2  # type: ignore
+        from aaf2 import components as C  # type: ignore
+    except Exception:
+        return False
+
+    tmpdir = tempfile.mkdtemp(prefix="aaf_essence_")
+    # (timeline_start_s, source_offset_s, duration_s, essence_path)
+    placed: list[tuple[float, float, float, str]] = []
+    try:
+        with aaf2.open(aaf_path, "r") as f:
+            ess_cache: dict[str, Optional[str]] = {}
+
+            def _write_essence(smob) -> Optional[str]:
+                key = str(getattr(smob, "mob_id", None) or id(smob))
+                if key in ess_cache:
+                    return ess_cache[key]
+                path: Optional[str] = None
+                try:
+                    ed = getattr(smob, "essence", None)
+                    if ed is not None:
+                        stream = ed.open("r")
+                        raw_path = os.path.join(tmpdir, f"ess_{len(ess_cache)}.bin")
+                        with open(raw_path, "wb") as out:
+                            while True:
+                                try:
+                                    chunk = stream.read(1 << 20)
+                                except TypeError:
+                                    out.write(stream.read())
+                                    break
+                                if not chunk:
+                                    break
+                                out.write(chunk)
+                        with open(raw_path, "rb") as rf:
+                            head = rf.read(4)
+                        if head == b"RIFF":
+                            path = raw_path + ".wav"
+                            os.replace(raw_path, path)
+                        elif head == b"FORM":
+                            path = raw_path + ".aif"
+                            os.replace(raw_path, path)
+                        else:
+                            # Raw PCM frames — wrap using the descriptor.
+                            try:
+                                desc = smob.descriptor
+                                sr = int(float(desc["SampleRate"].value))
+                                ch = int(desc["Channels"].value)
+                                bits = int(desc["QuantizationBits"].value)
+                                path = raw_path + ".wav"
+                                with open(raw_path, "rb") as rf, wave_mod.open(path, "wb") as w:
+                                    w.setnchannels(max(1, ch))
+                                    w.setsampwidth(max(1, bits // 8))
+                                    w.setframerate(sr)
+                                    w.writeframes(rf.read())
+                                os.unlink(raw_path)
+                            except Exception:
+                                path = None
+                except Exception:
+                    path = None
+                ess_cache[key] = path
+                return path
+
+            def _resolve_clip_essence(comp_clip):
+                """Resolve THIS timeline clip's essence by following its OWN
+                source-reference chain (mob_id + slot_id at every hop, via
+                pyaaf2's SourceClip.walk()).
+
+                CRITICAL: ElevenLabs AAFs use ONE MasterMob with N slots —
+                one slot per timeline clip, each referencing its own
+                SourceMob.  A resolver that just scans the MasterMob for
+                "the first SourceMob with essence" returns the SAME essence
+                (clip 1's audio) for EVERY timeline clip — the master then
+                plays scene 1's audio at every position.  The slot chain is
+                the only correct mapping.
+
+                Returns (source_mob_with_essence | None, source_offset_units).
+                """
+                off_units = 0
+                try:
+                    m = comp_clip.mob
+                except Exception:
+                    m = None
+                if m is not None and getattr(m, "essence", None) is not None:
+                    # Direct SourceMob reference (some producers skip the master)
+                    return m, off_units
+                try:
+                    for link in comp_clip.walk():
+                        if not isinstance(link, C.SourceClip):
+                            continue
+                        try:
+                            off_units += int(getattr(link, "start", 0) or 0)
+                        except Exception:
+                            pass
+                        try:
+                            lm = link.mob
+                        except Exception:
+                            lm = None
+                        if lm is not None and getattr(lm, "essence", None) is not None:
+                            return lm, off_units
+                except Exception as walk_err:
+                    logger.debug(f"AAF clip chain walk failed: {walk_err}")
+                return None, 0
+
+            comps = list(f.content.toplevel())
+            if not comps:
+                comps = [m for m in f.content.mobs if type(m).__name__ == "CompositionMob"]
+            for comp in comps:
+                for slot in getattr(comp, "slots", []) or []:
+                    if getattr(slot, "media_kind", None) != "Sound":
+                        continue
+                    seg = getattr(slot, "segment", None)
+                    if not isinstance(seg, C.Sequence):
+                        continue
+                    er = float(slot.edit_rate)
+                    if er <= 0:
+                        continue
+                    pos = 0
+                    for obj in seg.components:
+                        ln = int(getattr(obj, "length", 0) or 0)
+                        if isinstance(obj, C.Filler):
+                            pos += ln
+                            continue
+                        if isinstance(obj, C.Transition):
+                            pos -= ln
+                            continue
+                        if isinstance(obj, C.SourceClip):
+                            smob, _chain_off = _resolve_clip_essence(obj)
+                            path = _write_essence(smob) if smob is not None else None
+                            if path and ln > 0:
+                                try:
+                                    _own_off = int(getattr(obj, "start", 0) or 0)
+                                except Exception:
+                                    _own_off = 0
+                                src_off = max(0.0, float(_own_off + _chain_off) / er)
+                                placed.append((pos / er, src_off, ln / er, path))
+                            elif ln > 0:
+                                logger.warning(
+                                    f"AAF extraction: no essence resolved for clip at "
+                                    f"{pos / er:.2f}s (len {ln / er:.2f}s) — leaving silence"
+                                )
+                            pos += ln
+                            continue
+                        pos += ln
+
+        if not placed:
+            logger.info("AAF embedded-audio extraction: no embedded essence found (timeline-only AAF).")
+            return False
+        if len(placed) > 400:
+            logger.warning(f"AAF embedded-audio extraction: {len(placed)} clips — too many for one-pass assembly, skipping.")
+            return False
+
+        total_dur = max(st + du for st, _o, du, _p in placed) + 0.25
+        cmd = ["ffmpeg", "-y", "-f", "lavfi", "-t", f"{total_dur:.3f}",
+               "-i", "anullsrc=r=48000:cl=stereo"]
+        filters = []
+        mix_tags = ["[0:a]"]
+        for i, (st, off, du, pth) in enumerate(placed):
+            cmd += ["-i", pth]
+            delay_ms = max(0, int(round(st * 1000)))
+            filters.append(
+                f"[{i + 1}:a]atrim=start={off:.4f}:duration={du:.4f},"
+                f"aresample=48000,adelay={delay_ms}:all=1[a{i}]"
+            )
+            mix_tags.append(f"[a{i}]")
+        filters.append(
+            "".join(mix_tags) + f"amix=inputs={len(mix_tags)}:duration=first:normalize=0[out]"
+        )
+        if str(out_wav).lower().endswith(".mp3"):
+            # Browser/waveform-friendly: a reconstructed 7-min PCM WAV is
+            # ~80-190 MB and chokes the frontend's WebAudio decode (no
+            # waveform, broken playback); 192k MP3 matches a normal upload.
+            _enc = ["-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000"]
+        else:
+            _enc = ["-c:a", "pcm_s16le", "-ar", "48000"]
+        cmd += ["-filter_complex", ";".join(filters), "-map", "[out]", *_enc, out_wav]
+        proc = subprocess.run(cmd, capture_output=True, timeout=1800)
+        if proc.returncode != 0 or not os.path.exists(out_wav) or os.path.getsize(out_wav) < 1024:
+            logger.warning(
+                f"AAF embedded-audio assembly failed (rc={proc.returncode}): "
+                f"{(proc.stderr or b'')[-400:]!r}"
+            )
+            return False
+        logger.info(
+            f"AAF embedded-audio extraction OK: {len(placed)} clips -> "
+            f"{out_wav} ({os.path.getsize(out_wav) / 1e6:.1f} MB, {total_dur:.1f}s)"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"AAF embedded-audio extraction failed: {e}")
+        return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def parse_aaf_to_scenes(

@@ -77,7 +77,7 @@ export default function WaveformDisplay({
           wavesurfer.loadBlob(response.data);
         })
         .catch((err) => {
-          console.error('[WaveformDisplay] Failed to load audio via axios:', err);
+          console.error('[WaveformDisplay] Failed to load audio via axios (large file? check size/format):', err);
           // Fallback: try native wavesurfer load
           if (!cancelled) {
             try {

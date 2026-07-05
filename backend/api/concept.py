@@ -28,6 +28,10 @@ class CharacterModel(BaseModel):
     name: str = ""
     description: str = ""
     image_path: Optional[str] = None  # relative path to character reference image
+    # Additional reference-angle images of THIS character (rel_paths). Used to
+    # strengthen identity lock — multiple angles/expressions are auto-balanced
+    # into the scene's reference slots. Empty for single-image characters.
+    extra_images: list[str] = []
     # Last prompt used to generate this character — persisted so the
     # Character Edit modal can hydrate it on reopen and the user can
     # tweak + regenerate without retyping.
@@ -90,6 +94,12 @@ class ConceptData(BaseModel):
     # instead of plain natural language.  Per-scene Scene.parameters.json_prompt_mode
     # overrides this.
     json_prompt_mode: bool = False
+    # Scene Intent mode (opt-in): build a structured scene-intent brief that the
+    # prompt is compiled from. Per-scene Scene.parameters.scene_intent_mode overrides.
+    scene_intent_mode: bool = False
+    # Video JSON Prompt mode (opt-in): send the video prompt to LTX as a structured
+    # JSON object instead of prose. Per-scene Scene.parameters.video_json_mode overrides.
+    video_json_mode: bool = False
     # Model-generated audio (LTX 2.3 AV-native).  Global gate: when True,
     # scenes whose Video tab has `use_model_audio` set are dispatched via
     # the AV-native workflow that lets the model generate its own audio
@@ -286,6 +296,8 @@ async def get_concept(
         custom_color_palette=s.get("custom_color_palette", "") or "",
         global_image_color_filter=s.get("global_image_color_filter", "") or "",
         json_prompt_mode=bool(s.get("json_prompt_mode", False)),
+        scene_intent_mode=bool(s.get("scene_intent_mode", False)),
+        video_json_mode=bool(s.get("video_json_mode", False)),
         enable_model_audio=bool(s.get("enable_model_audio", False)),
         # Symmetric clamp with the PUT side so a hand-edited DB value can't
         # crash or distort the UI slider (range 0..2×).
@@ -348,6 +360,8 @@ async def save_concept(
     # FFmpeg post-process color filter ("" / "bw" / "grayscale" / "sepia")
     settings["global_image_color_filter"] = (req.global_image_color_filter or "").strip().lower()
     settings["json_prompt_mode"] = bool(req.json_prompt_mode)
+    settings["scene_intent_mode"] = bool(req.scene_intent_mode)
+    settings["video_json_mode"] = bool(req.video_json_mode)
     # Model-generated audio (LTX 2.3 AV-native) — global gate + mixer level
     settings["enable_model_audio"] = bool(req.enable_model_audio)
     settings["model_audio_volume"] = max(0.0, min(2.0, float(req.model_audio_volume)))
@@ -768,12 +782,12 @@ async def autogenerate_characters(
         combined_char_style = f"{direction_text}, {style_text}"
 
     for idx, char in enumerate(new_characters):
+        _cp_style = f" Rendered in {combined_char_style} style." if combined_char_style else ""
+        _cp_who = (char.description or char.name or "a character").strip().rstrip(".")
         char_prompt = (
-            f"Character portrait: {char.name}. "
-            f"{char.description}. "
-            f"Style: {combined_char_style}. "
-            "Full body or upper body shot, clear features, studio lighting, "
-            "character reference sheet style."
+            f"A full-body or upper-body character reference portrait of {_cp_who}, standing against "
+            f"a plain neutral studio background in soft, even studio lighting, facing the camera "
+            f"with clear, sharp facial features and natural balanced exposure.{_cp_style}"
         )
 
         job = Job(
@@ -1092,10 +1106,19 @@ async def _generate_flow_inner(
         "Even if the song concept is about one journey through one area, find DIFFERENT specific spots "
         "within that area. A 'neighborhood walk' should visit: the park entrance, a shop interior, "
         "a rooftop view, a crosswalk, a cafe patio — NOT the same street 10 times.\n\n"
-        "Note: This app supports character reference images (up to 5 characters) that maintain visual "
-        "consistency across scenes. When characters are defined, feel free to reference them by name "
-        "in your scene descriptions — the system can use their reference images to keep their appearance "
-        "consistent throughout the video.\n\n"
+        "CASTING (important — direct the cast like a casting director): the project's characters are "
+        "your CAST, each with a description telling you who they are. For EACH scene, decide from that "
+        "scene's lyrics/script content WHO actually belongs in the moment — who is speaking, acting, "
+        "being described, or emotionally central — and match the character whose ROLE and description "
+        "fit best. NEVER default to the first characters in the list, never reuse the same pair out of "
+        "habit, and never crowd a scene: name ONLY who serves that moment (usually 1-2 characters, 3 at "
+        "the absolute most — the renderer attaches at most 3 character references per scene). Some "
+        "scenes are strongest with NO characters at all (landscapes, objects, atmosphere) — leave those "
+        "empty. Spread the cast across the whole video where the story supports it, so every character "
+        "appears where they fit best rather than clustering in the first scenes. Reference characters "
+        "BY NAME in the scene description — the system maps names to their reference images — and name "
+        "the scene's PRIMARY subject FIRST (mention order sets reference-image priority for the "
+        "renderer).\n\n"
         "IMPORTANT: Return ONLY a JSON array of strings, one per scene, in order. "
         "No markdown, no labels, no explanation — just the JSON array."
     )
@@ -1115,7 +1138,7 @@ async def _generate_flow_inner(
         user_prompt = (
             f"Production Concept: {concept_text or '(not set)'}\n"
             f"Visual Style: {style_text or '(not set)'}\n"
-            f"Characters: {char_block}\n"
+            f"CAST SHEET (choose per scene WHO fits the moment — see CASTING rules): {char_block}\n"
             f"{lyrics_block}\n"
             f"Scenes (with per-scene narration text):\n{scene_list}\n\n"
             "Generate a storyboard idea for each scene. The narration for each scene is your PRIMARY source "
@@ -1125,7 +1148,7 @@ async def _generate_flow_inner(
         user_prompt = (
             f"Video Concept: {concept_text or '(not set)'}\n"
             f"Visual Style: {style_text or '(not set)'}\n"
-            f"Characters: {char_block}\n"
+            f"CAST SHEET (choose per scene WHO fits the moment — see CASTING rules): {char_block}\n"
             f"{lyrics_block}\n"
             f"Scenes (with per-scene lyrics):\n{scene_list}\n\n"
             "Generate a storyboard idea for each scene. The lyrics for each scene are your PRIMARY source "
@@ -1218,7 +1241,7 @@ async def _generate_flow_inner(
             batch_user_prompt = (
                 f"{'Production Concept' if _is_narration_proj else 'Video Concept'}: {concept_text or '(not set)'}\n"
                 f"Visual Style: {style_text or '(not set)'}\n"
-                f"Characters: {char_block}\n"
+                f"CAST SHEET (choose per scene WHO fits the moment — see CASTING rules): {char_block}\n"
             )
             if lyrics_summary:
                 _summary_label = (
@@ -1321,6 +1344,11 @@ async def _generate_flow_inner(
             "You are a creative director for AI-generated music videos and narration videos. "
             "Given scene details, generate ONE visual storyboard idea under 100 words describing "
             "the specific location, camera movement, action, mood, and composition. "
+            "Make the location SPECIFIC and DISTINCT — the surrounding scenes each use different "
+            "locations, times of day, atmospheres, shot sizes and angles, so pick something that "
+            "stands apart while fitting the story. If characters are defined, CAST from them: pick "
+            "the 1-2 whose role/description best fits THIS moment (not the first in the list; none "
+            "at all is fine for scenery), name them, primary subject first. "
             "Return ONLY the idea text — no JSON, no labels, no explanation."
         )
 
@@ -1459,12 +1487,12 @@ async def generate_character_image(
         combined_style = f"{direction_text}, {style_text}"
 
     # Build prompt from character description + style
+    _cp_style = f" Rendered in {combined_style} style." if combined_style else ""
+    _cp_who = (char.get("description") or char.get("name") or "a character").strip().rstrip(".")
     char_prompt = req.prompt_override or (
-        f"Character portrait: {char.get('name', 'Character')}. "
-        f"{char.get('description', '')}. "
-        f"Style: {combined_style}. "
-        "Full body or upper body shot, clear features, studio lighting, "
-        "character reference sheet style."
+        f"A full-body or upper-body character reference portrait of {_cp_who}, standing against "
+        f"a plain neutral studio background in soft, even studio lighting, facing the camera "
+        f"with clear, sharp facial features and natural balanced exposure.{_cp_style}"
     )
 
     # Auto-select workflow based on reference count

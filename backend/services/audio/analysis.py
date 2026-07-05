@@ -361,23 +361,35 @@ class AudioAnalyzer:
             # Use Popen so we can log progress in real-time and avoid timeout issues
             process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
             )
 
-            # Read stderr in real time (demucs writes progress there)
-            stderr_lines = []
-            if process.stderr:
-                for line in process.stderr:
-                    line = line.rstrip()
-                    if line:
-                        stderr_lines.append(line)
-                        # Log progress lines so user can see activity in console
-                        if "%" in line or "Separated" in line or "segment" in line.lower():
-                            logger.info(f"Demucs: {line}")
-                        else:
-                            logger.debug(f"Demucs: {line}")
+            # Drain stderr on a background thread (demucs writes progress
+            # there).  Reading it inline blocks until demucs exits, which
+            # made the wait(timeout=...) below unenforceable — the exact
+            # wedge scenario it exists to catch.  stdout goes to DEVNULL so
+            # a full pipe buffer can never deadlock the process.
+            stderr_lines: list = []
+
+            def _drain_stderr() -> None:
+                try:
+                    if process.stderr:
+                        for line in process.stderr:
+                            line = line.rstrip()
+                            if line:
+                                stderr_lines.append(line)
+                                if "%" in line or "Separated" in line or "segment" in line.lower():
+                                    logger.info(f"Demucs: {line}")
+                                else:
+                                    logger.debug(f"Demucs: {line}")
+                except Exception:
+                    pass
+
+            import threading as _threading
+            _drainer = _threading.Thread(target=_drain_stderr, daemon=True)
+            _drainer.start()
 
             # Hard timeout — Demucs can wedge on disk I/O / OOM swap thrash.
             # Scale with audio length: long narrations need proportionally
@@ -400,10 +412,11 @@ class AudioAnalyzer:
                     pass
                 tail = "\n".join(stderr_lines[-20:])
                 raise RuntimeError(
-                    f"Demucs timed out after 30 minutes and was killed. "
-                    f"Last stderr lines:\n{tail}"
+                    f"Demucs timed out after {_demucs_timeout // 60} minutes "
+                    f"and was killed. Last stderr lines:\n{tail}"
                 )
 
+            _drainer.join(timeout=10)
             if process.returncode != 0:
                 stderr_text = "\n".join(stderr_lines)
                 raise RuntimeError(f"Demucs failed (exit {process.returncode}): {stderr_text}")
@@ -654,7 +667,10 @@ class AudioAnalyzer:
         # 1. Check for OpenAI-compatible (most specific endpoint)
         try:
             r = requests.options(f"{base_url}/v1/audio/transcriptions", timeout=5)
-            if r.status_code < 500:
+            # Only 200/204/405 prove the route exists — Gradio answers 404
+            # (which is < 500) and was being misrouted here, then failing
+            # the POST and silently falling back to LOCAL Whisper.
+            if r.status_code in (200, 204, 405):
                 logger.info(f"Detected OpenAI-compatible Whisper at {base_url}")
                 return "openai"
         except Exception:
@@ -1779,6 +1795,11 @@ class AudioAnalyzer:
         url = f"{base_url}/v1/audio/transcriptions"
         logger.info(f"Posting to OpenAI-compatible endpoint: {url}")
 
+        try:
+            _remote_timeout = max(600, int(_get_audio_duration_seconds(str(audio_path)) * 2))
+        except Exception:
+            _remote_timeout = 600
+
         with open(audio_path, "rb") as f:
             files = {"file": (audio_path.name, f, "audio/wav")}
             data = {
@@ -1789,7 +1810,7 @@ class AudioAnalyzer:
             if initial_text:
                 data["initial_prompt"] = initial_text
 
-            response = requests.post(url, files=files, data=data, timeout=600)
+            response = requests.post(url, files=files, data=data, timeout=_remote_timeout)
 
         logger.info(f"OpenAI-compatible response: {response.status_code}")
         if response.status_code != 200:
@@ -1825,6 +1846,11 @@ class AudioAnalyzer:
         """Transcribe using a generic endpoint (/asr or /transcribe)."""
         import requests
 
+        try:
+            _remote_timeout = max(600, int(_get_audio_duration_seconds(str(audio_path)) * 2))
+        except Exception:
+            _remote_timeout = 600
+
         # Try common endpoint paths
         for endpoint in ["/asr", "/transcribe"]:
             url = f"{base_url}{endpoint}"
@@ -1836,7 +1862,7 @@ class AudioAnalyzer:
                     if initial_text:
                         data["initial_prompt"] = initial_text
 
-                    response = requests.post(url, files=files, data=data, timeout=600)
+                    response = requests.post(url, files=files, data=data, timeout=_remote_timeout)
 
                 if response.status_code == 404:
                     continue

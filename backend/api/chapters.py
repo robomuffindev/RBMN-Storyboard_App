@@ -299,8 +299,11 @@ async def split_chapter(
         s.chapter_id = new_ch.id
         session.add(s)
 
-    # Update original chapter's end_time
+    # Update original chapter's end_time.  Flip it to manual too (matches
+    # merge) — otherwise the next rebuild's pre-clean deletes the still-auto
+    # original and silently undoes the split.
     ch.end_time = float(target_scene.start_time)
+    ch.source = "manual"
     ch.updated_at = datetime.utcnow()
     session.add(ch)
 

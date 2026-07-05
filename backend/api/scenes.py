@@ -803,6 +803,7 @@ async def _reslice_audio_for_scene(scene: Scene, project_id: UUID, session: Asyn
             _audio_select(Asset)
             .where(Asset.project_id == project_id)
             .where(Asset.asset_type.in_([AssetType.MUSIC, AssetType.NARRATION]))
+            .where(~Asset.rel_path.contains("stems/"))  # never slice from a Demucs stem
             .order_by(Asset.created_at.desc())  # type: ignore
         )
         master = (await session.execute(_stmt)).scalars().first()
@@ -1588,7 +1589,7 @@ async def _retrim_scene(
     # Step 2: Color correction
     try:
         from backend.database.models import AppSettings as DBAppSettings
-        cc_stmt = select(AppSettings).where(AppSettings.id == 1)
+        cc_stmt = select(DBAppSettings).where(DBAppSettings.id == 1)
         cc_result = await session.execute(cc_stmt)
         cc_settings_obj = cc_result.scalars().first()
         cc_enabled = cc_settings_obj.color_correction_enabled if cc_settings_obj and hasattr(cc_settings_obj, 'color_correction_enabled') and cc_settings_obj.color_correction_enabled is not None else True

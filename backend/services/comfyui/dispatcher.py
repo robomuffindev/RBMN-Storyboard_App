@@ -79,21 +79,26 @@ def apply_user_caps(worker: "ComfyWorker", caps_config: dict) -> None:
     # the user specified an explicit list.  Empty list / missing = ALL
     # → leave that category unconstrained.
     user_models: set[str] = set()
+    worker.image_models = set()
+    worker.video_models = set()
     if caps_config.get("image", True):
         img_models = caps_config.get("image_models") or []
         if img_models:
-            user_models |= {str(m) for m in img_models if m}
+            worker.image_models = {str(m) for m in img_models if m}
+            user_models |= worker.image_models
     if caps_config.get("video", True):
         vid_models = caps_config.get("video_models") or []
         if vid_models:
-            user_models |= {str(m) for m in vid_models if m}
-    # Preserve any models the dispatcher's discover_capabilities() set
-    # that are NOT in our known multiselect options (future-proofing).
-    # User selection takes precedence for image/video model names.
+            worker.video_models = {str(m) for m in vid_models if m}
+            user_models |= worker.video_models
+    # worker.models keeps the merged view for display/legacy readers;
+    # select_worker prefers the per-category sets so an image-only
+    # restriction can no longer knock the worker out of video routing.
     worker.models = user_models if user_models else set()
     logger.info(
         f"Applied user caps for {worker.url}: capabilities={merged_caps}, "
-        f"models={worker.models or 'ALL'}"
+        f"image_models={worker.image_models or 'ALL'}, "
+        f"video_models={worker.video_models or 'ALL'}"
     )
 
 
@@ -106,6 +111,12 @@ class ComfyWorker:
     in_flight: int = 0
     capabilities: Set[str] = field(default_factory=set)  # e.g., {"klein", "ltx", "upscale"}
     models: Set[str] = field(default_factory=set)  # e.g., {"SD15", "SD3"}
+    # Per-category user model caps (v1.22.1).  Empty set = "ALL" for that
+    # category.  These fix the merged-set bug where restricting only
+    # image_models excluded the worker from EVERY video job (the video
+    # model was never in the merged set).
+    image_models: Set[str] = field(default_factory=set)
+    video_models: Set[str] = field(default_factory=set)
     last_check: datetime = field(default_factory=datetime.now)
     is_runpod: bool = False  # True if this worker was added via RunPod integration
     # User-configurable per-worker priority.  Lower number = picked
@@ -412,18 +423,45 @@ class ComfyDispatcher:
 
         # Filter by models (only if workers actually have models configured)
         if required_models:
-            # Only apply model filter to workers that have models declared.
-            # Workers with empty model sets are assumed to support whatever
-            # models their capability implies (e.g., ltx capability = LTX model).
-            workers_with_models = [w for w in capable if w.models]
+            # The job's category is encoded in required_caps ("klein" =
+            # image family, "ltx" = video family) — use it to test ONLY the
+            # matching per-category cap set.  Empty per-category set = ALL.
+            # Workers that predate the split (discovery-populated w.models
+            # only) keep the legacy merged-set semantics.
+            _cat_attr = None
+            if required_caps and "klein" in required_caps:
+                _cat_attr = "image_models"
+            elif required_caps and "ltx" in required_caps:
+                _cat_attr = "video_models"
+            elif not required_caps:
+                # First-pass T2I families (z_image_turbo / krea2_turbo) carry
+                # EMPTY caps but a required model — they are image jobs.  Video
+                # jobs always carry the "ltx" cap, so this branch is safe; it
+                # closes the last merged-set hole (a video-restricted worker
+                # wrongly rejecting first-pass image jobs).
+                _cat_attr = "image_models"
+
+            def _model_ok(w: "ComfyWorker") -> bool:
+                if _cat_attr is not None and (w.image_models or w.video_models):
+                    cat = getattr(w, _cat_attr)
+                    return (not cat) or required_models.issubset(cat)
+                return (not w.models) or required_models.issubset(w.models)
+
+            workers_with_models = [
+                w for w in capable if w.models or w.image_models or w.video_models
+            ]
             if workers_with_models:
-                # Some workers declare models — filter those
-                model_capable = [w for w in capable if required_models.issubset(w.models) or not w.models]
+                model_capable = [w for w in capable if _model_ok(w)]
                 if not model_capable:
+                    _desc = ", ".join(
+                        f"{w.url}: img={w.image_models or 'ALL'} "
+                        f"vid={w.video_models or 'ALL'} legacy={w.models}"
+                        for w in capable
+                    )
                     logger.warning(
-                        f"No workers available with required models {required_models}. "
-                        f"Capable workers and their models: "
-                        f"{{{', '.join(f'{w.url}: {w.models}' for w in capable)}}}"
+                        f"No workers available with required models {required_models} "
+                        f"(category={_cat_attr or 'legacy'}). "
+                        f"Capable workers and their models: {{{_desc}}}"
                     )
                     return None
                 capable = model_capable

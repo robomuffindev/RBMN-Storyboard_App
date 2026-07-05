@@ -354,24 +354,57 @@ async def delete_project(
             # main delete still fails, the outer except will catch it.
             logger.warning(f"GlobalCharacter pre-null on project delete failed: {_gc_err}")
 
+        # FK pre-clean: with PRAGMA foreign_keys=ON, ORM cascade order is not
+        # guaranteed for the chapters SELF-FK (parent_chapter_id) and the
+        # scenes->chapters FK.  Deep chapter trees (AAF imports auto-split
+        # into parent+sub chapters) made project deletion raise
+        # IntegrityError mid-cascade.  NULL both reference chains first.
+        try:
+            from sqlalchemy import text as _del_text
+            _pid_hex = project_id.hex
+            await session.execute(
+                _del_text("UPDATE scenes SET chapter_id = NULL WHERE project_id = :pid"),
+                {"pid": _pid_hex},
+            )
+            await session.execute(
+                _del_text("UPDATE chapters SET parent_chapter_id = NULL WHERE project_id = :pid"),
+                {"pid": _pid_hex},
+            )
+            await session.commit()
+        except Exception as _fk_err:
+            logger.warning(f"Project-delete FK pre-clean failed (continuing): {_fk_err}")
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+
         # Delete from database (cascade deletes scenes, assets, jobs, etc.)
         await session.delete(project)
         await session.commit()
 
-        # Delete project directory
+        # Delete project directory — NON-FATAL: a locked file (Windows +
+        # an ffmpeg/preview handle) must not resurrect a half-deleted
+        # project in the UI.  Leftover folders can be removed manually.
         project_path = settings.project_dir / str(project_id)
         if project_path.exists():
-            shutil.rmtree(project_path)
-            logger.info(f"Deleted project directory: {project_path}")
+            try:
+                shutil.rmtree(project_path)
+                logger.info(f"Deleted project directory: {project_path}")
+            except Exception as _rm_err:
+                logger.warning(
+                    f"Project DB row deleted but directory removal failed "
+                    f"(locked file?): {project_path} — {_rm_err}. "
+                    f"Delete the folder manually."
+                )
 
         logger.info(f"Deleted project {project_id}")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting project {project_id}: {e}")
+        logger.error(f"Error deleting project {project_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete project",
+            detail=f"Failed to delete project: {type(e).__name__}: {e}",
         )
 
 

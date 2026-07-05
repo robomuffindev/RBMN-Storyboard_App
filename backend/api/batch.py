@@ -180,7 +180,7 @@ async def upload_batch_audio(file: UploadFile = File(...)):
     staging_dir = settings.project_dir / "_batch_staging" / str(uuid4())
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    dest_path = staging_dir / file.filename
+    dest_path = staging_dir / Path(file.filename or "upload.bin").name
     content = await file.read()
     with open(dest_path, "wb") as f:
         f.write(content)
@@ -216,7 +216,7 @@ async def upload_batch_srt(file: UploadFile = File(...)):
         )
     staging_dir = settings.project_dir / "_batch_staging" / str(uuid4())
     staging_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = staging_dir / file.filename
+    dest_path = staging_dir / Path(file.filename or "upload.bin").name
     content = await file.read()
     with open(dest_path, "wb") as f:
         f.write(content)
@@ -848,7 +848,7 @@ async def _process_single_item(
             if (config.color_scheme or "").strip():
                 _proj_settings["color_scheme"] = config.color_scheme.strip()
             if (config.image_filter or "none").strip().lower() != "none":
-                _proj_settings["image_filter"] = config.image_filter.strip().lower()
+                _proj_settings["global_image_color_filter"] = config.image_filter.strip().lower()
             project = Project(
                 name=item_state["project_name"],
                 mode=ProjectMode(config.render_type),
@@ -1036,14 +1036,37 @@ async def _process_single_item(
         # it as the source of truth like the per-project upload_srt
         # endpoint does).
         if _srt_attached and _srt_words:
-            analysis_result["transcription"] = list(_srt_words)
+            # v1.8.20 drift-fix parity with upload_srt: SRT timestamps
+            # (esp. ElevenLabs) drift from the real audio — re-anchor the
+            # SRT words onto the Whisper timing measured above before
+            # substituting them in.
+            _use_words = list(_srt_words)
+            try:
+                _whisper_words = list(analysis_result.get("transcription") or [])
+                if _whisper_words:
+                    from backend.services.audio.text_align import (
+                        retime_srt_words_to_audio as _retime,
+                    )
+                    _retimed = _retime(_use_words, _whisper_words)
+                    if _retimed and len(_retimed) == len(_use_words):
+                        _use_words = _retimed
+                        logger.info(
+                            f"Batch item {item_index}: re-anchored SRT words "
+                            f"to Whisper audio timing before substitution."
+                        )
+            except Exception as _rt_err:
+                logger.warning(
+                    f"Batch item {item_index}: SRT re-anchor failed "
+                    f"(non-fatal, using raw SRT timings): {_rt_err}"
+                )
+            analysis_result["transcription"] = _use_words
             analysis_result["lyrics"] = {
-                "text": " ".join(w.get("word", "") for w in _srt_words),
-                "words": list(_srt_words),
+                "text": " ".join(w.get("word", "") for w in _use_words),
+                "words": _use_words,
             }
             logger.info(
                 f"Batch item {item_index}: substituted Whisper transcription with "
-                f"{len(_srt_words)} SRT cue words."
+                f"{len(_use_words)} SRT cue words."
             )
 
         # Save analysis results to cache
@@ -1286,7 +1309,7 @@ async def _process_single_item(
                 if (config.color_scheme or "").strip():
                     proj_settings["color_scheme"] = config.color_scheme.strip()
                 if (config.image_filter or "none").strip().lower() != "none":
-                    proj_settings["image_filter"] = config.image_filter.strip().lower()
+                    proj_settings["global_image_color_filter"] = config.image_filter.strip().lower()
                 project.settings = proj_settings
                 await session.commit()
 

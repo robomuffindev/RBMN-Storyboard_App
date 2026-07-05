@@ -649,6 +649,20 @@ export default function AppLayout() {
 
   useEffect(() => {
     setScenes(stableScenes as Scene[]);
+    // Re-point activeScene at its refetched row: backend-side writes
+    // (auto-gen persisted refs / submitted_* / chosen paths / dispatch-time
+    // json_prompt) must reach the store copy, or SceneEditor's next
+    // whole-parameters PUT spreads STALE parameters over them.  React
+    // Query's structural sharing keeps unchanged rows referentially
+    // identical, so this is a no-op unless the row actually changed.
+    const _store = useAppStore.getState();
+    const _cur = _store.activeScene;
+    if (_cur) {
+      const _fresh = (stableScenes as Scene[]).find((s) => s.id === _cur.id);
+      if (_fresh && _fresh !== _cur) {
+        _store.setActiveScene(_fresh);
+      }
+    }
   }, [stableScenes, setScenes]);
 
   // ── Push chapter scope into the Zustand store ─────────────────────
@@ -3156,6 +3170,7 @@ type AutoGenMode =
   | 'all_video_single'
   | 'missing_videos_single'
   | 'all_video_fflf'
+  | 'all_video_fflf_keyframes'
   | 'all_video_v2v';
 
 const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string }[] = [
@@ -3164,6 +3179,12 @@ const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string
     label: 'Full Pipeline \u2014 FF/LF Chaining',
     description:
       "Enhance prompts and generate first-frame image + video for every scene. Uses the previous scene's last frame as this scene's first frame for visual continuity.",
+  },
+  {
+    value: 'all_video_fflf_keyframes',
+    label: 'Full Pipeline — FF/LF Keyframes (Independent)',
+    description:
+      'Generates a first-frame AND last-frame image for every scene (two keyframes of one continuous shot), then renders the video with the FF→LF interpolation workflow. No cross-scene chaining — each scene stands alone. Generates one scene at a time.',
   },
   {
     value: 'all_video_v2v',
@@ -3444,6 +3465,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
   const getModeLabel = (m: string) => {
     switch (m) {
       case 'all_video_fflf': return 'Full Pipeline \u2014 FF/LF Chaining';
+      case 'all_video_fflf_keyframes': return 'Full Pipeline \u2014 FF/LF Keyframes';
       case 'all_video_v2v': return 'Full Pipeline \u2014 V2V Extend';
       case 'all_video_single': return 'Full Pipeline \u2014 Single Image';
       case 'missing_videos_single': return 'Missing Videos (Single Image)';
@@ -3673,7 +3695,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
                   <input type="checkbox" checked={overrideFullSet} onChange={e => setOverrideFullSet(e.target.checked)} disabled={isStarting}
                     className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-amber-500" />
                   <div>
-                    <span className="text-sm text-gray-200">Override \u2014 Regenerate Full Set</span>
+                    <span className="text-sm text-gray-200">Override — Regenerate Full Set</span>
                     <p className="text-xs text-gray-500">For "Missing" modes: regenerate every scene instead of only the missing ones. Prior versions remain in the gallery.</p>
                   </div>
                 </label>
@@ -3682,8 +3704,8 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
                   <input type="checkbox" checked={skipExistingPrompts} onChange={e => setSkipExistingPrompts(e.target.checked)} disabled={isStarting}
                     className="w-4 h-4 rounded border-gray-600 bg-gray-700 accent-emerald-500" />
                   <div>
-                    <span className="text-sm text-gray-200">Use Existing Prompts \u2014 Just Render</span>
-                    <p className="text-xs text-gray-500">Skip the LLM enhance step for any scene that already has a prompt. Blank scenes still get a fresh enhancement. Useful for re-runs after you've curated prompts manually \u2014 saves LLM tokens and preserves your edits.</p>
+                    <span className="text-sm text-gray-200">Use Existing Prompts — Just Render</span>
+                    <p className="text-xs text-gray-500">Skip the LLM enhance step for any scene that already has a prompt. Blank scenes still get a fresh enhancement. Useful for re-runs after you've curated prompts manually — saves LLM tokens and preserves your edits.</p>
                   </div>
                 </label>
 

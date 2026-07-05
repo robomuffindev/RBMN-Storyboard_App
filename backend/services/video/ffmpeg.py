@@ -1932,13 +1932,18 @@ def slice_audio(audio_path: str, output_path: str, start_sec: float, end_sec: fl
     duration = end_sec - start_sec
     logger.info(f"Slicing audio: {start_sec}s → {end_sec}s")
 
+    # Re-encode to REAL PCM when writing .wav — "-c:a copy" stuffed MP3
+    # packets into a .wav container whenever the master was MP3 (AAF-extracted
+    # masters are), and browsers / ComfyUI LoadAudio mis-decode WAV-wrapped-MP3
+    # (observed as "every scene plays/shows the first scene's audio").
+    _codec = ["-c:a", "pcm_s16le"] if str(output_path).lower().endswith(".wav") else ["-c:a", "copy"]
     cmd = [
         "ffmpeg",
         *_gpu.get_decode_flags(),
         "-ss", str(start_sec),
         "-i", audio_path,
         "-t", str(duration),
-        "-c:a", "copy",
+        *_codec,
         "-y",
         output_path,
     ]
@@ -2850,10 +2855,16 @@ def mix_audio_tracks(
     """
     if not backing_tracks:
         logger.info("No backing tracks — copying narration as-is")
+        # Same wav-container guard as slice_audio: never stream-copy a
+        # compressed master (AAF-extracted = MP3) into a .wav output.
+        _cn_codec = (
+            ["-c:a", "pcm_s16le"] if str(output_path).lower().endswith(".wav")
+            else ["-c:a", "copy"]
+        )
         cmd = [
             "ffmpeg",
             "-i", narration_path,
-            "-c:a", "copy",
+            *_cn_codec,
             "-y",
             output_path,
         ]

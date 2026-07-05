@@ -64,6 +64,10 @@ _ADVANCED_SCENE_PARAM_KEYS = (
     "vision_describe_refs",         # per-scene vision-describe override
     "json_prompt_mode",             # Ideogram JSON-prompt toggle
     "json_prompt",                  # Ideogram JSON-prompt payload
+    "scene_intent_mode",            # Scene Intent per-scene toggle (1.21)
+    "scene_intent",                 # Scene Intent payload (1.21)
+    "video_json_mode",              # Video JSON per-scene toggle (1.22)
+    "video_json_prompt",            # Video JSON payload (1.22)
     "lf_exclude_first_frame_ref",   # last-frame "don't reference FF" toggle
 )
 
@@ -264,6 +268,10 @@ async def build_export(project: Project, session: AsyncSession) -> dict:
         "custom_image_direction": settings.get("custom_image_direction", "") or "",
         "global_color_override": settings.get("global_color_override", "") or "",
         "custom_color_palette": settings.get("custom_color_palette", "") or "",
+        # Structured prompt-mode project toggles (1.10 / 1.21 / 1.22)
+        "json_prompt_mode": bool(settings.get("json_prompt_mode", False)),
+        "scene_intent_mode": bool(settings.get("scene_intent_mode", False)),
+        "video_json_mode": bool(settings.get("video_json_mode", False)),
     }
     # Resolution split (1.8.x)
     resolution_out = {
@@ -386,6 +394,15 @@ async def apply_import(
     ):
         if src_key in concept and _maybe_write(settings, dst_key, concept[src_key] or "", mode):
             stats["concept_fields_updated"] += 1
+
+    # Structured prompt-mode toggles — booleans, so they bypass the
+    # string-coercing loop above ("fill_missing" only writes when unset).
+    for _bkey in ("json_prompt_mode", "scene_intent_mode", "video_json_mode"):
+        if _bkey in concept and concept[_bkey] is not None:
+            _bval = bool(concept[_bkey])
+            if (mode == "override" or _bkey not in settings) and settings.get(_bkey) != _bval:
+                settings[_bkey] = _bval
+                stats["concept_fields_updated"] += 1
 
     # Resolution block (1.8.x).  Resolution values 0 = "use unified".
     res = payload.get("resolution", {}) or {}

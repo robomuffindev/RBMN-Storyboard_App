@@ -616,6 +616,37 @@ def _cleanup_tmpfs_dir(tmpdir: Path, output_dir: Path) -> None:
         logger.warning(f"tmpfs cleanup failed for {tmpdir}: {e}")
 
 
+def _validate_workdir_params(work_dir: Path, params_key: str) -> None:
+    """Guard against a FAILED prior export's work_dir poisoning resume.
+
+    The work_dir path is stable per process, clips are reused by index +
+    nonzero duration, and merged videos by a bare duration check — so if
+    the scene set or render params changed, stale leftovers MUST be wiped.
+    A matching key keeps the intended resume behavior intact.
+    """
+    marker = work_dir / ".params_hash"
+    try:
+        if marker.exists() and marker.read_text().strip() == params_key:
+            return
+        stale = [p for p in work_dir.iterdir() if p.name != ".params_hash"]
+        if marker.exists() or stale:
+            logger.info(
+                f"work_dir params changed / unkeyed leftovers — wiping "
+                f"{len(stale)} stale item(s) in {work_dir}"
+            )
+        for p in stale:
+            try:
+                if p.is_dir():
+                    shutil.rmtree(str(p), ignore_errors=True)
+                else:
+                    p.unlink()
+            except Exception:
+                pass
+        marker.write_text(params_key)
+    except Exception as e:
+        logger.warning(f"work_dir params validation failed (non-fatal): {e}")
+
+
 def _build_clip_task(
     scene: dict,
     scene_idx: int,
@@ -1242,6 +1273,17 @@ def assemble_music_video(
     # Acquire a tmpfs-backed working directory for intermediate files.
     # On Linux with /dev/shm this eliminates disk I/O for temp clips.
     work_dir = _get_tmpfs_dir(output_dir, label="rbmn_music_export")
+    _validate_workdir_params(
+        work_dir,
+        _video_cache_key(
+            scenes,
+            width=width, height=height, fps=fps,
+            intermediate_crf=14, final_crf=final_crf,
+            default_transition=default_transition,
+            default_transition_duration=default_transition_duration,
+            color_match_clips=color_match_clips,
+        ),
+    )
     temp_files: list[str] = []
 
     def _cleanup_temp_files() -> None:
@@ -1690,6 +1732,7 @@ def assemble_narration_video(
 
     # Acquire a tmpfs-backed working directory for intermediate files.
     work_dir = _get_tmpfs_dir(output_dir, label="rbmn_narr_export")
+    _validate_workdir_params(work_dir, _cache_key)
     temp_files: list[str] = []
 
     def _cleanup_narration_temp_files() -> None:

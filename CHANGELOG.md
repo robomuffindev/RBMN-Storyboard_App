@@ -1,5 +1,367 @@
 # Changelog
 
+## [1.25.1] - 2026-07-05
+
+### Fixed — FF/LF Keyframes run died on the first two-pass scene
+
+- Root cause (spotted via `rbmn jobs`: two Klein jobs created 8s apart on the failing scene): two-pass
+  FF generation completes in TWO jobs — the awaited Pass-1 (base) job spawns a Pass-2 (composite) job
+  at completion, and only Pass 2 sets `chosen_image_path`. All sequential auto-gen FF steps waited on
+  the Pass-1 row only, then raced ahead → `ltx_fflf` dispatched with no first frame ("LTX video
+  workflow requires a first frame image"). Char-less scenes downgrade to single-pass, which is why the
+  first few scenes worked.
+- New `_await_scene_first_frame`: after every sequential FF wait (keyframes mode + chaining scene-1 +
+  chaining fallback + v2v FF + defensive single branch), poll until the scene REALLY has a first frame.
+  If the composite FAILED, falls back to the Pass-1 base image (loud warning, `two_pass_composite_failed`
+  kept for the UI) so the run continues instead of dying. Also fixes the LF job silently rendering
+  without its FF continuity ref in the same race window.
+- Keyframes step 3: 30s grace poll on `chosen_last_frame_path` instead of an instant hard fail.
+- `rbmn jobs` now shows scene number/name and frame-type/two-pass phase per job.
+
+## [1.25.0] - 2026-07-04
+
+### Added — Auto-Gen mode: Full Pipeline — FF/LF Keyframes (Independent)
+
+- New sequential auto-gen mode `all_video_fflf_keyframes`: for each scene independently, generate a
+  First-Frame image AND a Last-Frame image (two keyframes of one continuous shot), then render the
+  video with the true FF→LF interpolation workflow (`ltx_fflf`). Unlike "FF/LF Chaining" (which
+  chains the previous VIDEO's last frame into the next scene and renders plain I2V), no cross-scene
+  coupling — each scene stands on its own keyframes. Two-pass, character refs, FF-as-LF-continuity-ref
+  (slot 1, opt-out respected), override/skip-existing, lipsync and chapter scoping all behave like the
+  sibling modes.
+- **Keyframe-aware prompting** (applies to ALL FF/LF scenes, auto + manual, prose + Video-JSON):
+  - Video enhance context: new KEYFRAME INTERPOLATION block — clip starts/ends EXACTLY on the two
+    keyframes; write ONE continuous shot bridging them (subject motion + camera move), no content
+    absent from both frames, no cuts/location changes; includes both keyframe prompts as anchors.
+    Replaces the previous one-line mention. Flows into Video-JSON lazy builds automatically.
+  - FF image context: KEYFRAME PAIR block — compose keyframe A so the end state is reachable; keep
+    setting/lighting/wardrobe stable, put the energy in pose/action; cites the LF prompt when present.
+  - LF image context: reachability rules — exact final frame via continuous motion over the scene's
+    real duration, no teleports, but advance the action DECISIVELY (near-identical endpoints = static clip).
+  - VIDEO + NARRATION_VIDEO system prompts: FFLF section (single segment always — multi-segment fights
+    fixed endpoints; prompt supplies the JOURNEY between decided compositions; duration-scaled pacing).
+  - VIDEO_JSON system prompt: FFLF rule (subject.action = journey between keyframes, camera bridges the
+    two compositions, preserve_from_input_image = constants across the whole clip).
+- Note: LTX Director-node path deliberately NOT used here (its workflow is still an unvalidated
+  draft); Video-JSON mode keeps working via the project toggle since `ltx_fflf` is in its gate.
+
+## [1.24.1] - 2026-07-04
+
+### Added — unified CLI troubleshooting suite (`tools/rbmn.py`)
+
+- One entry point for every debugging task: `projects` / `project` / `prompts` / `jobs` / `db`
+  (read-only DB inspection), `audio` / `timeline` / `chapters` / `general` / `aaf` (wrap the existing
+  diag scripts), `media` (ffprobe + content fingerprint), `logs` (tail `logs/rbmn.log`), and live
+  backend commands `health` / `api` (raw escape hatch to any endpoint) / `slice` / `detach-aaf`
+  (port auto-read from `app_settings.app_port`).
+- **Every command mirrors its output to `diagnostics/latest_<cmd>.txt`** (+ timestamped copy) inside
+  the repo, so debugging no longer requires copy/pasting terminal output — the assistant reads the
+  reports (and the backend log) directly from the repo folder. `diagnostics/` is gitignored.
+- Full documentation with symptom→command recipes: `docs/CLI_TOOLS.md`.
+
+### Fixed
+
+- Auto-Gen panel showed literal `\u2014` in "Override — Regenerate Full Set" / "Use Existing
+  Prompts — Just Render" labels: `\uXXXX` escapes are only interpreted inside JS string literals,
+  not in JSX text content. Replaced with real em-dash characters (3 sites in AppLayout.tsx).
+
+## [1.24.0] - 2026-07-01
+
+### Fixed — stale-master accumulation, unordered master lookups, project delete
+
+- Lorenzo's `diag_audio` run exposed the compounding data state: repeated AAF imports **accumulated
+  master asset rows** (cleanup only deleted one), and several master lookups used **unordered
+  `.first()`** — the slicer could pick a stale master from an earlier run (clip filenames carried a
+  version stamp 7h older than the newest master). Now: re-import purges **every** prior AAF-extracted
+  master (rows + files), and all master queries (bulk/single/dispatch auto-slice + job-media fallback)
+  order newest-first; the job-media fallback also excludes stems (desc order would have preferred a
+  newer stem row).
+- **Project deletion could fail with IntegrityError** on deep chapter trees (AAF imports auto-split
+  into parent+sub chapters; ORM cascade order vs the chapters self-FK + scenes→chapters FK is not
+  guaranteed with `PRAGMA foreign_keys=ON`). Delete now NULLs both FK chains first; directory removal
+  is non-fatal (a locked file no longer resurrects a half-deleted project); the 500 detail includes
+  the real exception instead of a blind "Failed to delete project".
+- `tools/diag_audio.py` now honors the **`app_settings.project_dir` override** (DB and project files
+  can live in different roots) and prints the project folder + `audio_clips/` contents, so
+  "MISSING-FILE" verdicts distinguish wrong-root from genuinely-absent.
+
+### Fixed — THE AAF audio root cause: essence resolver returned clip 1 for every scene
+
+- **ElevenLabs AAFs use ONE MasterMob with N slots** (diag: `MasterMob: 1, SourceMob: 56`) — every
+  timeline clip references the same MasterMob, distinguished only by `slot_id`. The extraction's
+  essence resolver scanned the MasterMob for "the first SourceMob with essence" and therefore
+  returned **clip 1's audio for all 56 timeline clips** — the reconstructed master was scene 1's
+  audio stamped at every clip position, which then sliced into 56 identical-content clips. Exactly
+  the observed "same waveform/audio on every scene".
+- Fixed: essence now resolves **per clip through its own source-reference chain** (mob_id + slot_id
+  at every hop via pyaaf2's `SourceClip.walk()`, source offsets accumulated); a clip whose chain
+  fails is left silent with a loud log instead of borrowing another clip's audio.
+- **Verified against a synthetic AAF with the exact ElevenLabs topology** (1 MasterMob / N slots /
+  N SourceMobs): three distinct tones land in their own regions. The earlier test used one
+  MasterMob per clip — the wrong topology — which is why it passed while real files failed.
+- **New `tools/diag_audio.py`** — one command audits the whole chain from the DB out: master asset
+  (codec/duration), every scene's clip (exists/codec/duration) plus a decoded-PCM content
+  fingerprint that makes "all clips identical" undeniable, and a plain verdict.
+
+### Fixed — AAF re-import now actually repairs a broken project (three compounding gaps)
+
+- **Re-import replaces a previously AAF-extracted master** instead of silently reusing it — projects
+  whose master was a stale artifact of older extraction code (e.g. the giant PCM WAV) kept the broken
+  master forever, so re-importing changed nothing. User-uploaded masters are still reused untouched.
+  Extracted masters also get a timestamped filename (new URL, no browser cache).
+- **Per-scene clip filenames now embed the master's mtime** (all three slicers: bulk, single-scene,
+  dispatch auto-slice). Names used to be identical across re-slices, so browsers kept serving the OLD
+  cached clip files even after a correct re-slice — "like nothing ever happened."
+- **"Re-slice audio" button added to the AAF panel** — the old re-slice control only rendered in the
+  post-Whisper section, which AAF projects (correctly) never show, making the documented repair
+  path unreachable. Clarified: AAF import/re-import slices automatically; Process Audio is never
+  required for AAF projects.
+
+### Fixed — per-scene audio clips were MP3-in-a-.wav-container (the "scene 1 over and over" bug)
+
+- `slice_audio` used `-c:a copy`: with the (new) MP3 master it wrote **MP3 packets into a `.wav`
+  container**. ffmpeg reads such files, but browsers and ComfyUI's LoadAudio mis-decode them — the
+  timeline showed/played the same waveform for every scene and playback behaved as if only scene 1's
+  clip existed. Verified by repro: `codec_name=mp3` inside `.wav` slices. Slices (and the backing-mix
+  narration copy) now re-encode to REAL PCM whenever the output is `.wav`; non-wav outputs keep stream
+  copy. Slice content itself was always positionally correct.
+- **Repair for affected projects:** Re-slice Audio on the Audio tab (regenerates all per-scene clips
+  as real PCM). Old WAV/MP3-upload projects were never affected (PCM master → copy produced real PCM).
+
+### Fixed — AAF extracted audio now lands as MP3 + merge-cuts control for choppy AAF timelines
+
+- **Extracted AAF audio is written as 192k MP3** instead of a reconstructed PCM WAV. A 7-minute
+  reconstruction was 80-190 MB of WAV — the frontend's WebAudio decode choked on it (no waveform,
+  broken timeline playback), while a ~10 MB MP3 behaves exactly like a normal upload. Extraction
+  verified end-to-end again on the MP3 path (clips at exact positions, silent gaps).
+- **"Merge cuts < N s" control in the AAF panel**: ElevenLabs often renders one clip per SENTENCE,
+  which produces choppy scenes that split paragraphs at every sentence boundary. The new field feeds
+  the importer's existing `min_scene_seconds` merge so close cut points collapse into one scene
+  (0 = exact AAF cuts).
+- `tools/diag_aaf.py` now prints a **per-track breakdown** (clips/fillers per Sound track) — a second
+  audio track in the AAF cuts scenes at ITS clip starts too, which is the other cause of odd splits.
+
+### Fixed — scene videos baked with the beginning of the FULL audio track
+
+- The completion-time audio mux had a last-resort fallback that muxed the **entire master audio,
+  unseeked**, onto a scene's video whenever the per-scene clip was missing and auto-slice failed —
+  so every affected scene played the beginning of the whole track (observed on AAF-imported
+  projects whose scenes predated the audio). The fallback now **slices the master to the scene's
+  own time range inline**; a true full-master mux is only allowed for a scene starting at 0
+  (positionally correct), and mid-timeline scenes keep model audio with a loud log telling you to
+  re-slice + regenerate instead of shipping wrong audio. Master lookup also excludes Demucs stems.
+- Already-rendered clips carry the wrong audio in their files: click **Re-slice Audio** (Audio tab)
+  to (re)create per-scene clips, then regenerate the affected videos. Exports were never affected —
+  the export assembler lays the master track over the timeline positionally.
+
+### Changed — flow LLM casts characters by fit, not list order
+
+- The story-flow prompt now directs the LLM like a **casting director**: for each scene, pick WHO
+  belongs from the scene's lyrics/script content and each character's role/description — never default
+  to the first characters in the list or reuse the same pair out of habit; character-free scenes are
+  explicitly fine; spread the cast across the video where the story supports it. The character list is
+  framed as a **CAST SHEET** at both prompt sites, and the LLM is told to name the scene's PRIMARY
+  subject FIRST — mention order feeds reference-image priority (Klein weighs earlier slots more).
+  The per-scene retry prompt carries the same casting rules.
+
+### Fixed — auto-gen character references permanently locked off (empty-seed poisoning)
+
+- Auto-gen seeds each scene's character pick into `image_refs_first` so the Image tab shows what was
+  used. When the auto-pick found NOBODY (typical for a first run on fresh AAF-imported scenes, before
+  flow/SRT text existed), it persisted an **empty** selection — which every later run then respected as
+  the user's explicit "no characters" choice. Result: no scene ever attached character references again.
+- Fix, unified across `/auto`, windowed and sequential runners: an empty stored selection only counts as
+  explicit when the reference picker's **manual lock** (`image_refs_first_manual`, set on real user edits)
+  is present; unlocked empties fall through and re-pick from today's flow/prompt/narration text. Auto-gen
+  now only seeds NON-empty picks. Existing poisoned projects self-heal on their next auto-gen run
+  (bonus: a user-locked "no characters" choice is now respected by `/auto` too, which previously ignored it).
+
+### Added — AAF-first audio setup for narration projects (Audio tab)
+
+The AAF exported by ElevenLabs (or any AAF-capable editor) becomes a first-class — and recommended —
+audio setup path, with clear override semantics while it's active.
+
+- **AAF Timeline panel on the Audio tab** (narration modes, shown first, marked RECOMMENDED): pick the
+  AAF (+ the matching audio file, optional if audio already uploaded, + the SRT export if you want
+  narration text + subtitles), one Import button, **upload progress bar** (AAFs are big) → "Parsing AAF
+  timeline & slicing audio…" → optional SRT step. Uses the proven 1.14.0 import pipeline (replace scenes
+  from sample-accurate clip boundaries, slice audio, rebuild chapters).
+- **AAF is authoritative while attached** (`project.settings.audio_source = "aaf"`, set by the import
+  endpoint — the project-menu Import AAF modal gets this for free):
+  - Whisper analyze / SRT upload **never resync scene boundaries** (gated inside
+    `_maybe_resync_scene_boundaries` with an explicit `aaf_authoritative` reason).
+  - **Suggest Timeline and create-scenes-from-sections return 409** with a clear "detach the AAF first"
+    message; the Audio tab's post-analyze auto scene-create/suggest chain is skipped client-side too.
+  - The rest of the Audio tab renders dimmed under a banner explaining exactly what is superseded
+    (boundaries) and what SRT/Whisper are still for (narration text for prompts, word timing for
+    subtitles — **research note: ElevenLabs AAFs carry timing only; the text ships in their SRT/CSV**,
+    which is why the panel takes an optional SRT alongside).
+- **Active-state panel** shows the imported filename, date, clip/scene counts, with **Re-import AAF**
+  (replaces scenes, with warning) and **Detach AAF timeline** (new `POST /timeline/detach-aaf` —
+  clears the authority flag, keeps scenes/audio/chapters untouched, re-enables the normal flow).
+- **Embedded audio extraction** (`extract_aaf_embedded_audio`): ElevenLabs AAFs embed every clip's
+  rendered audio essence (a ~200 MB AAF vs an 8 MB MP3 — it's mostly audio). The importer now pulls each
+  SourceClip's essence (RIFF/AIFC/raw-PCM aware, chunked reads) and reconstructs the full-length track
+  with ffmpeg at exact timeline positions (silence base + adelay + amix, no normalization) → saved as the
+  project's narration audio and sliced per scene. Priority: uploaded audio > existing project audio >
+  embedded essence > **fail fast with a clear 400** (previously an AAF-only import silently produced a
+  dead timeline: scenes but no waveform/playback).
+- Importer improvement: clip text is now also read from AAF mob **user comments** (best-effort) in case
+  a producer embeds dialogue there — ElevenLabs puts the text in its SRT/CSV exports, so scene names
+  still fall back to "Scene N" until an SRT provides text.
+- **`tools/diag_aaf.py`** — inspect any AAF: clip count/names (text present?), mob user comments,
+  embedded essence streams with sizes + format signatures (RIFF/AIFC/raw-PCM + sample rate/channels/bits),
+  and a plain verdict on what the file provides. Loads the parser directly by path (no heavy deps).
+- **Extraction verified end-to-end** against a pyaaf2-authored embedded-essence AAF (raw-PCM, the exact
+  format real ElevenLabs exports use per diag): clips land at exact timeline positions, gaps and tail
+  are digital silence. Also fixed a pyaaf2 quirk the first diag run exposed: essence streams return
+  **bytearray** (unhashable), which silently zeroed the size counts.
+
+## [1.23.0] - 2026-07-01
+
+### Changed — Prompt-system overhaul (deep-dive P0/P1/P2 + official LTX JSON schema)
+
+Implements `docs/PROMPTING_DEEP_DIVE_2026-07-01.md` end-to-end, informed by LTX's official
+JSON-prompting article supplied by the user.
+
+**Video JSON mode → official LTX schema**
+- The structured video prompt now follows LTX's OFFICIAL format: `scene` / `subject` / `camera` / `duration` (was a community five-section shape). Camera is three mandatory discrete fields (shot_type / angle / movement — "static" stated explicitly); `preserve_from_input_image` lives under `scene`; duration paces the motion. **Legacy v1.22.0 objects auto-convert on load** (`normalize_video_json`) so existing scenes keep working. Dispatch SFW/style/colour constraints inject as `scene.style_constraints`; duration backfills from the scene when the model leaves it 0.
+- **The lazy dispatch build now uses the FULL video enhance context** (same builder as the /video-json endpoint) — autogen-built JSON prompts had only a duration line as context.
+
+**Routing & overrides (correctness)**
+- **Autogen 0-ref renders route to the first-pass model's prompt rules** (Z-Image / Krea 2) in `/auto`, windowed batch and all five sequential FF sites — they never render on Klein, but were always prompted as Klein. Narration override skipped for first-pass models (context still carries NARRATION MODE), matching manual enhance.
+- **Two-pass phase prompts now beat narration/user overrides** — a narration-mode batch Pass 1 was silently enhanced under the narration prompt, losing its scene-only/no-refs rules.
+- **Two-pass base double-enhance removed** — the seven batch `("base",)` pre-enhance sites are gone; dispatch's `_build_two_pass_base_prompt` is the single authoritative base enhance (one LLM call instead of two, no compounding drift).
+- **Ideogram lazy captions build from the CLEAN stored prompt** — SFW/style/colour dispatch tails were leaking into the structured caption's source prose.
+- **Scene Intent is role-gated** — an intent authored for the first frame is no longer declared AUTHORITATIVE for last-frame/video prompts (cross-role → continuity-reference phrasing); manual video enhance passes the video role; auto video now receives the intent block at all.
+- **Placeholder guard** — "Scene 12" / "Cinematic scene 3" placeholders are treated as empty by the enhancer instead of being "tightened while keeping the intent".
+
+**Video context parity (the image builder's generation of upgrades, ported)**
+- Auto video context gains: explicit priority stack (with the new "drop, don't merge" resolution rule — also added to image + manual stacks), strict-vs-grade palette split, global project context, Scene Intent (video role), clip pacing ("one main action per 2-3s", beat count computed from duration), CAMERA IS MANDATORY clause, and an AV-native audio-description block when model audio is on.
+- The named-uncapped character list is replaced by an appearance-only cast capped at 3 (video prompts were being fed names the model can't use).
+- Manual video enhance: video-resolution canvas (was image), camera-mandatory clause.
+
+**Reference handling**
+- Batch/sequential runners use the same budget order as `/auto`: extras count against the 5-slot budget first, characters fill the remainder (they could previously exceed the Klein slot budget).
+- Manual generation now attaches multi-angle `extra_images` identity refs (appended after extras so Image-N numbering stays aligned; capped at 5).
+- Manual ref descriptions are appearance-only ("Image N shows: …") — character names are no longer fed to an LLM that is simultaneously forbidden from using them; stale "2-character limit" copy → 3.
+
+**System prompts (research-backed)**
+- Klein composite: mandatory explicit KEEP-CLAUSE ("keep the pose, lighting, composition and colors of Image 1 unchanged") — BFL's documented anti-bleed technique.
+- Z-Image: adopted Tongyi's official pe.py rules — lock-the-core-first, detail-not-padding (five enrichment axes), no metaphor/emotional rhetoric, band widened to ~70-200 words (512-token encoder note), plus a target-shape example; persona now precedes the first-frame conditional (also Krea 2).
+- LTX video prompts: honest negative-prompt statement (standard path has NO negative channel — write positively; only Director has one), length↔duration coupling with beat math, camera-clause-always, emotion-as-physical-cues, and a target-shape example (both music and narration variants).
+- IMAGE prompt: two few-shot examples (one 2-ref, one no-ref) demonstrating graceful degradation.
+- Flow generation: restored the per-scene cast rule (1-2 most important, 3 max — was "up to 5, name freely"); the per-scene retry prompt regains the location-diversity + cast rules.
+- Character-creator portraits: prose phrasing (appearance-led, neutral studio, balanced exposure) instead of tag piles — they render on Z-Image/Krea 2 whose rules forbid tag spam.
+- Vision ref captions: face shape/structure + clothing colours called out (identity-critical detail for the prompt writer); Ideogram captions hard-capped under the 2048-token limit by trimming tail elements.
+- Manual /enhance-prompt now passes per-model prompt guidance (Settings) — autogen always did; the button silently dropped it.
+
+### Fixed — post-release verification pass (5 adversarial audit agents re-checked every claim)
+All v1.22.1 + v1.23.0 claims verified present and correct; the pass surfaced and fixed:
+- **`_save_fallback_output` was EOF-truncated (pre-existing, at HEAD)** — the VHS direct-download fallback saved assets then hit `TypeError` in its caller because the final `return created_asset_ids` had been lost (the recurring Edit-tool truncation class; AST-clean so compilers can't catch it). Restored.
+- **Last 5-ref leak paths closed**: `_resolve_frame_ref_asset_ids` now hard-clamps its return to the 4-slot budget (≥5 manual extras used to leak through); LF queueing reserves slot 1 for the FF continuity ref inside the 4 limit; frontend ref caps 5/4 → 4/3 and the LF workflow label can no longer say `klein_5ref`.
+- **Worker-caps residual gap**: `z_image_turbo`/`krea2_turbo` jobs carry empty caps and were still hitting the legacy merged-set check — a video-restricted worker wrongly rejected first-pass image jobs. Empty-caps jobs now use the image category.
+- **Stale "2 character references" Prompt-tab warning** contradicted the 3-ref limit and false-warned 3-character projects → corrected to 3.
+- Sequential 0-ref scenes: the context's model line now matches the routed system prompt (was still labeled Klein).
+- Minor: export normalize temp WAVs cleaned on failure too; dead `if False` expression removed from `build_scene_intent`; `CharacterInfo.extra_images` typed (killed an `as any`); ReferenceSelector header comment corrected.
+
+### Notes
+- **Klein reference budget locked to 4** (`MAX_TOTAL_REF_IMAGES = 4`) per BFL's official multi-reference guide — dispatch also clamps the LF first-frame-prepend case to 4 total; `klein_5ref` stays mapped for legacy queued jobs only, nothing new produces 5 refs.
+- Full server-side context consolidation (killing the frontend TS context fork entirely) remains the recommended next structural step (P1-2 in the deep-dive doc).
+
+## [1.22.1] - 2026-07-01
+
+### Fixed — full-audit fix wave (complete findings list in AUDIT_2026-07-01.md)
+
+**Blocking**
+- **`/auto` enhanced modes 500'd on every run** — undefined `session_factory` in the video branch; plus three swallowed `skip_existing_prompts` NameErrors that meant `/auto` LLM enhancement NEVER actually ran; plus a chapter-scoped `/auto` + LLM crash (and scope leak) in the post-flow scene re-read.
+- **Chapter-scoped export rendered the full project** — `chapter_selection` was never forwarded into the export task params; all scope machinery (scene filter, audio slice, subtitle shift, filename label) was unreachable. Also forwarded the previously-dead `subtitle_bold`.
+- **SceneEditor Rules-of-Hooks crash** — the Prompt-tab audit `useEffect` sat below the `!activeScene` early return; moved above it.
+
+**Dispatch correctness (the params-rebind class)**
+- `_build_builtin_workflow` now builds on ONE local copy of the params and propagates routing/record keys (`submitted_*`, `effective_negative_prompt`, `ideogram_caption`, `skip_audio_mux`, `video_tail`, seed) to `job.parameters` via a `_record()` channel. Previously, five mid-function `dict(params)` rebinds silently dropped everything written after them whenever SFW / image-direction / colour-override was active — losing submitted-prompt records, mis-routing redirected jobs, and muxing project audio over AV-native model audio. Redirects signal worker routing via `_effective_workflow_type` without poisoning retries; the actual seed is recorded (asset meta no longer says `seed: null`, retries reuse it).
+- **Anti-text suffix truly removed** — 1.20.0 removed it from the *record* while `prepare_klein/zimage/krea2_workflow` still appended it to what was SENT. Send sites now match the record (and FLUX/Krea "no negatives in the positive prompt" practice).
+- **Video JSON mode gated to i2v / fflf / v2v-extend** — it was hijacking transition clips (zhuanchang LoRA trigger lost) and V2V pass-2 refinement prompts; it also bypassed the SFW/style/colour dispatch constraints (now re-injected into `visual_style_mood`) and its build failures were logged at debug (now warning). `video_tail` no longer snapshots the whole params dict (which lost the submitted video prompt).
+- Klein inpaint mask controls (`expand`/`blur_radius`) never applied — node title is "Grow Mask With Blur" (with spaces); both spellings now tried.
+- **Per-worker model caps are per-category** — restricting a worker's image models no longer excludes it from ALL video jobs (the old merged set could never contain the video model).
+
+**Prompt/reference integrity**
+- FF cast context no longer claims "reference photos attached" when the resolver attaches nothing (cast == refs symmetry); stale "2-character limit" copy → 3; `rerun_pass2` honours an explicit empty character selection and uses the image-resolution chain; three image-job sites (missing-images mode + two sequential scene-1 FFs) rendered at VIDEO resolution → now image resolution; `enhanced_count` no longer over-reports.
+- Ollama failover actually fires (OpenAI SDK raises `APIConnectionError`, not builtin `ConnectionError`); Gemini calls get a 600 s timeout; OpenAI token-param mismatch retries once with the alternate parameter.
+
+**Timeline / chapters / audio**
+- Re-uploading an SRT now triggers the scene-boundary auto-resync (the missing half of the 1.8.20 drift fix); batch SRT items get the same re-anchor before substitution.
+- Chapter split marks the original chapter manual (rebuild no longer silently undoes the split); rebuild pre-clean re-parents manual children of deleted auto parents (FK crash); header-chapter reparse respects surviving manual chapters (no renamed-chapter duplicates); `_apply_auto_split` raw SQL binds hex GUIDs (was a silent 0-row UPDATE).
+- Delete-merge can no longer slice scene audio from a Demucs stem (stems exclusion + stem-row upsert on analyze); suggest-timeline commits the new timeline BEFORE the chapter rebuild (a rebuild failure used to roll back every scene while reporting success); `/retrim` colour correction was dead (aliased-import NameError); dead duration fallback referenced a nonexistent enum + attribute.
+- Demucs timeout is now enforceable (threaded stderr drain, DEVNULL stdout, honest message); remote Whisper detection no longer misroutes Gradio (404 ≠ OpenAI-compatible) and remote POST timeouts scale with audio duration.
+
+**Export / batch / IO**
+- Failed exports no longer poison the next run — work_dir carries a params hash and stale leftovers are wiped on mismatch (keyed resume still works).
+- Music-mode "Normalize audio" no longer fails the export at 98 % (PCM-in-MP4): audio is extracted, normalised as WAV, re-muxed with the video stream copied.
+- Batch image filter wrote a key nobody read (`image_filter` → `global_image_color_filter`); resume/recover CRF maps aligned with the main map; upload filenames sanitised (batch/assets/timeline).
+- Project text export/import round-trips the structured-prompt state (per-scene + project `scene_intent_mode`/`scene_intent`/`video_json_mode`/`video_json_prompt`, project `json_prompt_mode`).
+
+**Frontend**
+- ConceptPanel "Create" character button no longer wipes the song title; `handleCreatorSave` dep array carries all 13 missing payload fields (stale-closure saves reverted resolutions/global-context/model-audio); duplicate character-library modal removed.
+- The RQ→Zustand mirror re-points `activeScene` at its refetched row — one checkbox click after an auto-gen run can no longer clobber freshly-persisted refs/prompts/chosen image via a stale whole-parameters PUT. The per-scene GGUF select goes through `updateSceneAndSync` (was the last raw-write holdout).
+- LLM results (enhance / scene intent / video JSON) no-op when the scene changed mid-request instead of landing on the wrong scene; CharacterCreatorModal preserves fields it doesn't edit (`library_origin_id`) and its version-poll no longer leaks intervals.
+- Backend FastAPI/health version strings read from `VERSION` (were 1.11.0 / 0.1.0); startup orphan-sweep message reports the job's original status.
+
+### Deferred (documented in AUDIT_2026-07-01.md)
+`/rerun-whisper` SRT-preservation guards, server-side scene-parameters merge, music-mode remix/stems support, per-scene Scene-Intent/Video-JSON override UI, library `extra_images` round-trip, autogen per-model prompt routing, video-context prompt upgrades (the last two are picked up by the prompt-system deep-dive).
+
+
+## [1.22.0] - 2026-06-29
+
+### Added — Video JSON Prompt mode (opt-in, structured LTX prompting)
+
+- **Send the video prompt to LTX as structured JSON instead of prose.** A new per-project/scene toggle (Concept tab → "Video JSON Prompt Mode", LTX only). When on, the video prompt for a scene is a structured JSON object — `setting_environment` (location, lighting, `preserve_from_input_image`, environment motion, color palette), `subject_action` (subject + timed `action_sequence` + motion characteristics), `camera_movement` (style, movement, framing, `forbidden_camera_behavior`), `visual_style_mood`, and `motion_timing_cues` (duration, intensity, animation behavior, `negative_cues`). LTX 2.3 parses these fields with higher fidelity than prose, giving much tighter control over camera behavior, action timing, and motion. Schema mirrors the community example that "worked great."
+- **Generated + fully editable on the Prompt tab** ("✨ Generate with AI" builds it from the scene's video context; every field is editable JSON; Save persists it). The stored object is sent verbatim at dispatch in place of the prose prompt.
+- **`preserve_from_input_image` auto-fills** from the scene's first frame when left empty, so image-to-video keeps the established composition, subject placement, lighting, palette, and background geometry.
+- **Auto-gen and per-scene video both follow the setting** (the structured object is built lazily at dispatch when none is stored, so no auto-gen changes were needed). Off by default — the existing prose flow is untouched when off. LTX Director mode is unaffected (it has its own dispatch path). New endpoint: `POST /generate/video-json`; prompt export now includes `video_json_mode` + `video_json`.
+
+
+## [1.21.0] - 2026-06-28
+
+### Added — the two deferred prompt-system features
+
+- **Multiple reference angles per character (auto-balanced).** Characters can now hold extra reference-angle images (`extra_images`) in the character editor ("Extra reference angles (identity lock)"). When a scene references characters, the Klein 5-slot budget is spent intelligently: one main character fills its slots with angles for strong identity lock; several characters get one each before any extra angles. Fully backward compatible — a single-image character behaves exactly as before.
+- **Scene Intent mode (opt-in, structured).** A per-project/scene toggle (Concept tab → "Scene Intent Mode"). When on, each scene builds a structured intent — anchor, cast, environment, lighting, camera, palette, must-include/avoid, continuity — that the image/video prompt is compiled to realize exactly. Generated + editable on the Prompt tab ("✨ Generate with AI" + JSON editor + Save), injected as an authoritative brief into both auto-gen and manual Enhance, and included in the prompt export. Off by default; the current prose flow is untouched when off. Mirrors the proven Ideogram-JSON-mode pattern. New endpoint: `POST /generate/scene-intent`.
+
+
+## [1.20.0] - 2026-06-28
+
+### Changed — Prompt-system gap closure (from the optimality review)
+
+Closed the gaps from `PROMPT_SYSTEM_OPTIMALITY_REVIEW.md`, in the safest way for the app:
+
+- **Reference handling aligned + raised.** New `MAX_SCENE_CHARACTER_REFS = 3` applied consistently. The **first-frame** cast block + auto-gen first-frame references now use the scene's selected (else story-flow) characters — symmetric with the last-frame path — so the **described cast always matches the attached references** (no more "context says 2, 3 attached"). Raised from 2 → 3 (the Klein workflows support up to 5).
+- **Dispatch suffix hygiene.** Removed the **phantom anti-text suffix** that was written to the *record* but never actually sent (the models forbid text via their system prompt anyway) — so the Prompt tab now shows exactly what ComfyUI received. The **SFW** suffix that *is* sent was rewritten to **positive phrasing** ("fully clothed, modest, tasteful, family-friendly") per FLUX/Krea best practice instead of negative tags.
+- **Manual ⇄ auto parity.** The manual Enhance context now carries the same colour-palette (strict vs grade) and camera-action directives, and the enhance endpoint injects the global project context server-side — eliminating the remaining drift between the Enhance button and Auto-Gen.
+- **Pre-flight validators.** `Download Prompts JSON` and a new **Prompt-tab panel** now show read-only warnings before you spend GPU time: "Image N referenced but only M attached", palette contradictions, accidental text/signage, and character-count over the limit. Computed on demand — zero generation-path risk.
+- Corrected the inaccurate "FLUX has NO prompt upsampling" claim (FLUX.2 has it; our local workflow doesn't run it).
+
+### Deferred (documented, not gaps)
+Multiple reference *angles per character* (needs a per-character multi-image library) and the full Scene-Intent-Object compiler remain future enhancements, not bugs.
+
+
+## [1.19.0] - 2026-06-28
+
+### Changed — Prompt-system hardening (external-review fixes)
+
+Acted on a prompt-system review (Gemini + ChatGPT against `PROMPT_SYSTEM_AUDIT.md`). Implemented the valid fixes; corrected one false positive.
+
+- **Target canvas / aspect ratio** now injected into the enhance context (auto image + video, and manual) so the LLM composes for the real frame shape instead of guessing.
+- **First-frame ↔ heavy-action resolution**: the video-starting-frame rule now tells the LLM how to resolve "calm opening" vs "lyrics describe running/explosion" — depict the charged moment *just before* the action, one coherent frame.
+- **Narration routing fixed**: a model-agnostic NARRATION MODE directive is injected whenever the project is narration, so Krea 2 / Z-Image first-pass scenes get the illustrate-the-script bias (previously only Klein did).
+- **Explicit priority stack** added to the context, replacing the competing HIGHEST/MANDATORY/ABSOLUTE/PRIMARY labels with one deterministic order.
+- **Palette: strict vs grade** — monochrome/B&W/duotone palettes stay strict (all elements incl. skin), but a *named colour grade* now governs mood/lighting/wardrobe while keeping skin and material tones believable (fixes over-strict photoreal skin).
+- **Two-pass face preservation** — the composite (Pass 2) prompt now tells Klein to re-light only to match direction/warmth and NOT blow out, harden, or re-shape the inserted face (preserves identity/softness).
+- **Character limit surfaced** — when a project has >2 characters, the context notes the 2-reference limit, it's logged, and the Prompt tab shows a warning (no more silent drop).
+- **Dispatch transparency** — `Download Prompts JSON` now includes `dispatch_mutations` per frame (which suffixes dispatch appended: SFW / anti-text / style-colour tail), so stored-vs-submitted differences are visible.
+- Renamed the misleading `_collapse_to_single_paragraph` → `_clean_prompt_preserve_segments` (alias kept). **Verified it already preserves LTX multi-segment video prompts** — the top concern from both reviewers was a false positive (they read the old name, not the body).
+
+
 ## [1.18.0] - 2026-06-28
 
 ### Added — Editable Prompt tab (full manual control)

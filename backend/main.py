@@ -95,10 +95,11 @@ async def lifespan(app: FastAPI):
             )
             _orph_jobs = list((await _orph_session.execute(_orph_stmt)).scalars().all())
             for _oj in _orph_jobs:
+                _orig_status = _oj.status
                 _oj.status = JobStatus.FAILED
                 _oj.error = (
                     "Orphaned at startup — previous backend session left this "
-                    f"job in {_oj.status.value if hasattr(_oj.status, 'value') else _oj.status} "
+                    f"job in {_orig_status.value if hasattr(_orig_status, 'value') else _orig_status} "
                     "state for >1h without progress."
                 )
                 _oj.completed_at = _orph_dt.utcnow()
@@ -344,11 +345,25 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
+# Resolve the app version from the repo VERSION file (single source of
+# truth — pyproject/CHANGELOG track it) with a safe fallback.
+def _read_app_version() -> str:
+    try:
+        from pathlib import Path as _P
+        _vf = _P(__file__).resolve().parent.parent / "VERSION"
+        _v = _vf.read_text(encoding="utf-8").strip()
+        return _v or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+APP_VERSION = _read_app_version()
+
 # Create FastAPI app
 app = FastAPI(
     title="Robomuffin Idea Factory",
     description="AI music video / narration video creation tool",
-    version="1.11.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -371,7 +386,7 @@ async def health_check():
     return {
         "status": "ok",
         "app": "Robomuffin Idea Factory",
-        "version": "0.1.0",
+        "version": APP_VERSION,
         "gpu": {
             "ffmpeg_encoder": _ffmpeg_gpu.encoder,
             "ffmpeg_gpu_type": _ffmpeg_gpu.gpu_type,

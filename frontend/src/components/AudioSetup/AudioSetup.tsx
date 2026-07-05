@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, Music, Loader, CheckCircle, AlertCircle, Play, Pause, Mic, Drum, Guitar, Waves, FileText, Sparkles, Scissors, MessageSquare } from 'lucide-react';
-import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt, updateProject } from '@/api/client';
+import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt, updateProject, importAaf, detachAaf } from '@/api/client';
 import { useAppStore } from '@/store';
 
 interface AudioSetupProps {
@@ -116,6 +116,114 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [isResplitting, setIsResplitting] = useState(false);
   const [isUploadingSrt, setIsUploadingSrt] = useState(false);
+  // ── AAF timeline import (ElevenLabs etc.) — narration modes ──
+  const [aafFile, setAafFile] = useState<File | null>(null);
+  const [aafAudioFile, setAafAudioFile] = useState<File | null>(null);
+  const [aafSrtFile, setAafSrtFile] = useState<File | null>(null);
+  const [aafStage, setAafStage] = useState<'idle' | 'uploading' | 'processing' | 'srt' | 'done' | 'error'>('idle');
+  const [aafPct, setAafPct] = useState(0);
+  const [aafError, setAafError] = useState('');
+  const [aafReimport, setAafReimport] = useState(false);
+  const [aafMinScene, setAafMinScene] = useState<number>(0);
+  const [aafDetaching, setAafDetaching] = useState(false);
+  const [aafReslicing, setAafReslicing] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+
+  const aafActive = (currentProject?.settings as any)?.audio_source === 'aaf';
+  const aafMeta = ((currentProject?.settings as any)?.aaf_import || {}) as {
+    filename?: string; imported_at?: string; clip_count?: number; scene_count?: number;
+  };
+
+  const handleAafImport = async () => {
+    if (!aafFile) return;
+    const _importedName = aafFile.name;
+    setAafError('');
+    setAafPct(0);
+    setAafStage('uploading');
+    try {
+      const fd = new FormData();
+      fd.append('file', aafFile);
+      if (aafAudioFile) fd.append('audio', aafAudioFile);
+      if (aafMinScene > 0) fd.append('min_scene_seconds', String(aafMinScene));
+      const res = await importAaf(projectId, fd, {
+        onUploadProgress: (e) => {
+          if (e.total) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            setAafPct(pct);
+            if (pct >= 100) setAafStage('processing');
+          }
+        },
+      });
+      if (aafSrtFile) {
+        // Text + word timing for subtitles / scene narration.  Boundary
+        // resync is gated server-side while the AAF is authoritative.
+        setAafStage('srt');
+        await uploadSrt(projectId, aafSrtFile);
+      }
+      setAafStage('done');
+      setAafFile(null);
+      setAafAudioFile(null);
+      setAafSrtFile(null);
+      setAafReimport(false);
+      queryClient.invalidateQueries({ queryKey: ['scenes', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['assets', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['chapters', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      // Flip the local store immediately so the superseded UI shows without
+      // waiting for the project refetch.
+      if (currentProject) {
+        useAppStore.getState().setProject({
+          ...currentProject,
+          settings: {
+            ...((currentProject.settings as any) || {}),
+            audio_source: 'aaf',
+            aaf_import: {
+              filename: _importedName,
+              imported_at: new Date().toISOString(),
+              scene_count: res.data.created_count,
+            },
+          },
+        } as any);
+      }
+    } catch (e: any) {
+      setAafStage('error');
+      setAafError(e?.response?.data?.detail || e?.message || 'AAF import failed');
+    }
+  };
+
+  const handleAafReslice = async () => {
+    setAafReslicing('busy');
+    try {
+      await sliceSceneAudio(projectId);
+      queryClient.invalidateQueries({ queryKey: ['scenes', projectId] });
+      setAafReslicing('done');
+      setTimeout(() => setAafReslicing('idle'), 4000);
+    } catch (e) {
+      console.error('re-slice failed', e);
+      setAafReslicing('error');
+    }
+  };
+
+  const handleAafDetach = async () => {
+    if (!window.confirm(
+      'Detach the AAF timeline?\n\nScenes, audio and chapters stay exactly as they are — but scene boundaries are no longer locked to the AAF (Whisper/SRT resync and Suggest Timeline are re-enabled).'
+    )) return;
+    setAafDetaching(true);
+    try {
+      await detachAaf(projectId);
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      if (currentProject) {
+        const ns: any = { ...((currentProject.settings as any) || {}) };
+        delete ns.audio_source;
+        delete ns.aaf_import;
+        useAppStore.getState().setProject({ ...currentProject, settings: ns } as any);
+      }
+    } catch (e) {
+      console.error('detach AAF failed', e);
+    } finally {
+      setAafDetaching(false);
+    }
+  };
 
   // Determine label based on project mode
   const isNarration = projectMode === 'narration_images' || projectMode === 'narration_video';
@@ -244,9 +352,16 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
       queryClient.invalidateQueries({ queryKey: ['sections', projectId] });
       queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
 
-      // Auto-create scenes from the detected sections (unless scenes are locked)
+      // Auto-create scenes from the detected sections (unless scenes are
+      // locked or the AAF timeline is authoritative — AAF boundaries must
+      // never be replaced by section/LLM-derived ones).
       const { scenesLocked } = useAppStore.getState();
-      if (!scenesLocked) {
+      const _aafAuthoritative =
+        (useAppStore.getState().currentProject?.settings as any)?.audio_source === 'aaf';
+      if (_aafAuthoritative) {
+        console.info('AAF timeline active — skipping auto scene-create / suggest-timeline (transcription + sections updated only)');
+      }
+      if (!scenesLocked && !_aafAuthoritative) {
         try {
           await createScenesFromSections(projectId);
         } catch (e) {
@@ -356,6 +471,164 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* ── AAF Timeline (narration modes): the tightest source — clip
+             boundaries come straight from the editor that rendered the
+             audio. Supersedes Whisper/SRT for TIMING when active. ── */}
+        {isNarration && (
+          <div className={aafActive
+            ? 'bg-emerald-950/40 border border-emerald-700/50 rounded-lg p-4'
+            : 'bg-gray-800 border border-indigo-600/50 rounded-lg p-4'}>
+            <h4 className="text-sm font-medium mb-1 flex items-center gap-2">
+              {aafActive ? <CheckCircle size={14} className="text-emerald-400" /> : <Sparkles size={14} className="text-indigo-300" />}
+              {aafActive ? 'AAF timeline active' : 'AAF Timeline (ElevenLabs)'}
+              {!aafActive && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600/40 border border-indigo-500/40 text-indigo-200">RECOMMENDED</span>
+              )}
+            </h4>
+
+            {aafActive && (
+              <div className="text-xs text-emerald-200/90 space-y-2">
+                <p>
+                  Imported <span className="font-semibold">{aafMeta.filename || 'timeline.aaf'}</span>
+                  {aafMeta.imported_at ? ` on ${new Date(aafMeta.imported_at).toLocaleString()}` : ''}
+                  {typeof aafMeta.scene_count === 'number' ? ` — ${aafMeta.scene_count} scenes` : ''}
+                  {typeof aafMeta.clip_count === 'number' ? ` from ${aafMeta.clip_count} clips` : ''}.
+                  Scene boundaries are <span className="font-semibold">locked to the AAF</span> (sample-accurate).
+                </p>
+                <p className="text-emerald-300/70">
+                  Note: the AAF provides timing + embedded audio — the narration TEXT ships in ElevenLabs' SRT/CSV
+                  export. Upload the matching SRT below for narration text + subtitles (it will NOT move your
+                  scene boundaries).
+                </p>
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => { setAafReimport(true); setAafStage('idle'); }}
+                    className="px-2 py-1 text-[11px] rounded bg-gray-700 hover:bg-gray-600"
+                  >
+                    Re-import AAF
+                  </button>
+                  <button
+                    onClick={handleAafReslice}
+                    disabled={aafReslicing === 'busy'}
+                    className="px-2 py-1 text-[11px] rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-50"
+                    title="Regenerate every scene's audio clip from the master (fixes broken/stale clips)"
+                  >
+                    {aafReslicing === 'busy' ? 'Re-slicing…' : aafReslicing === 'done' ? '✓ Re-sliced' : aafReslicing === 'error' ? 'Re-slice failed — retry' : 'Re-slice audio'}
+                  </button>
+                  <button
+                    onClick={handleAafDetach}
+                    disabled={aafDetaching}
+                    className="px-2 py-1 text-[11px] rounded bg-red-900/50 hover:bg-red-900 border border-red-800/50 disabled:opacity-50"
+                  >
+                    {aafDetaching ? 'Detaching…' : 'Detach AAF timeline'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {(!aafActive || aafReimport) && (
+              <div className="space-y-2 mt-2">
+                {!aafActive && (
+                  <p className="text-xs text-gray-400">
+                    Import the AAF exported by ElevenLabs (or any AAF-capable editor). Its clip boundaries are
+                    sample-accurate, so scenes are created directly from the real narration timeline — no Whisper
+                    timing, no SRT drift. <span className="font-semibold">Embedded audio is extracted
+                    automatically</span> (ElevenLabs AAFs embed every clip's audio — that's why they're big).
+                    The narration <span className="font-semibold">text</span> is NOT in the AAF: add the SRT export
+                    for narration text + subtitles.
+                  </p>
+                )}
+                <div className="grid grid-cols-1 gap-2">
+                  <label className="flex items-center gap-2 text-xs text-gray-300">
+                    <span className="w-28 shrink-0">AAF file *</span>
+                    <input type="file" accept=".aaf" className="text-xs file:mr-2 file:px-2 file:py-1 file:rounded file:border-0 file:bg-indigo-700 file:text-white file:text-xs"
+                      onChange={(e) => setAafFile(e.target.files?.[0] || null)} />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-300">
+                    <span className="w-28 shrink-0">Audio (override)</span>
+                    <input type="file" accept="audio/*" className="text-xs file:mr-2 file:px-2 file:py-1 file:rounded file:border-0 file:bg-gray-700 file:text-white file:text-xs"
+                      onChange={(e) => setAafAudioFile(e.target.files?.[0] || null)} />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-300">
+                    <span className="w-28 shrink-0">SRT (text)</span>
+                    <input type="file" accept=".srt" className="text-xs file:mr-2 file:px-2 file:py-1 file:rounded file:border-0 file:bg-gray-700 file:text-white file:text-xs"
+                      onChange={(e) => setAafSrtFile(e.target.files?.[0] || null)} />
+                  </label>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-gray-300">
+                  <span className="w-28 shrink-0">Merge cuts &lt; (s)</span>
+                  <input
+                    type="number" min={0} max={30} step={0.5} value={aafMinScene}
+                    onChange={(e) => setAafMinScene(Math.max(0, Number(e.target.value) || 0))}
+                    className="w-20 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs"
+                  />
+                  <span className="text-[10px] text-gray-500">
+                    0 = exact AAF cuts. ElevenLabs often renders one clip per SENTENCE — if scenes look
+                    choppy / split mid-paragraph, merge cut points closer than e.g. 6-10s.
+                  </span>
+                </label>
+                <p className="text-[10px] text-gray-500">
+                  Audio: optional — auto-extracted from the AAF's embedded essence; upload only to override it
+                  (or if extraction fails). SRT: optional but recommended (narration text for prompts + subtitles).
+                </p>
+
+                {(aafStage === 'uploading' || aafStage === 'processing' || aafStage === 'srt') && (
+                  <div className="space-y-1">
+                    <div className="w-full bg-gray-900 rounded h-2 overflow-hidden">
+                      <div
+                        className="h-2 bg-indigo-500 transition-all"
+                        style={{ width: `${aafStage === 'uploading' ? aafPct : 100}%` }}
+                      />
+                    </div>
+                    <p className="text-[11px] text-indigo-300 flex items-center gap-1">
+                      <Loader size={11} className="animate-spin" />
+                      {aafStage === 'uploading' && `Uploading… ${aafPct}%`}
+                      {aafStage === 'processing' && 'Parsing AAF timeline, extracting embedded audio & slicing…'}
+                      {aafStage === 'srt' && 'Uploading SRT (text + subtitles)…'}
+                    </p>
+                  </div>
+                )}
+                {aafStage === 'error' && (
+                  <p className="text-[11px] text-red-400 flex items-center gap-1">
+                    <AlertCircle size={11} /> {aafError}
+                  </p>
+                )}
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleAafImport}
+                    disabled={!aafFile || aafStage === 'uploading' || aafStage === 'processing' || aafStage === 'srt'}
+                    className="px-3 py-1.5 text-xs rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {aafActive ? 'Re-import AAF timeline' : 'Import AAF timeline'}
+                  </button>
+                  {aafReimport && (
+                    <button
+                      onClick={() => { setAafReimport(false); setAafStage('idle'); }}
+                      className="px-3 py-1.5 text-xs rounded bg-gray-700 hover:bg-gray-600"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+                {aafActive && aafReimport && (
+                  <p className="text-[10px] text-amber-300">Re-importing REPLACES all scenes with the new AAF's boundaries.</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {isNarration && aafActive && (
+          <div className="bg-amber-950/30 border border-amber-800/40 rounded p-2 text-[11px] text-amber-300">
+            ⬇ The sections below are <span className="font-semibold">superseded by the AAF timeline</span>: scene
+            boundaries are locked to the AAF — Whisper and SRT no longer move them, and Suggest Timeline is disabled.
+            SRT / Whisper remain useful only as <span className="font-semibold">text + word-timing</span> sources
+            (scene narration for prompts, subtitles). Detach the AAF to restore full control.
+          </div>
+        )}
+
+        <div className={isNarration && aafActive ? 'space-y-4 opacity-60' : 'space-y-4'}>
         {/* Step 1: Lyrics / Script Input */}
         <div className="bg-gray-800 rounded-lg p-4">
           <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
@@ -873,6 +1146,7 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
             </div>
           </>
         )}
+        </div>
       </div>
     </div>
   );

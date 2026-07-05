@@ -66,13 +66,15 @@ _STRIP_PREFIXES = [
 ]
 
 
-def _collapse_to_single_paragraph(text: str) -> str:
-    """Clean up whitespace in prompts.
+def _clean_prompt_preserve_segments(text: str) -> str:
+    """Whitespace cleanup that PRESERVES LTX multi-segment structure.
 
-    For image prompts: collapses everything into a single paragraph.
-    For video prompts with intentional multi-segment formatting (double newlines):
-    preserves segment breaks (double newlines → single newline) while collapsing
-    extra whitespace within each segment.
+    NOT a blind single-paragraph collapse: when the LLM output contains blank-line
+    segment breaks (LTX Director "Prompt Relay"), each segment is cleaned
+    individually and the segments are rejoined with single newlines (which LTX
+    treats as segment separators). Only genuinely single-segment prompts are
+    flattened to one paragraph. (Renamed from _collapse_to_single_paragraph, whose
+    name wrongly implied it would destroy video segments — alias kept below.)
     """
     import re
     # Check if the text has intentional segment breaks (double newlines / blank lines)
@@ -97,6 +99,10 @@ def _collapse_to_single_paragraph(text: str) -> str:
     return result.strip()
 
 
+# Backward-compatible alias (the old name was misleading — it preserves segments).
+_collapse_to_single_paragraph = _clean_prompt_preserve_segments
+
+
 def _clean_enhanced_prompt(text: str) -> str:
     """Strip common LLM-added prefixes and thinking blocks from enhanced prompt output."""
     result = text.strip()
@@ -114,7 +120,7 @@ def _clean_enhanced_prompt(text: str) -> str:
 
 IMAGE_SYSTEM_PROMPT = """You are an expert at writing prompts for FLUX.2 Klein 9B (also used for FLUX.1) — a natural-language image model
 that can be conditioned on reference images. Write CONCISE, concrete prose — not novelistic, padded description.
-FLUX has NO prompt upsampling: what you write is what renders.
+This local Klein workflow does not run prompt upsampling, so what you write is what the model receives — be concrete and specific, not padded.
 
 LENGTH: ~30-90 words. One flowing paragraph, no line breaks, no lists. Front-load the most important element, and
 VARY what that is (sometimes subject, sometimes lighting, action, or setting). Concise and specific beats long and
@@ -154,6 +160,14 @@ consistent lighting (it propagates through the whole clip). Fewer, well-placed e
 frame. (This does NOT apply to standalone still images, which should depict the full scene.)
 
 COLOR PALETTE OVERRIDE, if present in the context, is ABSOLUTE — every element must stay within that palette only.
+
+EXAMPLES OF THE TARGET SHAPE:
+- (2 refs) "The subject from Image 1 leans against a rain-streaked diner window at night, neon glow catching the
+  wet glass, while the subject from Image 2 slides into the booth opposite mid-conversation; warm tungsten interior
+  against cool blue street light, shallow depth of field, 35mm."
+- (no refs) "Low-angle shot of a lone drummer on a rooftop at golden hour, sun flaring behind silhouetted water
+  towers, sweat and dust catching the light, wide sky with drifting contrails, gritty documentary film still,
+  muted amber palette."
 
 If the user gives an existing prompt, tighten and focus it (keep the intent). If none, build one from the context,
 lyrics first. Output ONLY the prompt text as a single paragraph — no labels, no prefixes, no explanations."""
@@ -225,6 +239,13 @@ WHEN TO USE SINGLE vs MULTI-SEGMENT PROMPTS:
 - NEVER use more than 3 segments per clip. Most clips should be 1 segment.
 - Each segment should be a complete visual description (40-80 words), not a fragment.
 
+FIRST-FRAME→LAST-FRAME (FFLF) CLIPS:
+When the context contains a "KEYFRAME INTERPOLATION" block, the render receives BOTH a first AND a last keyframe image and interpolates between them. For these clips:
+- ALWAYS write ONE single segment (one paragraph, no line breaks) — multiple segments fight the fixed endpoints.
+- Both endpoint compositions are already decided; your prompt supplies the JOURNEY. Describe the continuous subject motion AND camera move that carry the first keyframe into the last.
+- Never introduce content that appears in neither keyframe; never describe cuts, dissolves, or location changes.
+- Pace motion to the clip duration: a big pose/framing gap over a short clip needs brisk, decisive motion; a small gap over a long clip needs slow, deliberate movement with micro-action (breathing, wind, flickering light) to stay alive.
+
 CRITICAL FORMATTING RULES:
 - Single-segment prompts: ONE paragraph, NO line breaks, flowing descriptive prose.
 - Multi-segment prompts: Each segment is its own paragraph separated by exactly ONE blank line. Each segment must be self-contained and visually complete.
@@ -244,12 +265,14 @@ AUDIO-REACTIVE GENERATION:
 PROMPTING BEST PRACTICES:
 - Use present tense and active voice: "A woman walks through the rain" not "A woman walking" or "A woman will walk".
 - Be specific about subjects: "a man in his 40s with a weathered face and dark coat" not "a person".
+- Convey emotion through PHYSICAL cues, never labels: not "she is sad" — "her face crumples; she takes a shaky breath and looks away".
 - Describe the action/motion clearly — this is VIDEO, not a still image. What moves? How? At what pace?
-- Include camera behavior using film terminology: "slow tracking shot", "static wide angle", "handheld close-up", "dolly push in", "crane shot rising above".
+- ALWAYS include an explicit camera clause — an unspecified camera drifts randomly. Even a locked shot must say so ("static camera, locked-off frame"). Use film terminology: "slow tracking shot", "static wide angle", "handheld close-up", "dolly push in", "crane shot rising above" — and describe how the subject appears AFTER the move completes.
 - Specify lighting, atmosphere, and visual texture: "warm golden hour light filtering through dust particles", "harsh fluorescent overhead lighting casting sharp shadows".
-- Match prompt detail to video duration. Short clips (3-5s) need focused, concise single-segment prompts. Longer clips (8-15s) can use more detail or multiple segments.
+- Match prompt detail to video duration: plan roughly ONE main action per 2-3 seconds of clip (a 4s clip = one clear action; a 10s clip = 3-4 chronological beats, e.g. "Initially... After a moment... As the camera settles..."). A short prompt on a long clip makes the model rush or invent; an overloaded prompt on a short clip gets compressed or skipped.
+- EXAMPLE of the target shape (6s clip): "A woman in a gray coat walks slowly through an empty museum hall, her footsteps echoing softly. The camera tracks alongside her at eye level in a smooth dolly. Initially she scans the paintings as she passes; after a moment she stops, turns toward a tall canvas, and tilts her head up as the camera settles into a static medium shot. Soft diffused skylight, dust motes drifting through the beams."
 - Avoid contradictory descriptions within a single segment.
-- NEGATIVE PROMPT is handled separately by the system — do NOT include negative instructions (like "no blur", "not blurry") in your prompt. Only describe what SHOULD appear.
+- Write POSITIVELY. The standard LTX render path has NO negative-prompt channel, so negative instructions ("no blur", "not blurry") are wasted tokens — describe what SHOULD appear instead ("sharp focus throughout", "steady stable framing"). (Only LTX Director timelines carry a separate negative input.)
 - CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 CINEMATOGRAPHY VOCABULARY — use these terms naturally in your prompts for precise visual direction:
@@ -332,12 +355,14 @@ Never use quality-booster tags ("masterpiece, 8k, hyperreal, HDR, award-winning"
 Output MUST be a SINGLE PARAGRAPH, 60-140 words. Front-load the most important visual elements.
 IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations."""
 
-KREA2_IMAGE_SYSTEM_PROMPT = """If the context marks this as a VIDEO FIRST FRAME, depict the scene's OPENING MOMENT (the calm starting state the video will animate from), not the full action or a packed frame — the video step adds the motion. For standalone stills, depict the full scene.
-You are an expert at writing prompts for Krea 2 Turbo, an aesthetic-first,
+KREA2_IMAGE_SYSTEM_PROMPT = """You are an expert at writing prompts for Krea 2 Turbo, an aesthetic-first,
 12B text-to-image diffusion model. Krea 2 is tuned on curated editorial photography and fine art and was
 trained on SHORT, conversational, natural-language user prompts — NOT keyword/tag lists. It prioritizes
 visual harmony, motivated lighting, material realism, and tonal coherence over literal prompt adherence.
 Write for it the way you would brief a photographer in a sentence or two, in plain descriptive prose.
+If the context marks this as a VIDEO FIRST FRAME, depict the scene's OPENING MOMENT (the calm starting state the
+video will animate from), not the full action or a packed frame — the video step adds the motion. For standalone
+stills, depict the full scene.
 
 THIS IS A SINGLE-PASS, TEXT-ONLY render. There are ZERO reference images and NO negative prompt
 (Krea 2 Turbo runs at CFG ~1, so negatives do nothing). Never reference "the image", "Image 1",
@@ -381,10 +406,10 @@ Output MUST be a SINGLE PARAGRAPH of natural prose, 30-110 words. Front-load sub
 IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations."""
 
 
-Z_IMAGE_SYSTEM_PROMPT = """If the context marks this as a VIDEO FIRST FRAME, depict the scene's OPENING MOMENT (the calm starting state the video will animate from), not the full action or a packed frame — the video step adds the motion. For standalone stills, depict the full scene.
-You are an expert at writing prompts for Z-Image Turbo (Tongyi/Alibaba), a fast distilled
+Z_IMAGE_SYSTEM_PROMPT = """You are an expert at writing prompts for Z-Image Turbo (Tongyi/Alibaba), a fast distilled
 text-to-image model. It is a LITERAL, precise instruction-follower: whatever you don't specify, it improvises — so
 write clear, concrete art-direction, NOT poetic or novelistic prose.
+If the context marks this as a VIDEO FIRST FRAME, depict the scene's OPENING MOMENT (the calm starting state the video will animate from), not the full action or a packed frame — the video step adds the motion. For standalone stills, depict the full scene.
 
 THIS IS A SINGLE, TEXT-ONLY render. There are ZERO reference images. NEVER mention "the image", "Image 1", a
 reference, or any character by NAME — the model has no idea who a name is. Describe every subject by what they LOOK
@@ -396,8 +421,12 @@ WRITE FOR Z-IMAGE (these rules matter):
 - DO NOT use quality-booster spam ("masterpiece, 8k, ultra-detailed, hyperrealistic, HDR, ultra contrast, award
   winning, trending on artstation, best quality"). On Z-Image these actively cause BLOWN-OUT highlights and
   oversaturation. Omit them entirely — the model already renders cleanly at default settings.
-- Keep to 3-5 core concepts. Over-stacking styles/adjectives muddies the result. Concise and precise beats long
-  and padded.
+- Build around 3-5 core concepts, then enrich each with CONCRETE detail (composition, lighting atmosphere,
+  material texture, colour scheme, spatial layering — the five axes Tongyi's own enhancer injects). Detail helps;
+  PADDING hurts: every word must add a visible fact, never a vague intensifier.
+- LOCK THE CORE FIRST: the subject(s), their count, action/state, named objects, colours, and any quoted text are
+  bedrock — preserve them exactly, then layer the aesthetics around them. No metaphor, no emotional rhetoric —
+  objective, visualizable statements only.
 - Write "negatives" POSITIVELY: say "sharp focus, clean edges" — not "no blur"; "calm empty street" — not "no
   people". The model has no usable negative prompt.
 - BALANCED EXPOSURE: name a single motivated light source (a window at dusk, one candle, overcast sky, a neon
@@ -413,7 +442,14 @@ substitute. Each scene must depict a DIFFERENT environment, time of day, weather
 DO NOT include any text, captions, watermarks, or written words (other than intentional quoted signage).
 COLOR PALETTE OVERRIDE, if present in the context, is ABSOLUTE — describe every element within that palette only.
 
-Output ONE natural-language paragraph, ~70-160 words. Front-load the shot and subject.
+EXAMPLE OF THE TARGET SHAPE:
+"Wide shot of a lone woman in a rust-red raincoat standing at the end of a concrete pier at dawn, hood down, dark
+hair whipping in the wind. Flat overcast light from a pale grey sky, sea mist softening the horizon, wet concrete
+reflecting her silhouette. Cold muted palette of slate blue, grey and that single rust-red accent. Documentary
+photography, 35mm, eye-level, sharp focus with gentle atmospheric haze."
+
+Output ONE natural-language paragraph, ~70-200 words of concrete visual detail (the text encoder truncates around
+500 tokens — length only helps while every word stays specific). Front-load the shot and subject.
 IMPORTANT: Output ONLY the prompt text. No labels, no prefixes, no explanations."""
 
 
@@ -505,6 +541,243 @@ CONTENT RULES:
 - Output ONLY the JSON object."""
 
 
+SCENE_INTENT_SYSTEM_PROMPT = """You are a film director's assistant. From the scene context (lyrics/narration, storyboard, concept, references), output a STRUCTURED SCENE INTENT as JSON — a compact plan of exactly what the shot must show. This is the single source the image/video prompt will be compiled from.
+
+OUTPUT ONLY this JSON object (no prose, no markdown fences, no comments):
+{
+  "role": "first_frame" | "last_frame" | "video",
+  "anchor": "<3-8 word scene anchor, e.g. 'rainy rooftop at night'>",
+  "subjects": [{"descriptor": "<who/what, by APPEARANCE not name>", "action": "<what they do at this moment>", "position": "<where in frame>"}],
+  "environment": "<the setting described WITHOUT the subjects>",
+  "lighting": "<source, direction, quality>",
+  "camera": "<shot size, angle, movement>",
+  "palette": "<colour mood or strict palette>",
+  "must_include": ["<specific objects/people/actions the lyrics or storyboard NAME>"],
+  "must_avoid": ["<things that must NOT appear>"],
+  "continuity": "<what stays constant across this scene's frames (same outfit, lighting, place)>"
+}
+
+RULES:
+- Describe people by APPEARANCE (build, hair, clothing), NEVER by name or proper noun.
+- For a FIRST FRAME of a video, the intent is the OPENING moment (the calm starting state), not the full action.
+- For a LAST FRAME, it is the END state (a distinct later moment).
+- Pull "must_include" from the lyrics/narration — the specific things they name MUST be present.
+- Keep every field short and concrete; omit nothing structural. Output ONLY the JSON object."""
+
+
+VIDEO_JSON_SYSTEM_PROMPT = """You are an expert at writing STRUCTURED JSON VIDEO PROMPTS for LTX Video 2.3 (image-to-video), following LTX's OFFICIAL JSON prompting format (scene / subject / camera / duration). Structured fields remove the ambiguity of prose — camera control especially is far more consistent as discrete fields.
+
+The video ANIMATES FROM a first-frame image that already defines the look. Describe MOTION and what CHANGES over time; preserve the source scene. Do not re-describe static elements already visible in the first frame.
+
+OUTPUT ONLY this JSON object (no prose, no markdown fences, no comments):
+{
+  "scene": {
+    "description": "<environment + visual context: interior/exterior, time of day, architecture, weather>",
+    "lighting": "<light source, quality and tone, e.g. 'natural light from large windows, warm afternoon tone'>",
+    "atmosphere": "<mood of the space, e.g. 'focused, collaborative' or 'tense, storm-charged'>",
+    "color_palette": "<dominant colours (omit when unconstrained)>",
+    "preserve_from_input_image": ["<what to KEEP from the first frame: composition, subject placement, lighting direction, palette, background geometry>"]
+  },
+  "subject": {
+    "type": "<person | product | animal | vehicle | ...>",
+    "description": "<by APPEARANCE only, never a name: age, build, hair, clothing>",
+    "action": "<chronological, present tense. ONE main action per 2-3 seconds of duration; for longer clips write sequential beats: 'Initially ... After a moment ... As the camera settles ...'>",
+    "position": "<where in frame, e.g. 'left of frame, standing'>"
+  },
+  "camera": {
+    "shot_type": "<close-up | medium shot | wide shot | establishing shot>",
+    "angle": "<eye level | low angle | high angle | overhead | bird's eye>",
+    "movement": "<static | slow push in | dolly in | dolly out | pan left | pan right | tilt up | tilt down | orbit>"
+  },
+  "duration": <clip length in seconds — the model paces motion to it>
+}
+
+RULES:
+- CAMERA IS MANDATORY and is where JSON prompting helps most — fill all three camera fields; use "static" explicitly for a locked shot (an unspecified camera drifts randomly).
+- IMAGE-TO-VIDEO: fill scene.preserve_from_input_image with what to KEEP from the first frame; put ALL the motion in subject.action.
+- FIRST→LAST-FRAME clips (context contains a "KEYFRAME INTERPOLATION" block): the render is pinned to BOTH keyframe images. subject.action must be the continuous journey from the first keyframe to the last; the camera fields must bridge the two compositions (e.g. shot_type tightens from wide to close if the frames differ); never add content absent from both keyframes; scene.preserve_from_input_image lists what stays constant across the WHOLE clip.
+- Set duration to the scene's real duration and scale the number of action beats to it (one per 2-3s).
+- Describe people by APPEARANCE, never by name or proper noun.
+- Convey emotion through physical cues ("her face crumples; she takes a shaky breath"), never labels ("sad").
+- Write everything positively — there is no negative-prompt channel.
+- For multi-shot consistency, scene + subject stay constant across a sequence while camera + duration vary.
+Output ONLY the JSON object."""
+
+
+def normalize_video_json(obj):
+    """Validate/normalize a structured LTX video-JSON prompt into the OFFICIAL
+    LTX shape — scene / subject / camera / duration (ltx.io JSON prompting
+    guide).  Lenient: extra fields are preserved (the Gemma-3 connector parses
+    semantically).  Legacy objects from the v1.22.0 five-section schema are
+    converted in place so existing scenes keep working after the upgrade."""
+    if isinstance(obj, str):
+        obj = extract_json_object(obj)
+    if not isinstance(obj, dict):
+        raise ValueError("video JSON is not a JSON object")
+
+    def _join(v, sep=", "):
+        if isinstance(v, dict):
+            return sep.join(f"{k}: {_join(x)}" for k, x in v.items() if x)
+        if isinstance(v, list):
+            return sep.join(_join(x) for x in v if x)
+        return str(v).strip() if v is not None else ""
+
+    # ── Legacy (v1.22.0) five-section schema → official shape ──
+    if any(k in obj for k in ("setting_environment", "subject_action", "camera_movement", "motion_timing_cues")):
+        se = obj.pop("setting_environment", {}) or {}
+        sa = obj.pop("subject_action", {}) or {}
+        cm = obj.pop("camera_movement", {}) or {}
+        vsm = obj.pop("visual_style_mood", {}) or {}
+        mtc = obj.pop("motion_timing_cues", {}) or {}
+
+        scene = obj.get("scene") if isinstance(obj.get("scene"), dict) else {}
+        if se.get("location"):
+            scene.setdefault("description", _join(se.get("location")))
+        if se.get("lighting"):
+            scene.setdefault("lighting", _join(se.get("lighting")))
+        _atmo = _join(vsm) if vsm else ""
+        if se.get("environment_motion"):
+            _atmo = (_atmo + "; " if _atmo else "") + "environment motion: " + _join(se.get("environment_motion"))
+        if _atmo:
+            scene.setdefault("atmosphere", _atmo)
+        if se.get("color_palette"):
+            scene.setdefault("color_palette", _join(se.get("color_palette")))
+        if se.get("preserve_from_input_image"):
+            scene.setdefault("preserve_from_input_image", se.get("preserve_from_input_image"))
+        obj["scene"] = scene
+
+        subj = obj.get("subject") if isinstance(obj.get("subject"), dict) else {}
+        _ss = sa.get("subject") or {}
+        if isinstance(_ss, dict):
+            if _ss.get("description"):
+                subj.setdefault("description", _join(_ss.get("description")))
+            _pos = " -> ".join(
+                x for x in (_join(_ss.get("starting_position")), _join(_ss.get("ending_position"))) if x
+            )
+            if _pos:
+                subj.setdefault("position", _pos)
+        elif _ss:
+            subj.setdefault("description", _join(_ss))
+        beats = sa.get("action_sequence") or []
+        if beats and not subj.get("action"):
+            subj["action"] = "; ".join(
+                (f"{b.get('time', '')}: {b.get('action', '')}".strip(": ") if isinstance(b, dict) else _join(b))
+                for b in beats if b
+            )
+        if sa.get("motion_characteristics"):
+            subj["action"] = (str(subj.get("action", "")) + " (" + _join(sa["motion_characteristics"]) + ")").strip()
+        obj["subject"] = subj
+
+        cam = obj.get("camera") if isinstance(obj.get("camera"), dict) else {}
+        if cm.get("movement"):
+            cam.setdefault("movement", _join(cm.get("movement")))
+        fr = cm.get("framing") or {}
+        if isinstance(fr, dict):
+            if fr.get("composition"):
+                cam.setdefault("shot_type", _join(fr.get("composition")))
+            if fr.get("camera_height"):
+                cam.setdefault("angle", _join(fr.get("camera_height")))
+        if cm.get("forbidden_camera_behavior"):
+            cam["movement"] = (str(cam.get("movement", "")) + " (avoid: " + _join(cm["forbidden_camera_behavior"]) + ")").strip()
+        obj["camera"] = cam
+
+        if mtc.get("duration_seconds") and not obj.get("duration"):
+            obj["duration"] = mtc.get("duration_seconds")
+
+    # ── Canonical official keys ──
+    for k in ("scene", "subject", "camera"):
+        if not isinstance(obj.get(k), dict):
+            obj[k] = {"description": _join(obj.get(k))} if obj.get(k) else {}
+    try:
+        obj["duration"] = round(float(obj.get("duration") or 0), 2)
+    except (TypeError, ValueError):
+        obj["duration"] = 0
+    # Drop hollow scene keys rather than emitting empty values
+    for k in list(obj.get("scene", {}).keys()):
+        if obj["scene"][k] in ("", [], {}, None):
+            obj["scene"].pop(k)
+
+    if not any((obj.get("scene"), obj.get("subject"), obj.get("camera"))):
+        raise ValueError("video JSON has no usable content")
+    return obj
+
+
+def normalize_scene_intent(obj):
+    """Validate + clamp an LLM (or hand-edited) scene intent into the canonical shape."""
+    if isinstance(obj, str):
+        obj = extract_json_object(obj)
+    if not isinstance(obj, dict):
+        raise ValueError("scene intent is not a JSON object")
+
+    def _s(v):
+        return str(v).strip() if v is not None else ""
+
+    role = _s(obj.get("role")) or "first_frame"
+    if role not in ("first_frame", "last_frame", "video"):
+        role = "first_frame"
+    subjects = []
+    for sub in (obj.get("subjects") or []):
+        if isinstance(sub, dict):
+            subjects.append({
+                "descriptor": _s(sub.get("descriptor")),
+                "action": _s(sub.get("action")),
+                "position": _s(sub.get("position")),
+            })
+        elif isinstance(sub, str) and sub.strip():
+            subjects.append({"descriptor": sub.strip(), "action": "", "position": ""})
+
+    def _list(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()][:12]
+        if isinstance(v, str) and v.strip():
+            return [v.strip()]
+        return []
+
+    out = {
+        "role": role,
+        "anchor": _s(obj.get("anchor")),
+        "subjects": subjects[:5],
+        "environment": _s(obj.get("environment")),
+        "lighting": _s(obj.get("lighting")),
+        "camera": _s(obj.get("camera")),
+        "palette": _s(obj.get("palette")),
+        "must_include": _list(obj.get("must_include")),
+        "must_avoid": _list(obj.get("must_avoid")),
+        "continuity": _s(obj.get("continuity")),
+    }
+    if not out["anchor"] and not out["subjects"] and not out["environment"]:
+        raise ValueError("scene intent has no usable content")
+    return out
+
+
+def scene_intent_to_brief(intent: dict) -> str:
+    """Serialize a normalized scene intent into a compact prose brief for the enhancer."""
+    if not isinstance(intent, dict):
+        return ""
+    parts = []
+    if intent.get("anchor"):
+        parts.append(f"anchor: {intent['anchor']}")
+    subs = []
+    for sub in (intent.get("subjects") or []):
+        seg = sub.get("descriptor", "")
+        if sub.get("action"):
+            seg += f" — {sub['action']}"
+        if sub.get("position"):
+            seg += f" ({sub['position']})"
+        if seg.strip():
+            subs.append(seg.strip())
+    if subs:
+        parts.append("subjects: " + "; ".join(subs))
+    for k in ("environment", "lighting", "camera", "palette", "continuity"):
+        if intent.get(k):
+            parts.append(f"{k}: {intent[k]}")
+    if intent.get("must_include"):
+        parts.append("must include: " + ", ".join(intent["must_include"]))
+    if intent.get("must_avoid"):
+        parts.append("must avoid: " + ", ".join(intent["must_avoid"]))
+    return " | ".join(parts)
+
+
 TWO_PASS_COMPOSITE_SYSTEM_PROMPT = """You write a SHORT, literal EDIT INSTRUCTION for FLUX.2 Klein 9B — an image EDIT model that ALREADY SEES the
 reference images attached to this job. You are NOT describing a scene from scratch; you are telling the model
 what to ADD to images it can already see. Treat this like Photoshop directions, not a T2I prompt.
@@ -524,6 +797,13 @@ HARD RULES:
 - PRESERVE IMAGE 1's LOOK: keep its exact brightness, exposure, colour grade, and palette. Klein tends to
   darken / dim / re-grade on edits — explicitly tell it to keep Image 1's lighting and to NOT darken, dim, or
   restyle. Re-light the inserted character(s) to match Image 1's light direction and palette.
+- PRESERVE THE FACE: re-light ONLY to match Image 1's light direction and warmth — do NOT blow out, harden,
+  flatten, or re-shape the inserted character's face. Keep their facial features, skin softness, bone structure
+  and expression exactly as their reference shows. The goal is the SAME person standing in the scene's light,
+  never a re-rendered or re-styled face.
+- ALWAYS end with an explicit KEEP-CLAUSE — e.g. "keep the pose, lighting, composition and colors of Image 1
+  unchanged". Pairing every edit with a preserve-statement is the documented FLUX.2 way to stop colour/style
+  bleed from the character references.
 - Output ONE concise instruction, ~20–60 words, a single paragraph. No lists, no labels, no names, no text or
   watermarks, no preamble.
 
@@ -538,7 +818,7 @@ entirely within that palette regardless of their reference-photo colours.
 IMPORTANT: Output ONLY the instruction text."""
 
 NARRATION_IMAGE_SYSTEM_PROMPT = """You are an expert at writing prompts for FLUX.2 Klein 9B, a reference-image-conditioned AI image generation model.
-Your job is to produce a single concise paragraph that the model can render into a clear, high-quality image to illustrate a narration script. FLUX has no prompt upsampling — what you write is what renders, so be concrete, not padded.
+Your job is to produce a single concise paragraph that the model can render into a clear, high-quality image to illustrate a narration script. This local Klein workflow does not run prompt upsampling — what you write is what the model receives, so be concrete, not padded.
 
 CRITICAL FORMATTING RULES:
 - Output MUST be a SINGLE PARAGRAPH with NO line breaks, NO bullet points, NO numbered lists.
@@ -595,6 +875,13 @@ WHEN TO USE SINGLE vs MULTI-SEGMENT PROMPTS:
 - NEVER use more than 3 segments per clip. Most clips should be 1 segment.
 - Each segment should be a complete visual description (40-80 words), not a fragment.
 
+FIRST-FRAME→LAST-FRAME (FFLF) CLIPS:
+When the context contains a "KEYFRAME INTERPOLATION" block, the render receives BOTH a first AND a last keyframe image and interpolates between them. For these clips:
+- ALWAYS write ONE single segment (one paragraph, no line breaks) — multiple segments fight the fixed endpoints.
+- Both endpoint compositions are already decided; your prompt supplies the JOURNEY. Describe the continuous subject motion AND camera move that carry the first keyframe into the last.
+- Never introduce content that appears in neither keyframe; never describe cuts, dissolves, or location changes.
+- Pace motion to the clip duration: a big pose/framing gap over a short clip needs brisk, decisive motion; a small gap over a long clip needs slow, deliberate movement with micro-action (breathing, wind, flickering light) to stay alive.
+
 CRITICAL FORMATTING RULES:
 - Single-segment prompts: ONE paragraph, NO line breaks, flowing descriptive prose.
 - Multi-segment prompts: Each segment is its own paragraph separated by exactly ONE blank line. Each segment must be self-contained and visually complete.
@@ -608,13 +895,15 @@ REFERENCE IMAGE AWARENESS (KEYFRAME IMAGES):
 PROMPTING BEST PRACTICES:
 - Use present tense and active voice: "A woman walks through the rain" not "A woman walking" or "A woman will walk".
 - Be specific about subjects: "a man in his 40s with a weathered face and dark coat" not "a person".
+- Convey emotion through PHYSICAL cues, never labels: not "she is sad" — "her face crumples; she takes a shaky breath and looks away".
 - Describe the action/motion clearly — this is VIDEO, not a still image. What moves? How? At what pace?
 - Emphasize SMOOTH, DELIBERATE camera work suitable for narration: "slow tracking shot", "gentle dolly push", "static wide angle", "steady crane rising", "smooth pan across".
 - Avoid rapid or aggressive camera movements unless the narration calls for urgency.
 - Specify lighting, atmosphere, and visual texture: "warm golden hour light filtering through dust particles", "harsh fluorescent overhead lighting casting sharp shadows".
-- Match prompt detail to video duration. Short clips (3-5s) need focused, concise single-segment prompts. Longer clips (8-15s) can use more detail or multiple segments.
+- Match prompt detail to video duration: plan roughly ONE main action per 2-3 seconds of clip (a 4s clip = one clear action; a 10s clip = 3-4 chronological beats, e.g. "Initially... After a moment... As the camera settles..."). A short prompt on a long clip makes the model rush or invent; an overloaded prompt on a short clip gets compressed or skipped.
+- EXAMPLE of the target shape (6s clip): "A woman in a gray coat walks slowly through an empty museum hall, her footsteps echoing softly. The camera tracks alongside her at eye level in a smooth dolly. Initially she scans the paintings as she passes; after a moment she stops, turns toward a tall canvas, and tilts her head up as the camera settles into a static medium shot. Soft diffused skylight, dust motes drifting through the beams."
 - Avoid contradictory descriptions within a single segment.
-- NEGATIVE PROMPT is handled separately by the system — do NOT include negative instructions in your prompt.
+- Write POSITIVELY. The standard LTX render path has NO negative-prompt channel — describe what SHOULD appear ("sharp focus", "steady framing"), never what shouldn't.
 - CRITICAL — COLOR PALETTE ENFORCEMENT: If a COLOR PALETTE OVERRIDE is specified in the context, it takes ABSOLUTE PRIORITY over everything else. You MUST strictly adhere to the specified color palette. Do NOT introduce ANY colors outside the palette — not in lighting, clothing, environment, materials, skin tones, or any visual element. For example, if the override says "black and white only", you must NEVER mention gold, amber, red, blue, or any chromatic color. Describe everything using ONLY the permitted tones. This rule overrides all other style considerations.
 
 CINEMATOGRAPHY VOCABULARY — use these terms naturally in your prompts for precise visual direction:
@@ -806,6 +1095,14 @@ class PromptEnhancer:
             ValueError: If provider or model invalid
             RuntimeError: If API call fails
         """
+        # Auto-gen placeholder prompts ("Scene 12", "Cinematic scene 3") are
+        # not user intent — treat them as empty so the LLM builds from the
+        # context instead of "tightening" garbage while "keeping the intent".
+        if prompt:
+            import re as _ph_re
+            if _ph_re.fullmatch(r"(?:cinematic\s+scene|scene)\s+\d+", prompt.strip(), _ph_re.I):
+                prompt = ""
+
         logger.info(f"Enhancing {'video' if is_video else 'image'} prompt with {provider}/{model} (frame_type={frame_type}, two_pass_phase={two_pass_phase})")
 
         # Determine prompt_type key for system prompt lookup
@@ -821,11 +1118,17 @@ class PromptEnhancer:
             prompt_type = "image"
 
         model_key = gen_model_name or ("ltx_2.3" if is_video else "flux2_klein_dev_9b")
+        # Two-pass phase prompts MUST win over narration/user overrides:
+        # a Pass-1 base render enhanced under the narration override loses
+        # its scene-only/no-refs rules, and the composite loses its
+        # edit-instruction contract.  Overrides still apply to every
+        # non-phase enhance.
+        _phase_locked = two_pass_phase in ("base", "composite")
         system_prompt = get_system_prompt(
             model_name=model_key,
             prompt_type=prompt_type,
-            user_override=system_prompt_override,
-            override_enabled=system_prompt_override is not None,
+            user_override=None if _phase_locked else system_prompt_override,
+            override_enabled=(system_prompt_override is not None) and not _phase_locked,
         )
 
         # Append per-model prompt guidance if provided
@@ -844,7 +1147,7 @@ class PromptEnhancer:
             raise ValueError(f"Unknown provider: {provider}")
 
         # Enforce single-paragraph output for both image and video prompts
-        result = _collapse_to_single_paragraph(result)
+        result = _clean_prompt_preserve_segments(result)
 
         return result
 
@@ -888,14 +1191,41 @@ class PromptEnhancer:
                 extra_params["max_tokens"] = enhance_tokens
                 extra_params["temperature"] = 0.7
 
-            response = client.chat.completions.create(
-                model=effective_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                **extra_params,
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=effective_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    **extra_params,
+                )
+            except Exception as _tok_err:
+                # Prefix sniffing can misclassify future model families —
+                # retry once with the alternate token parameter.
+                from openai import BadRequestError as _BadReq
+                _msg = str(_tok_err)
+                if isinstance(_tok_err, _BadReq) and (
+                    "max_tokens" in _msg or "max_completion_tokens" in _msg
+                ):
+                    if "max_completion_tokens" in extra_params:
+                        extra_params = {"max_tokens": enhance_tokens, "temperature": 0.7}
+                    else:
+                        extra_params = {"max_completion_tokens": enhance_tokens}
+                    logger.warning(
+                        f"OpenAI token-param mismatch for {effective_model} — "
+                        f"retrying with {list(extra_params)[0]}"
+                    )
+                    response = client.chat.completions.create(
+                        model=effective_model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message},
+                        ],
+                        **extra_params,
+                    )
+                else:
+                    raise
 
             raw_content = response.choices[0].message.content or ""
             enhanced = _clean_enhanced_prompt(raw_content)
@@ -961,6 +1291,7 @@ class PromptEnhancer:
 
             try:
                 # Ollama's OpenAI-compatible endpoint needs a dummy API key
+                from openai import APIConnectionError as _OpenAIConnErr
                 client = OpenAI(
                     api_key="ollama",
                     base_url=ollama_api_url,
@@ -1043,8 +1374,11 @@ CRITICAL RULES FOR YOUR RESPONSE (FOLLOW EXACTLY):
                 _write_enhance_log("ollama", effective_model, prompt, context, raw_content, enhanced)
                 return enhanced
 
-            except (ConnectionError, OSError, TimeoutError) as e:
-                # Server unreachable — try next one
+            except (ConnectionError, OSError, TimeoutError, _OpenAIConnErr) as e:
+                # Server unreachable — try next one.  The OpenAI SDK used for
+                # Ollama's /v1 endpoint raises APIConnectionError (which also
+                # covers APITimeoutError), NOT the builtin ConnectionError —
+                # without it the failover below was dead code.
                 last_error = e
                 logger.warning(f"Ollama server {idx + 1}/{len(urls)} unreachable: {e}")
                 continue
@@ -1146,6 +1480,7 @@ CRITICAL RULES FOR YOUR RESPONSE (FOLLOW EXACTLY):
                     max_output_tokens=800,
                     temperature=0.7,
                 ),
+                request_options={"timeout": 600},
             )
 
             raw_content = response.text or ""
@@ -1249,4 +1584,14 @@ def normalize_ideogram_caption(obj):
 
     if not out["high_level_description"] and not out["elements"] and not out["background"]:
         raise ValueError("caption has no usable content")
+
+    # Ideogram 4 hard-caps captions at 2048 tokens — trim overflow from the
+    # tail of the element list (largest/most-important elements come first by
+    # the decomposition rule) rather than letting the node error or degrade.
+    try:
+        import json as _ic_json
+        while out["elements"] and len(_ic_json.dumps(out, ensure_ascii=False)) > 8000:
+            out["elements"].pop()
+    except Exception:
+        pass
     return out

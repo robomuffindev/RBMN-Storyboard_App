@@ -1,168 +1,221 @@
-#!/usr/bin/env python3
-"""diag_audio.py — Why is the timeline waveform / audio missing?
-
-Checks whether the project's audio (music / narration) Asset row exists and
-whether its file is actually on disk — testing BOTH the C: and D: project_dir
-roots to expose the known DB-vs-media drive split.
-
-Writes ./audio_diag.md (also prints). Stdlib only.
+"""Audit a project's ENTIRE audio chain: master, per-scene clips, content.
 
 Usage:
-    python tools/diag_audio.py                      # most-recently-edited project
-    python tools/diag_audio.py --project 55703d4e   # by id prefix or name
-    python tools/diag_audio.py --db PATH
+    python tools/diag_audio.py "<project name fragment or id>"
+    python tools/diag_audio.py "<project>" --db "C:\\path\\to\\RBMN.db"
+
+Prints, with zero guessing:
+  - the project's master audio asset(s): file, size, ffprobe codec/duration
+  - every scene: start/end, audio_clip_path, file exists?, codec, duration,
+    and a CONTENT FINGERPRINT (md5 of the first 2s of decoded PCM)
+  - verdicts: are clips missing? wrong codec? DO MULTIPLE SCENES SHARE THE
+    SAME AUDIO CONTENT? (the "scene 1 over and over" bug shows up as one
+    fingerprint repeated across scenes)
+
+Requires ffmpeg/ffprobe on PATH. Read-only - changes nothing.
 """
 from __future__ import annotations
-import argparse, json, sqlite3, sys
+
+import hashlib
+import json
+import sqlite3
+import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
 
 
-def find_db(explicit):
-    cands = []
-    if explicit:
-        cands.append(Path(explicit).expanduser())
-    cands.append(Path("~/RBMN-Projects/RBMN.db").expanduser())
+def ffprobe(path: Path) -> dict:
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from backend.config import settings as _s
-        cands.append(Path(str(_s.db_path)))
-    except Exception:
-        pass
-    for c in cands:
-        if c.exists():
-            return c
-    return None
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_name,sample_rate,channels:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        d = json.loads(r.stdout or "{}")
+        st = (d.get("streams") or [{}])[0]
+        return {
+            "codec": st.get("codec_name", "?"),
+            "sr": st.get("sample_rate", "?"),
+            "ch": st.get("channels", "?"),
+            "dur": round(float((d.get("format") or {}).get("duration", 0) or 0), 2),
+        }
+    except Exception as e:
+        return {"codec": f"probe-failed:{e}", "sr": "?", "ch": "?", "dur": 0}
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=None)
-    ap.add_argument("--project", default=None, help="id prefix or name substring")
-    ap.add_argument("--out", default="audio_diag.md")
-    args = ap.parse_args()
+def content_fp(path: Path, seconds: float = 2.0) -> str:
+    """md5 of the first N seconds DECODED to raw PCM - container-agnostic,
+    so identical audio content gives identical fingerprints."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path), "-t", str(seconds),
+             "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+            capture_output=True, timeout=30,
+        )
+        if not r.stdout:
+            return "decode-failed"
+        return hashlib.md5(r.stdout).hexdigest()[:10]
+    except Exception as e:
+        return f"fp-failed:{e}"
 
-    db = find_db(args.db)
-    if not db:
-        print("ERROR: could not locate RBMN.db. Pass --db PATH.")
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print(__doc__)
         return 2
-    con = sqlite3.connect(str(db))
+    needle = sys.argv[1].lower()
+    db_path = None
+    if "--db" in sys.argv:
+        db_path = Path(sys.argv[sys.argv.index("--db") + 1])
+    if db_path is None:
+        db_path = Path.home() / "RBMN-Projects" / "RBMN.db"
+    if not db_path.exists():
+        print(f"DB not found at {db_path} - pass it with --db")
+        return 2
+    project_root = db_path.parent
+
+    con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
-    cur = con.cursor()
 
-    # project_dir override (the media root the running app uses)
-    dir_override = None
+    # The app supports a project_dir OVERRIDE stored in app_settings — the
+    # DB file and the project FILES can live in different roots (e.g. after
+    # a failed/partial "move project folder"). Honor it.
+    override_root = None
     try:
-        r = cur.execute("SELECT project_dir FROM app_settings LIMIT 1").fetchone()
-        dir_override = (r["project_dir"] if r else None) or None
+        row = con.execute("SELECT project_dir FROM app_settings LIMIT 1").fetchone()
+        if row and row["project_dir"]:
+            cand = Path(row["project_dir"])
+            if cand.exists():
+                override_root = cand
     except Exception:
         pass
-
-    # candidate media roots to test (override + both common drives)
-    roots = []
-    def add_root(p):
-        if p:
-            pp = Path(p)
-            if pp not in roots:
-                roots.append(pp)
-    add_root(dir_override)
-    add_root(r"C:\Users\hexum\RBMN-Projects")
-    add_root(r"D:\RBMN-Projects")
-    add_root(str(Path("~/RBMN-Projects").expanduser()))
-
-    # pick project
-    cur.execute("SELECT id,name,mode,updated_at FROM projects ORDER BY updated_at DESC")
-    projs = cur.fetchall()
-    if not projs:
-        print("no projects")
+    print(f"DB: {db_path}\nDB-parent root: {project_root}")
+    print(f"app_settings.project_dir override: {override_root or '(none)'}")
+    roots = [r for r in [override_root, project_root] if r]
+    print(f"Searching roots: {[str(r) for r in roots]}\n")
+    rows = con.execute("SELECT id, name, mode FROM projects").fetchall()
+    matches = [r for r in rows if needle in (r["name"] or "").lower() or needle in str(r["id"]).lower()]
+    if not matches:
+        print(f"No project matching {needle!r}. Projects:")
+        for r in rows:
+            print(f"  {r['id']}  {r['name']}")
         return 2
-    target = None
-    if args.project:
-        q = args.project.lower()
-        for p in projs:
-            if p["id"].lower().startswith(q) or q in (p["name"] or "").lower():
-                target = p
+    if len(matches) > 1:
+        print("Multiple matches - be more specific:")
+        for r in matches:
+            print(f"  {r['id']}  {r['name']}")
+        return 2
+    proj = matches[0]
+    pid_hex = str(proj["id"])
+    _h = pid_hex.replace("-", "")
+    pid_dashed = f"{_h[0:8]}-{_h[8:12]}-{_h[12:16]}-{_h[16:20]}-{_h[20:32]}" if len(_h) == 32 else pid_hex
+    proj_dir = None
+    for _root in roots:
+        for _name in (pid_dashed, pid_hex):
+            cand = _root / _name
+            if cand.exists():
+                proj_dir = cand
+                project_root = _root
                 break
-        if not target:
-            print(f"no project matching {args.project!r}")
-            return 2
+        if proj_dir:
+            break
+    if proj_dir is None:
+        proj_dir = (roots[0] if roots else project_root) / pid_dashed
+        print(f"!! project folder not found under any root — checked "
+              f"{[str(r / n) for r in roots for n in (pid_dashed, pid_hex)]}")
     else:
-        target = projs[0]
+        try:
+            _top = sorted(p.name for p in proj_dir.iterdir())[:12]
+            print(f"project folder contents: {_top}")
+            _ac = proj_dir / "audio_clips"
+            if _ac.exists():
+                _clips = sorted(p.name for p in _ac.iterdir())
+                print(f"audio_clips/ has {len(_clips)} file(s): {_clips[:5]}{' ...' if len(_clips) > 5 else ''}")
+            else:
+                print("audio_clips/ folder DOES NOT EXIST")
+        except Exception as _ls_err:
+            print(f"folder listing failed: {_ls_err}")
+    print(f"=== Project: {proj['name']} ({proj['mode']}) ===\nid={pid_hex}\ndir={proj_dir} exists={proj_dir.exists()}\n")
 
-    pid = target["id"]
-    L = ["# Audio / Waveform Diagnostic", ""]
-    L.append(f"- DB: `{db}`")
-    L.append(f"- app_settings.project_dir (override): `{dir_override}`")
-    L.append(f"- Project: **{target['name']}**  (`{pid}`)  mode=`{target['mode']}`")
-    L.append("")
+    try:
+        srow = con.execute("SELECT settings FROM projects WHERE id=?", (proj["id"],)).fetchone()
+        pset = json.loads(srow["settings"] or "{}")
+        print(f"audio_source: {pset.get('audio_source')!r}   aaf_import: {json.dumps(pset.get('aaf_import')) if pset.get('aaf_import') else None}\n")
+    except Exception as e:
+        print(f"settings read failed: {e}\n")
 
-    # all assets for this project
-    cur.execute(
-        "SELECT id,asset_type,filename,rel_path,file_size FROM assets WHERE project_id=?",
-        (pid,),
-    )
-    assets = cur.fetchall()
-    by_type = {}
-    for a in assets:
-        by_type.setdefault(a["asset_type"], 0)
-        by_type[a["asset_type"]] += 1
-    L.append("## Asset counts by type")
-    if by_type:
-        for t, n in sorted(by_type.items()):
-            L.append(f"- `{t}`: {n}")
-    else:
-        L.append("- (none)")
-    L.append("")
+    print("--- MASTER AUDIO ASSETS (type music, non-stem) ---")
+    assets = con.execute(
+        "SELECT id, filename, rel_path, file_size, created_at FROM assets "
+        "WHERE project_id=? AND asset_type IN ('music','MUSIC') ORDER BY created_at",
+        (proj["id"],),
+    ).fetchall()
+    masters = [a for a in assets if "stems/" not in (a["rel_path"] or "")]
+    if not masters:
+        print("  NONE - no master audio. That alone breaks slicing/playback.")
+    for a in masters:
+        f = proj_dir / (a["rel_path"] or "")
+        info = ffprobe(f) if f.exists() else {}
+        print(f"  {a['rel_path']}  size={a['file_size']}  exists={f.exists()}  "
+              f"{('codec=' + str(info.get('codec')) + ' dur=' + str(info.get('dur')) + 's') if f.exists() else ''}")
 
-    audio = [a for a in assets if (a["asset_type"] or "").lower() in ("music", "narration")]
-    L.append(f"## Audio assets (music / narration): {len(audio)}")
-    if not audio:
-        L.append("")
-        L.append("**No music/narration asset row exists for this project.**")
-        L.append("The waveform looks for an `asset_type == 'music'` asset and finds")
-        L.append("none — so it shows the empty placeholder and nothing plays.")
-        L.append("Fix: re-upload the audio on the Audio tab (Process Audio).")
-    for a in audio:
-        L.append("")
-        L.append(f"### `{a['asset_type']}` — {a['filename']}")
-        L.append(f"- asset id: `{a['id']}`")
-        L.append(f"- rel_path: `{a['rel_path']}`")
-        L.append(f"- db file_size: {a['file_size']}")
-        rel = a["rel_path"] or ""
-        # mirror backend resolution: if rel starts with pid -> root/rel else root/pid/rel
-        starts_pid = rel.startswith(pid + "/") or rel.startswith(pid + "\\")
-        L.append("- on-disk check across candidate media roots:")
-        found_any = False
-        for root in roots:
-            cand = (root / rel) if starts_pid else (root / pid / rel)
-            ok = cand.exists()
-            sz = cand.stat().st_size if ok else "-"
-            mark = "✅ FOUND" if ok else "❌ missing"
-            if ok:
-                found_any = True
-            L.append(f"    - {mark}  `{cand}`  (size={sz})")
-        served_root = roots[0] if roots else None
-        served = (served_root / rel) if (served_root and starts_pid) else ((served_root / pid / rel) if served_root else None)
-        L.append(f"- **App serves from:** `{served}`")
-        if served is not None and not served.exists():
-            # is it present on a DIFFERENT root?
-            elsewhere = [str((rt / rel) if starts_pid else (rt / pid / rel)) for rt in roots
-                         if ((rt / rel) if starts_pid else (rt / pid / rel)).exists()]
-            if elsewhere:
-                L.append("")
-                L.append("- ⚠️ **DRIVE SPLIT CONFIRMED:** the file exists, but NOT under the")
-                L.append("  drive the app serves from. It's at:")
-                for e in elsewhere:
-                    L.append(f"    - `{e}`")
-                L.append("  Fix: copy/move the project's `assets/audio/` (and any other")
-                L.append("  uploaded files) onto the served media root, OR point")
-                L.append("  Settings → project_dir at the drive that actually has the files.")
-            elif not found_any:
-                L.append("- ❌ File not found on ANY candidate root — it was deleted/moved.")
+    print("\n--- SCENES / CLIPS ---")
+    scenes = con.execute(
+        "SELECT order_index, name, start_time, end_time, parameters FROM scenes "
+        "WHERE project_id=? ORDER BY order_index", (proj["id"],),
+    ).fetchall()
+    fps: list = []
+    missing = wrong_codec = 0
+    for sc in scenes:
+        try:
+            params = json.loads(sc["parameters"] or "{}")
+        except Exception:
+            params = {}
+        clip_rel = params.get("audio_clip_path") or ""
+        line = f"  #{sc['order_index']:>3} {float(sc['start_time'] or 0):8.2f}-{float(sc['end_time'] or 0):8.2f}s"
+        if not clip_rel:
+            line += "  clip=NONE"
+            missing += 1
+        else:
+            f = project_root / clip_rel
+            if not f.exists():
+                f2 = proj_dir / clip_rel
+                f = f2 if f2.exists() else f
+            if not f.exists():
+                line += f"  clip=MISSING-FILE ({clip_rel})"
+                missing += 1
+            else:
+                info = ffprobe(f)
+                fp = content_fp(f)
+                fps.append((sc["order_index"], fp))
+                if str(info.get("codec")) not in ("pcm_s16le", "pcm_s24le", "pcm_f32le"):
+                    wrong_codec += 1
+                line += f"  codec={info['codec']} dur={info['dur']}s fp={fp}  ({Path(clip_rel).name})"
+        print(line)
 
-    out = Path(args.out)
-    out.write_text("\n".join(L), encoding="utf-8")
-    print("\n".join(L))
-    print(f"\n[wrote {out.resolve()}]")
+    print("\n=== VERDICT ===")
+    if missing:
+        print(f"  X {missing}/{len(scenes)} scenes have NO usable clip -> slicing didn't run/persist for them.")
+    if wrong_codec:
+        print(f"  X {wrong_codec} clips are NOT real PCM WAV (e.g. mp3-in-wav) -> browsers/ComfyUI mis-decode them.")
+    if fps:
+        counts = Counter(fp for _i, fp in fps)
+        top_fp, top_n = counts.most_common(1)[0]
+        uniq = len(counts)
+        print(f"  content fingerprints: {uniq} unique across {len(fps)} clips "
+              f"(most common appears {top_n}x)")
+        if uniq == 1 and len(fps) > 1:
+            print("  XX ALL CLIPS HAVE IDENTICAL AUDIO CONTENT - the 'scene 1 over and over' bug. "
+                  "Re-import the AAF on current code (restarted backend).")
+        elif top_n > max(2, len(fps) // 4):
+            print(f"  X {top_n} clips share identical content (fp={top_fp}) - partial duplication.")
+        else:
+            print("  OK clips carry distinct audio content, as expected.")
+    if not missing and not wrong_codec and fps and len(Counter(fp for _i, fp in fps)) > 1:
+        print("  OK audio chain looks HEALTHY - if the UI still misbehaves it is a frontend/cache issue "
+              "(hard-refresh with Ctrl+Shift+R and check the browser console).")
     return 0
 
 

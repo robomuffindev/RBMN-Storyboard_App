@@ -126,10 +126,12 @@ def prepare_klein_workflow(
     with open(workflow_path, "r", encoding="utf-8") as f:
         workflow = json.load(f)
 
-    # Set text prompt — append anti-text suffix to prevent Klein from rendering subtitles/captions
+    # v1.22.1: the anti-text suffix is GONE — negatives in the positive
+    # prompt are against FLUX best practice, the LLM system prompts already
+    # forbid rendered text, and the 1.20 "submitted record == sent" contract
+    # was being violated (record dropped it while this still sent it).
     # NOTE: No negative prompt appended here — Klein has no negative prompt node
-    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-    full_prompt = prompt + anti_text_suffix if prompt else prompt
+    full_prompt = prompt
     set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", full_prompt)
 
     # Set dimensions
@@ -1312,10 +1314,9 @@ def prepare_zimage_workflow(
     with open(workflow_path, "r", encoding="utf-8") as f:
         workflow = json.load(f)
 
-    # Set text prompt with anti-text suffix
+    # v1.22.1: anti-text suffix removed (see prepare_klein_workflow note).
     # NOTE: No negative prompt appended here — Z-Image has no negative prompt node
-    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-    full_prompt = prompt + anti_text_suffix if prompt else prompt
+    full_prompt = prompt
     set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", full_prompt)
 
     # Set dimensions
@@ -1397,8 +1398,8 @@ def prepare_krea2_workflow(
     height = _as_int(height, 1024)
     seed = _as_int(seed, 0)
 
-    anti_text_suffix = ", no text, no subtitles, no captions, no words, no letters, no watermarks"
-    full_prompt = (prompt + anti_text_suffix) if prompt else prompt
+    # v1.22.1: anti-text suffix removed (see prepare_klein_workflow note).
+    full_prompt = prompt
 
     # ── Prompt ──
     # The Krea 2 graph feeds its prompt from a PrimitiveStringMultiline
@@ -1939,10 +1940,22 @@ def prepare_klein_inpaint_workflow(
     if klein_model_gguf:
         _try("Unet Loader (GGUF)", "unet_name", klein_model_gguf)
 
+    # Template titles the node "Grow Mask With Blur" (with spaces); the old
+    # no-space title never matched and _try silently skipped both controls.
+    # Try both spellings so a re-exported template keeps working either way.
+    def _try_mask(field: str, value) -> None:
+        for _title in ("Grow Mask With Blur", "GrowMaskWithBlur"):
+            try:
+                set_node_input(workflow, _title, field, value)
+                return
+            except ValueError:
+                continue
+        logger.warning(f"Klein inpaint: grow-mask node not found — skipping {field}")
+
     if mask_expand is not None:
-        _try("GrowMaskWithBlur", "expand", int(mask_expand))
+        _try_mask("expand", int(mask_expand))
     if mask_blur is not None:
-        _try("GrowMaskWithBlur", "blur_radius", int(mask_blur))
+        _try_mask("blur_radius", int(mask_blur))
 
     logger.info(
         f"Klein inpaint prepared: source={os.path.basename(source_masked_path)}, "

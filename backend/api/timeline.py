@@ -225,6 +225,19 @@ async def _maybe_resync_scene_boundaries(
     if getattr(proj, "mode", None) not in ("narration_video", "narration_images"):
         return {"resynced": False, "reason": "mode_not_narration"}
 
+    # ── AAF-authoritative gate ────────────────────────────────────────
+    # When the timeline was imported from an AAF (ElevenLabs etc.), the
+    # AAF clip boundaries are sample-accurate ground truth — NEVER
+    # re-snap them to Whisper/SRT word timing.  SRT/Whisper stay useful
+    # as TEXT + word-timing sources (subtitles, scene narration), they
+    # just lose boundary authority.
+    if (proj.settings or {}).get("audio_source") == "aaf":
+        logger.info(
+            f"_maybe_resync_scene_boundaries({trigger}, project={project_id}): "
+            f"AAF timeline is authoritative — skipping boundary resync."
+        )
+        return {"resynced": False, "reason": "aaf_authoritative"}
+
     # ── Active auto-gen guard ─────────────────────────────────────────
     # If a sequential auto-gen run is in flight, do NOT mutate scene
     # boundaries — the run reads scene.end_time - scene.start_time fresh
@@ -476,6 +489,8 @@ async def _slice_audio_for_scenes(
         .where(Asset.project_id == project_id)
         .where(Asset.asset_type == AssetType.MUSIC)
         .where(~Asset.rel_path.contains("stems/"))  # Exclude stem files
+        .order_by(Asset.created_at.desc())  # NEWEST master — unordered
+        # .first() once sliced from a stale row left by repeated imports
     )
     result = await session.execute(stmt)
     music_asset = result.scalars().first()
@@ -560,7 +575,14 @@ async def _slice_audio_for_scenes(
                     _eff_end = _audio_total_duration
                     _truncated_scene_count += 1
 
-            clip_filename = f"scene_{scene.order_index:03d}_{_eff_start:.2f}_{_eff_end:.2f}.wav"
+            # Cache-buster: embed the master's mtime — re-slicing after a
+            # master change must produce NEW filenames or browsers keep
+            # serving the old (possibly broken) cached clips forever.
+            try:
+                _clip_ver = int(audio_path.stat().st_mtime)
+            except Exception:
+                _clip_ver = 0
+            clip_filename = f"scene_{scene.order_index:03d}_{_eff_start:.2f}_{_eff_end:.2f}_{_clip_ver}.wav"
             clip_path = clips_dir / clip_filename
             rel_clip_path = str(clip_path.relative_to(settings.project_dir))
 
@@ -656,7 +678,7 @@ async def analyze_audio(
             content = await file.read()
             sha256 = hashlib.sha256(content).hexdigest()
 
-            audio_path = audio_dir / file.filename
+            audio_path = audio_dir / Path(file.filename or "audio.wav").name
             with open(audio_path, "wb") as f:
                 f.write(content)
 
@@ -796,6 +818,17 @@ async def analyze_audio(
         for stem_name in stem_names:
             stem_path = stems_dir / f"{stem_name}.wav"
             if stem_path.exists():
+                # Upsert guard: analyze re-runs must not duplicate stem rows
+                # (duplicates sort newer than the master and can hijack
+                # master-audio lookups).
+                _existing_stem = (await session.execute(
+                    select(Asset).where(
+                        Asset.project_id == project_id,
+                        Asset.rel_path == f"assets/stems/{stem_name}.wav",
+                    )
+                )).scalars().first()
+                if _existing_stem is not None:
+                    continue
                 stem_size = os.path.getsize(stem_path)
                 with open(stem_path, "rb") as sf:
                     stem_hash = hashlib.sha256(sf.read()).hexdigest()
@@ -2424,7 +2457,17 @@ async def create_scenes_from_sections(
         HTTPException: If project not found.
     """
     try:
-        await _get_project_or_404(project_id, session)
+        _csp = await _get_project_or_404(project_id, session)
+        # AAF-authoritative guard — section-derived scenes would REPLACE the
+        # sample-accurate AAF boundaries.
+        if (_csp.settings or {}).get("audio_source") == "aaf":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This project's timeline was imported from an AAF, which is "
+                    "authoritative. Detach the AAF on the Audio tab first."
+                ),
+            )
 
         # Delete ALL existing scenes — the user explicitly chose to recreate
         # scenes from sections, so old scenes (including user-edited ones) must go.
@@ -3405,6 +3448,18 @@ async def suggest_timeline(
 
     project = await _get_project_or_404(project_id, session)
 
+    # AAF-authoritative guard: a fresh timeline would silently REPLACE the
+    # sample-accurate AAF scene boundaries.  Force the user to detach first.
+    if (project.settings or {}).get("audio_source") == "aaf":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This project's timeline was imported from an AAF, which is "
+                "authoritative. Detach the AAF on the Audio tab before "
+                "generating a fresh timeline."
+            ),
+        )
+
     # ── Gather all available data ────────────────────────────────────────
 
     # 1) Sections
@@ -3480,12 +3535,13 @@ async def suggest_timeline(
         # Try to find an audio asset to get duration
         audio_stmt = select(Asset).where(
             Asset.project_id == project_id,
-            Asset.asset_type == AssetType.AUDIO,
+            Asset.asset_type.in_([AssetType.MUSIC, AssetType.NARRATION]),
+            ~Asset.rel_path.contains("stems/"),
         )
         audio_result = await session.execute(audio_stmt)
         audio_asset = audio_result.scalars().first()
-        if audio_asset and audio_asset.metadata_:
-            total_duration = audio_asset.metadata_.get("duration", 0)
+        if audio_asset and audio_asset.meta:
+            total_duration = (audio_asset.meta or {}).get("duration", 0)
 
     if total_duration <= 0:
         raise HTTPException(
@@ -3772,6 +3828,10 @@ async def suggest_timeline(
         # This makes a 1-hour narration immediately workable in chunks
         # without the user having to do anything manual.
         chapter_count = 0
+        # Commit the new timeline BEFORE the chapter rebuild: if the rebuild
+        # throws, its rollback must not discard the scenes created above
+        # (matches the import-aaf / LLM-path ordering).
+        await session.commit()
         try:
             from backend.services.chapters import rebuild_chapters
             chapters = await rebuild_chapters(session, project_id)
@@ -3783,8 +3843,7 @@ async def suggest_timeline(
         except Exception as _ch_err:
             # Chapter builder failed; rollback its session changes so
             # the OUTER request handler can still close cleanly.  The
-            # scenes themselves were committed by the audio-slicer
-            # earlier so they're safe.
+            # scenes themselves were committed just above so they're safe.
             logger.warning(
                 f"[SuggestTimeline] Chapter auto-build failed (non-fatal): {_ch_err}"
             )
@@ -4820,6 +4879,7 @@ async def slice_audio_for_single_scene(
         .where(Asset.project_id == project_id)
         .where(Asset.asset_type == AssetType.MUSIC)
         .where(~Asset.rel_path.contains("stems/"))
+        .order_by(Asset.created_at.desc())
     )
     result = await session.execute(stmt)
     music_asset = result.scalars().first()
@@ -4834,7 +4894,11 @@ async def slice_audio_for_single_scene(
         clips_dir = settings.project_dir / str(project_id) / "audio_clips"
         clips_dir.mkdir(parents=True, exist_ok=True)
 
-        clip_filename = f"scene_{scene.order_index:03d}_{scene.start_time:.2f}_{scene.end_time:.2f}.wav"
+        try:
+            _clip_ver = int(audio_path.stat().st_mtime)
+        except Exception:
+            _clip_ver = 0
+        clip_filename = f"scene_{scene.order_index:03d}_{scene.start_time:.2f}_{scene.end_time:.2f}_{_clip_ver}.wav"
         clip_path = clips_dir / clip_filename
         rel_clip_path = str(clip_path.relative_to(settings.project_dir))
 
@@ -5006,6 +5070,19 @@ async def upload_srt(
             f"{len(full_text)} chars, {unique_blocks} SRT blocks committed to DB"
         )
 
+        # Auto-resync existing scene boundaries to the re-anchored SRT
+        # timing (same guard/threshold logic as the post-Whisper hook —
+        # this was the missing half of the 1.8.20 drift fix).
+        try:
+            await _maybe_resync_scene_boundaries(
+                project_id, session, trigger="srt_upload",
+            )
+        except Exception as _resync_err:
+            logger.warning(
+                f"Post-SRT-upload auto-resync failed (non-fatal) for "
+                f"{project_id}: {_resync_err}"
+            )
+
         # Verify the data was persisted by re-reading from DB
         verify_stmt = select(Lyrics).where(Lyrics.project_id == project_id)
         verify_result = await session.execute(verify_stmt)
@@ -5143,7 +5220,7 @@ async def import_aaf_timeline(
             audio_dir = project_path / "assets" / "audio"
             audio_dir.mkdir(parents=True, exist_ok=True)
             acontent = await audio.read()
-            apath = audio_dir / audio.filename
+            apath = audio_dir / Path(audio.filename or "audio.wav").name
             with open(apath, "wb") as af:
                 af.write(acontent)
             session.add(Asset(
@@ -5156,6 +5233,84 @@ async def import_aaf_timeline(
             ))
             await session.flush()
             audio_attached = True
+
+        # 2b. No uploaded audio: use the project's existing master audio if
+        # present; otherwise try the audio EMBEDDED in the AAF itself
+        # (ElevenLabs AAFs embed every clip's rendered essence — that's why
+        # they're ~25x the size of the MP3 export).  If neither exists,
+        # FAIL FAST before any scene mutation: an imported timeline with no
+        # audio is a broken project state (no waveform, no playback).
+        audio_extracted = False
+        if not audio_attached:
+            _all_masters = list((await session.execute(
+                select(Asset).where(
+                    Asset.project_id == project_id,
+                    Asset.asset_type == AssetType.MUSIC,
+                    ~Asset.rel_path.contains("stems/"),
+                ).order_by(Asset.created_at.desc())
+            )).scalars().all())
+            # Purge EVERY master produced by a previous AAF extraction —
+            # rows accumulated across repeated imports, and an unordered
+            # .first() elsewhere could then slice from a STALE master.
+            # Only user-uploaded masters are reused as-is.
+            _kept: list = []
+            for _m in _all_masters:
+                _is_ext = (
+                    ((_m.meta or {}).get("source") == "aaf_embedded_essence")
+                    or "_embedded" in (_m.rel_path or "")
+                )
+                if _is_ext:
+                    try:
+                        (project_path / _m.rel_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    await session.delete(_m)
+                else:
+                    _kept.append(_m)
+            if len(_kept) != len(_all_masters):
+                await session.flush()
+                logger.info(
+                    f"[ImportAAF] removed {len(_all_masters) - len(_kept)} prior "
+                    f"AAF-extracted master(s) — re-extracting fresh"
+                )
+            _existing_master = _kept[0] if _kept else None
+            if _existing_master is None:
+                from backend.services.import_aaf import extract_aaf_embedded_audio
+                _audio_dir = project_path / "assets" / "audio"
+                _audio_dir.mkdir(parents=True, exist_ok=True)
+                _base = Path(file.filename or "timeline.aaf").stem or "aaf_audio"
+                _out_wav = _audio_dir / f"{_base}_embedded_{int(datetime.utcnow().timestamp())}.mp3"
+                _ok = await asyncio.to_thread(
+                    extract_aaf_embedded_audio, tmp_path, str(_out_wav)
+                )
+                if _ok and _out_wav.exists():
+                    _h = hashlib.sha256()
+                    with open(_out_wav, "rb") as _hf:
+                        for _chunk in iter(lambda: _hf.read(1 << 20), b""):
+                            _h.update(_chunk)
+                    session.add(Asset(
+                        project_id=project_id,
+                        filename=_out_wav.name,
+                        rel_path=f"assets/audio/{_out_wav.name}",
+                        asset_type=AssetType.MUSIC,
+                        sha256=_h.hexdigest(),
+                        file_size=_out_wav.stat().st_size,
+                        meta={"source": "aaf_embedded_essence"},
+                    ))
+                    await session.flush()
+                    audio_attached = True
+                    audio_extracted = True
+                    logger.info(f"[ImportAAF] extracted embedded audio -> {_out_wav.name}")
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            "No audio available: this AAF has no extractable embedded "
+                            "audio, no audio file was uploaded, and the project has no "
+                            "existing narration audio. Re-import with the audio export "
+                            "(WAV/MP3) in the Audio field."
+                        ),
+                    )
 
         # Probe audio duration so the LAST scene can extend to the audio end.
         audio_end = None
@@ -5215,6 +5370,23 @@ async def import_aaf_timeline(
         except Exception as _se:
             logger.warning(f"[ImportAAF] audio slice failed (non-fatal): {_se}")
 
+        # 5b. Mark the AAF as this project's authoritative audio/timeline
+        # source.  Downstream this gates boundary resync (Whisper/SRT) and
+        # Suggest Timeline, and drives the Audio tab's "superseded" UI.
+        _proj_row = await session.get(Project, project_id)
+        if _proj_row is not None:
+            _ps = dict(_proj_row.settings or {})
+            _ps["audio_source"] = "aaf"
+            _ps["aaf_import"] = {
+                "filename": file.filename or "timeline.aaf",
+                "imported_at": datetime.utcnow().isoformat() + "Z",
+                "clip_count": len(clips),
+                "scene_count": len(created),
+                "audio_attached": audio_attached,
+            }
+            _proj_row.settings = _ps
+            session.add(_proj_row)
+
         await session.commit()
 
         # 6. Rebuild chapters from the new scenes (best-effort, isolated commit).
@@ -5237,12 +5409,32 @@ async def import_aaf_timeline(
             "created_count": len(created),
             "scene_ids": scene_ids,
             "audio_attached": audio_attached,
+            "audio_extracted_from_aaf": audio_extracted,
             "chapter_count": chapter_count,
             "chapters_ok": chapters_ok,
-            "message": _msg,
+            "message": _msg + (" Audio was extracted from the AAF's embedded essence." if audio_extracted else ""),
         }
     finally:
         try:
             os.unlink(tmp_path)
         except Exception:
             pass
+
+
+@router.post("/detach-aaf", summary="Detach the AAF timeline authority")
+async def detach_aaf(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    """Clear the AAF-authoritative flag so Whisper/SRT boundary resync and
+    Suggest Timeline work normally again.  Scenes, audio and chapters
+    imported from the AAF are left untouched."""
+    project = await _get_project_or_404(project_id, session)
+    _ps = dict(project.settings or {})
+    was_active = _ps.pop("audio_source", None) == "aaf"
+    _ps.pop("aaf_import", None)
+    project.settings = _ps
+    session.add(project)
+    await session.commit()
+    return {"detached": was_active}
+
