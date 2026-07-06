@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.26.0] - 2026-07-05
+
+### Changed — FF/LF Keyframes mode now runs as three parallel phases
+
+- The Keyframes mode was shipped on the sequential runner (FF → LF → video, one scene at a time),
+  which left N−1 workers idle — but unlike Chaining, this mode has ZERO cross-scene dependency.
+  Reworked as a phased orchestrator on the windowed-batch machinery: **Phase 1 renders every scene's
+  first frame across all workers, Phase 2 every last frame, Phase 3 every FF→LF video.** In-scene
+  ordering is preserved by the phase boundaries; a drain barrier between Phases 1→2 waits out
+  two-pass composite follow-on jobs and applies the base-image fallback where a composite failed.
+- New internal windowed modes `kf_last_frames` (LF images w/ FF continuity ref + slot reservation)
+  and `kf_videos_fflf` (ltx_fflf videos; scenes missing either keyframe are skipped with a BatchRun
+  error entry instead of failing the run). `_run_windowed_batch` gained `finalize=False` so phases
+  don't prematurely mark the run done. Per-scene failures skip-and-continue like other windowed modes.
+- The serial per-scene branch is removed; the 1.25.1 two-pass FF guards remain on the chaining/V2V
+  sequential paths. UI description updated to describe the phased behavior.
+
 ## [1.25.1] - 2026-07-05
 
 ### Fixed — FF/LF Keyframes run died on the first two-pass scene

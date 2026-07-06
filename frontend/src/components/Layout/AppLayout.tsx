@@ -3184,7 +3184,7 @@ const AUTO_GEN_OPTIONS: { value: AutoGenMode; label: string; description: string
     value: 'all_video_fflf_keyframes',
     label: 'Full Pipeline — FF/LF Keyframes (Independent)',
     description:
-      'Generates a first-frame AND last-frame image for every scene (two keyframes of one continuous shot), then renders the video with the FF→LF interpolation workflow. No cross-scene chaining — each scene stands alone. Generates one scene at a time.',
+      'Generates a first-frame AND last-frame image for every scene (two keyframes of one continuous shot), then renders the video with the FF→LF interpolation workflow. No cross-scene chaining — runs as three parallel phases across all workers: every first frame, then every last frame, then every video.',
   },
   {
     value: 'all_video_v2v',

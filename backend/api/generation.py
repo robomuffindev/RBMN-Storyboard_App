@@ -3956,7 +3956,8 @@ async def start_sequential_auto_gen(
       first frame.  Generates first frame image for scene 1 if missing.
     - all_video_fflf_keyframes: Generate FF + LF keyframe images per scene
       (independent, no chaining), then render via the FF/LF interpolation
-      workflow (ltx_fflf).
+      workflow (ltx_fflf).  Runs as THREE parallel phases across all workers
+      (every FF → every LF → every video), not one scene at a time.
     - all_video_single: Generate videos from single first-frame image (no LF).
       Generates first frame image for each scene if missing.
     - all_images: Generate first-frame images only (still-image video).
@@ -4456,8 +4457,12 @@ async def _run_windowed_batch(
     image_prompt_guidance: str = "",
     video_prompt_guidance: str = "",
     skip_existing_prompts: bool = False,
+    finalize: bool = True,
 ):
     """Process scenes via continuous dispatch (pool of N = worker count).
+
+    finalize=False: phased-orchestrator mode — do NOT mark the run done or
+    finish the BatchRun at the end (the caller runs more phases after this).
 
     Phase 1: Prepares all eligible scenes (resolve images, enhance prompts).
     Phase 2: Fills N worker slots initially, then as each job completes,
@@ -4482,7 +4487,7 @@ async def _run_windowed_batch(
         vid_h = res_h
 
     # Determine window size from available workers
-    job_type = "video" if mode == "missing_videos_single" else "image"
+    job_type = "video" if mode in ("missing_videos_single", "kf_videos_fflf") else "image"
     window_size = _count_capable_workers(comfy_dispatcher, job_type)
     logger.info(
         f"Windowed batch: mode={mode}, window_size={window_size}, "
@@ -4544,6 +4549,12 @@ async def _run_windowed_batch(
                 continue
             if mode == "missing_images_independent" and has_ff and not override_full_set:
                 logger.info(f"Windowed batch: Scene {i} already has FF image — skipping prep entirely")
+                continue
+            if mode == "kf_last_frames" and _scene_has_last_frame(scene) and not override_full_set:
+                logger.info(f"Windowed batch: Scene {i} already has LF image — skipping prep entirely")
+                continue
+            if mode == "kf_videos_fflf" and has_video and not override_full_set:
+                logger.info(f"Windowed batch: Scene {i} already has video — skipping prep entirely")
                 continue
 
             # Collect reference IDs: character images + scene extras.
@@ -4955,11 +4966,152 @@ async def _run_windowed_batch(
                         },
                     )
 
+            elif mode == "kf_last_frames":
+                # Phase 2 of FF/LF Keyframes: last-frame image per scene.
+                if _scene_has_last_frame(scene) and not override_full_set:
+                    continue
+                if not (scene.parameters or {}).get("chosen_image_path"):
+                    logger.warning(
+                        f"Windowed batch (LF phase): {scene_name} has no first frame "
+                        f"(FF phase failed?) — generating LF without the FF continuity ref"
+                    )
+
+                lf_prompt = scene.parameters.get("last_frame_prompt", "") or scene.prompt or f"Scene {scene.order_index + 1} - last frame"
+                ref_ids_lf = await _resolve_lf_ref_asset_ids(scene, project_fresh, session)
+                _lf_attach_ff = scene.parameters.get("lf_exclude_first_frame_ref") is not True
+                if _lf_attach_ff and len(ref_ids_lf) >= MAX_TOTAL_REF_IMAGES:
+                    ref_ids_lf = ref_ids_lf[:MAX_TOTAL_REF_IMAGES - 1]
+                wf_type_lf = _auto_workflow_type(len(ref_ids_lf) + (1 if _lf_attach_ff else 0))
+
+                if enhancer and llm_api_key:
+                    try:
+                        _seq_auto_jobs[pid]["current_step"] = f"enhancing LF prompt {i + 1}/{len(scenes)}"
+                        context = await _build_auto_enhance_context(
+                            project_fresh, scene, scene_lyrics, "last", image_model, None
+                        )
+                        if _should_enhance(skip_existing_prompts, lf_prompt):
+                            lf_prompt = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
+                                    False, image_sys_override, image_model, "last",
+                                    image_prompt_guidance or None,
+                                ),
+                                timeout=90.0,
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Windowed batch: LF enhance timed out for scene {i} — using un-enhanced prompt")
+                    except Exception as e:
+                        logger.warning(f"Windowed batch: LF enhance failed scene {i}: {e}")
+
+                scene_params = dict(scene.parameters or {})
+                scene_params["last_frame_prompt"] = lf_prompt
+                scene.parameters = scene_params
+                await session.commit()
+
+                eligible.append({
+                    "scene_id": scene.id,
+                    "scene_name": scene_name,
+                    "scene_index": i,
+                    "job_type": JobType.IMAGE,
+                    "parameters": {
+                        "workflow_type": wf_type_lf,
+                        "prompt": lf_prompt,
+                        "width": img_w, "height": img_h,
+                        "reference_asset_ids": ref_ids_lf,
+                        "frame_type": "last",
+                        "attach_first_frame_ref": _lf_attach_ff,
+                        "auto_save_preview": True,
+                    },
+                })
+
+            elif mode == "kf_videos_fflf":
+                # Phase 3 of FF/LF Keyframes: FF→LF interpolation video.
+                if has_video and not override_full_set:
+                    continue
+                _sp_now = dict(scene.parameters or {})
+                if not _sp_now.get("chosen_image_path") or not _sp_now.get("chosen_last_frame_path"):
+                    _missing = [k for k, v in (("FF", _sp_now.get("chosen_image_path")), ("LF", _sp_now.get("chosen_last_frame_path"))) if not v]
+                    logger.warning(
+                        f"Windowed batch (video phase): {scene_name} is missing "
+                        f"{'+'.join(_missing)} keyframe(s) from earlier phases — skipping video"
+                    )
+                    if batch_run_id:
+                        try:
+                            await _update_batch_run(
+                                session_factory, batch_run_id,
+                                error_entry={
+                                    "scene_id": str(scene.id),
+                                    "scene_name": scene_name,
+                                    "step": "FF/LF video",
+                                    "error": f"missing {'+'.join(_missing)} keyframe image(s) from earlier phase",
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                },
+                            )
+                        except Exception:
+                            pass
+                    continue
+
+                _sp_now["video_mode"] = "ff_lf"
+                _sp_now["scene_source_type"] = "video"
+                _sp_now["lipsync_enabled"] = lipsync_enabled
+                _sp_now["vocals_only_for_lipsync"] = vocals_only_for_lipsync
+                scene.parameters = _sp_now
+                await session.commit()
+
+                video_prompt = scene.parameters.get("video_prompt", "") or scene.prompt or f"Cinematic scene {scene.order_index + 1}"
+                prev_scene_for_ctx = scenes[i - 1] if i > 0 else None
+                if enhancer and llm_api_key:
+                    try:
+                        _seq_auto_jobs[pid]["current_step"] = f"enhancing video prompt {i + 1}/{len(scenes)}"
+                        vid_ctx = await _build_video_enhance_context(
+                            project_fresh, scene, scene_lyrics, video_model, prev_scene_for_ctx
+                        )
+                        if _should_enhance(skip_existing_prompts, video_prompt):
+                            video_prompt = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
+                                    True, video_sys_override, video_model, None,
+                                    video_prompt_guidance or None,
+                                ),
+                                timeout=90.0,
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Windowed batch: video enhance timed out for scene {i} — using un-enhanced prompt")
+                    except Exception as e:
+                        logger.warning(f"Windowed batch: video enhance failed scene {i}: {e}")
+
+                scene_params = dict(scene.parameters or {})
+                scene_params["video_prompt"] = video_prompt
+                scene.parameters = scene_params
+                await session.commit()
+
+                duration = await _scene_duration_for_dispatch(
+                    session_factory, scene, label="auto_gen")
+                eligible.append({
+                    "scene_id": scene.id,
+                    "scene_name": scene_name,
+                    "scene_index": i,
+                    "job_type": JobType.VIDEO,
+                    "parameters": {
+                        "workflow_type": "ltx_fflf",
+                        "prompt": video_prompt,
+                        "width": vid_w, "height": vid_h,
+                        "duration": duration,
+                        "framerate": 24,
+                        "skip_audio_mux": skip_audio_mux,
+                        "lipsync_enabled": lipsync_enabled,
+                        "vocals_only_for_lipsync": vocals_only_for_lipsync,
+                    },
+                })
+
     if not eligible:
-        _seq_auto_jobs[pid]["status"] = "done"
-        _seq_auto_jobs[pid]["completed_scenes"] = len(scenes)
-        _seq_auto_jobs[pid]["current_step"] = "complete — nothing to generate"
-        _seq_auto_jobs[pid]["current_scene_name"] = None
+        if finalize:
+            _seq_auto_jobs[pid]["status"] = "done"
+            _seq_auto_jobs[pid]["completed_scenes"] = len(scenes)
+            _seq_auto_jobs[pid]["current_step"] = "complete — nothing to generate"
+            _seq_auto_jobs[pid]["current_scene_name"] = None
+        else:
+            logger.info(f"Windowed phase (mode={mode}): nothing to generate — next phase")
         return
 
     # Phase 2: Continuous dispatch — fill all worker slots, and as each job
@@ -5383,6 +5535,13 @@ async def _run_windowed_batch(
                 f"follow-on jobs to finish in the background"
             )
 
+    if not finalize:
+        logger.info(
+            f"Windowed phase complete (mode={mode}): {total_succeeded} succeeded, "
+            f"{total_failed} failed — finalization deferred to the phased orchestrator"
+        )
+        return
+
     # Done
     if total_failed > 0:
         _seq_auto_jobs[pid]["status"] = "done"
@@ -5680,6 +5839,140 @@ async def _run_sequential_auto_gen(
                 video_prompt_guidance=video_prompt_guidance_text,
                 skip_existing_prompts=skip_existing_prompts,
             )
+            return
+
+        # ── Phased-parallel mode: FF/LF Keyframes (independent) ──────────
+        # Zero cross-scene dependency → batch each STAGE across all workers
+        # instead of one scene at a time: Phase 1 = every FF image, Phase 2 =
+        # every LF image, Phase 3 = every FF→LF interpolation video.  A
+        # two-pass drain barrier sits between Phases 1 and 2 (composites are
+        # follow-on jobs that only Pass 2 concludes with chosen_image_path).
+        if mode == "all_video_fflf_keyframes":
+            # Pre-pass: mark every scene FF/LF so all prompt contexts and the
+            # dispatcher see keyframe mode from the first enhance onward.
+            async with session_factory() as _kf_sess:
+                for _kf_sc in scenes:
+                    _kf_fresh = await _kf_sess.get(Scene, _kf_sc.id)
+                    if not _kf_fresh:
+                        continue
+                    _kf_sp = dict(_kf_fresh.parameters or {})
+                    _kf_sp["video_mode"] = "ff_lf"
+                    _kf_sp["scene_source_type"] = "video"
+                    _kf_fresh.parameters = _kf_sp
+                await _kf_sess.commit()
+
+            async def _kf_phase(phase_mode: str, label: str) -> bool:
+                """Run one windowed phase; False = cancelled (bail out)."""
+                if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+                    return False
+                _seq_auto_jobs[pid]["current_step"] = label
+                if batch_run_id:
+                    await _update_batch_run(
+                        session_factory, batch_run_id,
+                        current_step=label,
+                        step_entry={
+                            "step": label,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "type": "phase_start",
+                        },
+                    )
+                await _run_windowed_batch(
+                    pid, project_id,
+                    phase_mode,
+                    scenes, job_queue, session_factory,
+                    comfy_dispatcher=comfy_dispatcher,
+                    override_full_set=override_full_set,
+                    project=project, lyrics_words=lyrics_words,
+                    enhancer=enhancer, llm_provider=llm_provider,
+                    llm_api_key=llm_api_key, llm_model=llm_model,
+                    image_model=image_model, video_model=video_model,
+                    first_pass_gm=first_pass_gm,
+                    image_sys_override=image_sys_override,
+                    video_sys_override=video_sys_override,
+                    res_w=res_w, res_h=res_h,
+                    img_w=img_w, img_h=img_h, vid_w=vid_w, vid_h=vid_h,
+                    vocals_only_audio=vocals_only_audio,
+                    skip_audio_mux=skip_audio_mux,
+                    two_pass=two_pass,
+                    user_lyrics_text=user_lyrics_text,
+                    use_story_flow=use_story_flow,
+                    batch_run_id=batch_run_id,
+                    lipsync_enabled=lipsync_enabled,
+                    vocals_only_for_lipsync=vocals_only_for_lipsync,
+                    image_prompt_guidance=image_prompt_guidance_text,
+                    video_prompt_guidance=video_prompt_guidance_text,
+                    skip_existing_prompts=skip_existing_prompts,
+                    finalize=False,
+                )
+                return _seq_auto_jobs.get(pid, {}).get("status") == "running"
+
+            async def _kf_bail():
+                if batch_run_id:
+                    await _finish_batch_run(session_factory, batch_run_id, BatchRunStatus.CANCELLED, _batch_started_at)
+
+            # Phase 1: all first-frame keyframes in parallel
+            if not await _kf_phase("missing_images_independent", "Phase 1/3 — first-frame keyframes (parallel)"):
+                await _kf_bail()
+                return
+
+            # Barrier: two-pass composites are follow-on jobs — wait for all
+            # image jobs on these scenes to settle, then apply the
+            # composite-failed base-image fallback per scene (quick poll).
+            _seq_auto_jobs[pid]["current_step"] = "Phase 1/3 — waiting for two-pass composites"
+            _kf_scene_ids = [s.id for s in scenes]
+            import time as _kf_time
+            _kf_deadline = _kf_time.monotonic() + _IMAGE_JOB_TIMEOUT
+            while _kf_time.monotonic() < _kf_deadline:
+                async with session_factory() as _kf_s:
+                    _kf_busy = (await _kf_s.execute(
+                        select(Job.id).where(
+                            Job.scene_id.in_(_kf_scene_ids),
+                            Job.job_type == JobType.IMAGE,
+                            Job.status.in_((JobStatus.PENDING, JobStatus.RUNNING)),
+                        ).limit(1)
+                    )).first()
+                if _kf_busy is None:
+                    break
+                if _seq_auto_jobs.get(pid, {}).get("status") != "running":
+                    await _kf_bail()
+                    return
+                await asyncio.sleep(5)
+            for _kf_sc in scenes:
+                await _await_scene_first_frame(session_factory, _kf_sc.id, timeout=10.0)
+            # Re-assert keyframe flags (Phase-1 prep marks scenes as
+            # scene_source_type="image"; these ARE video scenes).
+            async with session_factory() as _kf_s2:
+                for _kf_sc in scenes:
+                    _kf_fresh = await _kf_s2.get(Scene, _kf_sc.id)
+                    if not _kf_fresh:
+                        continue
+                    _kf_sp = dict(_kf_fresh.parameters or {})
+                    _kf_sp["video_mode"] = "ff_lf"
+                    _kf_sp["scene_source_type"] = "video"
+                    _kf_fresh.parameters = _kf_sp
+                await _kf_s2.commit()
+
+            # Phase 2: all last-frame keyframes in parallel
+            if not await _kf_phase("kf_last_frames", "Phase 2/3 — last-frame keyframes (parallel)"):
+                await _kf_bail()
+                return
+
+            # Phase 3: all FF→LF videos in parallel
+            if not await _kf_phase("kf_videos_fflf", "Phase 3/3 — FF→LF interpolation videos (parallel)"):
+                await _kf_bail()
+                return
+
+            _seq_auto_jobs[pid]["status"] = "done"
+            _seq_auto_jobs[pid]["current_step"] = "complete"
+            _seq_auto_jobs[pid]["completed_scenes"] = len(scenes)
+            _seq_auto_jobs[pid]["total_scenes"] = len(scenes)
+            _seq_auto_jobs[pid]["current_scene_name"] = None
+            if batch_run_id:
+                await _update_batch_run(
+                    session_factory, batch_run_id,
+                    completed_scenes=len(scenes), current_scene_name=None,
+                )
+                await _finish_batch_run(session_factory, batch_run_id, BatchRunStatus.COMPLETED, _batch_started_at)
             return
 
         # Process scenes one by one (sequential modes)
@@ -6211,215 +6504,6 @@ async def _run_sequential_auto_gen(
                     if not ok:
                         _seq_auto_jobs[pid]["status"] = "failed"
                         _seq_auto_jobs[pid]["error"] = f"Video generation failed for {scene_name}"
-                        return
-
-                # ── MODE: all_video_fflf_keyframes ──
-                # Independent per scene: generate a First-Frame image AND a
-                # Last-Frame image as two keyframes of ONE continuous shot,
-                # then render the video with the FF→LF interpolation workflow
-                # (ltx_fflf).  No cross-scene chaining — each scene stands on
-                # its own generated frames.
-                elif mode == "all_video_fflf_keyframes":
-                    if has_video and not override_full_set:
-                        logger.info(f"Sequential auto-gen: Scene {i} already has video, skipping")
-                        prev_scene = scene
-                        continue
-
-                    # Mark the scene FF/LF FIRST so every enhance context and
-                    # the dispatcher see keyframe mode (contexts read video_mode).
-                    scene_params = dict(scene.parameters or {})
-                    scene_params["video_mode"] = "ff_lf"
-                    scene_params["scene_source_type"] = "video"
-                    scene.parameters = scene_params
-                    await session.commit()
-
-                    # Step 1: First Frame image (keyframe A)
-                    if (not has_ff) or override_full_set:
-                        _seq_auto_jobs[pid]["current_step"] = "generating first frame (keyframe A)"
-                        prompt = scene.prompt or f"Scene {scene.order_index + 1}"
-                        if enhancer and llm_api_key:
-                            try:
-                                context = await _build_auto_enhance_context(
-                                    project, scene, scene_lyrics, "first", (image_model if ref_ids else first_pass_gm), prev_scene
-                                )
-                                if _should_enhance(skip_existing_prompts, prompt):
-                                    prompt = await asyncio.to_thread(
-                                        enhancer.enhance, prompt, context, llm_provider, llm_api_key, llm_model,
-                                        False, (image_sys_override if ref_ids else None), (image_model if ref_ids else first_pass_gm), "first",
-                                        image_prompt_guidance_text or None,
-                                    )
-                            except Exception as e:
-                                logger.warning(f"Sequential auto-gen (fflf_keyframes): enhance FF failed: {e}")
-
-                        scene.prompt = prompt
-                        await session.commit()
-
-                        img_params = {
-                            "workflow_type": wf_type,
-                            "prompt": prompt,
-                            "width": img_w, "height": img_h,
-                            "reference_asset_ids": ref_ids,
-                            "frame_type": "first",
-                            "auto_save_preview": True,
-                        }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
-                        await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
-                        job = Job(
-                            project_id=project_id,
-                            scene_id=scene.id,
-                            job_type=JobType.IMAGE,
-                            status=JobStatus.PENDING,
-                            priority=0,
-                            parameters=img_params,
-                        )
-                        session.add(job)
-                        await session.commit()
-                        await session.refresh(job)
-                        job_queue.notify()
-
-                        ok = await _wait_for_job(job.id, session_factory)
-                        if not ok:
-                            _seq_auto_jobs[pid]["status"] = "failed"
-                            _seq_auto_jobs[pid]["error"] = f"First-frame keyframe failed for {scene_name}"
-                            return
-                        # Two-pass FF = TWO jobs; only Pass 2 sets the scene's
-                        # first frame.  Wait for it before building LF/video.
-                        _ff_state = await _await_scene_first_frame(session_factory, scene.id)
-                        if _ff_state == "failed":
-                            _seq_auto_jobs[pid]["status"] = "failed"
-                            _seq_auto_jobs[pid]["error"] = f"First-frame image never landed for {scene_name} (two-pass composite missing or failed)"
-                            return
-                        # Re-read scene (dispatcher wrote chosen_image_path)
-                        scene_id = scene.id
-                        session.expire(scene)
-                        scene = await session.get(Scene, scene_id)
-
-                    # Step 2: Last Frame image (keyframe B)
-                    if (not _scene_has_last_frame(scene)) or override_full_set:
-                        _seq_auto_jobs[pid]["current_step"] = "generating last frame (keyframe B)"
-                        lf_prompt = scene.parameters.get("last_frame_prompt", "") or scene.prompt or f"Scene {scene.order_index + 1} - last frame"
-                        ref_ids_lf = await _resolve_lf_ref_asset_ids(scene, project, session)
-                        # FF continuity ref occupies Klein slot 1 unless opted out
-                        _lf_attach_ff = scene.parameters.get("lf_exclude_first_frame_ref") is not True
-                        if _lf_attach_ff and len(ref_ids_lf) >= MAX_TOTAL_REF_IMAGES:
-                            ref_ids_lf = ref_ids_lf[:MAX_TOTAL_REF_IMAGES - 1]
-                        wf_type_lf = _auto_workflow_type(len(ref_ids_lf) + (1 if _lf_attach_ff else 0))
-
-                        if enhancer and llm_api_key:
-                            try:
-                                context = await _build_auto_enhance_context(
-                                    project, scene, scene_lyrics, "last", image_model, prev_scene
-                                )
-                                if _should_enhance(skip_existing_prompts, lf_prompt):
-                                    lf_prompt = await asyncio.to_thread(
-                                        enhancer.enhance, lf_prompt, context, llm_provider, llm_api_key, llm_model,
-                                        False, image_sys_override, image_model, "last",
-                                        image_prompt_guidance_text or None,
-                                    )
-                            except Exception as e:
-                                logger.warning(f"Sequential auto-gen (fflf_keyframes): enhance LF failed: {e}")
-
-                        scene_params = dict(scene.parameters or {})
-                        scene_params["last_frame_prompt"] = lf_prompt
-                        scene.parameters = scene_params
-                        await session.commit()
-
-                        job = Job(
-                            project_id=project_id,
-                            scene_id=scene.id,
-                            job_type=JobType.IMAGE,
-                            status=JobStatus.PENDING,
-                            priority=0,
-                            parameters={
-                                "workflow_type": wf_type_lf,
-                                "prompt": lf_prompt,
-                                "width": img_w, "height": img_h,
-                                "reference_asset_ids": ref_ids_lf,
-                                "frame_type": "last",
-                                "attach_first_frame_ref": _lf_attach_ff,
-                                "auto_save_preview": True,
-                            },
-                        )
-                        session.add(job)
-                        await session.commit()
-                        await session.refresh(job)
-                        job_queue.notify()
-
-                        ok = await _wait_for_job(job.id, session_factory)
-                        if not ok:
-                            _seq_auto_jobs[pid]["status"] = "failed"
-                            _seq_auto_jobs[pid]["error"] = f"Last-frame keyframe failed for {scene_name}"
-                            return
-
-                    # Step 3: video — FF→LF interpolation (both frames must exist)
-                    _seq_auto_jobs[pid]["current_step"] = "generating video (FF→LF interpolation)"
-                    scene_id = scene.id
-                    session.expire(scene)
-                    scene = await session.get(Scene, scene_id)
-                    # Grace poll: LF completion writes the scene param moments
-                    # around the job flipping DONE — give it up to 30s.
-                    for _lf_try in range(10):
-                        if (scene.parameters or {}).get("chosen_last_frame_path"):
-                            break
-                        await asyncio.sleep(3)
-                        session.expire(scene)
-                        scene = await session.get(Scene, scene_id)
-                    if not (scene.parameters or {}).get("chosen_last_frame_path"):
-                        _seq_auto_jobs[pid]["status"] = "failed"
-                        _seq_auto_jobs[pid]["error"] = f"No last-frame image for {scene_name} (FF/LF video needs both keyframes)"
-                        return
-
-                    video_prompt = scene.parameters.get("video_prompt", "") or scene.prompt or f"Cinematic scene {scene.order_index + 1}"
-                    if enhancer and llm_api_key:
-                        try:
-                            vid_ctx = await _build_video_enhance_context(
-                                project, scene, scene_lyrics, video_model, prev_scene
-                            )
-                            if _should_enhance(skip_existing_prompts, video_prompt):
-                                video_prompt = await asyncio.to_thread(
-                                    enhancer.enhance, video_prompt, vid_ctx, llm_provider, llm_api_key, llm_model,
-                                    True, video_sys_override, video_model,
-                                    None,  # frame_type
-                                    video_prompt_guidance_text or None,
-                                )
-                        except Exception as e:
-                            logger.warning(f"Sequential auto-gen (fflf_keyframes): enhance video failed: {e}")
-
-                    scene_params = dict(scene.parameters or {})
-                    scene_params["video_prompt"] = video_prompt
-                    scene_params["lipsync_enabled"] = lipsync_enabled
-                    scene_params["vocals_only_for_lipsync"] = vocals_only_for_lipsync
-                    scene.parameters = scene_params
-                    await session.commit()
-
-                    duration = await _scene_duration_for_dispatch(
-                        session_factory, scene, label="auto_gen")
-                    job = Job(
-                        project_id=project_id,
-                        scene_id=scene.id,
-                        job_type=JobType.VIDEO,
-                        status=JobStatus.PENDING,
-                        priority=0,
-                        parameters={
-                            "workflow_type": "ltx_fflf",
-                            "prompt": video_prompt,
-                            "width": vid_w, "height": vid_h,
-                            "duration": duration,
-                            "framerate": 24,
-                            "skip_audio_mux": skip_audio_mux,
-                            "lipsync_enabled": lipsync_enabled,
-                            "vocals_only_for_lipsync": vocals_only_for_lipsync,
-                        },
-                    )
-                    session.add(job)
-                    await session.commit()
-                    await session.refresh(job)
-                    job_queue.notify()
-
-                    ok = await _wait_for_job(job.id, session_factory, timeout=_VIDEO_JOB_TIMEOUT)
-                    if not ok:
-                        _seq_auto_jobs[pid]["status"] = "failed"
-                        _seq_auto_jobs[pid]["error"] = f"FF/LF video generation failed for {scene_name}"
                         return
 
                 # ── MODE: all_video_v2v ──
