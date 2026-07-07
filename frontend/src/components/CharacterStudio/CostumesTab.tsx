@@ -13,7 +13,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Pencil, Trash2, X, Shirt } from 'lucide-react';
 import { CostumeFieldsT, CostumeT, EngineT, OutfitCatalogEntryT, p2Api } from './characterStudioP2Api';
-import { Spinner, ErrorText, StatusChip, assetUrl } from './p2Shared';
+import { Spinner, ErrorText, StatusChip, assetUrl, ImageLightbox } from './p2Shared';
 
 const COSTUME_FIELD_KEYS: { key: keyof CostumeFieldsT; label: string }[] = [
   { key: 'top', label: 'Top' },
@@ -179,6 +179,7 @@ function CostumeCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState(false);
 
   const sprite = costume.sprites?.base;
   const url = sprite?.asset_id ? assetUrl(studioProjectId, sprite.asset_id) : null;
@@ -214,11 +215,18 @@ function CostumeCard({
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 flex flex-col gap-2">
       <div className="aspect-square bg-gray-800 border border-gray-700 rounded overflow-hidden flex items-center justify-center">
         {url ? (
-          <img src={url} alt={costume.name} className="w-full h-full object-cover" />
+          <img
+            src={url}
+            alt={costume.name}
+            onClick={() => setLightbox(true)}
+            title="Click to enlarge"
+            className="w-full h-full object-cover cursor-pointer"
+          />
         ) : (
           <Shirt size={28} className="text-gray-600" />
         )}
       </div>
+      {lightbox && url && <ImageLightbox url={url} onClose={() => setLightbox(false)} />}
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm text-gray-200 font-medium truncate" title={costume.name}>
           {costume.name}

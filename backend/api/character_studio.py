@@ -1371,8 +1371,10 @@ async def generate_costume(char_id: UUID, costume_id: str, body: CostumeGenerate
             desc_bits.append(str(v))
     description = ", ".join(x for x in desc_bits if x)
 
+    _cs = await _app_settings(session)
+    _cw, _ch = _res_from_settings(_cs)
     params = costume_params(engine, identity_asset_id=str(identity_asset.id),
-                            description=description)
+                            description=description, width=_cw, height=_ch)
     params.update({"frame_type": "first", "auto_save_preview": False,
                    "studio_character_id": str(c.id),
                    "studio_shot_id": f"costume:{costume_id}"})
@@ -1413,6 +1415,8 @@ async def generate_poses(char_id: UUID, body: PoseGenerateIn, request: Request,
     except EngineUnavailableError as e:
         raise _engine_error(e)
 
+    s = await _app_settings(session)
+    w, h = _res_from_settings(s)
     m = dict(c.manifest or {})
     pose_sets = dict(m.get("pose_sets") or {})
     created = []
@@ -1441,7 +1445,8 @@ async def generate_poses(char_id: UUID, body: PoseGenerateIn, request: Request,
                 meta={"studio_pose_preset_id": preset_id, "studio_character_id": str(c.id)},
             )
             params = pose_edit_params(engine, pose_asset_id=str(pose_asset.id),
-                                      identity_asset_id=str(identity_asset.id))
+                                      identity_asset_id=str(identity_asset.id),
+                                      width=w, height=h)
             params.update({"frame_type": "first", "auto_save_preview": False,
                            "studio_character_id": str(c.id),
                            "studio_shot_id": f"pose:{preset_id}"})
@@ -1888,8 +1893,10 @@ async def _run_generate_all(char_id: UUID, body_dict: dict, session_factory,
                             if v:
                                 desc_bits.append(str(v))
                         description = ", ".join(x for x in desc_bits if x)
+                        _gs = await _app_settings(session)
+                        _gw, _gh = _res_from_settings(_gs)
                         params = costume_params(engine, identity_asset_id=str(identity_asset.id),
-                                                description=description)
+                                                description=description, width=_gw, height=_gh)
                         params.update({"frame_type": "first", "auto_save_preview": False,
                                        "studio_character_id": str(c.id),
                                        "studio_shot_id": f"costume:{cid}"})

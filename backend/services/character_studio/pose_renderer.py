@@ -195,7 +195,8 @@ def _resolve_joints(pose_or_preset_id) -> tuple[dict[str, tuple[float, float]], 
 
 # ── cv2 renderer (primary path — matches VNCCS visual output) ─────────────
 def _render_schematic_cv2(joints: dict[str, tuple[float, float]],
-                           width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT):
+                           width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT,
+                           show_skeleton: bool = False):
     img = np.zeros((height, width, 4), dtype=np.uint8)
 
     def as_point(pt):
@@ -221,22 +222,25 @@ def _render_schematic_cv2(joints: dict[str, tuple[float, float]],
             if j1 in joints and j2 in joints:
                 draw_ellipse_between(joints[j1], joints[j2], part["width"], _hex_to_rgb(part["color"]))
 
-    for j1, j2 in BONE_CONNECTIONS:
-        if j1 in joints and j2 in joints:
-            p1, p2 = as_point(joints[j1]), as_point(joints[j2])
-            if p1 and p2:
-                cv2.line(img, p1, p2, (60, 60, 60, 255), 2, cv2.LINE_AA)
-
-    for name, xy in joints.items():
-        p = as_point(xy)
-        if p:
-            cv2.circle(img, p, 6, (255, 100, 100, 255), -1, cv2.LINE_AA)
-            cv2.circle(img, p, 6, (180, 50, 50, 255), 1, cv2.LINE_AA)
+    # Skeleton overlay (bones + joint dots) is OFF by default: it made the
+    # figure read as a wireframe once the light body ovals were composited.
+    # The body-part ovals alone give the mannequin look VNCCS shows.
+    if show_skeleton:
+        for j1, j2 in BONE_CONNECTIONS:
+            if j1 in joints and j2 in joints:
+                p1, p2 = as_point(joints[j1]), as_point(joints[j2])
+                if p1 and p2:
+                    cv2.line(img, p1, p2, (60, 60, 60, 255), 2, cv2.LINE_AA)
+        for name, xy in joints.items():
+            p = as_point(xy)
+            if p:
+                cv2.circle(img, p, 6, (255, 100, 100, 255), -1, cv2.LINE_AA)
+                cv2.circle(img, p, 6, (180, 50, 50, 255), 1, cv2.LINE_AA)
 
     return img  # RGBA numpy array
 
 
-def _save_rgba_cv2(img_rgba, out_path: Path, bg: tuple[int, int, int] = (255, 255, 255)) -> None:
+def _save_rgba_cv2(img_rgba, out_path: Path, bg: tuple[int, int, int] = (120, 124, 130)) -> None:
     """Composite the RGBA schematic over a plain background and save as PNG.
 
     A flat background (not transparent) makes the pose image behave as a
@@ -258,7 +262,8 @@ def _save_rgba_cv2(img_rgba, out_path: Path, bg: tuple[int, int, int] = (255, 25
 # ── PIL fallback renderer (no cv2 available) ───────────────────────────────
 def _render_and_save_pil(joints: dict[str, tuple[float, float]], out_path: Path,
                           width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT,
-                          bg: tuple[int, int, int] = (255, 255, 255)) -> None:
+                          bg: tuple[int, int, int] = (120, 124, 130),
+                          show_skeleton: bool = False) -> None:
     if not _HAVE_PIL:
         raise RuntimeError(
             "pose_renderer: neither cv2 nor PIL is available — cannot render pose images"
@@ -281,17 +286,17 @@ def _render_and_save_pil(joints: dict[str, tuple[float, float]], out_path: Path,
             if p1 and p2:
                 draw.line([p1, p2], fill=(*_hex_to_rgb(part["color"]), 220), width=max(part["width"] // 2, 8))
 
-    for j1, j2 in BONE_CONNECTIONS:
-        p1, p2 = pt(j1), pt(j2)
-        if p1 and p2:
-            draw.line([p1, p2], fill=(60, 60, 60, 255), width=3)
-
-    for name in joints:
-        p = pt(name)
-        if p:
-            r = 6
-            draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=(255, 100, 100, 255),
-                         outline=(180, 50, 50, 255))
+    if show_skeleton:
+        for j1, j2 in BONE_CONNECTIONS:
+            p1, p2 = pt(j1), pt(j2)
+            if p1 and p2:
+                draw.line([p1, p2], fill=(60, 60, 60, 255), width=3)
+        for name in joints:
+            p = pt(name)
+            if p:
+                r = 6
+                draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=(255, 100, 100, 255),
+                             outline=(180, 50, 50, 255))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path, format="PNG")
@@ -325,6 +330,8 @@ def render_preset_thumbnails(cache_dir: str | Path, size: int = 128) -> dict[str
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         src_mtime = _PRESETS_PATH.stat().st_mtime
+        # Also invalidate when the renderer itself changes (look/bg tweaks).
+        src_mtime = max(src_mtime, Path(__file__).stat().st_mtime)
     except Exception:
         src_mtime = 0.0
 

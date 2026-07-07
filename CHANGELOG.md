@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.31.3] - 2026-07-07
+
+### Fixed — pose refs looked like wireframes; costume images now open a lightbox
+
+- Pose control/thumbnail images composited the light peach body ovals (`#FFE5D9`) onto a **white**
+  background, so the mannequin body vanished and only the dark skeleton lines + red joint dots
+  showed — reading as a wireframe. The renderer now uses a neutral gray backdrop and turns the
+  skeleton overlay OFF by default, so poses render as a solid mannequin figure (VNCCS look).
+  Thumbnail cache now also invalidates when the renderer changes.
+- Costume sprite images are clickable to open a full-size lightbox (new shared `ImageLightbox`
+  in p2Shared, reusable across studio tabs).
+
+## [1.31.2] - 2026-07-07
+
+### Fixed — pose / costume generation failed with "invalid dimensions width=0, height=0"
+
+- The Klein-engine pose (`klein_2ref`) and costume (`klein_1ref`) param builders never set
+  `width`/`height`, so the dispatcher's dimension guard refused every job. They now take
+  `width`/`height` (from the project's image resolution, falling back to `target_size`), passed
+  from the pose/costume endpoints and the Generate-All flow.
+- The input-derived studio workflows (`studio_qie_edit`, `studio_rmbg2`, `studio_upscale`,
+  `studio_seedvr2`, `studio_facedetailer`) are now exempt from the width/height guard, like
+  `klein_inpaint` — they compute output dimensions from the input image / target_size, not from
+  params. This unblocks the Qwen engine and the Process (cutout/upscale) stages too.
+
 ## [1.31.1] - 2026-07-07
 
 ### Fixed — saving the Identity section wiped all fields, then crashed

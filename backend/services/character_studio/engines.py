@@ -112,7 +112,8 @@ def resolve_engine(op: str, requested: str, comfy_dispatcher) -> str:
 # ── Pose ────────────────────────────────────────────────────────────────────
 def pose_edit_params(engine: str, *, pose_asset_id: str, identity_asset_id: str,
                       prompt: str = "", seed: int = 0,
-                      target_size: int = 1024) -> dict[str, Any]:
+                      target_size: int = 1024,
+                      width: int = 0, height: int = 0) -> dict[str, Any]:
     """Build Job.parameters for a pose-conditioned render.
 
     qwen: studio_qie_edit, image1=pose skeleton (control/canvas),
@@ -149,13 +150,16 @@ def pose_edit_params(engine: str, *, pose_asset_id: str, identity_asset_id: str,
         "workflow_type": "klein_2ref",
         "reference_asset_ids": [identity_asset_id, pose_asset_id],
         "prompt": base_instruction,
+        "width": width or target_size,
+        "height": height or target_size,
         "seed": seed,
     }
 
 
 # ── Costume ─────────────────────────────────────────────────────────────────
 def costume_params(engine: str, *, identity_asset_id: str, description: str = "",
-                    seed: int = 0, target_size: int = 1024) -> dict[str, Any]:
+                    seed: int = 0, target_size: int = 1024,
+                    width: int = 0, height: int = 0) -> dict[str, Any]:
     """Build Job.parameters for a costume/outfit render.
 
     qwen: studio_qie_edit, ClothesCore LoRA, latent_image_index=2 (edit the
@@ -191,6 +195,8 @@ def costume_params(engine: str, *, identity_asset_id: str, description: str = ""
         "workflow_type": "klein_1ref",
         "reference_asset_ids": [identity_asset_id],
         "prompt": prompt,
+        "width": width or target_size,
+        "height": height or target_size,
         "seed": seed,
     }
 

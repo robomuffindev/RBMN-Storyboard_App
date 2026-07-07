@@ -7,7 +7,31 @@
  * look identical to Phase 1, without modifying the Phase 1 file to export
  * them.
  */
-import { Loader2, AlertTriangle } from 'lucide-react';
+import { Loader2, AlertTriangle, X } from 'lucide-react';
+
+/** Full-screen image lightbox reused across the studio tabs. */
+export function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/80 z-[9995] flex items-center justify-center p-6"
+      onClick={onClose}
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute top-4 right-4 text-gray-300 hover:text-white"
+      >
+        <X size={24} />
+      </button>
+      <img
+        src={url}
+        alt=""
+        onClick={(e) => e.stopPropagation()}
+        className="max-w-full max-h-full object-contain rounded-lg"
+      />
+    </div>
+  );
+}
 
 export function Spinner({ size = 16 }: { size?: number }) {
   return <Loader2 size={size} className="animate-spin text-purple-400" />;

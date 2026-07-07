@@ -1187,7 +1187,15 @@ class JobDispatcher:
         # output (0-frame video, corrupt image).  Catch them HERE rather than
         # failing deep in the workflow execution.  Transition clips are not
         # included since they auto-derive dims from the frames.
-        if workflow_type and workflow_type not in ("ltx_transition", "klein_inpaint"):
+        # studio_* edit/process workflows derive their output dimensions from
+        # the input image / target_size (not params width/height), like
+        # klein_inpaint — so they're exempt from the width/height guard.
+        _dim_exempt = (
+            "ltx_transition", "klein_inpaint",
+            "studio_qie_edit", "studio_rmbg2", "studio_upscale",
+            "studio_seedvr2", "studio_facedetailer",
+        )
+        if workflow_type and workflow_type not in _dim_exempt:
             _w = params.get("width", 0)
             _h = params.get("height", 0)
             if not isinstance(_w, int) or not isinstance(_h, int) or _w <= 0 or _h <= 0:
