@@ -48,6 +48,9 @@ class CharacterModel(BaseModel):
     # library" affordance later.  Optional — None for ad-hoc characters
     # that were created directly inside this project.
     library_origin_id: Optional[str] = None
+    # Character Studio provenance — must survive Concept-panel round-trips
+    source: Optional[str] = None
+    studio_character_id: Optional[str] = None
 
 
 class ConceptData(BaseModel):

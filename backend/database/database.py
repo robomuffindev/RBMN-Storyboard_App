@@ -219,6 +219,15 @@ async def init_db() -> None:
         except Exception:
             pass  # Column already exists
 
+        # Add default_style column to studio_stories if missing
+        try:
+            await conn.execute(
+                text("ALTER TABLE studio_stories ADD COLUMN default_style VARCHAR DEFAULT 'anime'")
+            )
+            logger.info("Migration: added default_style column to studio_stories table")
+        except Exception:
+            pass  # Column already exists
+
         # Add RunPod columns to app_settings if missing
         for col_sql in [
             "ALTER TABLE app_settings ADD COLUMN runpod_enabled BOOLEAN DEFAULT 0",

@@ -1,0 +1,191 @@
+{
+ "1": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "input.png"
+  },
+  "_meta": {
+   "title": "STUDIO FD INPUT"
+  }
+ },
+ "2": {
+  "class_type": "UnetLoaderGGUF",
+  "inputs": {
+   "unet_name": "qwen-image-edit-2511-Q5_0.gguf"
+  },
+  "_meta": {
+   "title": "STUDIO FD UNET"
+  }
+ },
+ "3": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "2",
+    0
+   ],
+   "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+   "strength_model": 1.0
+  },
+  "_meta": {
+   "title": "STUDIO FD LIGHTNING"
+  }
+ },
+ "4": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "3",
+    0
+   ],
+   "lora_name": "VNCCS_QIE2511_EmotionCore-RC1.safetensors",
+   "strength_model": 1.0
+  },
+  "_meta": {
+   "title": "STUDIO FD EMOTION LORA"
+  }
+ },
+ "5": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+   "type": "qwen_image"
+  },
+  "_meta": {
+   "title": "STUDIO FD CLIP"
+  }
+ },
+ "6": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "qwen_image_vae.safetensors"
+  },
+  "_meta": {
+   "title": "STUDIO FD VAE"
+  }
+ },
+ "7": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "5",
+    0
+   ],
+   "text": ""
+  },
+  "_meta": {
+   "title": "STUDIO FD POSITIVE"
+  }
+ },
+ "8": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "5",
+    0
+   ],
+   "text": "blurry, deformed face, extra faces"
+  },
+  "_meta": {
+   "title": "STUDIO FD NEGATIVE"
+  }
+ },
+ "9": {
+  "class_type": "UltralyticsDetectorProvider",
+  "inputs": {
+   "model_name": "bbox/face_yolov8m.pt"
+  },
+  "_meta": {
+   "title": "STUDIO FD BBOX"
+  }
+ },
+ "10": {
+  "class_type": "SAMLoader",
+  "inputs": {
+   "model_name": "sam_vit_b_01ec64.pth",
+   "device_mode": "AUTO"
+  },
+  "_meta": {
+   "title": "STUDIO FD SAM"
+  }
+ },
+ "11": {
+  "class_type": "FaceDetailer",
+  "inputs": {
+   "image": [
+    "1",
+    0
+   ],
+   "model": [
+    "4",
+    0
+   ],
+   "clip": [
+    "5",
+    0
+   ],
+   "vae": [
+    "6",
+    0
+   ],
+   "positive": [
+    "7",
+    0
+   ],
+   "negative": [
+    "8",
+    0
+   ],
+   "bbox_detector": [
+    "9",
+    0
+   ],
+   "sam_model_opt": [
+    "10",
+    0
+   ],
+   "guide_size": 1536,
+   "guide_size_for": true,
+   "max_size": 1536,
+   "seed": 42,
+   "steps": 4,
+   "cfg": 1.0,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "denoise": 0.55,
+   "feather": 5,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "bbox_threshold": 0.5,
+   "bbox_dilation": 10,
+   "bbox_crop_factor": 3.0,
+   "sam_detection_hint": "center-1",
+   "sam_dilation": 0,
+   "sam_threshold": 0.93,
+   "sam_bbox_expansion": 0,
+   "sam_mask_hint_threshold": 0.7,
+   "sam_mask_hint_use_negative": "False",
+   "drop_size": 10,
+   "wildcard": "",
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 20
+  },
+  "_meta": {
+   "title": "STUDIO FACEDETAILER"
+  }
+ },
+ "12": {
+  "class_type": "SaveImage",
+  "inputs": {
+   "images": [
+    "11",
+    0
+   ],
+   "filename_prefix": "studio_fd"
+  },
+  "_meta": {
+   "title": "STUDIO FD SAVE"
+  }
+ }
+}

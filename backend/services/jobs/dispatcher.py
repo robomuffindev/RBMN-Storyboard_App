@@ -31,6 +31,11 @@ from ..comfyui.workflow import (
     prepare_sequencer_workflow,
     prepare_ltx_director_workflow,
     prepare_klein_inpaint_workflow,
+    prepare_studio_qie_edit_workflow,
+    prepare_studio_rmbg2_workflow,
+    prepare_studio_upscale_workflow,
+    prepare_studio_seedvr2_workflow,
+    prepare_studio_facedetailer_workflow,
     prepare_workflow_from_config,
     stamp_vhs_unique_prefix,
     flatten_group_nodes,
@@ -1428,6 +1433,16 @@ class JobDispatcher:
             except Exception as e:
                 logger.debug(f"first-pass generator lookup failed: {e} — defaulting Z-Image")
 
+            # Per-job override: the Character Studio base-render model dropdown
+            # lets the user pick the first-pass model for a single render
+            # without touching the global Settings default.
+            _sig_override = _params.get("single_image_generator_override")
+            if _sig_override:
+                generator = _sig_override
+                logger.info(
+                    f"[{_job_id or 'N/A'}] First-pass generator overridden per-job -> {generator}"
+                )
+
             # ── Krea 2 Turbo (gated on workflow file presence) ──
             if generator == "krea2_turbo":
                 # JSON Prompt Mode (Ideogram structured caption) — opt-in per
@@ -1662,6 +1677,88 @@ class JobDispatcher:
             )
 
         # ===== Klein inpaint (mask-paint edit of a rendered image) =====
+        # ===== Character Studio stage graphs (docs/CHARACTER_STUDIO.md P2) =====
+        if workflow_type == "studio_qie_edit":
+            _wf_path = workflows_dir / "STUDIO_QIE_EDIT.json"
+            if not _wf_path.exists():
+                raise ValueError("workflow_type=studio_qie_edit but STUDIO_QIE_EDIT.json is missing from workflows/")
+            _img1 = await self._resolve_single_asset_path(params.get("image1_asset_id"))
+            _img1 = _img1 or params.get("image1_path") or ""
+            _img2 = await self._resolve_single_asset_path(params.get("image2_asset_id"))
+            _img2 = _img2 or params.get("image2_path") or ""
+            if not _img1 or not _img2:
+                raise ValueError("studio_qie_edit requires image1 (control) and image2 (identity)")
+            return prepare_studio_qie_edit_workflow(
+                str(_wf_path),
+                image1_path=_img1,
+                image2_path=_img2,
+                prompt=params.get("prompt", "") or "",
+                seed=seed,
+                task_lora=params.get("task_lora"),
+                task_lora_strength=float(params.get("task_lora_strength") or 1.0),
+                target_size=int(params.get("target_size") or 1024),
+                latent_image_index=int(params.get("latent_image_index") or 1),
+                qie_model_gguf=params.get("qie_model_gguf") or None,
+                instruction=params.get("instruction") or None,
+            )
+
+        if workflow_type == "studio_rmbg2":
+            _wf_path = workflows_dir / "STUDIO_RMBG2.json"
+            if not _wf_path.exists():
+                raise ValueError("workflow_type=studio_rmbg2 but STUDIO_RMBG2.json is missing from workflows/")
+            _img = await self._resolve_single_asset_path(params.get("image_asset_id"))
+            _img = _img or params.get("image_path") or ""
+            if not _img:
+                raise ValueError("studio_rmbg2 requires an input image")
+            return prepare_studio_rmbg2_workflow(
+                str(_wf_path), image_path=_img,
+                sensitivity=float(params.get("sensitivity") or 0.85),
+            )
+
+        if workflow_type == "studio_facedetailer":
+            _wf_path = workflows_dir / "STUDIO_FACEDETAILER.json"
+            if not _wf_path.exists():
+                raise ValueError("workflow_type=studio_facedetailer but STUDIO_FACEDETAILER.json is missing from workflows/")
+            _img = await self._resolve_single_asset_path(params.get("image_asset_id"))
+            _img = _img or params.get("image_path") or ""
+            if not _img:
+                raise ValueError("studio_facedetailer requires an input image")
+            return prepare_studio_facedetailer_workflow(
+                str(_wf_path), image_path=_img,
+                prompt=params.get("prompt", "") or "",
+                seed=seed,
+                denoise=float(params.get("face_denoise") or 0.55),
+                qie_model_gguf=params.get("qie_model_gguf") or None,
+            )
+
+        if workflow_type == "studio_seedvr2":
+            _wf_path = workflows_dir / "STUDIO_SEEDVR2.json"
+            if not _wf_path.exists():
+                raise ValueError("workflow_type=studio_seedvr2 but STUDIO_SEEDVR2.json is missing from workflows/")
+            _img = await self._resolve_single_asset_path(params.get("image_asset_id"))
+            _img = _img or params.get("image_path") or ""
+            if not _img:
+                raise ValueError("studio_seedvr2 requires an input image")
+            return prepare_studio_seedvr2_workflow(
+                str(_wf_path), image_path=_img, seed=seed,
+                resolution=int(params.get("resolution") or 2048),
+                dit_model=params.get("seedvr_dit_model") or None,
+                vae_model=params.get("seedvr_vae_model") or None,
+            )
+
+        if workflow_type == "studio_upscale":
+            _wf_path = workflows_dir / "STUDIO_UPSCALE.json"
+            if not _wf_path.exists():
+                raise ValueError("workflow_type=studio_upscale but STUDIO_UPSCALE.json is missing from workflows/")
+            _img = await self._resolve_single_asset_path(params.get("image_asset_id"))
+            _img = _img or params.get("image_path") or ""
+            if not _img:
+                raise ValueError("studio_upscale requires an input image")
+            return prepare_studio_upscale_workflow(
+                str(_wf_path), image_path=_img,
+                model_name=params.get("upscale_model") or None,
+            )
+
         if workflow_type == "klein_inpaint":
             inpaint_path = workflows_dir / "KLEIN_INPAINT.json"
             if not inpaint_path.exists():
@@ -4189,6 +4286,11 @@ class JobDispatcher:
             "ltx_av_native": {"ltx"},
             "ltx_director": {"ltx"},
             "klein_inpaint": {"klein"},
+            "studio_qie_edit": {"vnccs"},
+            "studio_rmbg2": {"vnccs"},
+            "studio_upscale": {"upscale"},
+            "studio_seedvr2": {"seedvr2"},
+            "studio_facedetailer": {"impact", "vnccs"},
         }
         return caps_map.get(workflow_type, set())
 
@@ -4610,7 +4712,11 @@ class JobDispatcher:
                         f"phase={params.get('two_pass_phase')}, is_base={is_two_pass_base}, "
                         f"is_composite={is_two_pass_composite}, media={media_type}, scene={scene_id}"
                     )
-                    if media_type == "image" and scene_id and not is_two_pass_base:
+                    # (v1.29.1 audit B1) auto_save_preview=False jobs (Character
+                    # Studio stage renders) must NOT overwrite the scene's chosen
+                    # images — the flag existed but was never enforced here.
+                    if (media_type == "image" and scene_id and not is_two_pass_base
+                            and params.get("auto_save_preview", True)):
                         scene = await session.get(Scene, scene_id)
                         if scene:
                             scene_params = dict(scene.parameters or {})

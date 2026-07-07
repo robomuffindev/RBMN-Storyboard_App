@@ -1963,3 +1963,159 @@ def prepare_klein_inpaint_workflow(
         f"prompt={'yes' if prompt else 'no'}, seed={seed}"
     )
     return workflow
+
+
+def prepare_studio_qie_edit_workflow(
+    workflow_path: str,
+    *,
+    image1_path: str,
+    image2_path: str,
+    prompt: str,
+    seed: int = 0,
+    task_lora: Optional[str] = None,
+    task_lora_strength: float = 1.0,
+    target_size: int = 1024,
+    latent_image_index: int = 1,
+    qie_model_gguf: Optional[str] = None,
+    instruction: Optional[str] = None,
+) -> dict:
+    """Prepare the Character Studio Qwen-Image-Edit graph (STUDIO_QIE_EDIT.json).
+
+    VNCCS-quality edit stage: image1 = control image (pose skeleton / source
+    sprite), image2 = character identity image, prompt = the edit request.
+    latent_image_index=1 makes the OUTPUT canvas follow image1 (VNCCS pose
+    recipe); use 2 to edit image2 in place (emotion/costume-in-place edits).
+    task_lora=None keeps the template's default; pass "" to bypass the task
+    LoRA entirely (strength 0).  LoadImage uploads are handled by the
+    dispatcher's file-upload pass, same as Klein inpaint.
+    """
+    logger.info(f"Preparing Studio QIE edit workflow from {workflow_path}")
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    def _try(title: str, field: str, value: Any) -> None:
+        try:
+            set_node_input(workflow, title, field, value)
+        except ValueError:
+            logger.warning(f"Studio QIE: node '{title}' not found — skipping {field}")
+
+    _try("STUDIO IMAGE 1", "image", image1_path)
+    _try("STUDIO IMAGE 2", "image", image2_path)
+    _try("STUDIO QWEN ENCODER", "prompt", prompt or "")
+    _try("STUDIO QWEN ENCODER", "target_size", int(target_size))
+    _try("STUDIO QWEN ENCODER", "latent_image_index", int(latent_image_index))
+    if instruction:
+        _try("STUDIO QWEN ENCODER", "instruction", instruction)
+    _try("STUDIO SAMPLER", "seed", int(seed))
+    if qie_model_gguf:
+        _try("STUDIO QIE UNET", "unet_name", qie_model_gguf)
+    if task_lora is not None:
+        if task_lora:
+            _try("STUDIO TASK LORA", "lora_name", task_lora)
+            _try("STUDIO TASK LORA", "strength_model", float(task_lora_strength))
+        else:
+            _try("STUDIO TASK LORA", "strength_model", 0.0)
+    return workflow
+
+
+def prepare_studio_rmbg2_workflow(
+    workflow_path: str,
+    *,
+    image_path: str,
+    sensitivity: float = 0.85,
+) -> dict:
+    """Prepare the Character Studio background-removal graph (STUDIO_RMBG2.json)."""
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+    try:
+        set_node_input(workflow, "STUDIO CUTOUT INPUT", "image", image_path)
+        set_node_input(workflow, "STUDIO RMBG2", "sensitivity", float(sensitivity))
+    except ValueError as e:
+        logger.warning(f"Studio RMBG2: {e}")
+    return workflow
+
+
+def prepare_studio_upscale_workflow(
+    workflow_path: str,
+    *,
+    image_path: str,
+    model_name: Optional[str] = None,
+) -> dict:
+    """Prepare the Character Studio GAN-upscale graph (STUDIO_UPSCALE.json)."""
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+    try:
+        set_node_input(workflow, "STUDIO UPSCALE INPUT", "image", image_path)
+        if model_name:
+            set_node_input(workflow, "STUDIO UPSCALE MODEL", "model_name", model_name)
+    except ValueError as e:
+        logger.warning(f"Studio upscale: {e}")
+    return workflow
+
+
+def prepare_studio_seedvr2_workflow(
+    workflow_path: str,
+    *,
+    image_path: str,
+    seed: int = 42,
+    resolution: int = 2048,
+    dit_model: Optional[str] = None,
+    vae_model: Optional[str] = None,
+) -> dict:
+    """Prepare the Character Studio SeedVR2 upscale graph (STUDIO_SEEDVR2.json).
+
+    Uses the VNCCS-proven defaults (2048 target / 3840 max, lab color
+    correction, tiled 1024/128 encode+decode, sdpa attention).  Requires a
+    worker with the ComfyUI-SeedVR2_VideoUpscaler node pack ("seedvr2" cap).
+    """
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    def _try(title: str, field: str, value: Any) -> None:
+        try:
+            set_node_input(workflow, title, field, value)
+        except ValueError:
+            logger.warning(f"Studio SeedVR2: node '{title}' not found — skipping {field}")
+
+    _try("STUDIO SEEDVR INPUT", "image", image_path)
+    _try("STUDIO SEEDVR UPSCALER", "seed", int(seed))
+    _try("STUDIO SEEDVR UPSCALER", "resolution", int(resolution))
+    if dit_model:
+        _try("STUDIO SEEDVR DIT", "model", dit_model)
+    if vae_model:
+        _try("STUDIO SEEDVR VAE", "model", vae_model)
+    return workflow
+
+
+def prepare_studio_facedetailer_workflow(
+    workflow_path: str,
+    *,
+    image_path: str,
+    prompt: str,
+    seed: int = 42,
+    denoise: float = 0.55,
+    qie_model_gguf: Optional[str] = None,
+) -> dict:
+    """Prepare the Character Studio FaceDetailer emotion graph
+    (STUDIO_FACEDETAILER.json) — VNCCS's exact recipe: YOLO face bbox + SAM
+    mask → face-crop re-render at guide 1536 with the EmotionCore LoRA on
+    QIE-2511 Lightning, feather-pasted back.  Requires a worker with
+    Impact-Pack/Subpack ("impact" cap) AND the VNCCS/QIE models.  Best for
+    small faces in full-body sprites (the crop-upscale advantage).
+    """
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    def _try(title: str, field: str, value: Any) -> None:
+        try:
+            set_node_input(workflow, title, field, value)
+        except ValueError:
+            logger.warning(f"Studio FaceDetailer: node '{title}' not found — skipping {field}")
+
+    _try("STUDIO FD INPUT", "image", image_path)
+    _try("STUDIO FD POSITIVE", "text", prompt or "")
+    _try("STUDIO FACEDETAILER", "seed", int(seed))
+    _try("STUDIO FACEDETAILER", "denoise", float(denoise))
+    if qie_model_gguf:
+        _try("STUDIO FD UNET", "unet_name", qie_model_gguf)
+    return workflow

@@ -34,7 +34,7 @@ from backend.database.database import get_session
 from backend.database.models import (
     GlobalCharacter,
     GlobalCharacterVersion,
-    Project,
+    Project, Asset, AssetType,
 )
 
 logger = logging.getLogger(__name__)
@@ -455,6 +455,11 @@ async def import_to_project(
                 dest = proj_chars_dir / f"{src_abs.stem}_{_uuid.uuid4().hex[:6]}{src_abs.suffix}"
             shutil.copy2(src_abs, dest)
             new_image_rel = str(dest.relative_to(app_settings.project_dir))
+            # (audit 2026-07-06) generation-path resolvers match characters
+            # against Asset ROWS — a bare file copy silently attaches zero refs.
+            session.add(Asset(project_id=req.project_id, type=AssetType.REFERENCE,
+                              rel_path=new_image_rel,
+                              meta={"source": "global_library", "library_origin_id": str(c.id)}))
 
     # Copy ref images
     new_refs: list[str] = []
@@ -465,7 +470,11 @@ async def import_to_project(
             if dest.exists():
                 dest = proj_chars_dir / f"{src_abs.stem}_{_uuid.uuid4().hex[:6]}{src_abs.suffix}"
             shutil.copy2(src_abs, dest)
-            new_refs.append(str(dest.relative_to(app_settings.project_dir)))
+            _ref_rel = str(dest.relative_to(app_settings.project_dir))
+            session.add(Asset(project_id=req.project_id, type=AssetType.REFERENCE,
+                              rel_path=_ref_rel,
+                              meta={"source": "global_library", "library_origin_id": str(c.id)}))
+            new_refs.append(_ref_rel)
 
     # Append to project.settings["characters"]
     proj_settings = dict(proj.settings or {})

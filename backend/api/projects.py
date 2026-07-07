@@ -133,6 +133,9 @@ async def list_projects(
 
         response = []
         for project in projects:
+            # Character Studio's hidden system project never shows in the UI
+            if (project.settings or {}).get("studio_system"):
+                continue
             # Count scenes and assets
             scenes_stmt = select(Scene).where(Scene.project_id == project.id)
             scenes_result = await session.execute(scenes_stmt)

@@ -1,5 +1,229 @@
 # Changelog
 
+## [1.31.1] - 2026-07-07
+
+### Fixed — saving the Identity section wiped all fields, then crashed
+
+- `PATCH /characters/{id}` returned `{"ok": true}` instead of the updated character. The Sheet
+  tab fed that straight into its character state, so `character.name` became undefined (blanking
+  every field), and the next Save called `undefined.trim()` → "Cannot read properties of undefined
+  (reading 'trim')". The endpoint now returns the full character via `_char_out` (matching
+  create/get). Added a frontend guard so a malformed response can never clobber the form.
+  Note: the DB rows were never actually cleared — the second save threw before calling the API —
+  so reloading a character shows its data intact.
+
+## [1.31.0] - 2026-07-07
+
+### Added — selectable character art style (not just anime)
+
+- New **art-style registry** (`STUDIO_STYLES` in service.py): Anime/Visual Novel (default),
+  Semi-realistic, Photorealistic, 3D render, Western comic, Storybook illustration — plus custom
+  free-text (used verbatim as the style descriptor, so it's never a hard limit). Mirrored on the
+  frontend in `characterStudioStyles.tsx` with a reusable `StyleSelect` dropdown.
+- `build_base_prompt` is now style-aware: subject tokens switch between danbooru tags
+  (`1girl`/`1boy`, anime-family) and natural language (`a woman`/`a man`, realistic), and the
+  style descriptor is appended. `build_caption_prompt` tag-mode subject follows the same rule.
+  Everything downstream (shots/poses/costumes/emotions) edits from the base image, so it inherits
+  the style automatically.
+- Style is stored per-character in `character_info.style` (no migration) and selectable in the
+  **Sheet tab** and **New Character** form. New characters pre-fill from their Story's default.
+- **Story-level default**: new `studio_stories.default_style` column (idempotent migration) with a
+  Default-style picker on the New Story form — set a whole project's look once.
+- The **Wizard** and **Clone-from-image** tag-sheet generators are style-aware: their Ollama
+  system prompt says "professional {style} character designer" so the extracted sheet matches the
+  target look. `GET /character-studio/styles` exposes the canonical presets.
+
+## [1.30.4] - 2026-07-07
+
+### Fixed — base render feedback + reliable preview refresh (Sheet tab)
+
+- Clicking **Generate Base Render** now shows a prominent status banner ("Rendering base image
+  on a worker… (Ns)") with a live elapsed-seconds counter, plus the button switches to
+  "Rendering…". Previously the only cue was a tiny spinner in the preview box, so it was hard to
+  tell anything was happening.
+- The preview now reliably updates when the render finishes. The Sheet tab drives its own
+  completion poll (`onStatusRefresh` every 2.5s) the moment a render is submitted, independent of
+  the parent status-poll chain, and clears itself as soon as the image lands or the render fails
+  (soft-capped at 10 min). Fixes the case where a finished base render didn't appear until a
+  manual page refresh.
+
+## [1.30.3] - 2026-07-07
+
+### Added — Clone character from reference image (Sheet tab)
+
+- New **Clone from image** button beside the Wizard in the Character Info header. Upload a
+  reference character image; the Ollama vision model describes it and the character wizard
+  extracts a full tag sheet (sex/age/race/skin/body/face/hair/eyes/details) that auto-fills the
+  editable fields — NVCCS clone-character style. Surfaces the existing `POST /wizards/clone`
+  endpoint (previously backend-only). Shows an elapsed timer + staged status while the vision
+  model runs. Requires Ollama Vision (Settings → Vision) + text model (Settings → LLM).
+- Wizard and Clone now share one `applyTagSheet` merge helper; Clone also fills the Description
+  field from the vision description when empty.
+
+## [1.30.2] - 2026-07-07
+
+### Added — Character Studio base-render controls (Sheet tab)
+
+- **Click-to-lightbox**: click the base render to view it full-size in an overlay.
+- **Per-render model dropdown**: pick the first-pass model for a single base render
+  (Z-Image Turbo / Krea 2 Turbo / FLUX.2 Klein T2I), defaulting to the configured First
+  Frame model (Settings → `single_image_generator`). Wired through `generate-base`
+  (`model` field) → job param `single_image_generator_override` → dispatcher
+  `_try_zimage_redirect` honors it per-job without changing the global default.
+- **Upload-image-as-base** (NVCCS import style): upload any image; it's stored as a
+  studio-project asset and the new `POST /characters/{id}/set-base` points the scene's
+  `chosen_image_path` at it, so the whole downstream pipeline (shots/poses/costumes/
+  emotions/process/dataset) edits from it exactly as a rendered base would.
+
+## [1.30.1] - 2026-07-07
+
+### Fixed — Character Studio base render never surfaced failure / idle state
+
+- `/characters/{id}/status` now reconciles the newest `studio_shot_id=="base"` job and returns
+  `base.status` (idle/pending/running/failed) + `base.error`. Previously base state was inferred
+  solely from `chosen_image_path`, so a failed or never-started render was indistinguishable from a
+  running one — the preview spun "Rendering…" forever. The Sheet tab now shows a Render-failed
+  state with the error and a "Retry Base Render" button, and polling keys off the real status.
+
+### Changed — quieter optional-engine probes
+
+- New `ComfyDispatcher.has_capability(cap)` non-logging probe. Character Studio's `_worker_online`
+  availability checks (vnccs / seedvr2 / impact) route through it instead of `select_worker`, so the
+  dispatcher no longer logs a `No workers available with required capabilities` WARNING every poll
+  when those optional engines are simply absent from the pool. Real dispatch still warns.
+
+### Added — engine-availability chips + Tag Sheet live status
+
+- Preflight now reports `klein_online` / `qwen_online` / `impact_online`; the detail-header
+  PreflightBadges render explicit Klein / Qwen (VNCCS) / FaceDetailer chips so it's obvious which
+  engines the current workers support.
+- Character Wizard "Generate Tag Sheet" button shows an elapsed-seconds timer + staged text
+  ("Contacting Ollama…" → "Model is generating your tag sheet…") so the Ollama call never looks
+  frozen. (Reminder: the wizard talks directly to the Ollama HTTP API in Settings → LLM, not
+  ComfyUI — it needs `ollama_urls` + `ollama_model` reachable and the model pulled.)
+- Describe-a-character auto-fill is now on the single-character **edit page** (Sheet tab → Character
+  Info), not just the New Character modal. The same wizard merges the LLM tag sheet into the
+  editable age/race/body/face/hair/eyes/etc. fields so you can regenerate attributes from a
+  description at any time, then tweak and Save.
+
+## [1.30.0] - 2026-07-06
+
+### Added — third emotion engine: FaceDetailer (VNCCS's exact mechanism)
+
+- `STUDIO_FACEDETAILER.json`: YOLOv8 face bbox + SAM mask → face-crop re-render at guide/max 1536
+  with the EmotionCore LoRA on QIE-2511 Lightning (denoise 0.55, feather 5, force-inpaint,
+  noise-mask-feather 20 — VNCCS's proven recipe), feather-pasted back. Best for small faces in
+  full-body sprites (the crop-upscale advantage the whole-image edit lacks).
+- Requires Impact-Pack + Impact-Subpack on the VNCCS worker (new auto-detected `impact`
+  capability) plus `bbox/face_yolov8m.pt` and `sam_vit_b_01ec64.pth`. Engine resolution rejects it
+  with an actionable 409 when unavailable; preflight reports `facedetailer_online`.
+- Emotions tab gains a per-tab engine override select (follow page / Qwen whole-image edit /
+  Klein face-mask inpaint / FaceDetailer face-crop re-render) so all three are A/B-testable.
+
+## [1.29.1] - 2026-07-06
+
+### Fixed — Character Studio deep audit (3 adversarial reviews before first testing)
+
+- **BLOCKING — pushed characters had zero working refs**: `push_to_project` (and the Global
+  Library's `import_to_project` — same latent bug) copied image files but never created Asset
+  rows; every generation-path resolver matches characters against Asset rows, so pushed/imported
+  characters looked fine in the UI but silently attached no reference images. Both paths now
+  register Asset rows.
+- **BLOCKING — `auto_save_preview` was a phantom on completion**: stage renders (poses, costumes,
+  emotions, processing) would each overwrite the studio scene's chosen image — corrupting the
+  identity source mid-pipeline. The completion handler now honors the flag.
+- **BLOCKING — emotion/process refs mismatch**: costume-source emotions 400'd (UI sent the costume
+  id as `source`), and Process never resolved `costume:`/`emotion:` refs. Backend now accepts both
+  forms; UI sends canonical values.
+- HIGH: missing `AssetType` import (NameError on pose/emotion/cutout registration); unguarded
+  `select_worker` calls 500'd when zero workers were online (now degrade gracefully everywhere);
+  emotion face crops get Asset rows + `face_crop_asset_id` (UI thumbnails now render); status
+  polling now tracks cutout/upscale jobs; Concept-panel saves no longer strip Studio provenance
+  from characters (re-push updates in place instead of duplicating).
+- Full audit reports in `diagnostics/audit_studio_{backend,frontend,integration}.md` (gitignored);
+  open MEDIUM/LOW items listed there.
+
+## [1.29.0] - 2026-07-06
+
+### Added — Character Studio: final gap closure (everything test-ready)
+
+- **SeedVR2 premium upscale**: `STUDIO_SEEDVR2.json` (VNCCS-proven defaults: 2048/3840, lab color
+  correction, tiled 1024/128) on workers with the SeedVR2 node pack (new auto-detected `seedvr2`
+  capability). Upscale mode selector everywhere upscale runs (Process panel + Generate All):
+  Auto (SeedVR2 when available, else GAN) / SeedVR2 / GAN; preflight reports both availabilities.
+- **2D Pose Editor**: drag-the-joints skeleton editor (18-joint OpenPose layout on the 512×1536
+  canvas, bone-aware, live server-rendered preview) — load any bundled preset as a starting point,
+  save as reusable custom presets (with delete), and generate pose sets from customs exactly like
+  built-ins. New endpoints: pose joints fetch, live preview render, custom preset CRUD.
+- **Outfit catalog suggestions**: the 629-aesthetic VNCCS outfit catalog is now served by /catalogs
+  and surfaced as a searchable picker in the costume builder (fills the prompt with the aesthetic's
+  tag set, still fully editable).
+- **YuNet auto-download**: the face-detection model fetches itself from the official opencv_zoo on
+  first use (Klein-engine emotions get quality face masks out of the box; Haar remains the fallback
+  if the download fails).
+
+## [1.28.0] - 2026-07-06
+
+### Added — Character Studio Phase 2: full VNCCS-parity pipeline with a dual engine (Qwen + Klein)
+
+- **Dual-engine stages**: every edit stage (poses, costumes, emotions) runs on either engine —
+  **qwen** (our own thin API graphs from VNCCS atomic nodes: Qwen-Image-Edit-2511 GGUF + Lightning +
+  the VNCCS pose/clothes/emotion core LoRAs via `VNCCS_QWEN_Encoder`; requires a worker with VNCCS
+  installed, auto-detected as a new `vnccs` capability) or **klein** (existing `klein_2ref`/
+  `klein_1ref`/`klein_inpaint` workflows — zero new worker deps). Engine selector with `auto`
+  fallback + per-character preflight validation (worker caps, base render, vision config) before
+  anything dispatches.
+- **Pose sets**: bundled VNCCS pose presets rendered server-side as 18-joint skeletons (ported 2D
+  renderer; opencv with PIL fallback) → pose-conditioned sprites (qwen: pose LoRA + pose-as-canvas
+  recipe; klein: skeleton-as-reference instruction).
+- **Costumes**: per-character costume library (structured top/bottom/head/face/shoes + prompt),
+  generated against the base identity (ClothesCore LoRA on qwen).
+- **Emotions**: full 157-emotion catalog picker; qwen path edits via EmotionCore; klein path builds a
+  CPU face-detected (YuNet→Haar fallback), feather-masked RGBA and runs our Klein inpaint —
+  face crops saved separately for portrait dataset material.
+- **Cutout & upscale**: transparent sprites via `STUDIO_RMBG2` on a VNCCS worker or CPU fallback
+  (optional `rembg`, chroma-distance last resort — surfaced in preflight, never crashes); GAN
+  upscale via standard nodes on any `upscale`-capable worker.
+- **Generate All**: one-click orchestrator (base → shots → costumes → emotions → processing) with
+  per-stage checkpoints, skip-and-record error handling, and live progress in the UI.
+- **Wizards**: describe-in-prose → structured tag sheet (LLM), clone-from-image → tag sheet (vision).
+- Datasets can now include costume/emotion/pose sprites and face crops. New workflows
+  `STUDIO_QIE_EDIT/RMBG2/UPSCALE.json`; API contract in `docs/CHARACTER_STUDIO_P2_API.md`;
+  35 new endpoints; frontend Poses/Costumes/Emotions tabs + engine selector + Generate All modal.
+- New dependency: `opencv-python-headless` (CPU face detect + skeleton rendering).
+
+## [1.27.0] - 2026-07-05
+
+### Added — Character Studio (Phase 1)
+
+- New app section (Home → 🎭 Character Studio, route `/studio`): create reusable characters (or
+  items), organize them into **Stories** for series with recurring casts, and use them across
+  projects. Design + phasing: `docs/CHARACTER_STUDIO.md` (built after a full analysis of the VNCCS
+  3.0 ComfyUI suite + LoRA-dataset research; VNCCS catalogs — tags/outfits/157 emotions/pose
+  presets — are bundled under `backend/data/character_studio/`; the `vnccs/` reference folder is
+  gitignored).
+- **Character sheet → base render → shot plan**: VNCCS-style tag sheet builds the base prompt
+  (first-pass generator); an editable research-backed shot plan (angles incl. profile+back,
+  portrait/upper/full framings, expressions, background/lighting variation — item mode swaps in
+  context/detail shots) renders each shot as a Klein "Image 1" edit of the base render. All
+  generation runs through the normal job queue inside a hidden system project (one scene per
+  character), so the existing dispatcher/lightbox/versions machinery applies. The hidden project
+  is filtered from the project list.
+- **LoRA dataset builder ("idiot-proof")**: pick renders → auto-caption on the existing Ollama
+  vision pool with per-style templates (trigger-word-first, prune-constant-traits rule, SDXL
+  quality prefix branched by Illustrious/NoobAI/Pony) → review/edit every caption in the UI →
+  export **kohya** (`N_trigger class` folder + captions + dataset_config.toml) and/or
+  **ai-toolkit** (flat images + natural-language captions + trigger_word config.yaml skeleton),
+  zipped with per-format READMEs.
+- **Push to Project**: copies the base render + best angle shots into a target project and
+  adds/updates the character in `settings.characters` with `extra_images` angles (re-push updates
+  in place via the studio id).
+- New tables `studio_stories` / `studio_characters` / `studio_datasets` (auto-created);
+  `caption_image_sync` (custom-prompt vision call) in the vision service.
+- Phase 2 (planned, per docs): VNCCS-quality upgrades as our own thin graphs on the VNCCS-equipped
+  worker — pose-conditioned sprite sets, costumes, emotions (FaceDetailer), transparent sprites
+  (RMBG2/ChromaKey), SeedVR2 upscale toggle. Phase 3: clone-from-image, training handoff.
+
 ## [1.26.0] - 2026-07-05
 
 ### Changed — FF/LF Keyframes mode now runs as three parallel phases

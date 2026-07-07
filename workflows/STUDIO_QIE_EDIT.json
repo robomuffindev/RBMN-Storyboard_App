@@ -1,0 +1,178 @@
+{
+ "1": {
+  "class_type": "UnetLoaderGGUF",
+  "inputs": {
+   "unet_name": "qwen-image-edit-2511-Q5_0.gguf"
+  },
+  "_meta": {
+   "title": "STUDIO QIE UNET"
+  }
+ },
+ "2": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+   "type": "qwen_image"
+  },
+  "_meta": {
+   "title": "STUDIO QIE CLIP"
+  }
+ },
+ "3": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "qwen_image_vae.safetensors"
+  },
+  "_meta": {
+   "title": "STUDIO QIE VAE"
+  }
+ },
+ "4": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+   "strength_model": 1.0
+  },
+  "_meta": {
+   "title": "STUDIO LIGHTNING LORA"
+  }
+ },
+ "5": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "4",
+    0
+   ],
+   "lora_name": "VNCCS_QIE2511_PoseStudio_ART_V5.9.5.safetensors",
+   "strength_model": 1.0
+  },
+  "_meta": {
+   "title": "STUDIO TASK LORA"
+  }
+ },
+ "6": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "pose.png"
+  },
+  "_meta": {
+   "title": "STUDIO IMAGE 1"
+  }
+ },
+ "7": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "base.png"
+  },
+  "_meta": {
+   "title": "STUDIO IMAGE 2"
+  }
+ },
+ "8": {
+  "class_type": "VNCCS_QWEN_Encoder",
+  "inputs": {
+   "clip": [
+    "2",
+    0
+   ],
+   "vae": [
+    "3",
+    0
+   ],
+   "prompt": "",
+   "image1": [
+    "6",
+    0
+   ],
+   "image2": [
+    "7",
+    0
+   ],
+   "image1_name": "image 1",
+   "image2_name": "image 2",
+   "image3_name": "image 3",
+   "target_size": 1024,
+   "upscale_method": "lanczos",
+   "crop_method": "disabled",
+   "weight1": 1.0,
+   "weight2": 1.0,
+   "weight3": 1.0,
+   "vl_size": 384,
+   "latent_image_index": 1,
+   "qwen_2511": true,
+   "background_color": "White",
+   "instruction": "Describe the character and their key features (body shape, physical characteristics, clothing, items, accessories). Then explain how the user's text instruction should alter or modify the character. Generate a new image that meets the user's requirements while maintaining consistency with the original character where appropriate."
+  },
+  "_meta": {
+   "title": "STUDIO QWEN ENCODER"
+  }
+ },
+ "9": {
+  "class_type": "KSampler",
+  "inputs": {
+   "model": [
+    "5",
+    0
+   ],
+   "positive": [
+    "8",
+    0
+   ],
+   "negative": [
+    "8",
+    1
+   ],
+   "latent_image": [
+    "8",
+    2
+   ],
+   "seed": 0,
+   "steps": 4,
+   "cfg": 1.0,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "denoise": 1.0
+  },
+  "_meta": {
+   "title": "STUDIO SAMPLER"
+  }
+ },
+ "10": {
+  "class_type": "VAEDecodeTiled",
+  "inputs": {
+   "samples": [
+    "9",
+    0
+   ],
+   "vae": [
+    "3",
+    0
+   ],
+   "tile_size": 512,
+   "overlap": 64,
+   "temporal_size": 64,
+   "temporal_overlap": 8
+  },
+  "_meta": {
+   "title": "STUDIO DECODE"
+  }
+ },
+ "11": {
+  "class_type": "SaveImage",
+  "inputs": {
+   "images": [
+    "10",
+    0
+   ],
+   "filename_prefix": "studio_qie"
+  },
+  "_meta": {
+   "title": "STUDIO SAVE"
+  }
+ }
+}

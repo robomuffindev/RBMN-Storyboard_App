@@ -9,6 +9,7 @@ import BatchPreviewPIP from '@/components/BatchPreviewPIP/BatchPreviewPIP';
 import BatchesDashboard from '@/components/BatchMode/BatchesDashboard';
 import BatchRunDetail from '@/components/BatchMode/BatchRunDetail';
 import ShortcodeRedirect from '@/components/Chapters/ShortcodeRedirect';
+import CharacterStudioPage from './components/CharacterStudio/CharacterStudioPage';
 
 function App() {
   useJobEvents();
@@ -21,6 +22,7 @@ function App() {
         <Route path="/project/:id" element={<AppLayout />} />
         <Route path="/project/:id/c/:chapterShortCode" element={<AppLayout />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/studio" element={<CharacterStudioPage />} />
         <Route path="/batches" element={<BatchesDashboard />} />
         <Route path="/batches/:batchRunId" element={<BatchRunDetail />} />
         <Route path="/s/:code" element={<ShortcodeRedirect />} />

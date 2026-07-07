@@ -41,6 +41,54 @@ def _normalize_urls(urls) -> list[str]:
     return [u.rstrip("/") for u in urls if u and str(u).strip()]
 
 
+def caption_image_sync(
+    image_path: str | Path,
+    ollama_urls: Sequence[str] | str,
+    model: str,
+    prompt: str,
+    timeout: float = 120.0,
+) -> Optional[str]:
+    """Like describe_image_sync but with a caller-supplied prompt.
+
+    Used by Character Studio dataset captioning (LoRA caption templates).
+    Never raises — returns None on any failure.
+    """
+    urls = _normalize_urls(ollama_urls)
+    if not urls or not model:
+        return None
+    p = Path(image_path)
+    if not p.exists():
+        logger.warning(f"vision: image not found: {p}")
+        return None
+    try:
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    except Exception as e:
+        logger.warning(f"vision: could not read image {p}: {e}")
+        return None
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt, "images": [b64]}],
+        "stream": False,
+        "options": {"temperature": 0.2},
+    }
+    import httpx
+    last_err = None
+    for url in urls:
+        try:
+            r = httpx.post(f"{url}/api/chat", json=body, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            content = ((data.get("message") or {}).get("content") or "").strip()
+            if content:
+                return content
+            last_err = "empty response"
+        except Exception as e:
+            last_err = e
+            continue
+    logger.warning(f"vision: caption failed on all {len(urls)} server(s): {last_err}")
+    return None
+
+
 def describe_image_sync(
     image_path: str | Path,
     ollama_urls: Sequence[str] | str,

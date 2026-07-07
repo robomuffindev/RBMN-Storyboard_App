@@ -287,6 +287,18 @@ class ComfyDispatcher:
             if any("Upscale" in n or "upscale" in n.lower() for n in node_types):
                 capabilities.add("upscale")
 
+            # Check for VNCCS nodes (Character Studio P2 stage graphs)
+            if "VNCCS_QWEN_Encoder" in node_types:
+                capabilities.add("vnccs")
+
+            # Check for SeedVR2 upscaler nodes (Character Studio premium upscale)
+            if "SeedVR2VideoUpscaler" in node_types:
+                capabilities.add("seedvr2")
+
+            # Check for Impact-Pack (Character Studio FaceDetailer emotion engine)
+            if "FaceDetailer" in node_types:
+                capabilities.add("impact")
+
             # Check for inpainting nodes
             if any("Inpaint" in n or "inpaint" in n.lower() for n in node_types):
                 capabilities.add("inpaint")
@@ -357,6 +369,19 @@ class ComfyDispatcher:
         except Exception as e:
             logger.error(f"Failed to discover capabilities: {e}")
             raise
+
+    def has_capability(self, cap: str, exclude_runpod: bool = True) -> bool:
+        """Non-logging availability probe: is any healthy worker advertising
+        ``cap``?
+
+        Unlike ``select_worker`` this NEVER logs a warning, so Character
+        Studio's optional-engine probes (vnccs / seedvr2 / impact) don't spam
+        the console with "No workers available with required capabilities"
+        every poll when those engines are simply absent from the pool."""
+        healthy = [w for w in self.workers.values() if w.healthy]
+        if exclude_runpod:
+            healthy = [w for w in healthy if not w.is_runpod]
+        return any(cap in w.capabilities for w in healthy)
 
     def select_worker(
         self,

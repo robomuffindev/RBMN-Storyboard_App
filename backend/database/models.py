@@ -664,3 +664,58 @@ class GlobalCharacterVersion(SQLModel, table=True):
     )
     note: str = Field(default="")
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Story(SQLModel, table=True):
+    """Character Studio: a story/series grouping reusable characters."""
+
+    __tablename__ = "studio_stories"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(default="")
+    description: str = Field(default="")
+    default_style: str = Field(default="anime")  # pre-fills new characters' art style
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class StudioCharacter(SQLModel, table=True):
+    """Character Studio: a reusable character (or item) definition.
+
+    character_info follows the VNCCS tag-sheet schema (sex/age/race/skin_color/
+    hair/eyes/face/body/additional_details/...); manifest holds shot_plan +
+    generated shot map {shot_id: {status, image_rel, asset_id}}.
+    """
+
+    __tablename__ = "studio_characters"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    story_id: Optional[UUID] = Field(default=None, foreign_key="studio_stories.id", index=True)
+    name: str = Field(default="")
+    kind: str = Field(default="character")  # character | item
+    trigger_word: str = Field(default="")
+    class_word: str = Field(default="")  # e.g. "woman", "man", "robot", "sword"
+    description: str = Field(default="")
+    character_info: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    manifest: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    scene_id: Optional[UUID] = Field(default=None)  # scene in the hidden studio project
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class StudioDataset(SQLModel, table=True):
+    """Character Studio: a LoRA training dataset built from a character's renders."""
+
+    __tablename__ = "studio_datasets"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    character_id: UUID = Field(foreign_key="studio_characters.id", index=True, ondelete="CASCADE")
+    name: str = Field(default="")
+    target: str = Field(default="both")  # kohya | ai_toolkit | both
+    trigger_word: str = Field(default="")
+    class_word: str = Field(default="")
+    status: str = Field(default="new")  # new | captioning | ready | exported | failed
+    config: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    captions: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    error: str = Field(default="")
+    zip_path: str = Field(default="")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
