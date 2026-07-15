@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.117.0] - 2026-07-15
+### Added -- "Strip release" control for the refbase base (tune leftover clothing/jewelry live)
+- Exposed klein_refbase_ref_end (added in 1.116) as a segmented control in the Klein
+  settings, next to Cleanup: Hold / 0.90 / 0.85 (default) / 0.80 / 0.75 / 0.70 / 0.65.
+  Lower = the body reference lets go earlier so the final render steps strip leftover
+  clothing/jewelry harder; Hold (1.0) keeps the reference the whole way (old behavior).
+  Persists to studio settings (debounced auto-save) and takes effect on the next base
+  preview -- no backend restart needed to retune, just re-run.
+
 ## [1.116.0] - 2026-07-15
 ### Changed -- Refbase base: PuLID now engages + late reference release for residual jewelry
 - PuLID was fed the full-body reference, where the face is too small for InsightFace

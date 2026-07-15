@@ -386,6 +386,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [baseSet, setBaseSet] = useState<boolean>(false);
   const [cleanup, setCleanup] = useState<string>('gentle');
   const [kSteps, setKSteps] = useState<number>(6);
+  const [rbEnd, setRbEnd] = useState<string>('0.85');
   const [savingHost, setSavingHost] = useState(false);
   const settingsLoaded = useRef(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -584,6 +585,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setBaseSet(['on', 'true', '1', 'yes', 'set'].includes(String(st.klein_base_set ?? 'off').toLowerCase()));
       setCleanup(String(st.klein_cleanup ?? 'gentle'));
       setKSteps(parseInt(String(st.klein_steps ?? '6'), 10) || 6);
+      setRbEnd(st.klein_refbase_ref_end !== undefined ? String(st.klein_refbase_ref_end) : '0.85');
       setRunBaseClothing(String(st.klein_run_base_clothing ?? ''));
       setEnhanceOn(['on', 'true', '1', 'yes'].includes(String(st.enhance_on ?? 'off').toLowerCase()));
       setEnhanceMethod(String(st.enhance_method ?? 'gan') === 'seedvr2' ? 'seedvr2' : 'gan');
@@ -805,6 +807,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_base_set = baseSet ? 'on' : 'off';
     settings.klein_cleanup = cleanup || 'gentle';
     settings.klein_steps = kSteps || 6;
+    settings.klein_refbase_ref_end = rbEnd || '0.85';
     settings.klein_run_base_clothing = runBaseClothing;
     settings.enhance_on = enhanceOn ? 'on' : 'off';
     settings.enhance_method = enhanceMethod;
@@ -857,7 +860,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps,
+      kpMode, kpStrength, frMode, frDenoise, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength]);
@@ -869,7 +872,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setBaseClothing('strip'); setFaceKind('auto'); setRunBaseClothing('');
     setLockBase(true);
     setBaseSet(false);
-    setCleanup('gentle'); setKSteps(6);
+    setCleanup('gentle'); setKSteps(6); setRbEnd('0.85');
     // the debounced auto-save effect persists these defaults
   };
 
@@ -2098,6 +2101,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           <label style={label}>Cleanup — strips shoes/jewelry (higher = stronger, a bit more grain)</label>
           {segRow([{ v: 'off', label: 'Off' }, { v: 'gentle', label: 'Gentle' }, { v: 'strong', label: 'Strong' }],
                   cleanup, setCleanup)}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Strip release — where the body reference lets go so the final steps can strip leftover clothing/jewelry (lower = strips harder; Hold keeps the reference the whole way)</label>
+          {segRow([{ v: '1', label: 'Hold' }, { v: '0.9', label: '0.90' }, { v: '0.85', label: '0.85 (def)' }, { v: '0.8', label: '0.80' }, { v: '0.75', label: '0.75' }, { v: '0.7', label: '0.70' }, { v: '0.65', label: '0.65' }],
+                  rbEnd, setRbEnd)}
         </div>
       )}
       {variant === 'klein' && (
