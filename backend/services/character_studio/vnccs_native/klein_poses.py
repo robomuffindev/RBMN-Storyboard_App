@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 # What we look for on the worker (matched by basename against /object_info).
 KLEIN_POSE_LORA_BASENAME = "VNCCS_PoseStudioKlein9b_V1.safetensors"
 KLEIN_POSE_REPO = "MIUProject/VNCCS_PoseStudio_Klein"
+REALISM_LORA_BASENAME = "anime2real-semi.safetensors"
+SAM3_LOADER_CLASS = "easy sam3ModelLoader"
+SAM3_SEG_CLASS = "easy sam3ImageSegmentation"
+SAM3_DEFAULT_MODEL = "sam3.pt"
+SAM3_DEFAULT_ARTICLES = (
+    "necklace, chain, pendant, choker, bracelet, wristband, watch, ring, earrings, "
+    "shirt, t-shirt, blouse, collar, sleeve, jacket, coat")
 DEFAULT_KLEIN_UNET = "flux-2-klein-9b-fp8.safetensors"
 DEFAULT_KLEIN_CLIP = "qwen_3_8b_fp8mixed_abliterated.safetensors"
 DEFAULT_KLEIN_VAE = "flux2-vae.safetensors"
@@ -330,7 +337,112 @@ def resolve_klein_models(oi: dict, settings: Optional[dict] = None,
             f"Klein pose LoRA '{KLEIN_POSE_LORA_BASENAME}' is not on this worker. "
             f"Download the VNCCS pose pack repository '{KLEIN_POSE_REPO}' with the "
             f"VNCCS Model Manager (vnccs-utils) on that worker, then retry.")
-    return {"unet": unet, "clip": clip, "vae": vae, "lora": lora or ""}
+    out: Dict[str, Any] = {"unet": unet, "clip": clip, "vae": vae, "lora": lora or ""}
+    _realism = _resolve_realism_lora(oi, st)
+    if _realism:
+        out["realism_lora"] = _realism
+    return out
+
+
+def _resolve_realism_lora(oi: dict, settings: Optional[dict]) -> Optional[Dict[str, Any]]:
+    """Optional realism LoRA stacked on Klein to push outputs more photoreal
+    (anime2real-semi.safetensors). OFF by default; enable via studio setting
+    klein_realism_lora='on'. Strength klein_realism_lora_strength (default 1.0,
+    clamped 0.0-1.5). Returns {'name','strength'} or None (off / not on worker)."""
+    st = settings or {}
+    mode = str(st.get("klein_realism_lora") or "off").strip().lower()
+    if mode in ("off", "false", "0", "no", "disabled", "none", ""):
+        return None
+    name = _resolve_name(_options(oi, "LoraLoaderModelOnly", "lora_name"),
+                         str(st.get("klein_realism_lora_name") or REALISM_LORA_BASENAME))
+    if not name:
+        return None
+    try:
+        strength = float(st.get("klein_realism_lora_strength") or 1.0)
+    except Exception:  # noqa: BLE001
+        strength = 1.0
+    return {"name": name, "strength": max(0.0, min(1.5, strength))}
+
+
+def _apply_realism_lora(api: Dict[str, dict], models: Dict[str, Any], model_ref: list) -> list:
+    """Stack the optional realism LoRA (models['realism_lora']) onto ``model_ref``.
+    No-op when absent. Shared by every Klein graph that renders the character."""
+    r = (models or {}).get("realism_lora")
+    if not r:
+        return model_ref
+    api["rlora"] = {"class_type": "LoraLoaderModelOnly",
+                    "inputs": {"model": list(model_ref), "lora_name": r["name"],
+                               "strength_model": float(r.get("strength", 1.0))}}
+    return ["rlora", 0]
+
+def resolve_sam3_cleanup(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """Optional SAM3 article-cleanup config, or None.  Segments leftover
+    clothing/jewelry by TEXT and inpaints just those regions to bare skin on the
+    base, so Strip release can stay HIGH (max likeness) while stubborn articles are
+    removed surgically.  OFF by default; enable via klein_sam_cleanup='on'.
+    Needs the comfyui-easy-sam3 nodes on the worker (else None = graceful skip)."""
+    st = settings or {}
+    mode = str(st.get("klein_sam_cleanup") or "off").strip().lower()
+    if mode in ("off", "false", "0", "no", "disabled", "none", ""):
+        return None
+    if SAM3_SEG_CLASS not in (oi or {}) or SAM3_LOADER_CLASS not in (oi or {}):
+        return None
+    opts = _options(oi, SAM3_LOADER_CLASS, "model")
+    model = (_resolve_name(opts, str(st.get("klein_sam_cleanup_model") or SAM3_DEFAULT_MODEL))
+             or (opts[0] if opts else SAM3_DEFAULT_MODEL))
+    prompt = str(st.get("klein_sam_cleanup_prompt") or "").strip() or SAM3_DEFAULT_ARTICLES
+    try:
+        thr = float(st.get("klein_sam_cleanup_threshold") or 0.4)
+    except Exception:  # noqa: BLE001
+        thr = 0.4
+    thr = max(0.05, min(0.95, thr))
+    return {"model": model, "prompt": prompt, "threshold": thr,
+            "grow": "GrowMaskWithBlur" in (oi or {}), "expand": 6, "blur": 4.0}
+
+
+def _inject_sam3_cleanup(api: Dict[str, dict], image_node: str, model_ref: list,
+                         sam: Dict[str, Any], seed: int, positive: str, negative: str,
+                         steps: int, width: int, height: int) -> str:
+    """Segment leftover articles on ``image_node`` by TEXT (SAM3), inpaint just
+    those regions to bare skin/underwear, and composite back so ONLY the flagged
+    articles change (likeness elsewhere is byte-identical).  Reuses the graph's
+    Klein clip/vae ('c'/'v') + ``model_ref``.  Returns the composited image id."""
+    api["sam_m"] = {"class_type": SAM3_LOADER_CLASS,
+                    "inputs": {"model": sam["model"], "segmentor": "image",
+                               "device": "cuda", "precision": "fp16"}}
+    api["sam_seg"] = {"class_type": SAM3_SEG_CLASS,
+                      "inputs": {"sam3_model": ["sam_m", 0], "images": [image_node, 0],
+                                 "prompt": sam["prompt"], "threshold": float(sam["threshold"]),
+                                 "keep_model_loaded": False, "add_background": "none",
+                                 "detection_limit": -1}}
+    mask_ref: list = ["sam_seg", 0]
+    if sam.get("grow"):
+        api["sam_grow"] = {"class_type": "GrowMaskWithBlur",
+                           "inputs": {"mask": mask_ref, "expand": int(sam.get("expand", 6)),
+                                      "incremental_expandrate": 0.0, "tapered_corners": True,
+                                      "flip_input": False, "blur_radius": float(sam.get("blur", 4.0)),
+                                      "lerp_alpha": 1.0, "decay_factor": 1.0, "fill_holes": True}}
+        mask_ref = ["sam_grow", 0]
+    api["ci_enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": [image_node, 0], "vae": ["v", 0]}}
+    api["ci_mask"] = {"class_type": "SetLatentNoiseMask",
+                      "inputs": {"samples": ["ci_enc", 0], "mask": mask_ref}}
+    api["ci_pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["c", 0]}}
+    api["ci_neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["c", 0]}}
+    api["ci_sig"] = {"class_type": "Flux2Scheduler",
+                     "inputs": {"steps": int(steps), "width": int(width), "height": int(height)}}
+    api["ci_gd"] = {"class_type": "CFGGuider",
+                    "inputs": {"model": list(model_ref), "positive": ["ci_pos", 0],
+                               "negative": ["ci_neg", 0], "cfg": KLEIN_POSE_CFG}}
+    api["ci_ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed) + 7}}
+    api["ci_sm"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+    api["ci_sc"] = {"class_type": "SamplerCustomAdvanced",
+                    "inputs": {"noise": ["ci_ns", 0], "guider": ["ci_gd", 0], "sampler": ["ci_sm", 0],
+                               "sigmas": ["ci_sig", 0], "latent_image": ["ci_mask", 0]}}
+    api["ci_dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["ci_sc", 0], "vae": ["v", 0]}}
+    api["ci_comp"] = {"class_type": "ImageCompositeMasked",
+                      "inputs": {"destination": [image_node, 0], "source": ["ci_dec", 0],
+                                 "mask": mask_ref, "x": 0, "y": 0, "resize_source": False}}
+    return "ci_comp"
 
 
 def resolve_face_refine(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
@@ -895,6 +1007,7 @@ def build_klein_pose_graph(
             body_load_ids.append(bid)
 
     model_ref = ["lora", 0]
+    model_ref = _apply_realism_lora(api, models, model_ref)
     if pulid:
         # PuLID's InsightFace does its OWN face detection+alignment, so feed it the
         # FULL identity image (a real photo where it can find the face), NOT our
@@ -1290,6 +1403,8 @@ def build_klein_refbase_graph(
     body_ref_end: float = 1.0,
     face_file: Optional[str] = None,
     pulid: Optional[Dict[str, Any]] = None,
+    face_refine: Optional[Dict[str, Any]] = None,
+    sam_cleanup: Optional[Dict[str, Any]] = None,
     rmbg: Optional[Dict[str, Any]] = None,
     cfg: Optional[float] = None,
     negative_prompt: str = "",
@@ -1317,6 +1432,7 @@ def build_klein_refbase_graph(
         model_ref: list = ["lora", 0]
     else:
         model_ref = ["u", 0]
+    model_ref = _apply_realism_lora(api, models, model_ref)
 
     body_load_ids: List[str] = []
     for k, bf in enumerate(body_files):
@@ -1390,7 +1506,17 @@ def build_klein_refbase_graph(
                  "inputs": {"noise": ["ns", 0], "guider": ["gd", 0], "sampler": ["sm", 0],
                             "sigmas": ["sig", 0], "latent_image": ["lat", 0]}}
     api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sc", 0], "vae": ["v", 0]}}
-    _cur = _inject_rmbg(api, "dec", rmbg)
+    # optional low-denoise FaceDetailer refine on the base face (ultralytics detector,
+    # not PuLID/InsightFace) -- runs on the decoded RGB BEFORE background removal.
+    _fr_src = "dec"
+    if face_refine:
+        _fr_src = _face_refine_node(api, "fd", ["dec", 0], list(model_ref),
+                                    [pos_cur, 0], [neg_cur, 0], int(seed), face_refine)
+    if sam_cleanup:
+        _fr_src = _inject_sam3_cleanup(api, _fr_src, list(model_ref), sam_cleanup,
+                                       int(seed), prompt, negative_prompt,
+                                       int(steps), int(width), int(height))
+    _cur = _inject_rmbg(api, _fr_src, rmbg)
     api["save"] = {"class_type": "SaveImage",
                    "inputs": {"images": [_cur, 0], "filename_prefix": filename_prefix}}
     return api, {"base": "save"}

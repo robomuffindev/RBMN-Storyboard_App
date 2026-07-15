@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.120.0] - 2026-07-15
+### Added -- SAM3 article cleanup: remove leftover clothing/jewelry without losing likeness
+- Strip release trades likeness for a cleaner strip (lower = the reference lets go
+  sooner, so less of the person carries through). This breaks that tradeoff: keep
+  Strip release HIGH for max likeness and let SAM3 remove the stubborn scraps.
+- New pass on the base (after FaceDetailer, before background removal): SAM3
+  (comfyui-easy-sam3, `easy sam3ImageSegmentation`) segments leftover articles by
+  TEXT -> GrowMaskWithBlur -> Flux2 inpaint (SetLatentNoiseMask + SamplerCustomAdvanced,
+  reusing the Klein model/clip/vae, positive = the underwear base prompt, negative =
+  the strip negative) -> ImageCompositeMasked back onto the base, so ONLY the flagged
+  regions change and likeness elsewhere is untouched. Gracefully skipped when the
+  worker lacks the SAM3 nodes.
+- Settings + base-preview controls: Article cleanup (SAM3) On/Off (klein_sam_cleanup),
+  editable 'Articles to remove' text (klein_sam_cleanup_prompt; default jewelry +
+  shirt/collar/sleeve/jacket, deliberately NOT bra/panties), Detection threshold
+  Global/0.25-0.60 (klein_sam_cleanup_threshold). OFF by default.
+
+## [1.119.0] - 2026-07-15
+### Added -- Realism LoRA toggle for Klein generation (anime2real-semi)
+- Optional realism LoRA stacked onto the Klein model chain to push outputs more
+  photoreal, since Klein alone can only go so far. Resolved in resolve_klein_models
+  (rides in the models dict) and stacked via _apply_realism_lora in BOTH the base
+  (refbase) and pose graphs -- applies across Klein generation. OFF by default.
+- Settings: klein_realism_lora ('on'/'off'), klein_realism_lora_strength (default
+  1.0, clamped 0.0-1.5), klein_realism_lora_name (default anime2real-semi.safetensors).
+  New base-preview controls: Realism LoRA On/Off + Realism strength (1.00 default,
+  down to 0.40). Gracefully no-ops if the LoRA isn't on the worker.
+
+## [1.118.0] - 2026-07-15
+### Added -- FaceDetailer refine pass on the base + base-local face controls
+- The refbase base preview now runs the SAME low-denoise FaceDetailer refine the
+  pose runs use (ultralytics YOLO face detector -- NOT PuLID/InsightFace, which
+  can't detect these reference faces: worker logs `AUCUN VISAGE`). Runs on the
+  decoded image BEFORE background removal. Gracefully skipped when the worker lacks
+  FaceDetailer / a face detector model.
+- New base-local controls next to the base-preview settings (globals in the gear
+  panel still apply as fallback): Face refine (base) On/Off (klein_base_face_refine),
+  Refine denoise (base) with a Global option + 0.35-0.65 increments
+  (klein_base_face_refine_denoise), Refine steps (base) Global/4/6/8/10
+  (klein_base_face_refine_steps). Auto-save; apply on the next base preview.
+- Note: PuLID's source was already switched to the face crop in 1.116, but it needs
+  the APP backend restarted (not just ComfyUI) to take effect; even then it no-ops
+  on undetectable-face refs -- FaceDetailer is the reliable base-face path.
+
 ## [1.117.0] - 2026-07-15
 ### Added -- "Strip release" control for the refbase base (tune leftover clothing/jewelry live)
 - Exposed klein_refbase_ref_end (added in 1.116) as a segmented control in the Klein

@@ -2507,6 +2507,25 @@ async def generate_preview(body: PreviewIn, request: Request,
                 except Exception:  # noqa: BLE001
                     _rb_end = 0.85
                 _rb_end = max(0.5, min(1.0, _rb_end))
+                # base-local face refine: a per-base ON/OFF toggle + optional denoise
+                # override, both falling back to the global face-refine settings. Uses
+                # the same FaceDetailer (ultralytics detector) the pose runs already use.
+                _use_base_fr = str(saved.get("klein_base_face_refine") or "on").strip().lower() \
+                    not in ("off", "false", "0", "no", "disabled", "none")
+                if _use_base_fr:
+                    _fr_eff = dict(saved or {})
+                    _bfd = str(saved.get("klein_base_face_refine_denoise") or "").strip()
+                    if _bfd:
+                        _fr_eff["klein_face_refine_denoise"] = _bfd
+                    _bfs = str(saved.get("klein_base_face_refine_steps") or "").strip()
+                    if _bfs:
+                        _fr_eff["klein_face_refine_steps"] = _bfs
+                    _base_face_refine = klein_poses.resolve_face_refine(oi, _fr_eff)
+                else:
+                    _base_face_refine = None
+                # SAM3 article cleanup: segment leftover clothing/jewelry by text and
+                # inpaint it to skin, so Strip release can stay high for max likeness.
+                _sam_cleanup = klein_poses.resolve_sam3_cleanup(oi, saved)
                 imgs_b64 = []
                 for _i, (_vlabel, _rot, _vp) in enumerate(_views):
                     _vprompt = klein_poses.klein_refbase_prompt(
@@ -2516,6 +2535,7 @@ async def generate_preview(body: PreviewIn, request: Request,
                         prompt=_vprompt, seed=seed_v + _i, models=models,
                         body_files=pv_body_files, reflatentplus=reflatentplus,
                         strength=_rb_strength, body_ref_end=_rb_end, face_file=face_file, pulid=pulid,
+                        face_refine=_base_face_refine, sam_cleanup=_sam_cleanup,
                         rmbg=rmbg_cfg, cfg=klein_cfg, negative_prompt=neg_text, steps=_ksteps,
                         filename_prefix=f"rbmn_vnccs/{safe}/klein_refbase")
                     _r = client.submit_prompt(_g, timeout=120)

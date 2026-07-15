@@ -387,6 +387,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [cleanup, setCleanup] = useState<string>('gentle');
   const [kSteps, setKSteps] = useState<number>(6);
   const [rbEnd, setRbEnd] = useState<string>('0.85');
+  const [baseFr, setBaseFr] = useState<boolean>(true);
+  const [baseFrDenoise, setBaseFrDenoise] = useState<string>('');
+  const [baseFrSteps, setBaseFrSteps] = useState<string>('');
+  const [realLora, setRealLora] = useState<boolean>(false);
+  const [realLoraStr, setRealLoraStr] = useState<string>('1');
+  const [samClean, setSamClean] = useState<boolean>(false);
+  const [samPrompt, setSamPrompt] = useState<string>('');
+  const [samThresh, setSamThresh] = useState<string>('');
   const [savingHost, setSavingHost] = useState(false);
   const settingsLoaded = useRef(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -586,6 +594,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setCleanup(String(st.klein_cleanup ?? 'gentle'));
       setKSteps(parseInt(String(st.klein_steps ?? '6'), 10) || 6);
       setRbEnd(st.klein_refbase_ref_end !== undefined ? String(st.klein_refbase_ref_end) : '0.85');
+      setBaseFr(!['off', 'false', '0', 'no'].includes(String(st.klein_base_face_refine ?? 'on').toLowerCase()));
+      setBaseFrDenoise(st.klein_base_face_refine_denoise !== undefined ? String(st.klein_base_face_refine_denoise) : '');
+      setBaseFrSteps(st.klein_base_face_refine_steps !== undefined ? String(st.klein_base_face_refine_steps) : '');
+      setRealLora(['on', 'true', '1', 'yes'].includes(String(st.klein_realism_lora ?? 'off').toLowerCase()));
+      setRealLoraStr(st.klein_realism_lora_strength !== undefined ? String(st.klein_realism_lora_strength) : '1');
+      setSamClean(['on', 'true', '1', 'yes'].includes(String(st.klein_sam_cleanup ?? 'off').toLowerCase()));
+      setSamPrompt(st.klein_sam_cleanup_prompt !== undefined ? String(st.klein_sam_cleanup_prompt) : '');
+      setSamThresh(st.klein_sam_cleanup_threshold !== undefined ? String(st.klein_sam_cleanup_threshold) : '');
       setRunBaseClothing(String(st.klein_run_base_clothing ?? ''));
       setEnhanceOn(['on', 'true', '1', 'yes'].includes(String(st.enhance_on ?? 'off').toLowerCase()));
       setEnhanceMethod(String(st.enhance_method ?? 'gan') === 'seedvr2' ? 'seedvr2' : 'gan');
@@ -808,6 +824,18 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_cleanup = cleanup || 'gentle';
     settings.klein_steps = kSteps || 6;
     settings.klein_refbase_ref_end = rbEnd || '0.85';
+    settings.klein_base_face_refine = baseFr ? 'on' : 'off';
+    if (baseFrDenoise.trim() !== '') settings.klein_base_face_refine_denoise = baseFrDenoise;
+    else delete settings.klein_base_face_refine_denoise;
+    if (baseFrSteps.trim() !== '') settings.klein_base_face_refine_steps = baseFrSteps;
+    else delete settings.klein_base_face_refine_steps;
+    settings.klein_realism_lora = realLora ? 'on' : 'off';
+    settings.klein_realism_lora_strength = realLoraStr || '1';
+    settings.klein_sam_cleanup = samClean ? 'on' : 'off';
+    if (samPrompt.trim() !== '') settings.klein_sam_cleanup_prompt = samPrompt;
+    else delete settings.klein_sam_cleanup_prompt;
+    if (samThresh.trim() !== '') settings.klein_sam_cleanup_threshold = samThresh;
+    else delete settings.klein_sam_cleanup_threshold;
     settings.klein_run_base_clothing = runBaseClothing;
     settings.enhance_on = enhanceOn ? 'on' : 'off';
     settings.enhance_method = enhanceMethod;
@@ -860,7 +888,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd,
+      kpMode, kpStrength, frMode, frDenoise, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd, baseFr, baseFrDenoise, baseFrSteps, realLora, realLoraStr, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength]);
@@ -873,6 +901,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setLockBase(true);
     setBaseSet(false);
     setCleanup('gentle'); setKSteps(6); setRbEnd('0.85');
+    setBaseFr(true); setBaseFrDenoise(''); setBaseFrSteps('');
+    setRealLora(false); setRealLoraStr('1');
+    setSamClean(false); setSamPrompt(''); setSamThresh('');
     // the debounced auto-save effect persists these defaults
   };
 
@@ -2115,6 +2146,63 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           <label style={label}>Steps — sampler steps (higher = cleaner, slower)</label>
           {segRow([{ v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }, { v: '14', label: '14' }],
                   String(kSteps), (v) => setKSteps(parseInt(v, 10) || 6))}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Face refine (base) — FaceDetailer sharpen pass on the base face (your poses already get this; uses the YOLO detector, not PuLID)</label>
+          {segRow([{ v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  baseFr ? 'on' : 'off', (v) => setBaseFr(v === 'on'))}
+        </div>
+      )}
+      {variant === 'klein' && baseFr && (
+        <div>
+          <label style={label}>Refine denoise (base) — higher rebuilds more face detail, lower stays truer to the reference (Global = use the ⚙ Settings value)</label>
+          {segRow([{ v: '', label: 'Global' }, { v: '0.35', label: '0.35' }, { v: '0.4', label: '0.40' }, { v: '0.45', label: '0.45' }, { v: '0.5', label: '0.50' }, { v: '0.55', label: '0.55' }, { v: '0.6', label: '0.60' }, { v: '0.65', label: '0.65' }],
+                  baseFrDenoise, setBaseFrDenoise)}
+        </div>
+      )}
+      {variant === 'klein' && baseFr && (
+        <div>
+          <label style={label}>Refine steps (base) — more = cleaner face, slower (Global = use the ⚙ Settings value)</label>
+          {segRow([{ v: '', label: 'Global' }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }],
+                  baseFrSteps, setBaseFrSteps)}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Realism LoRA (anime2real-semi) — stacks a photoreal LoRA on Klein for the base + poses (must be on the worker)</label>
+          {segRow([{ v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  realLora ? 'on' : 'off', (v) => setRealLora(v === 'on'))}
+        </div>
+      )}
+      {variant === 'klein' && realLora && (
+        <div>
+          <label style={label}>Realism strength — 1.00 is usually best; lower it if the look gets over-processed</label>
+          {segRow([{ v: '1', label: '1.00' }, { v: '0.9', label: '0.90' }, { v: '0.8', label: '0.80' }, { v: '0.7', label: '0.70' }, { v: '0.6', label: '0.60' }, { v: '0.5', label: '0.50' }, { v: '0.4', label: '0.40' }],
+                  realLoraStr, setRealLoraStr)}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Article cleanup (SAM3) — segments leftover clothing/jewelry by name and inpaints it to skin, so you can keep Strip release high for max likeness (needs the SAM3 node on the worker)</label>
+          {segRow([{ v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  samClean ? 'on' : 'off', (v) => setSamClean(v === 'on'))}
+        </div>
+      )}
+      {variant === 'klein' && samClean && (
+        <div>
+          <label style={label}>Articles to remove — comma-separated things SAM3 should cut out (blank = jewelry + shirt/collar/sleeve defaults)</label>
+          <input style={input} type="text" value={samPrompt}
+                 placeholder="necklace, bracelet, watch, ring, earrings, shirt, collar, sleeve"
+                 onChange={(e) => setSamPrompt(e.target.value)} />
+        </div>
+      )}
+      {variant === 'klein' && samClean && (
+        <div>
+          <label style={label}>Detection threshold — lower catches more (may over-select), higher is stricter (Global = 0.40)</label>
+          {segRow([{ v: '', label: 'Global' }, { v: '0.25', label: '0.25' }, { v: '0.3', label: '0.30' }, { v: '0.4', label: '0.40' }, { v: '0.5', label: '0.50' }, { v: '0.6', label: '0.60' }],
+                  samThresh, setSamThresh)}
         </div>
       )}
     </div>
