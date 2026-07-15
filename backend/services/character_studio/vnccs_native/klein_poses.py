@@ -286,14 +286,24 @@ def _inject_reflatentplus(api: Dict[str, dict], cond_ref: list, body_loads: List
 
 
 def _options(oi: dict, class_type: str, input_name: str) -> List[str]:
-    """The option list for a combo input from a worker's /object_info."""
+    """The option list for a combo input from a worker's /object_info.
+
+    Handles BOTH object_info shapes: the classic ``[[opt, ...], {config}]`` where
+    the options are the first element, AND the newer COMBO form
+    ``["COMBO", {"options": [opt, ...], ...}]`` where they live under the config
+    dict's ``options`` key (e.g. comfyui-easy-sam3's model input)."""
     for section in ("required", "optional"):
         try:
-            opts = oi[class_type]["input"][section][input_name][0]
-            if isinstance(opts, list):
-                return [str(o) for o in opts]
+            spec = oi[class_type]["input"][section][input_name]
         except Exception:  # noqa: BLE001
             continue
+        first = spec[0] if isinstance(spec, (list, tuple)) and spec else None
+        if isinstance(first, list):
+            return [str(o) for o in first]
+        if isinstance(spec, (list, tuple)) and len(spec) > 1 and isinstance(spec[1], dict):
+            o = spec[1].get("options")
+            if isinstance(o, list):
+                return [str(x) for x in o]
     return []
 
 

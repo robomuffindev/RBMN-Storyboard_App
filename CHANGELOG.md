@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.122.0] - 2026-07-15
+### Fixed -- SAM3 model not found (COMBO object_info format)
+- SAM3 cleanup failed validation: `model: 'sam3.pt' not in ['sam3-fp16.safetensors']`.
+  The comfyui-easy-sam3 loader declares its model input in the newer COMBO shape
+  ['COMBO', {'options': [...]}], but _options only understood the classic
+  [[opt,...], config] shape, so it returned no options and fell back to the bad
+  default. _options now handles BOTH shapes, so resolve_sam3_cleanup picks the real
+  model on the worker (and every other node resolver is now robust to the new format).
+
+## [1.121.0] - 2026-07-15
+### Changed -- Base face-refine controls show the global value + global Refine steps is now settable
+- The base 'Refine denoise' / 'Refine steps' Global buttons now display the actual
+  global value they fall back to, e.g. 'Global (0.55)' / 'Global (6)', reading live
+  from the gear-panel settings.
+- Added a global 'Refine steps (def 6)' input to the Character Studio gear settings
+  (klein_face_refine_steps) -- previously only denoise had a control there. Also
+  corrected the gear 'Refine denoise' label/placeholder to its real default (0.55,
+  was mislabeled 0.40).
+
 ## [1.120.0] - 2026-07-15
 ### Added -- SAM3 article cleanup: remove leftover clothing/jewelry without losing likeness
 - Strip release trades likeness for a cleaner strip (lower = the reference lets go

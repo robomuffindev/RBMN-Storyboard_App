@@ -378,6 +378,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [kpStrength, setKpStrength] = useState<string>('');
   const [frMode, setFrMode] = useState<string>('auto');
   const [frDenoise, setFrDenoise] = useState<string>('');
+  const [frSteps, setFrSteps] = useState<string>('');
   const [baseClothing, setBaseClothing] = useState<string>('strip');
   const [runBaseClothing, setRunBaseClothing] = useState<string>('');
   const [faceKind, setFaceKind] = useState<string>('auto');
@@ -585,6 +586,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setKpStrength(st.klein_pulid_strength !== undefined ? String(st.klein_pulid_strength) : '');
       setFrMode(String(st.klein_face_refine ?? 'auto'));
       setFrDenoise(st.klein_face_refine_denoise !== undefined ? String(st.klein_face_refine_denoise) : '');
+      setFrSteps(st.klein_face_refine_steps !== undefined ? String(st.klein_face_refine_steps) : '');
       setBaseClothing(String(st.klein_base_clothing ?? 'strip'));
       // 'realistic' was the old value for the photoreal style — map it forward
       setFaceKind((s => (s === 'realistic' ? 'photorealistic' : s))(String(st.klein_face_kind ?? 'auto')));
@@ -814,8 +816,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     if (kpStrength.trim() !== '') settings.klein_pulid_strength = parseFloat(kpStrength) || 1.4;
     else delete settings.klein_pulid_strength;
     settings.klein_face_refine = frMode || 'auto';
-    if (frDenoise.trim() !== '') settings.klein_face_refine_denoise = parseFloat(frDenoise) || 0.4;
+    if (frDenoise.trim() !== '') settings.klein_face_refine_denoise = parseFloat(frDenoise) || 0.55;
     else delete settings.klein_face_refine_denoise;
+    if (frSteps.trim() !== '') settings.klein_face_refine_steps = parseInt(frSteps, 10) || 6;
+    else delete settings.klein_face_refine_steps;
     settings.klein_base_clothing = baseClothing || 'strip';
     settings.klein_face_kind = faceKind || 'auto';
     settings.klein_style_custom = styleCustom;
@@ -888,7 +892,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd, baseFr, baseFrDenoise, baseFrSteps, realLora, realLoraStr, samClean, samPrompt, samThresh,
+      kpMode, kpStrength, frMode, frDenoise, frSteps, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd, baseFr, baseFrDenoise, baseFrSteps, realLora, realLoraStr, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength]);
@@ -896,7 +900,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const resetSettings = () => {
     setEditModel(''); setGenMode(''); setGenModel(''); setGenSteps(''); setGenCfg('');
     setGenSampler(''); setGenScheduler(''); setGenSeed('');
-    setKpMode('off'); setKpStrength(''); setFrMode('auto'); setFrDenoise('');
+    setKpMode('off'); setKpStrength(''); setFrMode('auto'); setFrDenoise(''); setFrSteps('');
     setBaseClothing('strip'); setFaceKind('auto'); setRunBaseClothing('');
     setLockBase(true);
     setBaseSet(false);
@@ -2158,14 +2162,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       {variant === 'klein' && baseFr && (
         <div>
           <label style={label}>Refine denoise (base) — higher rebuilds more face detail, lower stays truer to the reference (Global = use the ⚙ Settings value)</label>
-          {segRow([{ v: '', label: 'Global' }, { v: '0.35', label: '0.35' }, { v: '0.4', label: '0.40' }, { v: '0.45', label: '0.45' }, { v: '0.5', label: '0.50' }, { v: '0.55', label: '0.55' }, { v: '0.6', label: '0.60' }, { v: '0.65', label: '0.65' }],
+          {segRow([{ v: '', label: `Global (${frDenoise.trim() || '0.55'})` }, { v: '0.35', label: '0.35' }, { v: '0.4', label: '0.40' }, { v: '0.45', label: '0.45' }, { v: '0.5', label: '0.50' }, { v: '0.55', label: '0.55' }, { v: '0.6', label: '0.60' }, { v: '0.65', label: '0.65' }],
                   baseFrDenoise, setBaseFrDenoise)}
         </div>
       )}
       {variant === 'klein' && baseFr && (
         <div>
           <label style={label}>Refine steps (base) — more = cleaner face, slower (Global = use the ⚙ Settings value)</label>
-          {segRow([{ v: '', label: 'Global' }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }],
+          {segRow([{ v: '', label: `Global (${frSteps.trim() || '6'})` }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }],
                   baseFrSteps, setBaseFrSteps)}
         </div>
       )}
@@ -2450,9 +2454,12 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                   <option value="auto">Auto (recommended)</option>
                   <option value="off">Off</option>
                 </select></div>
-              <div><label style={label}>Refine denoise (def 0.40)</label>
+              <div><label style={label}>Refine denoise (def 0.55)</label>
                 <input style={input} type="number" step="0.05" min="0.1" max="0.8" value={frDenoise}
-                       placeholder="0.40" onChange={(e) => setFrDenoise(e.target.value)} /></div>
+                       placeholder="0.55" onChange={(e) => setFrDenoise(e.target.value)} /></div>
+              <div><label style={label}>Refine steps (def 6)</label>
+                <input style={input} type="number" step="1" min="2" max="20" value={frSteps}
+                       placeholder="6" onChange={(e) => setFrSteps(e.target.value)} /></div>
             </div>
             <p style={{ fontSize: 11, color: '#6b7280', margin: '4px 0 0' }}>
               Klein-mode runs only. Raise refine denoise if eyes still look off; lower it (or PuLID strength)
