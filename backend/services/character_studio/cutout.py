@@ -81,6 +81,162 @@ def _chroma_distance_cutout(image_path: Path, out_path: Path,
         return False
 
 
+def chroma_key_cutout(image_path: str | Path, out_path: str | Path,
+                      bg_color: Optional[tuple] = None,
+                      inner: float = 60.0, outer: float = 135.0,
+                      despill: bool = True) -> tuple[bool, Optional[str]]:
+    """Vectorized chroma key for KNOWN solid-color studio renders (numpy).
+
+    For a character rendered on a flat green/blue field this is much cleaner
+    than rembg: rembg is a general subject-matting net that leaves a colored
+    edge halo and can keep shadow-tinted background, whereas a real chroma key
+    keys on the actual background COLOR.  We:
+      1. sample the background color as the MEDIAN of the image's border ring
+         (robust to a stray edge pixel; or use ``bg_color`` if given),
+      2. make pixels within ``inner`` RGB distance fully transparent and ramp
+         alpha up to opaque by ``outer`` -- the soft band gives a clean
+         anti-aliased edge AND removes shadow-darkened background (a shadowed
+         green is still within ~outer of the pure green),
+      3. despill the dominant background channel on the transition band so no
+         green/blue fringe survives around the silhouette.
+
+    Never raises: returns ``(True, note)`` / ``(False, reason)``.  Falls back to
+    ``cutout_cpu`` at the call site when numpy/PIL are unavailable.
+    """
+    try:
+        import numpy as np  # noqa: PLC0415
+    except Exception as e:  # pragma: no cover
+        return False, f"chroma_key needs numpy ({e})"
+    if not _HAVE_PIL:
+        return False, "chroma_key needs PIL"
+    image_path = Path(image_path)
+    out_path = Path(out_path)
+    if not image_path.exists():
+        return False, f"source image not found: {image_path}"
+    try:
+        with Image.open(image_path) as _im:
+            im = _im.convert("RGBA")
+            im.load()
+        arr = np.asarray(im).astype(np.float32)
+        rgb = arr[..., :3]
+        h, w = rgb.shape[:2]
+        if h < 2 or w < 2:
+            return False, "image too small to key"
+        if bg_color is None:
+            ring = np.concatenate([rgb[0, :, :], rgb[-1, :, :],
+                                   rgb[:, 0, :], rgb[:, -1, :]], axis=0)
+            bg = np.median(ring, axis=0)
+        else:
+            bg = np.asarray(bg_color[:3], dtype=np.float32)
+        lo = float(inner)
+        hi = max(lo + 1.0, float(outer))
+        dist = np.sqrt(((rgb - bg) ** 2).sum(axis=-1))
+        ramp = np.clip((dist - lo) / (hi - lo), 0.0, 1.0)     # 0 = background
+        out = arr.copy()
+        out[..., 3] = arr[..., 3] * ramp
+        if despill:
+            ch = int(np.argmax(bg))                            # green or blue field
+            o1, o2 = [c for c in range(3) if c != ch]
+            cap = np.maximum(out[..., o1], out[..., o2])
+            band = (ramp < 1.0) & (out[..., ch] > cap)         # only the keyed edge
+            out[..., ch] = np.where(band, cap, out[..., ch])
+        Image.fromarray(np.clip(out, 0, 255).astype("uint8"), "RGBA").save(out_path, "PNG")
+        transp = float((out[..., 3] < 8).mean())
+        opq = out[..., 3] >= 200
+        luma = (float((0.299 * out[..., 0] + 0.587 * out[..., 1]
+                       + 0.114 * out[..., 2])[opq].mean()) if bool(opq.any()) else 0.0)
+        return True, (f"chroma-key ok: bg={bg.astype(int).tolist()}, "
+                      f"transparent={transp * 100:.0f}%, subject_luma={luma:.0f}")
+    except Exception as e:  # noqa: BLE001
+        return False, f"chroma_key failed: {e}"
+
+
+def _estimate_bg_rgb(arr):
+    """Background colour = median of the image border ring (robust to a stray
+    edge pixel).  ``arr`` is an HxWx3 numpy array."""
+    import numpy as np
+    ring = np.concatenate([arr[0, :, :], arr[-1, :, :], arr[:, 0, :], arr[:, -1, :]], axis=0)
+    return np.median(ring, axis=0)
+
+
+def normalize_base_set(images, bg_rgb=None, pad_frac=0.06, thresh=60.0):
+    """Tighten + uniformly frame a set of base views (front/left/right/back).
+
+    Each render leaves a lot of empty background (wasted space, inconsistent
+    framing).  For every image we crop to the subject (non-background) bounding
+    box + a uniform padding, then scale all crops to a common height and centre
+    them on one shared green canvas, so the whole set reads as a consistent
+    character sheet.  Returns a list of PNG bytes aligned with ``images``.
+    Never raises: on any failure an image passes through unchanged.
+    """
+    try:
+        import numpy as np
+        from io import BytesIO
+    except Exception:  # pragma: no cover
+        return list(images)
+    if not _HAVE_PIL:
+        return list(images)
+    crops = []
+    for data in images:
+        try:
+            im = Image.open(BytesIO(data)).convert("RGB")
+            arr = np.asarray(im).astype(np.float32)
+            bg = (np.asarray(bg_rgb, dtype=np.float32) if bg_rgb is not None
+                  else _estimate_bg_rgb(arr))
+            dist = np.sqrt(((arr - bg) ** 2).sum(-1))
+            ys, xs = np.where(dist > float(thresh))
+            if len(xs) == 0:
+                crops.append((im, bg))
+                continue
+            x0, x1 = int(xs.min()), int(xs.max())
+            y0, y1 = int(ys.min()), int(ys.max())
+            pad = int(max(y1 - y0, x1 - x0) * float(pad_frac))
+            x0 = max(0, x0 - pad); y0 = max(0, y0 - pad)
+            x1 = min(im.width, x1 + pad); y1 = min(im.height, y1 + pad)
+            crops.append((im.crop((x0, y0, x1, y1)), bg))
+        except Exception:  # noqa: BLE001
+            try:
+                crops.append((Image.open(BytesIO(data)).convert("RGB"), None))
+            except Exception:  # noqa: BLE001
+                return list(images)
+    if not crops:
+        return list(images)
+    target_h = max(c.height for c, _ in crops)
+    scaled = []
+    for c, bg in crops:
+        s = target_h / c.height
+        nw = max(1, round(c.width * s))
+        scaled.append((c.resize((nw, target_h), Image.LANCZOS), bg))
+    target_w = max(c.width for c, _ in scaled)
+    out = []
+    for c, bg in scaled:
+        fill = tuple(int(x) for x in (bg if bg is not None else (0, 177, 64)))
+        canvas = Image.new("RGB", (target_w, target_h), fill)
+        canvas.paste(c, ((target_w - c.width) // 2, 0))
+        b = BytesIO(); canvas.save(b, "PNG"); out.append(b.getvalue())
+    return out
+
+
+def rembg_cutout(image_path: str | Path, out_path: str | Path) -> tuple[bool, Optional[str]]:
+    """Subject-based background removal via rembg (U2Net), when installed.
+
+    Background-INDEPENDENT: unlike the colour chroma key it does not care whether
+    the figure fills the frame or the backdrop is a clean uniform colour, so it is
+    the most robust option for full-body pose sprites (a frame-filling figure
+    contaminates the chroma key's border-ring background sample and can leave the
+    character semi-transparent/dark).  Returns (False, note) when rembg is not
+    importable so the caller can fall back to the chroma key / crude cutout.
+    Install on the app host with:  pip install rembg --break-system-packages
+    """
+    image_path = Path(image_path)
+    out_path = Path(out_path)
+    if not image_path.exists():
+        return False, f"source image not found: {image_path}"
+    if _rembg_cutout(image_path, out_path):
+        return True, "rembg (subject segmentation)"
+    return False, "rembg not installed"
+
+
 def cutout_cpu(image_path: str | Path, out_path: str | Path) -> tuple[bool, Optional[str]]:
     """Best-effort CPU background removal.  Always produces *some* output on
     success; returns ``(False, reason)`` on total failure — never raises."""

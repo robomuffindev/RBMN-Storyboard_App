@@ -47,6 +47,9 @@ CANVAS_WIDTH = 512
 CANVAS_HEIGHT = 1536
 
 DEFAULT_SKELETON: dict[str, tuple[float, float]] = {
+    # EXACT parity with vnccs/pose_utils/skeleton_512x1536.py (the convention the
+    # VNCCS PoseStudio LoRA was trained on). Only used as a whole-skeleton
+    # fallback + editor seed; the bundled pose presets carry their own joints.
     "nose": (256, 200),
     "neck": (256, 280),
     "r_shoulder": (320, 320),
@@ -303,15 +306,212 @@ def _render_and_save_pil(joints: dict[str, tuple[float, float]], out_path: Path,
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
+# ── OpenPose colored-skeleton renderer (control image for pose LoRAs) ───────
+# Standard OpenPose 18-color palette (ported from vnccs/pose_utils/bone_colors).
+_OP_BONE_COLORS: dict = {
+    ("nose", "neck"): (0, 0, 255),
+    ("neck", "r_shoulder"): (255, 0, 0),
+    ("r_shoulder", "r_elbow"): (255, 170, 0),
+    ("r_elbow", "r_wrist"): (255, 255, 0),
+    ("neck", "l_shoulder"): (255, 85, 0),  # VNCCS FALLBACK_PALETTE[4]
+    ("l_shoulder", "l_elbow"): (0, 255, 0),
+    ("l_elbow", "l_wrist"): (0, 255, 85),
+    ("neck", "r_hip"): (0, 255, 0),
+    ("neck", "l_hip"): (0, 255, 170),
+    ("r_hip", "r_knee"): (85, 255, 0),
+    ("r_knee", "r_ankle"): (2, 153, 102),
+    ("l_hip", "l_knee"): (0, 255, 255),
+    ("l_knee", "l_ankle"): (0, 0, 255),
+    ("nose", "r_eye"): (170, 0, 255),
+    ("r_eye", "r_ear"): (255, 0, 170),
+    ("nose", "l_eye"): (170, 0, 255),
+    ("l_eye", "l_ear"): (255, 0, 170),
+}
+_OP_JOINT_COLORS: dict = {
+    "nose": (0, 0, 255), "neck": (0, 0, 255),
+    "r_eye": (170, 0, 255), "l_eye": (170, 0, 255),
+    "r_ear": (255, 0, 170), "l_ear": (255, 0, 170),
+    "r_shoulder": (255, 85, 0), "r_elbow": (255, 170, 0), "r_wrist": (255, 255, 0),
+    "l_shoulder": (85, 255, 0), "l_elbow": (0, 255, 0), "l_wrist": (0, 255, 85),
+    "r_hip": (0, 255, 170), "r_knee": (85, 255, 0), "r_ankle": (0, 255, 0),
+    "l_hip": (0, 85, 255), "l_knee": (0, 255, 255), "l_ankle": (0, 170, 255),
+}
+
+
+def _render_openpose_cv2(joints: dict, width: int, height: int):
+    """Colored OpenPose skeleton on a BLACK background (BGR uint8). This is the
+    control image pose LoRAs (VNCCS QIE PoseStudio, Klein RefControl) expect."""
+    img = np.zeros((height, width, 3), dtype=np.uint8)
+
+    def as_pt(p):
+        try:
+            return (int(round(p[0])), int(round(p[1])))
+        except Exception:
+            return None
+
+    for j1, j2 in BONE_CONNECTIONS:
+        if j1 in joints and j2 in joints:
+            p1, p2 = as_pt(joints[j1]), as_pt(joints[j2])
+            if p1 and p2:
+                rgb = _OP_BONE_COLORS.get((j1, j2)) or _OP_BONE_COLORS.get((j2, j1)) or (255, 255, 255)
+                cv2.line(img, p1, p2, (rgb[2], rgb[1], rgb[0]), 3, cv2.LINE_AA)
+    for name, xy in joints.items():
+        p = as_pt(xy)
+        if p:
+            rgb = _OP_JOINT_COLORS.get(name, (255, 255, 255))
+            cv2.circle(img, p, 4, (rgb[2], rgb[1], rgb[0]), -1, cv2.LINE_AA)
+    return img
+
+
+def _render_openpose_pil(joints: dict, out_path: Path, width: int, height: int) -> None:
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    def pt(name):
+        xy = joints.get(name)
+        if xy is None:
+            return None
+        return (int(round(xy[0])), int(round(xy[1])))
+
+    for j1, j2 in BONE_CONNECTIONS:
+        p1, p2 = pt(j1), pt(j2)
+        if p1 and p2:
+            rgb = _OP_BONE_COLORS.get((j1, j2)) or _OP_BONE_COLORS.get((j2, j1)) or (255, 255, 255)
+            draw.line([p1, p2], fill=rgb, width=3)
+    for name in joints:
+        p = pt(name)
+        if p:
+            rgb = _OP_JOINT_COLORS.get(name, (255, 255, 255))
+            draw.ellipse([p[0] - 4, p[1] - 4, p[0] + 4, p[1] + 4], fill=rgb)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path, format="PNG")
+
+
+# ── OpenPose keypoint → VNCCS 18-joint conversion ──────────────────────────
+_OP_BODY25 = [
+    "nose", "neck", "r_shoulder", "r_elbow", "r_wrist", "l_shoulder", "l_elbow",
+    "l_wrist", "mid_hip", "r_hip", "r_knee", "r_ankle", "l_hip", "l_knee",
+    "l_ankle", "r_eye", "l_eye", "r_ear", "l_ear", "l_bigtoe", "l_smalltoe",
+    "l_heel", "r_bigtoe", "r_smalltoe", "r_heel",
+]
+_OP_COCO18 = [
+    "nose", "neck", "r_shoulder", "r_elbow", "r_wrist", "l_shoulder", "l_elbow",
+    "l_wrist", "r_hip", "r_knee", "r_ankle", "l_hip", "l_knee", "l_ankle",
+    "r_eye", "l_eye", "r_ear", "l_ear",
+]
+_VNCCS_JOINTS = set(DEFAULT_SKELETON.keys())
+
+
+def openpose_keypoints_to_joints(flat, conf_thresh: float = 0.05, safe: float = 0.85):
+    """Convert a flat OpenPose ``pose_keypoints_2d`` array (BODY_25 or COCO-18)
+    to a VNCCS named-joint dict, scaled to fit the 512x1536 canvas (aspect
+    preserved, centered). Returns None if too few valid joints."""
+    try:
+        flat = list(flat)
+    except Exception:
+        return None
+    n = len(flat) // 3
+    names = _OP_BODY25 if n >= 25 else (_OP_COCO18 if n >= 18 else None)
+    if not names:
+        return None
+    pts: dict = {}
+    for i, nm in enumerate(names):
+        if nm not in _VNCCS_JOINTS:
+            continue
+        b = i * 3
+        if b + 2 >= len(flat):
+            break
+        try:
+            x = float(flat[b]); y = float(flat[b + 1])
+            c = float(flat[b + 2]) if flat[b + 2] is not None else 1.0
+        except Exception:
+            continue
+        if c < conf_thresh or (x == 0 and y == 0):
+            continue
+        pts[nm] = (x, y)
+    if len(pts) < 6:
+        return None
+    xs = [p[0] for p in pts.values()]; ys = [p[1] for p in pts.values()]
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    bw = max(maxx - minx, 1e-3); bh = max(maxy - miny, 1e-3)
+    scale = min((CANVAS_WIDTH * safe) / bw, (CANVAS_HEIGHT * safe) / bh)
+    cx, cy = CANVAS_WIDTH / 2.0, CANVAS_HEIGHT / 2.0
+    ox, oy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    return {nm: [round(cx + (x - ox) * scale, 1), round(cy + (y - oy) * scale, 1)]
+            for nm, (x, y) in pts.items()}
+
+
+def openpose_obj_to_joints(obj):
+    """Convert one parsed OpenPose JSON object to a VNCCS joint dict. Accepts
+    the standard ``{"people":[{"pose_keypoints_2d":[...]}]}`` shape, a bare
+    keypoints list, or an already-VNCCS ``{"joints":{...}}`` object."""
+    if isinstance(obj, dict):
+        if "people" in obj:
+            best, best_n = None, -1
+            for pp in (obj.get("people") or []):
+                kp = pp.get("pose_keypoints_2d") or []
+                cnt = sum(1 for i in range(2, len(kp), 3) if (kp[i] or 0) > 0.05)
+                if cnt > best_n:
+                    best_n, best = cnt, kp
+            return openpose_keypoints_to_joints(best or [])
+        if "pose_keypoints_2d" in obj:
+            return openpose_keypoints_to_joints(obj.get("pose_keypoints_2d") or [])
+        if isinstance(obj.get("joints"), dict):
+            return {k: list(v) for k, v in obj["joints"].items() if k in _VNCCS_JOINTS}
+    if isinstance(obj, list) and obj and isinstance(obj[0], (int, float)):
+        return openpose_keypoints_to_joints(obj)
+    return None
+
+
+def _fit_joints_to_canvas(joints: dict, width: int, height: int,
+                          native_w: int = CANVAS_WIDTH, native_h: int = CANVAS_HEIGHT) -> dict:
+    """Scale joints authored in the native (512x1536) space to fit a width x
+    height canvas, preserving aspect ratio and CENTERING the figure. Without
+    this, a 512x1536-space skeleton drawn raw on a differently-sized canvas
+    lands off-center (e.g. crammed to the left) — which the pose LoRAs then
+    faithfully reproduce."""
+    if not width or not height:
+        return joints
+    scale = min(width / float(native_w), height / float(native_h))
+    ox = (width - native_w * scale) / 2.0
+    oy = (height - native_h * scale) / 2.0
+    out: dict = {}
+    for name, xy in joints.items():
+        try:
+            out[name] = [xy[0] * scale + ox, xy[1] * scale + oy]
+        except Exception:
+            out[name] = xy
+    return out
+
+
 def render_pose(pose_or_preset_id, out_path: str | Path,
-                 width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT) -> Path:
+                 width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT,
+                 style: str = "mannequin") -> Path:
     """Render a pose (preset id or a raw joints dict) to a PNG at ``out_path``.
 
-    Returns the resolved output path.  Uses cv2 when available (matches the
-    VNCCS reference renderer's exact look), otherwise a pure-PIL fallback.
+    style="mannequin" (default): schematic body ovals on a neutral gray
+        backdrop — the browsable library look.
+    style="openpose": the standard colored OpenPose skeleton on black — the
+        control image pose LoRAs (VNCCS QIE PoseStudio / Klein RefControl)
+        expect.
+
+    Returns the resolved output path.
     """
     joints, _label = _resolve_joints(pose_or_preset_id)
+    # Joints are authored in the native 512x1536 space; scale + center
+    # them into the requested canvas so the figure is centered and keeps
+    # its proportions at any target size.
+    if width and height and (int(width) != CANVAS_WIDTH or int(height) != CANVAS_HEIGHT):
+        joints = _fit_joints_to_canvas(joints, int(width), int(height))
     out_path = Path(out_path)
+    if style == "openpose":
+        if _HAVE_CV2:
+            img = _render_openpose_cv2(joints, width, height)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out_path), img)
+        else:
+            _render_openpose_pil(joints, out_path, width, height)
+        return out_path
     if _HAVE_CV2:
         img = _render_schematic_cv2(joints, width=width, height=height)
         _save_rgba_cv2(img, out_path)

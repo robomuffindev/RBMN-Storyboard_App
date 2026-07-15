@@ -144,6 +144,8 @@ export default function ProjectList() {
         return 'Narration (Images)';
       case 'narration_video':
         return 'Narration (Video)';
+      case 'talkie':
+        return 'Talkie (Lip-Sync)';
       default:
         return mode;
     }
@@ -274,7 +276,7 @@ export default function ProjectList() {
               <div className="mb-6">
                 <label className="block text-sm font-medium mb-3">Project Mode</label>
                 <div className="space-y-2">
-                  {(['music_video', 'narration_images', 'narration_video'] as ProjectMode[]).map((mode) => (
+                  {(['music_video', 'narration_images', 'narration_video', 'talkie'] as ProjectMode[]).map((mode) => (
                     <label key={mode} className="flex items-center gap-3 p-3 border border-gray-700 rounded cursor-pointer hover:bg-gray-800 transition-colors">
                       <input
                         type="radio"

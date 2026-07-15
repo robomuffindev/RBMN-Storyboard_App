@@ -1,5 +1,5 @@
 // ===== Enums matching backend exactly =====
-export type ProjectMode = 'music_video' | 'narration_images' | 'narration_video';
+export type ProjectMode = 'music_video' | 'narration_images' | 'narration_video' | 'talkie';
 export type AssetType =
   | 'character'
   | 'clothing'
@@ -217,6 +217,7 @@ export interface AppSettings {
   single_image_generator?: string;
   krea2_model_name?: string;
   krea2_sfw_mode?: boolean;
+  anima_ultra?: boolean;
   json_prompt_mode?: boolean;
   ollama_vision_model?: string;
   ollama_vision_available_models?: string[];
@@ -436,7 +437,7 @@ export interface BatchItemConfig {
   enable_model_audio?: boolean;
   // Image post-process filter (none | grayscale | bw | sepia)
   image_filter?: 'none' | 'grayscale' | 'bw' | 'sepia';
-  render_type: 'music_video' | 'narration_video' | 'narration_images';
+  render_type: 'music_video' | 'narration_video' | 'narration_images' | 'talkie';
   video_mode: 'i2v' | 'v2v' | 'fflf';
   image_mode: 'missing' | 'all_with_refs';
   two_pass: boolean;

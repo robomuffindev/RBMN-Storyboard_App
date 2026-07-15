@@ -586,7 +586,7 @@ async def generate_video(
         HTTPException: If project or scene not found.
     """
     try:
-        await _get_project_or_404(project_id, session)
+        _guard_proj = await _get_project_or_404(project_id, session)
         scene = await _get_scene_or_404(req.scene_id, project_id, session)
 
         # ── Start-image guard ─────────────────────────────────────────
@@ -600,6 +600,11 @@ async def generate_video(
         _wt = (req.workflow_type or "").lower()
         _v2v_workflows = {"ltx_v2v_extend", "ltx_seq_v2v"}
         _needs_first_frame = _wt not in _v2v_workflows
+        # Talkie: the source image is the project's single uploaded portrait
+        # (injected by the dispatcher); scenes have no per-scene start image.
+        if (str(getattr(_guard_proj, "mode", "")) == "talkie"
+                and (getattr(_guard_proj, "settings", None) or {}).get("portrait_asset_id")):
+            _needs_first_frame = False
         if _needs_first_frame:
             _has_explicit = req.first_frame_asset_id is not None
             _scene_params = scene.parameters or {}
@@ -611,6 +616,14 @@ async def generate_video(
                     f"no first_frame_asset_id in request, no chosen_image_path on scene, "
                     f"and no use_prev_lf_as_ff. Pre-flight guard blocked silent failure."
                 )
+                if str(getattr(_guard_proj, "mode", "")) == "talkie":
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            "No source portrait set for this Talkie project. Click "
+                            "'Talkie Setup' and upload a portrait, then generate again."
+                        ),
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
@@ -1016,7 +1029,7 @@ async def enhance_prompt(
             # composites them, so keep the Klein prompt.
             if not req.reference_asset_ids:
                 _sig = (app_settings.single_image_generator or "z_image_turbo")
-                gen_model_name = "krea2" if _sig == "krea2_turbo" else "z_image"
+                gen_model_name = "anima" if _sig == "anima" else ("krea2" if _sig == "krea2_turbo" else "z_image")
 
         model_override = overrides.get(gen_model_name, {})
         if isinstance(model_override, dict) and model_override.get("enabled") and model_override.get("text", "").strip():
@@ -1024,7 +1037,7 @@ async def enhance_prompt(
 
         # When project mode is narration, use narration-specific prompts
         # (only if no user override is already set)
-        if not system_prompt_override and gen_model_name not in ("krea2", "z_image") and project.mode in ("narration_images", "narration_video"):
+        if not system_prompt_override and gen_model_name not in ("krea2", "z_image") and project.mode in ("narration_images", "narration_video", "talkie"):
             from backend.services.llm.prompt_enhancer import (
                 NARRATION_IMAGE_SYSTEM_PROMPT,
                 NARRATION_VIDEO_SYSTEM_PROMPT,
@@ -2233,7 +2246,7 @@ async def _ensure_video_flow(
     scene_lines = []
     # Mode-aware: narration projects label per-scene text as NARRATION,
     # music_video as LYRICS.  Same downstream rendering.
-    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images")
+    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images", "talkie")
     _label = "NARRATION" if _is_narration_proj else "LYRICS"
     _gap = "(no narration in this segment)" if _is_narration_proj else "(instrumental / no vocals)"
     for i, sc in enumerate(scenes):
@@ -2592,7 +2605,7 @@ def _first_pass_gen_key(app_settings) -> str:
     that will actually render them.  Mirrors the manual /enhance-prompt
     routing."""
     _sig = (getattr(app_settings, "single_image_generator", None) or "z_image_turbo")
-    return "krea2" if _sig == "krea2_turbo" else "z_image"
+    return "anima" if _sig == "anima" else ("krea2" if _sig == "krea2_turbo" else "z_image")
 
 
 async def _build_auto_enhance_context(
@@ -2681,7 +2694,7 @@ async def _build_auto_enhance_context(
         parts.append(f"Visual style: {style_text}")
 
     # Narration mode — make the script the visual driver regardless of first-pass model.
-    if getattr(project, "mode", "") in ("narration_images", "narration_video"):
+    if getattr(project, "mode", "") in ("narration_images", "narration_video", "talkie"):
         parts.append(
             "NARRATION MODE: the spoken script (the lyrics/narration text below) is the PRIMARY content. "
             "Compose visuals that make the narration's meaning clear to a viewer WITHOUT any on-screen text "
@@ -3047,7 +3060,7 @@ async def _build_video_enhance_context(
         parts.append(f"Visual style: {style_text}")
 
     # Narration mode — keep the video motion illustrating the spoken script.
-    if getattr(project, "mode", "") in ("narration_images", "narration_video"):
+    if getattr(project, "mode", "") in ("narration_images", "narration_video", "talkie"):
         parts.append(
             "NARRATION MODE: the spoken script (the narration text below) is the PRIMARY content. The motion "
             "and camera should illustrate what the narration describes so it reads clearly without on-screen text."
@@ -3461,7 +3474,7 @@ async def auto_generate(
 
             # When project mode is narration, use narration-specific prompts
             # (only if no user override is already set)
-            if project.mode in ("narration_images", "narration_video"):
+            if project.mode in ("narration_images", "narration_video", "talkie"):
                 from backend.services.llm.prompt_enhancer import (
                     NARRATION_IMAGE_SYSTEM_PROMPT,
                     NARRATION_VIDEO_SYSTEM_PROMPT,
@@ -4635,6 +4648,12 @@ async def _run_windowed_batch(
             scene.parameters = scene_params
             await session.commit()
 
+            # Talkie: the uploaded portrait is the implicit first frame for every
+            # scene (the dispatcher injects it), so never generate a per-scene
+            # image — treat FF as satisfied so the batch goes straight to video.
+            if str(getattr(project_fresh, "mode", "")) == "talkie":
+                has_ff = True
+
             if mode == "missing_videos_single":
                 # Skip scenes that already have video
                 if has_video and not override_full_set:
@@ -5684,7 +5703,7 @@ async def _run_sequential_auto_gen(
 
                 # When project mode is narration, use narration-specific prompts
                 # (only if no user override is already set)
-                if project.mode in ("narration_images", "narration_video"):
+                if project.mode in ("narration_images", "narration_video", "talkie"):
                     from backend.services.llm.prompt_enhancer import (
                         NARRATION_IMAGE_SYSTEM_PROMPT as _N_IMG,
                         NARRATION_VIDEO_SYSTEM_PROMPT as _N_VID,
@@ -7211,6 +7230,7 @@ class InpaintRequest(BaseModel):
     seed: Optional[int] = None
     mask_expand: Optional[int] = None
     mask_blur: Optional[int] = None
+    engine: str = "klein"   # "klein" (Klein inpaint) | "anima" (Anima inpaint)
 
 
 @router.post(
@@ -7252,10 +7272,12 @@ async def inpaint_image(
             job_type="image", frame_type="first",
         )
 
+        _inpaint_wf = "anima_inpaint" if (req.engine or "").lower() == "anima" else "klein_inpaint"
         params = {
-            "workflow_type": "klein_inpaint",
+            "workflow_type": _inpaint_wf,
             "source_masked_asset_id": str(req.source_masked_asset_id),
             "reference_asset_id": str(req.reference_asset_id) if req.reference_asset_id else None,
+            "reference_asset_ids": [str(req.source_masked_asset_id)],  # anima i2i/inpaint source fallback
             "prompt": req.prompt or "",
             "seed": resolved_seed,
             "frame_type": "first",
@@ -7277,7 +7299,7 @@ async def inpaint_image(
         await session.commit()
         await session.refresh(job)
 
-        logger.info(f"Created klein_inpaint job {job.id} for scene {req.scene_id}")
+        logger.info(f"Created {_inpaint_wf} job {job.id} for scene {req.scene_id}")
         job_queue: JobQueue = request.app.state.job_queue
         job_queue.notify()
         return GenerationJobResponse.model_validate(job)

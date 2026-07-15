@@ -275,6 +275,86 @@ async def purge_jobs(
         )
 
 
+@router.post(
+    "/run/{run_id}/cancel",
+    summary="Cancel all jobs in a studio run",
+)
+async def cancel_run(
+    run_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Cancel every PENDING/RUNNING job belonging to one run.
+
+    Studio pose runs enqueue one Job per chunk, all sharing
+    ``parameters["run_id"]``.  This cancels the whole run in a single call:
+    RUNNING chunks are interrupted on their ComfyUI worker (same primitive
+    as per-job cancel), PENDING chunks are flipped to CANCELLED so the
+    dispatcher never submits them.  A no-op (cancelled=0) when nothing in
+    the run is live.
+    """
+    try:
+        stmt = select(Job).where(
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING])
+        )
+        result = await session.execute(stmt)
+        run_jobs = [
+            j for j in result.scalars().all()
+            if isinstance(j.parameters, dict)
+            and str(j.parameters.get("run_id") or "") == run_id
+        ]
+
+        comfy_dispatcher = getattr(request.app.state, "comfy_dispatcher", None)
+        cancelled = 0
+        for job in run_jobs:
+            if (
+                job.status == JobStatus.RUNNING
+                and job.worker_url
+                and comfy_dispatcher is not None
+            ):
+                try:
+                    if job.worker_url in comfy_dispatcher.clients:
+                        comfy_dispatcher.clients[job.worker_url].interrupt()
+                        logger.info(
+                            f"Sent interrupt to {job.worker_url} for job {job.id} "
+                            f"(run {run_id})"
+                        )
+                except Exception as interrupt_err:
+                    logger.warning(
+                        f"Failed to interrupt worker for job {job.id}: {interrupt_err}"
+                    )
+            job.status = JobStatus.CANCELLED
+            job.error = "Cancelled by user (run cancelled)"
+            session.add(job)
+            cancelled += 1
+
+        if cancelled:
+            await session.commit()
+
+        # Emit an SSE event per cancelled chunk so the studio UI updates.
+        try:
+            from backend.services.jobs.dispatcher import job_event_broadcaster
+            for job in run_jobs:
+                job_event_broadcaster.put_nowait({
+                    "event": "job_failed",
+                    "job_id": str(job.id),
+                    "job": {"id": str(job.id)},
+                    "error": "Cancelled by user",
+                })
+        except Exception:
+            pass
+
+        logger.info(f"Cancelled run {run_id}: {cancelled} job(s)")
+        return {"run_id": run_id, "cancelled": cancelled}
+
+    except Exception as e:
+        logger.error(f"Error cancelling run {run_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel run",
+        )
+
+
 @router.get(
     "/{job_id}",
     response_model=JobResponse,

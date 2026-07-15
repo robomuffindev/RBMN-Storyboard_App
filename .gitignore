@@ -113,3 +113,12 @@ diagnostics/
 
 # VNCCS reference repo — analysis only, never commit
 /vnccs/
+anima/
+/vnccs-utils/
+
+
+# Node-UI screenshots / reference samples — analysis only, never commit
+/samples/
+
+# Scratch verification files parked for deletion
+/_to_delete*

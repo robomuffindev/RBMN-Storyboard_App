@@ -47,6 +47,7 @@ export default function InpaintModal({
   const [brush, setBrush] = useState(40);
   const [erasing, setErasing] = useState(false);
   const [prompt, setPrompt] = useState('');
+  const [engine, setEngine] = useState<'klein' | 'anima'>('klein');
   const [hasMask, setHasMask] = useState(false);
 
   // Reference
@@ -203,6 +204,7 @@ export default function InpaintModal({
         source_masked_asset_id: sourceMaskedId,
         reference_asset_id: referenceAssetId,
         prompt: prompt.trim(),
+        engine,
       });
 
       // Poll for the new version
@@ -303,6 +305,15 @@ export default function InpaintModal({
                   <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)}
                     placeholder="e.g. a small brass key on the table; or describe the fix you want"
                     className="w-full h-20 mt-1 px-2 py-1.5 bg-gray-950 border border-gray-700 rounded text-xs text-gray-100 resize-y focus:outline-none focus:border-pink-500" />
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px] font-semibold text-gray-400">Engine</label>
+                  <select value={engine} onChange={(e) => setEngine(e.target.value as 'klein' | 'anima')}
+                    className="px-2 py-1 bg-gray-950 border border-gray-700 rounded text-xs text-gray-100">
+                    <option value="klein">Klein inpaint</option>
+                    <option value="anima">Anima inpaint (anime)</option>
+                  </select>
                 </div>
 
                 {/* Reference */}

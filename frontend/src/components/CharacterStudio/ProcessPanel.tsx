@@ -17,7 +17,7 @@ import {
   ProcessedEntryT,
   UpscaleModeT,
 } from './characterStudioP2Api';
-import { Spinner, ErrorText, StatusChip, assetUrl } from './p2Shared';
+import { Spinner, ErrorText, StatusChip, assetUrl, ImageLightbox } from './p2Shared';
 
 // Local shape for shot_plan entries passed in from Phase 1 (avoids importing
 // Phase 1's private ShotPlanItemT type — duplicated minimally here).
@@ -48,6 +48,7 @@ export function ProcessPanel({
   onProcessed: () => void;
 }) {
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(new Set());
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [cutout, setCutout] = useState(true);
   const [upscale, setUpscale] = useState(false);
   const [upscaleMode, setUpscaleMode] = useState<UpscaleModeT>('auto');
@@ -182,7 +183,13 @@ export function ProcessPanel({
                 <div key={`${ref}:${stepName}`} className="bg-gray-800/60 border border-gray-700 rounded-lg p-2 flex flex-col gap-1.5">
                   <div className="aspect-square bg-gray-800 border border-gray-700 rounded overflow-hidden flex items-center justify-center">
                     {url ? (
-                      <img src={url} alt={`${ref} ${stepName}`} className="w-full h-full object-cover" />
+                      <img
+                        src={url}
+                        alt={`${ref} ${stepName}`}
+                        onClick={() => setLightboxUrl(url)}
+                        title="Click to enlarge"
+                        className="w-full h-full object-cover cursor-pointer"
+                      />
                     ) : (
                       <span className="text-gray-600 text-xs">—</span>
                     )}
@@ -199,6 +206,8 @@ export function ProcessPanel({
           )}
         </div>
       )}
+
+      {lightboxUrl && <ImageLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </div>
   );
 }

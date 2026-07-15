@@ -2332,7 +2332,10 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
       const hasChosenImage = !!sceneParams.chosen_image_path;
       const hasPrevLfRef = !!sceneParams.use_prev_lf_as_ff;
       const directorOn = !!(sceneParams.ltx_director?.enabled);
-      if (!isV2VExtend && !directorOn && !hasChosenImage && !hasPrevLfRef) {
+      const isTalkie = currentProject?.mode === 'talkie';
+      // Talkie uses the project's single portrait as the source (injected
+      // by the dispatcher), so scenes have no per-scene start image.
+      if (!isV2VExtend && !directorOn && !hasChosenImage && !hasPrevLfRef && !isTalkie) {
         const msg =
           'This scene has no start image set yet.\n\n'
           + 'Generate or select an image on the Image tab first, then try '
@@ -2642,8 +2645,8 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
               // Hide video and stems tabs — keep transitions (crossfades) and movement (Ken Burns)
               return !['video', 'stems'].includes(tab);
             }
-            if (mode === 'narration_video') {
-              // Hide stems tab (no stem separation for narration)
+            if (mode === 'narration_video' || mode === 'talkie') {
+              // Hide stems tab (no stem separation for narration / talkie)
               return tab !== 'stems';
             }
             return true; // music_video: show all

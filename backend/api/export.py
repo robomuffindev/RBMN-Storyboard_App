@@ -957,7 +957,7 @@ async def _run_export_task(
 
             _export_progress[pid_s]["phase"] = "assembly"
 
-            if project_mode in ("narration_images", "narration_video"):
+            if project_mode in ("narration_images", "narration_video", "talkie"):
                 # Load backing tracks for narration projects
                 from backend.database.models import BackingTrack
                 bt_stmt = (
@@ -1308,7 +1308,7 @@ async def _run_export_task(
             # assemble_narration_video, so skip the post-assembly step.
             if (
                 export_params.get("subtitles_enabled")
-                and project_mode not in ("narration_images", "narration_video")
+                and project_mode not in ("narration_images", "narration_video", "talkie")
             ):
                 _export_progress[pid_s]["step"] = "Burning subtitles..."
                 _export_progress[pid_s]["percent"] = 96
@@ -1391,7 +1391,7 @@ async def _run_export_task(
             # assemble_narration_video, so skip the post-assembly step.
             if (
                 export_params.get("normalize_audio")
-                and project_mode not in ("narration_images", "narration_video")
+                and project_mode not in ("narration_images", "narration_video", "talkie")
             ):
                 _export_progress[pid_s]["step"] = "Normalizing audio..."
                 _export_progress[pid_s]["percent"] = 98
@@ -1719,7 +1719,7 @@ async def render_preview(
 
                 from backend.services.video.assembly import assemble_music_video, assemble_narration_video
 
-                if project_mode in ("narration_images", "narration_video"):
+                if project_mode in ("narration_images", "narration_video", "talkie"):
                     await asyncio.to_thread(
                         assemble_narration_video,
                         scene_dicts, master_audio, preview_path,

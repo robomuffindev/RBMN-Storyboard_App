@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlmodel import select
@@ -30,14 +30,14 @@ from backend.database.models import (
 from backend.services.character_studio.service import (
     build_base_prompt, build_caption_prompt, default_shot_plan,
     export_dataset, load_catalog, studio_root,
-    STUDIO_STYLES, DEFAULT_STYLE, style_label, style_key_of,
+    STUDIO_STYLES, DEFAULT_STYLE, style_label, style_key_of, style_descriptor,
 )
 from backend.services.character_studio import pose_renderer as _pose_renderer
 from backend.services.character_studio import faces as _faces
 from backend.services.character_studio import cutout as _cutout
 from backend.services.character_studio.engines import (
     EngineUnavailableError, resolve_engine, pose_edit_params, costume_params,
-    emotion_params, cutout_params, upscale_params,
+    emotion_params, cutout_params, upscale_params, IDENTITY_LOCK,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,6 +237,7 @@ class CharacterIn(BaseModel):
 class GenerateBaseIn(BaseModel):
     extra: str = ""                   # appended to the constructed prompt
     prompt_override: str = ""         # replaces the constructed prompt entirely
+    nsfw: Optional[bool] = None       # override character_info.nsfw for this render
     model: str = ""                   # optional first-pass model override for this
                                       # render (z_image_turbo | krea2_turbo |
                                       # flux2_klein_dev_9b); "" = use Settings default
@@ -273,6 +274,7 @@ class CostumeIn(BaseModel):
     name: str
     fields: dict = Field(default_factory=dict)   # {top, bottom, head, face, shoes}
     prompt: str = ""
+    reference_asset_id: Optional[str] = None     # clothing reference image (edit-model swap)
 
 
 class CostumeGenerateIn(BaseModel):
@@ -286,6 +288,8 @@ class PoseGenerateIn(BaseModel):
 
 class EmotionGenerateIn(BaseModel):
     emotions: list[str] = Field(default_factory=list)   # safe_name keys from emotions.json
+    # Ad-hoc expressions (e.g. from the Tools Expression Library): {name, natural_prompt}
+    custom_expressions: list[dict] = Field(default_factory=list)
     costume_id: Optional[str] = None
     source: str = "base"   # "base" | a shot id
     engine: str = "auto"
@@ -527,8 +531,9 @@ async def generate_base(char_id: UUID, body: GenerateBaseIn, request: Request,
     scene = await _ensure_scene(session, proj, c)
     s = await _app_settings(session)
     w, h = _res_from_settings(s)
+    _nsfw = body.nsfw if body.nsfw is not None else bool((c.character_info or {}).get("nsfw"))
     prompt = body.prompt_override.strip() or build_base_prompt(
-        c.character_info or {}, c.kind, body.extra)
+        c.character_info or {}, c.kind, body.extra, nsfw=_nsfw)
     scene.prompt = prompt
     session.add(scene)
     job = Job(project_id=proj.id, scene_id=scene.id, job_type=JobType.IMAGE,
@@ -537,6 +542,7 @@ async def generate_base(char_id: UUID, body: GenerateBaseIn, request: Request,
                           "width": w, "height": h, "reference_asset_ids": [],
                           "frame_type": "first", "auto_save_preview": True,
                           "studio_character_id": str(c.id), "studio_shot_id": "base",
+                          "krea2_sfw_override": (not _nsfw),
                           **({"single_image_generator_override": body.model.strip()}
                              if body.model.strip() else {})})
     session.add(job)
@@ -584,8 +590,235 @@ async def set_base(char_id: UUID, body: SetBaseIn,
     sp["chosen_image_path"] = asset.rel_path
     scene.parameters = sp
     session.add(scene)
+    m = dict(c.manifest or {})
+    vers = list(m.get("base_versions") or [])
+    if not any(v.get("asset_id") == str(asset.id) for v in vers):
+        vers.append({"asset_id": str(asset.id), "image_rel": asset.rel_path,
+                     "source": "uploaded", "style": "",
+                     "created_at": datetime.utcnow().isoformat()})
+        m["base_versions"] = vers
+        c.manifest = m
+        session.add(c)
     await session.commit()
     return {"ok": True, "asset_id": str(asset.id), "image_rel": asset.rel_path}
+
+
+@router.post("/characters/{char_id}/base-versions/set-active")
+async def set_active_base(char_id: UUID, body: SetBaseIn,
+                          session: AsyncSession = Depends(get_session)):
+    """Set which stored base version is the ACTIVE base (updates the scene's
+    chosen_image_path so the whole pipeline edits from it)."""
+    c = await session.get(StudioCharacter, char_id)
+    if not c:
+        raise HTTPException(404, "Character not found")
+    proj = await _ensure_studio_project(session)
+    scene = await _ensure_scene(session, proj, c)
+    asset = await session.get(Asset, body.asset_id)
+    if not asset:
+        raise HTTPException(404, "Version asset not found")
+    sp = dict(scene.parameters or {})
+    sp["chosen_image_path"] = asset.rel_path
+    scene.parameters = sp
+    session.add(scene)
+    await session.commit()
+    return {"ok": True, "asset_id": str(asset.id), "image_rel": asset.rel_path}
+
+
+class RestyleBaseIn(BaseModel):
+    style_key: str = ""                     # STUDIO_STYLES key OR a custom style descriptor
+    reference_asset_id: Optional[UUID] = None   # style-from-reference-image
+    project_id: Optional[UUID] = None       # match a video project's style_text
+    extra: str = ""
+
+
+@router.post("/characters/{char_id}/restyle-base")
+async def restyle_base(char_id: UUID, body: RestyleBaseIn, request: Request,
+                       session: AsyncSession = Depends(get_session)):
+    """Restyle the active base image with the Klein edit model, producing a NEW
+    base version (auto-set active on completion). Style source: a character/
+    custom style key, a reference image (klein_2ref art-style match), or a
+    video project's style_text. Keeps the character/pose/composition."""
+    c = await session.get(StudioCharacter, char_id)
+    if not c:
+        raise HTTPException(404, "Character not found")
+    proj = await _ensure_studio_project(session)
+    scene = await _ensure_scene(session, proj, c)
+    base_rel = (scene.parameters or {}).get("chosen_image_path")
+    base_asset = await _find_asset_by_rel(session, proj.id, base_rel) if base_rel else None
+    if not base_asset:
+        raise HTTPException(400, "Generate or upload a base image first — restyle edits the current base.")
+    s = await _app_settings(session)
+    w, h = _res_from_settings(s)
+    refs = [str(base_asset.id)]
+
+    # Resolve the target style.
+    style_desc = ""
+    if body.project_id:
+        prj = await session.get(Project, body.project_id)
+        style_desc = ((prj.settings or {}).get("style_text") or "").strip() if prj else ""
+        if not style_desc:
+            raise HTTPException(400, "That project has no style defined (Concept → Style).")
+    elif body.style_key.strip():
+        style_desc = style_descriptor(style_key_of(None, body.style_key)) or body.style_key.strip()
+
+    if body.reference_asset_id:
+        ref = await session.get(Asset, body.reference_asset_id)
+        if ref:
+            refs.append(str(ref.id))
+        wf = "klein_2ref"
+        prompt = ("Using image 1 as the subject and image 2 as the art-style reference: redraw the "
+                  "EXACT same character, pose, framing and composition from image 1, rendered in the "
+                  "art style of image 2. Keep identity, pose and layout identical — only the rendering "
+                  "style changes.")
+        style_tag = "reference image"
+    else:
+        if not style_desc:
+            raise HTTPException(400, "Provide a style (character/custom/project) or a reference image.")
+        wf = "klein_1ref"
+        prompt = (f"Redraw the character in image 1 in this exact art style: {style_desc}. Keep the "
+                  "same character, pose, framing and composition — only the art/rendering style changes.")
+        style_tag = style_desc[:60]
+    if body.extra.strip():
+        prompt += f" {body.extra.strip()}"
+    prompt += IDENTITY_LOCK
+
+    job = Job(project_id=proj.id, scene_id=scene.id, job_type=JobType.IMAGE,
+              status=JobStatus.PENDING, priority=0,
+              parameters={"workflow_type": wf, "prompt": prompt, "width": w, "height": h,
+                          "reference_asset_ids": refs, "frame_type": "first",
+                          "auto_save_preview": True, "studio_character_id": str(c.id),
+                          "studio_shot_id": "base", "base_source": "restyled",
+                          "base_style": style_tag})
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    request.app.state.job_queue.notify()
+    return {"job_id": str(job.id), "prompt": prompt}
+
+
+def _char_enhance_context(c: StudioCharacter) -> str:
+    """Build LLM context from a character's sheet for prompt enhancement."""
+    info = c.character_info or {}
+    bits: list[str] = []
+    if c.name:
+        bits.append(f"Character name: {c.name}")
+    sk = style_key_of(info)
+    bits.append(f"Target art style: {style_label(sk)} ({style_descriptor(sk)})")
+    for k in ("sex", "age", "race", "skin_color", "body", "face", "hair", "eyes", "additional_details"):
+        v = str(info.get(k) or "").strip()
+        if v:
+            bits.append(f"{k.replace('_', ' ')}: {v}")
+    if c.description:
+        bits.append(c.description.strip())
+    return " | ".join(b for b in bits if b)
+
+
+def _base_gen_model_name(s, has_refs: bool) -> str:
+    """Match the enhancer's model-specific rules to what will actually render."""
+    if has_refs:
+        return getattr(s, "image_model_type", None) or "flux2_klein_dev_9b"
+    sig = getattr(s, "single_image_generator", "") or "z_image_turbo"
+    return "anima" if sig == "anima" else ("krea2" if sig == "krea2_turbo" else "z_image")
+
+
+class EnhanceBaseIn(BaseModel):
+    prompt: str = ""
+    reference_asset_ids: list[UUID] = []
+
+
+@router.post("/characters/{char_id}/enhance-base-prompt")
+async def enhance_base_prompt(char_id: UUID, body: EnhanceBaseIn,
+                              session: AsyncSession = Depends(get_session)):
+    """LLM-enhance a freehand base-image prompt using the character's sheet as
+    context. Returns the optimized prompt for review before generation."""
+    c = await session.get(StudioCharacter, char_id)
+    if not c:
+        raise HTTPException(404, "Character not found")
+    s = await _app_settings(session)
+    from backend.api.settings import resolve_llm_config
+    from backend.services.llm.prompt_enhancer import PromptEnhancer
+    provider, api_key, model = resolve_llm_config(s)  # raises 400 if no LLM configured
+    gen_model = _base_gen_model_name(s, bool(body.reference_asset_ids))
+    ctx = _char_enhance_context(c)
+    try:
+        enhanced = await asyncio.to_thread(
+            PromptEnhancer.enhance, (body.prompt or "").strip(), ctx, provider, api_key,
+            model, False, None, gen_model, "first")
+    except Exception as e:
+        raise HTTPException(502, f"Prompt enhancement failed: {e}")
+    return {"enhanced_prompt": (enhanced or "").strip()}
+
+
+class AdvancedBaseIn(BaseModel):
+    prompt: str = ""
+    model: str = ""                              # first-pass model override (no-ref only)
+    reference_asset_ids: list[UUID] = []         # refs → klein_Nref edit
+    control_asset_id: Optional[UUID] = None      # Anima LLLite ControlNet hint image
+    lllite_name: str = ""                        # Anima LLLite model (pose/depth/inpaint/…)
+    img2img_asset_id: Optional[UUID] = None      # Anima img2img source image (transform this)
+    denoise: Optional[float] = None              # Anima img2img denoise (0.4–0.8)
+    negative: str = ""                           # optional negative prompt
+
+
+@router.post("/characters/{char_id}/generate-base-advanced")
+async def generate_base_advanced(char_id: UUID, body: AdvancedBaseIn, request: Request,
+                                 session: AsyncSession = Depends(get_session)):
+    """Freehand/advanced base render: arbitrary prompt + optional reference
+    images (→ Klein edit) + first-pass model override (no-ref). Lands as a new
+    base version and auto-activates."""
+    c = await session.get(StudioCharacter, char_id)
+    if not c:
+        raise HTTPException(404, "Character not found")
+    prompt = (body.prompt or "").strip()
+    refs = [str(a) for a in body.reference_asset_ids]
+    if not prompt and not refs and not body.control_asset_id:
+        raise HTTPException(400, "Provide a prompt, reference images, or a control image.")
+    proj = await _ensure_studio_project(session)
+    scene = await _ensure_scene(session, proj, c)
+    s = await _app_settings(session)
+    w, h = _res_from_settings(s)
+    n = len(refs)
+    _nsfw = bool((c.character_info or {}).get("nsfw"))
+    if body.img2img_asset_id:
+        # Anima img2img: transform the given source image with the prompt.
+        params = {"workflow_type": "anima_i2i",
+                  "prompt": prompt or "full-body character portrait",
+                  "width": w, "height": h,
+                  "reference_asset_ids": [str(body.img2img_asset_id)],
+                  "denoise": float(body.denoise) if body.denoise is not None else 0.6,
+                  "negative_prompt": body.negative.strip(),
+                  "frame_type": "first", "auto_save_preview": True,
+                  "studio_character_id": str(c.id), "studio_shot_id": "base",
+                  "base_source": "custom", "krea2_sfw_override": (not _nsfw)}
+    elif body.control_asset_id:
+        # Anima LLLite ControlNet: generate an anime image guided by a control
+        # hint (pose skeleton / depth / etc.) — no Klein refs.
+        params = {"workflow_type": "anima_controlnet",
+                  "prompt": prompt or "full-body character portrait",
+                  "width": w, "height": h,
+                  "control_asset_id": str(body.control_asset_id),
+                  "lllite_name": body.lllite_name.strip() or "anima-lllite-pose-1.safetensors",
+                  "frame_type": "first", "auto_save_preview": True,
+                  "studio_character_id": str(c.id), "studio_shot_id": "base",
+                  "base_source": "custom", "krea2_sfw_override": (not _nsfw)}
+    else:
+        wf = "klein_t2i" if n == 0 else f"klein_{min(n, 5)}ref"
+        params = {"workflow_type": wf, "prompt": prompt or "full-body character portrait",
+                  "width": w, "height": h, "reference_asset_ids": refs,
+                  "frame_type": "first", "auto_save_preview": True,
+                  "studio_character_id": str(c.id), "studio_shot_id": "base",
+                  "base_source": "custom", "krea2_sfw_override": (not _nsfw)}
+        if n == 0 and body.model.strip():
+            params["single_image_generator_override"] = body.model.strip()
+    scene.prompt = prompt or scene.prompt
+    session.add(scene)
+    job = Job(project_id=proj.id, scene_id=scene.id, job_type=JobType.IMAGE,
+              status=JobStatus.PENDING, priority=0, parameters=params)
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    request.app.state.job_queue.notify()
+    return {"job_id": str(job.id), "prompt": prompt}
 
 
 @router.post("/characters/{char_id}/generate-shots")
@@ -817,20 +1050,63 @@ async def character_status(char_id: UUID, session: AsyncSession = Depends(get_se
     # created_at DESC, so the first match is the most recent attempt).
     base_job = next(
         (j for j in jobs if (j.parameters or {}).get("studio_shot_id") == "base"), None)
-    if base_asset:
+    _bj = _new_status_for(base_job) if base_job is not None else None
+    if _bj in ("pending", "running"):
+        # A base job is in flight (generate / restyle / advanced) — report
+        # running even if an OLD base_asset still resolves, so the UI polls
+        # and the new version appears when it completes.
+        base_status = "running"
+        base_error = None
+    elif base_asset:
         base_status = "done"
         base_error = None
+    elif _bj == "failed":
+        base_status = "failed"
+        base_error = (str(base_job.error)[:300] if base_job.error else "Base render failed")
     elif base_job is not None:
-        base_status = _new_status_for(base_job)
-        base_error = (
-            (str(base_job.error)[:300] if base_job.error else "Base render failed")
-            if base_status == "failed" else None)
+        base_status = _bj
+        base_error = None
     else:
         base_status = None   # never started
         base_error = None
+    # Reconcile base VERSIONS: every done base job (generate + restyle) becomes
+    # a version; uploads add themselves in set-base. Active = chosen image.
+    base_versions = list(m.get("base_versions") or [])
+    known_aids = {v.get("asset_id") for v in base_versions}
+    _versions_changed = False
+    for bj in sorted([j for j in jobs if (j.parameters or {}).get("studio_shot_id") == "base"],
+                     key=lambda j: getattr(j, "created_at", None) or datetime.min):
+        if _new_status_for(bj) != "done":
+            continue
+        aid = _result_asset_id(bj)
+        if not aid or aid in known_aids:
+            continue
+        a = await session.get(Asset, UUID(aid))
+        if not a:
+            continue
+        base_versions.append({
+            "asset_id": aid, "image_rel": a.rel_path,
+            "source": (bj.parameters or {}).get("base_source", "generated"),
+            "style": (bj.parameters or {}).get("base_style", ""),
+            "created_at": (bj.created_at.isoformat() if getattr(bj, "created_at", None) else None),
+        })
+        known_aids.add(aid)
+        _versions_changed = True
+    if base_asset and base_asset.id and str(base_asset.id) not in known_aids:
+        base_versions.insert(0, {"asset_id": str(base_asset.id), "image_rel": base_asset.rel_path,
+                                 "source": "base", "style": "", "created_at": None})
+        _versions_changed = True
+    if _versions_changed:
+        m["base_versions"] = base_versions
+        c.manifest = m
+        session.add(c)
+        await session.commit()
+
     return {"base": {"image_rel": base_rel,
                      "asset_id": str(base_asset.id) if base_asset else None,
-                     "status": base_status, "error": base_error},
+                     "status": base_status, "error": base_error,
+                     "versions": base_versions,
+                     "active_asset_id": str(base_asset.id) if base_asset else None},
             "shots": shots, "shot_plan": m.get("shot_plan") or [],
             "pose_sets": pose_sets, "costumes": costumes, "emotions": emotions,
             "processed": processed, "generate_all": m.get("generate_all") or {},
@@ -1162,9 +1438,11 @@ def _engine_error(e: EngineUnavailableError) -> HTTPException:
 # ── pose presets ──────────────────────────────────────────────────────────
 @router.get("/pose-presets")
 async def list_pose_presets_ep():
-    presets = list(_pose_renderer.list_pose_presets())
+    presets = [{**p, "category": p.get("category") or "Basic"}
+               for p in _pose_renderer.list_pose_presets()]
     for cid, entry in _load_custom_poses().items():
-        presets.append({"id": cid, "name": entry.get("name", cid), "custom": True})
+        presets.append({"id": cid, "name": entry.get("name", cid), "custom": True,
+                        "category": entry.get("category") or "Custom"})
     return {"presets": presets}
 
 
@@ -1175,6 +1453,11 @@ async def pose_preset_thumbnail(preset_id: str):
         entry = _load_custom_poses().get(preset_id)
         if not entry:
             raise HTTPException(404, f"Custom pose '{preset_id}' not found")
+        _ci = entry.get("control_image")
+        if _ci:
+            _cp = _POSE_IMAGES_DIR / _ci
+            if _cp.exists():
+                return FileResponse(str(_cp), media_type="image/png")
         cache_dir.mkdir(parents=True, exist_ok=True)
         p = cache_dir / f"{preset_id}.png"
         try:
@@ -1191,6 +1474,8 @@ async def pose_preset_thumbnail(preset_id: str):
 
 # ── custom pose presets (2D pose editor) ───────────────────────────────────
 _CUSTOM_POSES_PATH = Path(cfg.project_dir) / "_character_studio" / "custom_poses.json"
+# Direct OpenPose control PNGs imported by the user (used as-is, no re-render).
+_POSE_IMAGES_DIR = Path(cfg.project_dir) / "_character_studio" / "pose_images"
 
 
 def _load_custom_poses() -> dict:
@@ -1250,6 +1535,170 @@ async def delete_custom_pose(preset_id: str):
     return {"ok": True}
 
 
+class PoseImportIn(BaseModel):
+    poses: Optional[list[dict]] = None   # [{name?, category?, joints:{...}}] or bare joint dicts
+    poseset: Optional[dict] = None       # VNCCS format: {canvas, poses:[jointdict, ...]}
+    category: str = "Imported"
+
+
+@router.post("/pose-presets/import")
+async def import_poses(body: PoseImportIn):
+    """Bulk-import poses into the custom-pose library (e.g. a VNCCS poseset
+    JSON). Accepts a VNCCS-style ``poseset`` ({canvas, poses:[jointdict,...]})
+    or a flat ``poses`` list of {name?, category?, joints} / bare joint dicts.
+    Each pose lands as a categorized custom preset."""
+    raw: list = []
+    if body.poseset and isinstance(body.poseset.get("poses"), list):
+        raw = body.poseset["poses"]
+    elif body.poses:
+        raw = body.poses
+    if not raw:
+        raise HTTPException(400, "No poses to import — provide a VNCCS 'poseset' or a 'poses' list.")
+    d = _load_custom_poses()
+    added: list[str] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, dict) and isinstance(item.get("joints"), dict):
+            joints = item["joints"]; name = item.get("name"); cat = (item.get("category") or body.category)
+        elif isinstance(item, dict) and item:
+            joints = item; name = None; cat = body.category  # bare joint dict (VNCCS shape)
+        else:
+            continue
+        if not joints:
+            continue
+        name = (name or f"{body.category} {i + 1}").strip()
+        cat = (cat or "Imported").strip() or "Imported"
+        slug = "custom_" + ("".join(ch for ch in name.lower() if ch.isalnum() or ch == "_")[:24] or f"pose{i}")
+        base_slug, k = slug, 2
+        while slug in d:
+            slug = f"{base_slug}_{k}"; k += 1
+        d[slug] = {"name": name, "joints": joints, "category": cat}
+        added.append(slug)
+    _save_custom_poses(d)
+    return {"imported": len(added), "ids": added}
+
+
+@router.post("/pose-presets/import-openpose")
+async def import_openpose(file: UploadFile = File(...), category: str = Form("OpenPose")):
+    """Bulk-import OpenPose keypoint files as categorized pose presets. Accepts
+    a single ``*.json`` (one OpenPose object or an array of them) or a ``.zip``
+    of many JSON files. BODY_25 and COCO-18 keypoint formats are auto-detected
+    and remapped to the VNCCS 18-joint schema, scaled to the 512x1536 canvas."""
+    raw = await file.read()
+    fname = (file.filename or "").lower()
+    items: list[tuple[str, dict]] = []
+    MAX_POSES = 8000
+
+    def _ingest(obj, default_name: str):
+        try:
+            joints = _pose_renderer.openpose_obj_to_joints(obj)
+        except Exception:
+            joints = None
+        if joints:
+            items.append((default_name, joints))
+
+    if fname.endswith(".zip"):
+        import io, zipfile
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except Exception:
+            raise HTTPException(400, "Could not read the ZIP file")
+        for zi in zf.infolist():
+            if zi.is_dir() or not zi.filename.lower().endswith(".json"):
+                continue
+            if len(items) >= MAX_POSES:
+                break
+            try:
+                obj = json.loads(zf.read(zi).decode("utf-8", "ignore"))
+            except Exception:
+                continue
+            _ingest(obj, Path(zi.filename).stem)
+    else:
+        try:
+            data = json.loads(raw.decode("utf-8", "ignore"))
+        except Exception:
+            raise HTTPException(400, "Could not parse the JSON file")
+        if isinstance(data, list):
+            for i, obj in enumerate(data[:MAX_POSES]):
+                _ingest(obj, f"{category}_{i + 1}")
+        else:
+            _ingest(data, Path(file.filename or "pose").stem)
+
+    if not items:
+        raise HTTPException(
+            400,
+            "No valid OpenPose skeletons found. Provide OpenPose keypoint JSON "
+            "(pose_keypoints_2d, BODY_25 or COCO-18), a JSON array of them, or a "
+            "ZIP of such files."
+        )
+
+    cat = (category or "OpenPose").strip() or "OpenPose"
+    d = _load_custom_poses()
+    added: list[str] = []
+    for nm, joints in items:
+        name = (nm or "pose").strip()[:40] or "pose"
+        slug = "custom_" + ("".join(ch for ch in name.lower() if ch.isalnum() or ch == "_")[:24] or "pose")
+        base_slug, k = slug, 2
+        while slug in d:
+            slug = f"{base_slug}_{k}"; k += 1
+        d[slug] = {"name": name, "joints": joints, "category": cat}
+        added.append(slug)
+    _save_custom_poses(d)
+    return {"imported": len(added), "category": cat}
+
+
+@router.post("/pose-presets/import-images")
+async def import_pose_images(file: Optional[UploadFile] = File(None),
+                             files: Optional[list[UploadFile]] = File(None),
+                             category: str = Form("OpenPose")):
+    """Bulk-import PNG/JPG OpenPose skeleton images as pose presets that use the
+    image DIRECTLY as the control (no keypoint conversion, no re-render). Accepts
+    a .zip of images OR a multi-file upload. Great for large existing OpenPose
+    skeleton collections."""
+    import io
+    import zipfile
+    from uuid import uuid4
+    _exts = (".png", ".jpg", ".jpeg", ".webp")
+    _POSE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    imgs: list = []
+    if file is not None:
+        raw = await file.read()
+        nm = (file.filename or "").lower()
+        if nm.endswith(".zip"):
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(raw))
+                for zi in zf.infolist():
+                    if zi.is_dir():
+                        continue
+                    if zi.filename.lower().endswith(_exts):
+                        imgs.append((zi.filename, zf.read(zi)))
+            except Exception as e:
+                raise HTTPException(400, f"bad zip: {e}")
+        elif nm.endswith(_exts):
+            imgs.append((file.filename, raw))
+    for uf in (files or []):
+        if (uf.filename or "").lower().endswith(_exts):
+            imgs.append((uf.filename, await uf.read()))
+    if not imgs:
+        raise HTTPException(400, "No image files found (upload a .zip of PNGs or image files).")
+    d = _load_custom_poses()
+    cat = (category or "OpenPose").strip() or "OpenPose"
+    added = 0
+    for name, data in imgs:
+        pid = "custom_png_" + uuid4().hex[:10]
+        ext = Path(name).suffix.lower()
+        if ext not in _exts:
+            ext = ".png"
+        try:
+            (_POSE_IMAGES_DIR / f"{pid}{ext}").write_bytes(data)
+        except Exception:
+            continue
+        d[pid] = {"name": (Path(name).name[:60] or pid), "category": cat,
+                  "control_image": f"{pid}{ext}", "source": "png_openpose"}
+        added += 1
+    _save_custom_poses(d)
+    return {"imported": added}
+
+
 @router.post("/pose-presets/preview")
 async def preview_pose(body: dict):
     """Render an arbitrary joints dict → PNG (the pose editor's live preview)."""
@@ -1283,6 +1732,7 @@ async def create_costume(char_id: UUID, body: CostumeIn,
     costumes[cid] = {
         "id": cid, "name": body.name.strip() or "Costume",
         "fields": body.fields or {}, "prompt": body.prompt or "",
+        "reference_asset_id": body.reference_asset_id or "",
         "sprites": {},   # {shot_key: {status, image_rel, asset_id, job_id}}
     }
     m["costumes"] = costumes
@@ -1306,6 +1756,8 @@ async def update_costume(char_id: UUID, costume_id: str, body: CostumeIn,
     entry["name"] = body.name.strip() or entry.get("name", "Costume")
     entry["fields"] = body.fields or entry.get("fields", {})
     entry["prompt"] = body.prompt if body.prompt is not None else entry.get("prompt", "")
+    if body.reference_asset_id is not None:
+        entry["reference_asset_id"] = body.reference_asset_id or ""
     costumes[costume_id] = entry
     m["costumes"] = costumes
     c.manifest = m
@@ -1373,8 +1825,10 @@ async def generate_costume(char_id: UUID, costume_id: str, body: CostumeGenerate
 
     _cs = await _app_settings(session)
     _cw, _ch = _res_from_settings(_cs)
+    _cref = (costume.get("reference_asset_id") or "").strip() or None
     params = costume_params(engine, identity_asset_id=str(identity_asset.id),
-                            description=description, width=_cw, height=_ch)
+                            description=description, clothing_ref_asset_id=_cref,
+                            width=_cw, height=_ch)
     params.update({"frame_type": "first", "auto_save_preview": False,
                    "studio_character_id": str(c.id),
                    "studio_shot_id": f"costume:{costume_id}"})
@@ -1427,7 +1881,8 @@ async def generate_poses(char_id: UUID, body: PoseGenerateIn, request: Request,
             _custom = _load_custom_poses().get(preset_id)
             if _custom:
                 preset = {"id": preset_id, "name": _custom.get("name", preset_id),
-                          "joints": _custom.get("joints", {})}
+                          "joints": _custom.get("joints", {}),
+                          "control_image": _custom.get("control_image")}
         if not preset:
             errors.append(f"{preset_id}: unknown pose preset")
             continue
@@ -1435,7 +1890,29 @@ async def generate_poses(char_id: UUID, body: PoseGenerateIn, request: Request,
             render_dir = studio_root(Path(cfg.project_dir)) / str(c.id) / "poses"
             render_dir.mkdir(parents=True, exist_ok=True)
             render_path = render_dir / f"{preset_id}.png"
-            _pose_renderer.render_pose(preset, render_path)
+            # Control image for the pose LoRA = colored OpenPose skeleton on
+            # black (what VNCCS QIE PoseStudio and Klein RefControl expect).
+            # Render the skeleton at the TARGET character dimensions so the pose
+            # proportions match the output canvas (QIE follows image1's size via
+            # latent_image_index=1; Klein resizes the ref) — otherwise a fixed
+            # 512x1536 skeleton is stretched to a differently-shaped target and
+            # the pose comes out wrong.
+            _ctrl = preset.get("control_image") if isinstance(preset, dict) else None
+            if _ctrl:
+                # Direct PNG OpenPose control — use the user's imported skeleton
+                # image AS-IS (no keypoint conversion, no re-render).
+                import shutil as _sh
+                _src = _POSE_IMAGES_DIR / _ctrl
+                if not _src.exists():
+                    errors.append(f"{preset_id}: control image missing on disk")
+                    continue
+                _sh.copy2(str(_src), str(render_path))
+            else:
+                _pw, _ph = (int(w) if w else 0), (int(h) if h else 0)
+                if _pw >= 64 and _ph >= 64:
+                    _pose_renderer.render_pose(preset, render_path, width=_pw, height=_ph, style="openpose")
+                else:
+                    _pose_renderer.render_pose(preset, render_path, style="openpose")
             rel = _register_asset(proj, render_path, "studio_poses")
             if not rel:
                 errors.append(f"{preset_id}: failed to register rendered pose image")
@@ -1444,9 +1921,10 @@ async def generate_poses(char_id: UUID, body: PoseGenerateIn, request: Request,
                 session, proj, rel, AssetType.REFERENCE,
                 meta={"studio_pose_preset_id": preset_id, "studio_character_id": str(c.id)},
             )
+            _pose_lora = (getattr(s, "cs_klein_pose_lora", "") or "").strip() if engine == "klein" else ""
             params = pose_edit_params(engine, pose_asset_id=str(pose_asset.id),
                                       identity_asset_id=str(identity_asset.id),
-                                      width=w, height=h)
+                                      width=w, height=h, pose_lora=_pose_lora)
             params.update({"frame_type": "first", "auto_save_preview": False,
                            "studio_character_id": str(c.id),
                            "studio_shot_id": f"pose:{preset_id}"})
@@ -1473,6 +1951,16 @@ async def generate_poses(char_id: UUID, body: PoseGenerateIn, request: Request,
 
 
 # ── emotions ──────────────────────────────────────────────────────────────
+def _emotion_prompt(entry: dict) -> str:
+    """Combine the emotion's natural-language prompt with its booru tag string,
+    mirroring VNCCS's emotion node (natural_prompt + 'Emotion Tags: ...')."""
+    nat = (entry.get("natural_prompt") or "").strip()
+    desc = (entry.get("description") or "").strip()
+    if nat and desc and desc.lower() not in nat.lower():
+        return f"{nat}, {desc}"
+    return nat or desc
+
+
 def _emotion_catalog_flat() -> dict[str, dict]:
     """Flatten emotions.json ({category: [entries]}) keyed by safe_name."""
     raw = load_catalog("emotions")
@@ -1491,8 +1979,8 @@ async def generate_emotions(char_id: UUID, body: EmotionGenerateIn, request: Req
     c = await session.get(StudioCharacter, char_id)
     if not c:
         raise HTTPException(404, "Character not found")
-    if not body.emotions:
-        raise HTTPException(400, "emotions is required (safe_name keys from GET /catalogs)")
+    if not body.emotions and not body.custom_expressions:
+        raise HTTPException(400, "emotions or custom_expressions is required")
 
     proj = await _ensure_studio_project(session)
     scene = await _ensure_scene(session, proj, c)
@@ -1504,12 +1992,26 @@ async def generate_emotions(char_id: UUID, body: EmotionGenerateIn, request: Req
     if body.costume_id and _src_key in ("base", body.costume_id):
         # Costume selected → its base sprite is the source (the UI may send
         # either "base" or the costume id itself here — accept both).
-        _spr = ((m.get("costumes") or {}).get(body.costume_id, {}).get("sprites", {}) or {})
-        rel = (_spr.get("base") or {}).get("image_rel")
-        if rel:
-            source_asset = await _find_asset_by_rel(session, proj.id, rel)
+        _cost = (m.get("costumes") or {}).get(body.costume_id) or {}
+        _base_spr = (_cost.get("sprites") or {}).get("base") or {}
+        # Prefer the rendered sprite's asset_id (always set once it renders —
+        # it's what draws the thumbnail); fall back to rel-path resolution.
+        _aid = _base_spr.get("asset_id")
+        if _aid:
+            try:
+                source_asset = await session.get(Asset, UUID(str(_aid)))
+            except Exception:
+                source_asset = None
+        if not source_asset and _base_spr.get("image_rel"):
+            source_asset = await _find_asset_by_rel(session, proj.id, _base_spr["image_rel"])
         if not source_asset:
-            raise HTTPException(400, f"Costume '{body.costume_id}' has no rendered base sprite yet")
+            if not _cost:
+                raise HTTPException(400, f"Costume '{body.costume_id}' not found for this character")
+            raise HTTPException(
+                400,
+                f"Costume '{_cost.get('name') or body.costume_id}' has no rendered base sprite yet "
+                "— generate the costume (Costumes tab) and wait for it to finish, then retry."
+            )
     elif _src_key == "base":
         source_asset = await _get_identity_asset(session, proj, c)
     else:
@@ -1535,8 +2037,26 @@ async def generate_emotions(char_id: UUID, body: EmotionGenerateIn, request: Req
     emotions = dict(m.get("emotions") or {})
     created = []
     errors = []
+    # Merge ad-hoc expressions (Tools Expression Library) into the lookup so they
+    # generate exactly like catalog emotions (by their natural_prompt).
+    _keys = list(body.emotions)
+    import re as _re_expr
+    for _ce in (body.custom_expressions or []):
+        if not isinstance(_ce, dict):
+            continue
+        _nm = str(_ce.get("name") or "").strip()
+        _pr = str(_ce.get("natural_prompt") or _ce.get("prompt") or "").strip()
+        if not _nm or not _pr:
+            continue
+        _sk = "expr_" + (_re_expr.sub(r"[^a-z0-9]+", "_", _nm.lower()).strip("_")[:40] or "custom")
+        _n = _sk
+        _i = 2
+        while _n in catalog:
+            _n = f"{_sk}_{_i}"; _i += 1
+        catalog[_n] = {"safe_name": _n, "name": _nm, "natural_prompt": _pr, "description": _pr}
+        _keys.append(_n)
     source_abs = _resolve_rel(proj, source_asset.rel_path)
-    for key in body.emotions:
+    for key in _keys:
         entry_cat = catalog.get(key)
         if not entry_cat:
             errors.append(f"{key}: unknown emotion key")
@@ -1566,7 +2086,7 @@ async def generate_emotions(char_id: UUID, body: EmotionGenerateIn, request: Req
 
             params = emotion_params(
                 engine, identity_asset_id=str(source_asset.id),
-                natural_prompt=entry_cat.get("natural_prompt") or entry_cat.get("description", ""),
+                natural_prompt=_emotion_prompt(entry_cat),
                 face_masked_asset_id=face_asset_id,
             )
             params.update({"frame_type": "first", "auto_save_preview": False,
@@ -1786,7 +2306,8 @@ async def _run_generate_all(char_id: UUID, body_dict: dict, session_factory,
             if not base_rel:
                 s = await _app_settings(session)
                 w, h = _res_from_settings(s)
-                prompt = build_base_prompt(c.character_info or {}, c.kind, "")
+                _nsfw = bool((c.character_info or {}).get("nsfw"))
+                prompt = build_base_prompt(c.character_info or {}, c.kind, "", nsfw=_nsfw)
                 scene.prompt = prompt
                 session.add(scene)
                 job = Job(project_id=proj.id, scene_id=scene.id, job_type=JobType.IMAGE,
@@ -1794,7 +2315,8 @@ async def _run_generate_all(char_id: UUID, body_dict: dict, session_factory,
                           parameters={"workflow_type": "klein_t2i", "prompt": prompt,
                                       "width": w, "height": h, "reference_asset_ids": [],
                                       "frame_type": "first", "auto_save_preview": True,
-                                      "studio_character_id": str(c.id), "studio_shot_id": "base"})
+                                      "studio_character_id": str(c.id), "studio_shot_id": "base",
+                                      "krea2_sfw_override": (not _nsfw)})
                 session.add(job)
                 await session.commit()
                 await session.refresh(job)
@@ -1895,8 +2417,10 @@ async def _run_generate_all(char_id: UUID, body_dict: dict, session_factory,
                         description = ", ".join(x for x in desc_bits if x)
                         _gs = await _app_settings(session)
                         _gw, _gh = _res_from_settings(_gs)
+                        _cref = (costume.get("reference_asset_id") or "").strip() or None
                         params = costume_params(engine, identity_asset_id=str(identity_asset.id),
-                                                description=description, width=_gw, height=_gh)
+                                                description=description, clothing_ref_asset_id=_cref,
+                                                width=_gw, height=_gh)
                         params.update({"frame_type": "first", "auto_save_preview": False,
                                        "studio_character_id": str(c.id),
                                        "studio_shot_id": f"costume:{cid}"})
@@ -2197,12 +2721,17 @@ Return a raw JSON object with exactly these keys:
 - hair
 - eyes
 - additional_details
+- aesthetics
+- nsfw
 
 Rules:
 - Use comma-separated prompt fragments for text fields.
 - The race field is for species/fantasy traits only. For normal humans set race to "human".
 - Never put ethnicity, nationality, profession, role, clothing, or archetype in race.
 - Put skin tone in skin_color, not race.
+- skin_color: choose ONE clearly visible value from: light skin, fair skin, pale skin, tan skin, dark skin, brown skin, olive skin, blue skin, green skin, grey skin. Use "pale skin" only for unusually pale/very light skin, never as a generic default; if the skin is hidden or uncertain, use "".
+- aesthetics: high-quality style tags, e.g. "masterpiece, best quality, anime style"; empty string if unknown.
+- nsfw: boolean — true ONLY if the source clearly depicts explicit/nude content, otherwise false.
 - For body, always provide a visible body/build descriptor.
 - Do not describe clothing, background, camera, pose, quality tags, style tags, or negative prompts.
 - If a field is not needed, use an empty string.
@@ -2284,8 +2813,9 @@ async def wizard_character(body: WizardCharacterIn, session: AsyncSession = Depe
     parsed = _parse_wizard_json(content or "")
     if parsed is None:
         raise HTTPException(502, f"Character wizard: could not parse LLM JSON output. Raw: {(content or '')[:300]}")
-    for key in ("race", "skin_color", "body", "face", "hair", "eyes", "additional_details"):
+    for key in ("race", "skin_color", "body", "face", "hair", "eyes", "additional_details", "aesthetics"):
         parsed.setdefault(key, "")
+    parsed.setdefault("nsfw", False)
     parsed["sex"] = "male" if str(parsed.get("sex", "female")).lower().startswith("m") else "female"
     try:
         parsed["age"] = max(1, min(100, int(float(parsed.get("age", 18)))))
@@ -2340,8 +2870,9 @@ async def wizard_clone(body: WizardCloneIn, session: AsyncSession = Depends(get_
     parsed = _parse_wizard_json(content or "")
     if parsed is None:
         raise HTTPException(502, f"Clone wizard: could not parse LLM JSON output. Raw: {(content or '')[:300]}")
-    for key in ("race", "skin_color", "body", "face", "hair", "eyes", "additional_details"):
+    for key in ("race", "skin_color", "body", "face", "hair", "eyes", "additional_details", "aesthetics"):
         parsed.setdefault(key, "")
+    parsed.setdefault("nsfw", False)
     parsed["sex"] = "male" if str(parsed.get("sex", "female")).lower().startswith("m") else "female"
     try:
         parsed["age"] = max(1, min(100, int(float(parsed.get("age", 18)))))

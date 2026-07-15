@@ -33,6 +33,9 @@ export const getProjects = () => api.get<Project[]>('/projects');
 
 export const getProject = (id: string) => api.get<Project>(`/projects/${id}`);
 
+export const setTalkieConfig = (projectId: string, data: { portrait_asset_id?: string | null; talkie_engine?: string }) =>
+  api.put<{ portrait_asset_id: string | null; talkie_engine: string }>(`/projects/${projectId}/talkie-config`, data);
+
 export const updateProject = (id: string, data: Partial<Project>) =>
   api.put<Project>(`/projects/${id}`, data);
 
@@ -175,6 +178,7 @@ export const inpaintImage = (projectId: string, data: {
   seed?: number;
   mask_expand?: number;
   mask_blur?: number;
+  engine?: string;   // 'klein' | 'anima'
 }) =>
   api.post<{ id: string }>(`/projects/${projectId}/generate/inpaint`, data);
 

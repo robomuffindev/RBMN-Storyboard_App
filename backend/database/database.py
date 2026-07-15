@@ -131,6 +131,23 @@ async def init_db() -> None:
         except Exception:
             pass  # Column already exists
 
+        # Add VNCCS Native mode columns to app_settings if missing
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN studio_vnccs_host VARCHAR DEFAULT NULL")
+            )
+            logger.info("Migration: added studio_vnccs_host column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN studio_vnccs_settings JSON DEFAULT NULL")
+            )
+            logger.info("Migration: added studio_vnccs_settings column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
         # Add system prompt override columns to app_settings if missing
         try:
             await conn.execute(
@@ -216,6 +233,33 @@ async def init_db() -> None:
                 text("ALTER TABLE app_settings ADD COLUMN color_correction_enabled BOOLEAN DEFAULT 1")
             )
             logger.info("Migration: added color_correction_enabled column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
+        # Add Anima ultra toggle column if missing
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN anima_ultra BOOLEAN DEFAULT 1")
+            )
+            logger.info("Migration: added anima_ultra column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
+        # Add Character Studio Klein pose-transfer LoRA column if missing
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN cs_klein_pose_lora VARCHAR DEFAULT 'refcontrol_v2_poses.safetensors'")
+            )
+            logger.info("Migration: added cs_klein_pose_lora column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
+        # Add Character Studio VNCCS/Qwen task-LoRA subfolder prefix if missing
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN cs_qie_lora_subdir VARCHAR DEFAULT 'qwen/VNCCS/'")
+            )
+            logger.info("Migration: added cs_qie_lora_subdir column to app_settings table")
         except Exception:
             pass  # Column already exists
 

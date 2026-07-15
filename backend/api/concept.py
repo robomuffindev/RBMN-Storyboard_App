@@ -458,7 +458,7 @@ async def base_on_lyrics(
 
     # Build generation instructions — wording adapts to project mode so
     # narration projects don't get music-video framing in the field names.
-    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images")
+    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images", "talkie")
     generate_parts = []
     if not has_title:
         if _is_narration_proj:
@@ -501,7 +501,7 @@ async def base_on_lyrics(
     # "emotional journey of the song") which is wrong for spoken-word
     # content. Branch on project.mode so each mode gets the right system
     # prompt and the same user_prompt shape carries either.
-    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images")
+    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images", "talkie")
     if _is_narration_proj:
         system_prompt = (
             "You are a creative director for AI-generated narration videos and "
@@ -1019,7 +1019,7 @@ async def _generate_flow_inner(
         line = f"  Scene {i+1} \"{sc.name}\" ({sc.start_time:.1f}s – {sc.end_time:.1f}s)"
         # Mode-aware label for the per-scene transcribed text — narration
         # projects don't have lyrics, they have narration text.
-        _line_label = "NARRATION" if getattr(project, "mode", None) in ("narration_video", "narration_images") else "LYRICS"
+        _line_label = "NARRATION" if getattr(project, "mode", None) in ("narration_video", "narration_images", "talkie") else "LYRICS"
         _gap_text = "(no narration in this segment)" if _line_label == "NARRATION" else "(instrumental / no vocals)"
         if scene_lyrics:
             line += f"\n    {_line_label}: \"{scene_lyrics}\""
@@ -1032,7 +1032,7 @@ async def _generate_flow_inner(
     # prompt instead of a lyrics-anchored one.  Same cinematography rules
     # (shot sizes, angles, movement, direction continuity, location
     # diversity) so the video quality wording is unchanged.
-    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images")
+    _is_narration_proj = getattr(project, "mode", None) in ("narration_video", "narration_images", "talkie")
     if _is_narration_proj:
         _driver_block = (
             "CRITICAL — THE NARRATION SCRIPT IS YOUR PRIMARY CREATIVE DRIVER:\n"

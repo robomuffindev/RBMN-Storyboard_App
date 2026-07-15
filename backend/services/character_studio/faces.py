@@ -88,7 +88,7 @@ def _detect_face_bbox_yunet(bgr) -> Optional[tuple[int, int, int, int]]:
     try:
         h, w = bgr.shape[:2]
         detector = cv2.FaceDetectorYN.create(
-            str(_YUNET_MODEL_PATH), "", (w, h), score_threshold=0.7,
+            str(_YUNET_MODEL_PATH), "", (w, h), score_threshold=0.6,
         )
         detector.setInputSize((w, h))
         _, faces = detector.detect(bgr)
@@ -110,7 +110,7 @@ def _detect_face_bbox_haar(bgr) -> Optional[tuple[int, int, int, int]]:
             return None
         cascade = cv2.CascadeClassifier(str(cascade_path))
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(36, 36))
         if faces is None or len(faces) == 0:
             return None
         # Largest face
@@ -182,7 +182,24 @@ def build_face_masked_rgba(image_path: str | Path, out_path: str | Path,
         return None
     bbox = detect_face_bbox(p)
     if not bbox:
-        return None
+        # Heuristic fallback for stylized/anime faces that YuNet + Haar miss
+        # (both are trained on photographic faces). Assume the head sits in the
+        # upper-center of the frame so the klein_inpaint emotion path can still
+        # run instead of hard-failing. Approximate but feathered.
+        try:
+            with Image.open(p) as _im:
+                _w, _h = _im.size
+            fw = max(1, int(_w * 0.26))
+            fh = max(1, int(_h * 0.16))
+            fx = max(0, int(_w * 0.5 - fw / 2))
+            fy = max(0, int(_h * 0.06))
+            bbox = {"x": fx, "y": fy, "w": fw, "h": fh, "method": "heuristic"}
+            logger.info(
+                f"faces: no face detected in {p.name}; using heuristic upper-center "
+                f"region ({fx},{fy},{fw}x{fh}) for the emotion mask"
+            )
+        except Exception:
+            return None
 
     try:
         with Image.open(p) as im:

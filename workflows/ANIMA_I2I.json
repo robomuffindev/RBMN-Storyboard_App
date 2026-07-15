@@ -1,0 +1,13 @@
+{
+  "10": {"class_type": "UNETLoader", "inputs": {"unet_name": "anima-base-v1.0.safetensors", "weight_dtype": "default"}, "_meta": {"title": "Load Diffusion Model"}},
+  "11": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_3_06b_base.safetensors", "type": "stable_diffusion", "device": "default"}, "_meta": {"title": "Load CLIP"}},
+  "12": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}, "_meta": {"title": "Load VAE"}},
+  "13": {"class_type": "Power Lora Loader (rgthree)", "inputs": {"PowerLoraLoaderHeaderWidget": {"type": "PowerLoraLoaderHeaderWidget"}, "lora_1": {"on": true, "lora": "anima-highres-aesthetic-boost.safetensors", "strength": 1}, "lora_2": {"on": true, "lora": "anima-preview-3-masterpieces-v5.safetensors", "strength": 1}, "lora_3": {"on": true, "lora": "anima_p3_rdbt_v0.29.b.122.safetensors", "strength": 1}, "➕ Add Lora": "", "model": ["10", 0], "clip": ["11", 0]}, "_meta": {"title": "Power Lora Loader (rgthree)"}},
+  "20": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["13", 1]}, "_meta": {"title": "CLIP Text Encode (Positive Prompt)"}},
+  "21": {"class_type": "CLIPTextEncode", "inputs": {"text": "worst quality, low quality, score_1, score_2, score_3, artist name, bad anatomy, bad hands, missing fingers, extra fingers, extra arms, extra legs, duplicate, twins, text, watermark, signature, simple background", "clip": ["13", 1]}, "_meta": {"title": "CLIP Text Encode (Negative Prompt)"}},
+  "31": {"class_type": "LoadImage", "inputs": {"image": ""}, "_meta": {"title": "Load Image"}},
+  "32": {"class_type": "VAEEncode", "inputs": {"pixels": ["31", 0], "vae": ["12", 0]}, "_meta": {"title": "VAE Encode"}},
+  "40": {"class_type": "KSampler", "inputs": {"seed": 0, "steps": 12, "cfg": 1, "sampler_name": "er_sde", "scheduler": "simple", "denoise": 0.6, "model": ["13", 0], "positive": ["20", 0], "negative": ["21", 0], "latent_image": ["32", 0]}, "_meta": {"title": "KSampler"}},
+  "50": {"class_type": "VAEDecode", "inputs": {"samples": ["40", 0], "vae": ["12", 0]}, "_meta": {"title": "VAE Decode"}},
+  "60": {"class_type": "SaveImage", "inputs": {"filename_prefix": "anima_i2i", "images": ["50", 0]}, "_meta": {"title": "Save Image"}}
+}

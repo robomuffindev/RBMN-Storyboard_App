@@ -299,9 +299,22 @@ class ComfyDispatcher:
             if "FaceDetailer" in node_types:
                 capabilities.add("impact")
 
+            # Check for DWPose / OpenPose estimators (Tools → Pose Organizer
+            # image→keypoints extraction, comfyui_controlnet_aux)
+            if any(n in node_types for n in ("DWPreprocessor", "DensePosePreprocessor", "OpenposePreprocessor")):
+                capabilities.add("dwpose")
+
             # Check for inpainting nodes
             if any("Inpaint" in n or "inpaint" in n.lower() for n in node_types):
                 capabilities.add("inpaint")
+
+            # Talkie lip-sync engines (talking-head from portrait + narration)
+            if any("LatentSync" in n or "latentsync" in n.lower() for n in node_types):
+                capabilities.add("latentsync")
+            if any("MuseTalk" in n or "musetalk" in n.lower() for n in node_types):
+                capabilities.add("musetalk")
+            if any("sonic" in n.lower() for n in node_types):
+                capabilities.add("sonic")
 
             # Detect models from checkpoint loaders
             # object_info format: {"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["model1.safetensors", ...]]}}}}
@@ -534,6 +547,76 @@ class ComfyDispatcher:
                 f"Released worker {worker_url} (in_flight now {worker.in_flight})"
             )
 
+    @staticmethod
+    def _lora_basename(name: str) -> str:
+        return name.replace("\\", "/").split("/")[-1].strip().lower()
+
+    def _worker_lora_list(self, worker_url: str, client) -> list:
+        """Cached list of the LoRA filenames a worker actually exposes (with
+        whatever subfolder/slash prefix ComfyUI uses)."""
+        import time as _t
+        cache = getattr(self, "_lora_cache", None)
+        if cache is None:
+            cache = {}
+            self._lora_cache = cache
+        hit = cache.get(worker_url)
+        if hit and (_t.time() - hit[0] < 300):
+            return hit[1]
+        names: list = []
+        try:
+            oi = client.get_object_info() or {}
+            for spec in oi.values():
+                io = (spec or {}).get("input", {}) or {}
+                for group in (io.get("required", {}) or {}, io.get("optional", {}) or {}):
+                    for fname, fdef in (group or {}).items():
+                        if "lora" in fname.lower() and isinstance(fdef, list) and fdef and isinstance(fdef[0], list):
+                            for v in fdef[0]:
+                                if isinstance(v, str) and v.lower().endswith((".safetensors", ".ckpt", ".pt")):
+                                    names.append(v)
+        except Exception as e:
+            logger.debug(f"lora list fetch failed for {worker_url}: {e}")
+        names = list(dict.fromkeys(names))
+        cache[worker_url] = (_t.time(), names)
+        return names
+
+    def _normalize_lora_names(self, workflow: dict, worker_url: str, client) -> None:
+        """Rewrite every LoRA reference in the workflow to the worker's EXACT
+        listed string (matched by filename), so subfolder/slash differences
+        (e.g. Windows 'qwen\\VNCCS\\x.safetensors') never fail validation."""
+        names = self._worker_lora_list(worker_url, client)
+        if not names:
+            return
+        exact = set(names)
+        by_base: dict = {}
+        for n in names:
+            by_base.setdefault(self._lora_basename(n), n)
+
+        def _resolve(val: str) -> str:
+            if not isinstance(val, str) or not val:
+                return val
+            if val in exact:
+                return val
+            m = by_base.get(self._lora_basename(val))
+            if m:
+                if m != val:
+                    logger.info(f"LoRA resolved for worker: '{val}' -> '{m}'")
+                return m
+            logger.warning(f"LoRA '{val}' not found on worker {worker_url} "
+                           f"(its list has {len(names)} entries) — leaving as-is.")
+            return val
+
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            inp = node.get("inputs")
+            if not isinstance(inp, dict):
+                continue
+            for k, v in list(inp.items()):
+                if isinstance(v, str) and "lora" in k.lower():
+                    inp[k] = _resolve(v)
+                elif isinstance(v, dict) and isinstance(v.get("lora"), str):
+                    v["lora"] = _resolve(v["lora"])  # rgthree Power Lora Loader slot
+
     def submit_job(
         self,
         workflow: dict,
@@ -571,6 +654,10 @@ class ComfyDispatcher:
             raise ComfyUIConnectionError(f"No client for {worker.url}")
 
         try:
+            try:
+                self._normalize_lora_names(workflow, worker.url, client)
+            except Exception as _ln_err:
+                logger.debug(f"LoRA normalization skipped: {_ln_err}")
             result = client.queue_prompt(workflow)
             prompt_id = result["prompt_id"]
 

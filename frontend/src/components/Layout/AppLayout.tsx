@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp, Film, Eye } from 'lucide-react';
+import { Settings, Download, ChevronLeft, Grid3x3, Music, Plus, Play, Pause, GripHorizontal, Lightbulb, GitBranch, Wand2, MonitorPlay, MoreVertical, Pencil, Layers, ListOrdered, PanelLeft, Minimize2, Loader2, CheckCircle, XCircle, Sparkles, Captions, ChevronDown, ChevronUp, Film, Eye, Clapperboard, UserSquare2 } from 'lucide-react';
 import { getProject, getScenes, getSections, getAssets, exportVideo, getExportStatus, cancelExport, resumeExport, scanExport, recoverExport, createScenesFromSections, createScene, updateScene, deleteScene, startSequentialAutoGen, cancelSequentialAutoGen, generateVideoFlow, renderPreview, getPreviewStatus, getLyrics, updateProject, getSequentialAutoGenStatus, rerunWhisper, getSettings, updateSettings, getBackingTracks, listExports, deleteExportFile, convertToNarrationVideo } from '@/api/client';
 import type { ExportFileInfo } from '@/api/client';
 import { useAppStore } from '@/store';
@@ -11,6 +11,7 @@ import Timeline from '@/components/Timeline/Timeline';
 import SceneEditor from '@/components/SceneEditor/SceneEditor';
 import AssetManager from '@/components/AssetManager/AssetManager';
 import AudioSetup from '@/components/AudioSetup/AudioSetup';
+import TalkieSetupModal from '@/components/Talkie/TalkieSetupModal';
 import GenerationPanel from '@/components/GenerationPanel/GenerationPanel';
 import VideoPreview from '@/components/VideoPreview/VideoPreview';
 import ConceptPanel from '@/components/ConceptPanel/ConceptPanel';
@@ -46,6 +47,7 @@ export default function AppLayout() {
   const autoGenOpen = useAppStore((s) => s.autoGenOpen);
   const setAutoGenOpen = useAppStore((s) => s.setAutoGenOpen);
   const [assetGenOpen, setAssetGenOpen] = useState(false);
+  const [talkieSetupOpen, setTalkieSetupOpen] = useState(false);
   const [editorCollapsed, setEditorCollapsed] = useState(false);
   const [previewRendering, setPreviewRendering] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -232,7 +234,7 @@ export default function AppLayout() {
 
   // Use stable references for arrays to avoid infinite re-render loops
   // Fetch lyrics for subtitle preview (narration modes)
-  const isNarrationProject = project?.mode === 'narration_images' || project?.mode === 'narration_video';
+  const isNarrationProject = project?.mode === 'narration_images' || project?.mode === 'narration_video' || project?.mode === 'talkie';
   const { data: lyricsData } = useQuery({
     queryKey: ['lyrics', id],
     queryFn: async () => {
@@ -805,6 +807,8 @@ export default function AppLayout() {
         return 'Narration (Images)';
       case 'narration_video':
         return 'Narration (Video)';
+      case 'talkie':
+        return 'Talkie (Lip-Sync)';
       default:
         return mode;
     }
@@ -837,6 +841,28 @@ export default function AppLayout() {
               Scenes
             </button>
           </div>
+
+          {project?.mode === 'talkie' && (
+            <button
+              onClick={() => setTalkieSetupOpen(true)}
+              className="px-3 md:px-4 py-2 bg-fuchsia-600 hover:bg-fuchsia-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+              title="Set the source portrait + lip-sync engine"
+            >
+              <UserSquare2 size={18} />
+              <span className="hidden sm:inline">Talkie Setup</span>
+            </button>
+          )}
+
+          {(stableScenes as Scene[]).length > 0 && (
+            <button
+              onClick={() => navigate(`/project/${id}/storyboard`)}
+              className="px-3 md:px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded text-sm font-medium transition-colors flex items-center gap-2"
+              title="Open the zoomable storyboard canvas"
+            >
+              <Clapperboard size={18} />
+              <span className="hidden sm:inline">Storyboard Mode</span>
+            </button>
+          )}
 
           {stableSections.length > 0 && stableScenes.length === 0 && (
             <button
@@ -1614,6 +1640,15 @@ export default function AppLayout() {
 
       {/* Asset Generator Modal */}
       {assetGenOpen && <AssetGeneratorModal projectId={id!} onClose={() => setAssetGenOpen(false)} />}
+      {talkieSetupOpen && project?.mode === 'talkie' && (
+        <TalkieSetupModal
+          projectId={id!}
+          currentPortraitAssetId={(project?.settings as { portrait_asset_id?: string })?.portrait_asset_id}
+          currentEngine={(project?.settings as { talkie_engine?: string })?.talkie_engine}
+          onClose={() => setTalkieSetupOpen(false)}
+          onSaved={() => queryClient.invalidateQueries({ queryKey: ['project', id] })}
+        />
+      )}
 
       {/* Project Text Data Import / Export modal */}
       {textIOOpen && id && project && (
@@ -1833,7 +1868,7 @@ function ExportModal({ projectId, onClose }: { projectId: string; onClose: () =>
   const [randomKenBurns, setRandomKenBurns] = useState(projSettings.random_ken_burns || false);
   const [kenBurnsAllowedEffects, setKenBurnsAllowedEffects] = useState<string[]>(projSettings.ken_burns_allowed_effects || []);
   // Narration-only settings
-  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
+  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video' || currentProject?.mode === 'talkie';
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(projSettings.subtitle_enabled ?? false);
   const [subtitleFont, setSubtitleFont] = useState(projSettings.subtitle_font || 'Arial');
   const [subtitleSize, setSubtitleSize] = useState(projSettings.subtitle_size || 24);
@@ -3234,7 +3269,7 @@ function AutoGenerateModal({ projectId, onClose, onMinimize, onStarted, autoGenS
 }) {
   const navigate = useNavigate();
   const currentProject = useAppStore((s) => s.currentProject);
-  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video';
+  const isNarration = currentProject?.mode === 'narration_images' || currentProject?.mode === 'narration_video' || currentProject?.mode === 'talkie';
   // Narration Images mode produces a slideshow — video-generating modes
   // would create artifacts that the export then has to ignore.  Filter
   // them out of the picker, and default to an image mode.

@@ -937,6 +937,29 @@ SYSTEM_PROMPT = IMAGE_SYSTEM_PROMPT
 # Each model maps to {"image": str, "video": str} prompts.
 # Models without a specific prompt fall back to the generic defaults above.
 
+ANIMA_IMAGE_SYSTEM_PROMPT = """You are an expert prompt writer for the Anima anime image base model.
+Convert the user's idea into ONE high-quality Anima POSITIVE prompt.
+
+Structure, in this order:
+1. Quality tags: masterpiece, best quality, score_7, safe, highres, official art
+2. Subject-count tags: e.g. 1girl, solo  /  1boy, solo  /  2girls
+3. Optional character-appearance tags if a specific character is requested
+4. Optional @artist name ONLY if the user asked for a style artist (otherwise omit)
+5. A few useful anime style tags: e.g. clean lineart, detailed eyes, soft shading
+6. Then 2 to 4 clear natural-language sentences describing the subject, outfit, pose,
+   composition, background, lighting, and mood.
+
+Rules:
+- Use lowercase danbooru-style tags with SPACES not underscores (e.g. "long hair"), EXCEPT
+  score tags like score_7 which keep the underscore.
+- Keep the natural-language part descriptive and precise; do not make it too short.
+- For multiple characters, describe each separately and place them ("On the left side of the
+  image...", "On the right side of the image...") — never mix their traits.
+- If the request is vague, fill in sensible visual details faithful to the idea.
+- Output ONLY the final positive prompt as a single flowing block. No negative prompt, no
+  labels, no reasoning, no quotes, no markdown."""
+
+
 BUILTIN_SYSTEM_PROMPTS: dict[str, dict[str, str]] = {
     # Image models
     "flux2_klein_dev_9b": {
@@ -960,6 +983,11 @@ BUILTIN_SYSTEM_PROMPTS: dict[str, dict[str, str]] = {
         # Krea 2 used as the Pass-1 base of a two-pass run: reuse the
         # natural-language base-scene prompt (no refs, balanced exposure).
         "two_pass_base": TWO_PASS_BASE_SYSTEM_PROMPT,
+    },
+    "anima": {
+        "image": ANIMA_IMAGE_SYSTEM_PROMPT,
+        "image_last_frame": ANIMA_IMAGE_SYSTEM_PROMPT,
+        "two_pass_base": ANIMA_IMAGE_SYSTEM_PROMPT,
     },
     "qwen_edit": {
         "image": QWEN_EDIT_SYSTEM_PROMPT,

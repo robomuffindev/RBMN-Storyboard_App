@@ -60,6 +60,7 @@ class SettingsResponse(BaseModel):
     single_image_generator: str = "z_image_turbo"
     krea2_model_name: str = "krea2_turbo_fp8.safetensors"
     krea2_sfw_mode: bool = True
+    anima_ultra: bool = True
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
@@ -136,6 +137,7 @@ class SettingsUpdate(BaseModel):
     single_image_generator: Optional[str] = None
     krea2_model_name: Optional[str] = None
     krea2_sfw_mode: Optional[bool] = None
+    anima_ultra: Optional[bool] = None
     use_distilled_lora: Optional[bool] = None
     distilled_lora_name: Optional[str] = None
     default_llm_provider: Optional[str] = None
@@ -350,6 +352,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         single_image_generator=settings.single_image_generator or "z_image_turbo",
         krea2_model_name=settings.krea2_model_name or "krea2_turbo_fp8.safetensors",
         krea2_sfw_mode=settings.krea2_sfw_mode if settings.krea2_sfw_mode is not None else True,
+        anima_ultra=(settings.anima_ultra if getattr(settings, "anima_ultra", None) is not None else True),
         use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
         distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
         default_llm_provider=settings.default_llm_provider,
@@ -545,6 +548,8 @@ async def update_settings(
             settings.ltx_model_gguf = req.ltx_model_gguf
         if req.single_image_generator is not None:
             settings.single_image_generator = req.single_image_generator
+        if req.anima_ultra is not None:
+            settings.anima_ultra = req.anima_ultra
         if req.krea2_model_name is not None:
             settings.krea2_model_name = req.krea2_model_name
         if req.krea2_sfw_mode is not None:
@@ -1331,6 +1336,7 @@ class SettingsExportData(BaseModel):
     single_image_generator: str = "z_image_turbo"
     krea2_model_name: str = "krea2_turbo_fp8.safetensors"
     krea2_sfw_mode: bool = True
+    anima_ultra: bool = True
     use_distilled_lora: bool = True
     distilled_lora_name: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
     default_llm_provider: Optional[str] = None
@@ -1415,6 +1421,7 @@ async def export_settings(
             single_image_generator=settings.single_image_generator or "z_image_turbo",
             krea2_model_name=settings.krea2_model_name or "krea2_turbo_fp8.safetensors",
         krea2_sfw_mode=settings.krea2_sfw_mode if settings.krea2_sfw_mode is not None else True,
+        anima_ultra=(settings.anima_ultra if getattr(settings, "anima_ultra", None) is not None else True),
             use_distilled_lora=settings.use_distilled_lora if settings.use_distilled_lora is not None else True,
             distilled_lora_name=settings.distilled_lora_name or "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
             default_llm_provider=settings.default_llm_provider,
@@ -1550,6 +1557,8 @@ async def import_settings(
             settings.ltx_model_gguf = data["ltx_model_gguf"]
         if "single_image_generator" in data:
             settings.single_image_generator = data["single_image_generator"]
+        if "anima_ultra" in data:
+            settings.anima_ultra = data["anima_ultra"]
         if "krea2_model_name" in data:
             settings.krea2_model_name = data["krea2_model_name"]
         if "krea2_sfw_mode" in data:

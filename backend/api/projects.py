@@ -794,3 +794,38 @@ async def text_import(
     except Exception as e:
         logger.error(f"Text import failed for {project_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Import failed: {e}")
+
+
+class TalkieConfigIn(BaseModel):
+    """Set the Talkie project's single source portrait + lip-sync engine."""
+    portrait_asset_id: Optional[str] = None
+    talkie_engine: Optional[str] = None
+
+
+_TALKIE_ENGINES = ("lipsync_ltx", "lipsync_latentsync", "lipsync_musetalk", "lipsync_sonic")
+
+
+@router.put("/{project_id}/talkie-config")
+async def set_talkie_config(
+    project_id: UUID,
+    req: TalkieConfigIn,
+    session: AsyncSession = Depends(get_session),
+):
+    """Merge the Talkie portrait_asset_id / talkie_engine into project.settings."""
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = dict(project.settings or {})
+    if req.portrait_asset_id is not None:
+        st["portrait_asset_id"] = req.portrait_asset_id or None
+    if req.talkie_engine is not None:
+        if req.talkie_engine not in _TALKIE_ENGINES:
+            raise HTTPException(status_code=400, detail=f"engine must be one of {_TALKIE_ENGINES}")
+        st["talkie_engine"] = req.talkie_engine
+    project.settings = st
+    project.updated_at = datetime.utcnow()
+    await session.commit()
+    return {
+        "portrait_asset_id": st.get("portrait_asset_id"),
+        "talkie_engine": st.get("talkie_engine", "lipsync_ltx"),
+    }

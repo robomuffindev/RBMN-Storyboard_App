@@ -1,5 +1,1971 @@
 # Changelog
 
+## [1.114.0] - 2026-07-15
+### Added -- Base body now comes from the reference photos (no mannequin)
+- The mannequin used for base generation imposed its own generic body, so the
+  character's build/chest/shoulders/height never matched the references. New
+  "base from references, then pose it" path: when body/full-body references are
+  present and the base isn't locked, the clone base preview generates the character
+  directly from the photos with a prompt-described neutral pose and NO mannequin --
+  body reproduced via ReferenceLatentPlus (full-person mask, strength ~1.15) + face
+  crop + PuLID, empty init latent, RMBG background removal. That image becomes the
+  identity/pose reference. Falls back to the mannequin path when there's no body
+  reference or the base is locked.
+
+## [1.113.0] - 2026-07-13
+
+### Fixed — OOM on base pose runs: 1 pose per job, round-robin across workers
+- Klein pose runs sent 4 poses per graph; stacked with the 1536 FaceDetailer +
+  PuLID + RMBG2 + Klein-9B + 8B CLIP all resident, that OOMs some GPUs. Poses are
+  now grouped into small per-job batches (default 1) and round-robin across every
+  eligible worker, so each job stays light and models can free between jobs while
+  the workers still run in parallel. Tunable via studio setting
+  klein_poses_per_job (1-8); each pose also gets a unique seed now.
+
+### Fixed — Body Helper height/build had no visible effect
+- The strip base prompt hard-instructed "keep EXACT body/build/proportions/height
+  from the reference," which overrode the Body Helper descriptors (and the bust
+  references don't even show legs/height). Now: face, hair, skin and identity come
+  from the reference as before, but when you provide build/height they are
+  AUTHORITATIVE for the body/legs/overall height. A new klein_body_text feeds the
+  body descriptors separately from face identity.
+
+## [1.112.0] - 2026-07-13
+
+### Changed — sharper faces: FaceDetailer now matches VNCCS's settings
+- We already ran the same Impact-Pack FaceDetailer as VNCCS, but with weaker
+  settings, which is why faces looked soft when zoomed. Now matched to VNCCS:
+  face crop guide_size/max_size 768/1024 -> 1536/1536 (the face is regenerated
+  at ~4x the pixels -> real detail without needing a huge source image), and
+  denoise 0.40 -> 0.55 (rebuilds detail instead of only lightly touching up).
+- Both stay tunable: klein_face_refine_guide (384-2048, default 1536),
+  klein_face_refine_denoise (0.10-0.80, default 0.55). Dial denoise down toward
+  0.4 if you ever see likeness drift; lower the guide size if it's too slow.
+- Cost: the 1536 face pass is heavier, so pose runs take a bit longer per face
+  (the base preview only refines the front view, so it's barely affected).
+
+## [1.111.0] - 2026-07-13
+
+### Added — Cleanup + Steps controls to fight flat-area interference
+- New "Cleanup" control (Off / Gentle / Strong) next to the Klein controls sets
+  the shoe/jewelry strip strength. Off = pure cfg 1.0 reference (cleanest flat
+  areas, keeps shoes/jewelry); Gentle (new DEFAULT) = negative at cfg 1.2 (was
+  1.5) -- removes most shoes/jewelry with much less cfg-induced grain; Strong =
+  cfg 1.5. Persisted as klein_cleanup, sent per-run.
+- New "Steps" control (4 / 6 / 8 / 10), DEFAULT 6 (up from the reference 4).
+  More steps noticeably cleans up flat-area grain/interference at a small time
+  cost. Persisted as klein_steps, sent per-run, clamped 2-16.
+- Applies to the base preview and all Klein pose runs (creator + clone).
+  klein_strip_negative is still honored as a legacy alias for klein_cleanup.
+
+## [1.110.0] - 2026-07-13
+
+### Changed — base preview is FRONT-only by default; 4-view set is now a toggle
+- The clone base preview renders just the front view again by default (fast),
+  which is the recommended way to dial in the base. The full 4-view set
+  (front/right/left/back) is now opt-in via a "Base preview" toggle next to the
+  Klein controls (Front only / 4-view set), persisted as klein_base_set and sent
+  per-run. Versioning, the gallery, framing and lock-base all work the same for
+  1 or 4 views (the front view is always the primary). Preview wait scales with
+  the view count (600s single, 1200s set).
+
+## [1.109.0] - 2026-07-13
+
+### Fixed — 4-view base preview timing out (600s)
+- The base preview became a 4-view set (v1.107.0) but each view ran its own
+  PuLID + FaceDetailer pass, so the render was ~4x the old single-view cost and
+  overran the 600s wait ("Klein job timed out after 600s").
+- The base set now runs the FaceDetailer face-refine pass on the FRONT view only
+  (the identity anchor used by lock-base) instead of all four -- most of the
+  extra cost removed while the important face stays sharp
+  (build_klein_pose_graph face_refine_first_only).
+- The preview wait was also raised to 1200s to accommodate the heavier 4-view
+  set. (Full pose runs are unaffected -- they still refine every pose.)
+
+## [1.108.0] - 2026-07-13
+
+### Changed — background removal now runs on the worker (VNCCS RMBG2), matching VNCCS
+- Klein pose sprites are now cut out ON THE WORKER GPU using VNCCS's own RMBG2
+  node (RMBG-2.0 / BiRefNet, Alpha output, refine_foreground on) -- the exact
+  model VNCCS itself uses. This replaces the fragile app-side colour chroma key
+  (which left frame-filling figures dark/semi-transparent) with a real ML matte,
+  at full GPU speed and with zero dependency or hardware requirement on the app
+  host. Enabled by default whenever the worker exposes the node.
+- Ingest auto-detects an already-removed (transparent) sprite and SKIPS the
+  app-side cutout entirely -- no flags to thread. The app-side chroma key / rembg
+  path remains only as a fallback for a pool with no VNCCS-capable worker.
+- Opt out or tune via studio settings: klein_rmbg ('off' to force the app-side
+  path), klein_rmbg_model, klein_rmbg_res (256-2048, default 1024).
+
+## [1.107.0] - 2026-07-13
+
+### Added — the base is now a 4-view SET (front / left / right / back)
+- Generating a clone base preview now renders FOUR views in the same neutral
+  stance -- front, right-side, left-side and back -- in one Klein batch. They
+  become the character's canonical reference set. Regenerating recreates the
+  whole set; versioning and active-base now operate on the SET (the front view
+  is the primary, so lock-base and older single-image consumers keep working).
+- Auto-framing: every view is cropped to the figure with uniform padding and
+  normalized onto one shared green canvas, killing the wasted empty space at the
+  top and giving the set consistent framing (cutout.normalize_base_set).
+- UI: the Base image area shows the selected view large with a labeled
+  Front/Left/Right/Back thumbnail gallery underneath to toggle between them;
+  version prev/next and Set-active work across sets.
+- Backend: _klein_wait_all_images collects every batched image; save_base_preview
+  stores a view set per version ([{view, asset_id, url}]); the /preview response
+  carries the full set.
+
+## [1.106.0] - 2026-07-13
+
+### Added — Body Helper: feet/inches height + body-type & chest quick-picks
+- Height can now be set in feet + inches (or cm) - all three stay in sync, with
+  a ft/in (cm) readout. Backend already translates it to a stature descriptor.
+- Two quick-pick dropdowns append Danbooru-style tags into the "body" field the
+  models read well: Body type (petite/slim/athletic/curvy/chubby/muscular/...)
+  and Chest/bust (flat/small/medium/large/huge + perky/natural/sagging). Useful
+  when references don't show the full body.
+
+### Changed — pose-sprite background removal prefers rembg (robust)
+- Full-body pose sprites now try rembg (subject segmentation) FIRST, then the
+  colour chroma key, then the crude fallback. A frame-filling figure contaminates
+  the chroma key's border-ring background sample, which could leave the character
+  semi-transparent/dark; rembg is background-independent and avoids that.
+  Install on the app host to enable: pip install rembg --break-system-packages
+  (falls back to the chroma key when rembg is absent).
+
+## [1.105.0] - 2026-07-13
+
+### Added — Lock-base-then-pose: consistent proportions across a whole pose set
+- Klein clone pose runs can now use the APPROVED base render as the single
+  body/identity reference for every pose, instead of re-deriving the body from
+  the raw (head-heavy) bust references each time. This is the fix for
+  proportions/likeness drifting between poses -- especially the oversized head
+  -- and it gives the cross-pose consistency that LoRA datasets need.
+- New "Pose consistency" toggle next to the Klein controls: "Lock to approved
+  base" (default) or "Use references". Persisted as studio setting
+  klein_lock_base; also sent per-run so the choice takes effect immediately.
+- Behaviour: when lock-base is on and the character has an active base version
+  (created by Generate Preview), every pose references that one base. If no base
+  exists yet it transparently falls back to the references and logs a hint to
+  generate a preview first. Reuses the existing active_base infrastructure
+  (_klein_identity_bytes) that create-mode runs already used.
+
+## [1.104.0] - 2026-07-13
+
+### Added — Body Helper: height + build fields that feed the Klein base body
+- The clone editor now has a Body Helper block: height in cm and inches (synced,
+  with a ft/in readout) plus the existing body/build field. Height is stored on
+  the character (useful as LoRA caption metadata) and, because a diffusion model
+  can't render an exact number from a lone figure on green, it's translated into
+  a stature descriptor the model CAN use -- petite / average / tall / very tall
+  -- and injected into the STRIP base prompt alongside the build tags.
+- Analyze Reference now reads ALL uploaded reference images together (not just
+  the first) via the vision model and returns a combined body build + an
+  estimated height descriptor, so "Analyze all references" fills both fields.
+- Backend: `clone-analyze` accepts an `images[]` list (Ollama vision path);
+  `klein_identity_text` appends the height descriptor; analyze schema gained a
+  `height` field and richer build/proportions guidance.
+
+## [1.103.0] - 2026-07-13
+
+### Added — negative-prompt / cfg toggle to strip leaked shoes & jewelry (STRIP bases)
+- Klein's reference workflow runs cfg=1, so the negative conditioning is ignored
+  and shoes/earrings/bracelets that the reference photo or the model's own prior
+  insist on cannot be removed by positive text (v1.101.0's emphatic "bare feet,
+  no jewelry" prompt proved this -- they persisted anyway). STRIP base runs now
+  set a real negative prompt (shoes/footwear/socks/jewelry/earrings/bracelet/...)
+  and a modest cfg (default 1.5) so (positive - negative) actively pushes those
+  items out. Applies to both the clone preview and full pose runs; never in
+  KEEP/clone-outfit mode (where those items are wanted).
+- Default ON for STRIP bases. Tunables via studio settings:
+  `klein_strip_negative` ('off' to restore pure cfg=1 reference behaviour),
+  `klein_strip_negative_text` (override the list), `klein_strip_cfg` (1.0-3.0).
+- Logs `klein strip-negative ON: cfg=... neg='...'` so the run confirms it engaged.
+
+### Note — PuLID insightface error on a worker
+- The `[PuLID] No module named 'insightface'` crash is the portable-ComfyUI python
+  split: `pip install insightface` in a normal shell targets system python, but
+  `ComfyUI_windows_portable` uses `python_embeded`. PuLID already defaults OFF on
+  disk (strictly opt-in), so restarting the backend stops the crash regardless.
+  To actually use PuLID, install into the embedded env:
+  `...\ComfyUI_windows_portable\python_embeded\python.exe -m pip install insightface onnxruntime`
+
+## [1.102.0] - 2026-07-13
+
+### Fixed — corrupt/dark pose sprites and un-keyed backgrounds
+- Pose-sprite background removal now runs the real `chroma_key_cutout` (median
+  border-ring sample + distance ramp + despill) instead of silently falling back
+  to the crude corner-sampling cutout. The crude method mis-sampled the
+  background whenever the figure reached the frame edges (0% keyed -> full
+  background left, or holes punched in dark hair/shadow), which produced the
+  "background left + graphical issues" sprites.
+- Downloaded sprite PNGs are now verified to decode fully before use, with up to
+  3 retries. A truncated `/view` download used to be written straight to disk as
+  a corrupt, half-black image -- the source of the "incredibly dark, ribbed/torn"
+  pose sprites. Truncated frames are now retried and, if still bad, skipped and
+  logged instead of saved.
+- `chroma_key_cutout` now returns a diagnostic note (sampled bg colour, % keyed
+  transparent, subject luma) so `rbmn.py logs N cutout` proves the keyer ran.
+
+## [1.101.0] - 2026-07-13
+
+### Changed — force BARE FEET and NO JEWELRY on the base body
+- Preview still leaked jewelry and shoe soles under the feet. The base-body prompt
+  now emphatically removes all jewelry (earrings, necklaces, chains, bracelets,
+  rings, anklets, watches, piercings) and demands completely BARE, barefoot feet
+  with no shoes/sandals/socks/soles/platforms under them.
+## [1.100.0] - 2026-07-13
+
+### Changed — clone preview uses a dedicated NEUTRAL default pose (VNCCS-style)
+- The clone "Generate Preview" no longer uses the first pose-library pose; it uses
+  a dedicated neutral rest stance (empty bones = the mannequin's natural pose,
+  front-facing, arms slightly out, full body). Like VNCCS's neutral base, this
+  suits any reference rather than forcing a library pose that may not fit.
+  (If it renders a T-pose, explicit A-pose arm rotations will replace the empties.)
+## [1.99.0] - 2026-07-13
+
+### Changed — strapless base bra, sharper face, proportion emphasis
+- Base underwear bra is now a plain white STRAPLESS bandeau (no shoulder straps).
+- Redress prompt now demands natural anatomically-correct proportions — the head
+  sized proportionally to the body (not oversized), matching the reference build.
+- Klein face-refine (FaceDetailer) renders the face at a larger guide size
+  (512 → 768) for a clearer, less blurry face that better matches the body.
+## [1.98.0] - 2026-07-13
+
+### Fixed — strip mode invented a generic/anime body (withheld the reference); now keeps it (VNCCS method)
+- Root cause of "a skin on a wrong-shaped head / doesn't use the body": strip mode
+  WITHHELD the full-body reference, so Klein had no body to work from and invented a
+  generic (often anime) one, then painted the face on. This mirrors nothing VNCCS does.
+- VNCCS's remove_clothes KEEPS the full character image and runs an edit that changes
+  ONLY the clothing (image1 = full character, latent_image_index=1, "Dress character:
+  White underwear", "maintain consistency with the original"). Adopted that model:
+  strip mode now KEEPS the full-body reference (body, proportions, face, identity all
+  preserved) and the prompt REDRESSES — "keep the exact body/figure/identity, change
+  ONLY the clothing to a plain white bra and panties." Face crop + PuLID ride along.
+- With `real_face=False` on his references (InsightFace can't detect the face → PuLID
+  face=0), identity now comes from Klein's own reference push (the kept full-body ref),
+  which is what actually carries a realistic body + face shape.
+## [1.97.0] - 2026-07-13
+
+### Changed — base underwear now mirrors VNCCS's own proven phrasing (specific WHITE, sex-aware)
+- Checked how VNCCS prompts its base models (character_creator_v2.py:1167):
+  "(wear white bra and panties)" for female, "(bare chest, wear white boxers)"
+  for male. The key is a SPECIFIC color (white) and concise phrasing — vague
+  "plain underwear" let Klein drift to topless. `_base_body_state` now renders a
+  plain WHITE bra + WHITE panties (female) / bare chest + WHITE boxers (male),
+  driven by character_info.sex, still explicit that the chest is covered / SFW.
+  NSFW = fully nude.
+## [1.96.0] - 2026-07-13
+
+### Fixed — lost all identity when PuLID returned face=0; and topless-when-SFW
+- When PuLID is on but its InsightFace finds no face (face=0 — common when the
+  reference face isn't cleanly photographic/detectable), we had DROPPED the
+  face-crop reference, leaving no identity source at all → generic/anime output.
+  The tight face crop is now ALWAYS kept as an identity reference latent (Klein
+  copies its pixels even when InsightFace can't detect a face there); PuLID is
+  purely additive on top when it does find a face.
+- Strip mode was coming back topless in SFW: the base-body prompt now forcefully
+  states the chest/breasts ARE covered by a plain bra (not topless, not nude —
+  only shoulders/arms/midriff bare, SFW underwear).
+
+### Note
+- If the worker still logs `face=0`, PuLID genuinely can't read that reference's
+  face (too small/stylized/angled) — identity then rides on the crop reference.
+## [1.95.0] - 2026-07-13
+
+### Fixed — PuLID got face=0 (no identity applied); now fed the FULL reference image
+- Worker logs showed PuLID loading fine but `face=0` — its InsightFace found no
+  face, so it applied no identity and the output came back generic/anime. Cause:
+  we handed PuLID our app-side crop, which for a realistic character was the crude
+  heuristic head crop that doesn't frame a detectable face. PuLID runs its OWN
+  detection+alignment, so it now receives the FULL identity image (a real photo it
+  can find the face in) instead of our crop. The app-side crop is still used for
+  the reference latent when PuLID is off.
+
+### Added — render-style hint from Character type
+- Realistic characters now get a "photorealistic, real photograph, not an
+  illustration" directive in the prompt (anime → anime style, 3D → 3D render),
+  so a realistic clone doesn't come back as generic anime. Applied to Klein pose
+  runs, the base "Generate Character" T2I, and the clone preview.
+## [1.94.0] - 2026-07-13
+
+### Changed — NSFW moved into the toggle group (SFW/NSFW button) by Character type / Base outfit
+- The per-character NSFW control (info.nsfw / cloneInfo.nsfw — the same flag the
+  wizard/analyze fills and that drives nude-vs-underwear base) is now an SFW/NSFW
+  button row grouped with Character type and Base outfit on the Create/Clone tabs,
+  instead of a lone checkbox. Shows in both Native and Klein modes; Character type
+  and Base outfit remain Klein-only. NSFW still persists with the character (💾),
+  and Character type / Base outfit auto-save to host settings as before.
+## [1.93.0] - 2026-07-12
+
+### Fixed — Klein editor showed "no host" even when a worker was available
+- The top-of-page availability badge computed `online` from a has_capability check
+  that could lag the worker pool at page load, so it read "no host" while
+  generation resolved a worker fine. It now reflects whether a worker actually
+  resolves (the same resolution generation uses) and refreshes every 15s so it
+  can't go stale after workers connect. Text is now "worker online: <url>" /
+  "no worker detected".
+## [1.92.0] - 2026-07-12
+
+### Changed — removed the "VNCCS host URL" field from the Klein editor settings
+- The VNCCS host/worker is managed in the main app settings, not here. The
+  duplicate host field in the ⚙ Settings panel caused issues when saved blank
+  (especially now that settings auto-save), so it's removed. These settings saves
+  now always pass host=null, which the backend treats as "leave the configured
+  host unchanged" — so saving/auto-saving Klein settings never touches the worker
+  pin. "Save host" button renamed "Save settings"; the panel header is now
+  "Settings — models & generation".
+## [1.91.0] - 2026-07-12
+
+### Added — Character Studio (Klein) settings auto-save + Reset to defaults
+- The ⚙ Settings in the VNCCS Native / Klein editor now PERSIST automatically: any
+  change (host/edit model, generation params, PuLID, face refine, base outfit,
+  character type) is saved to studio_vnccs_settings a moment after you change it
+  (debounced) and restored on refresh — no need to remember "Save host", and the
+  picks carry into the next generation set. "Save host" still works for an
+  immediate save + reconnect.
+- New "↺ Reset to defaults" button beside Save host restores all these settings to
+  their base defaults.
+- Removed the redundant per-toggle save added in 1.90.0 (the general auto-save
+  covers Character type + Base outfit now).
+## [1.90.0] - 2026-07-12
+
+### Fixed — PuLID crashed the job ("No module named 'insightface'"); now strictly opt-in
+- The worker's ComfyUI-PuLID-Flux2 node requires the `insightface` python package,
+  which isn't installed — so forcing PuLID on (Realistic) errored the whole job.
+  We can't detect that from /object_info, so PuLID is now OPT-IN: it engages ONLY
+  when klein_pulid='on' is set in Settings (default Off). The Realistic type no
+  longer forces it; stylized types still never use it. To enable PuLID: install
+  insightface in the worker's ComfyUI python, then set PuLID = On.
+- With PuLID off, realistic identity rides on the face-crop reference (real
+  detection) — so a good face crop matters; see the face-detection follow-up.
+
+### Added — toggle selections persist across visits
+- Character type and Base outfit picks are now saved into host settings the moment
+  you change them (klein_face_kind, klein_run_base_clothing) and restored when you
+  reopen the page, so you can see what you had selected.
+## [1.89.0] - 2026-07-12
+
+### Added — Character type control (Auto / Realistic / Anime / 3D) + clearer option buttons
+- The log showed the real problem for realistic characters: our photographic
+  face detector STILL missed the face, so PuLID stayed off and identity fell to a
+  crude heuristic head crop (face/hair way off). Fix: a "Character type" control
+  by the Klein Create/Clone generate area. 'Realistic' forces PuLID on — its
+  InsightFace finds the face on the worker even when our app-side detector misses,
+  and carries the identity properly; 'Anime'/'3D' skip PuLID (InsightFace can't
+  read stylized faces and would error); 'Auto' keeps the previous behavior.
+  Sent as GenerateIn.face_kind (creator, cloner, previews).
+- The base-outfit and character-type controls are now clear button rows
+  (segmented toggles), not a dropdown — hard to miss.
+- Face detection made a touch more sensitive (YuNet score 0.7→0.6; Haar
+  minNeighbors 5→4, minSize 48→36) so 'Auto' catches more real faces.
+- Log line now includes face_kind + real_face for diagnosis.
+## [1.88.0] - 2026-07-12
+
+### Fixed — THE strip root cause: anime faces defeat detection, so strip silently fell back
+- Logs revealed strip mode was engaging but `strip_body_refs=False pulid=False`
+  every time — because no face was detected. YuNet + Haar (and PuLID's
+  InsightFace) are PHOTOGRAPHIC detectors and miss VNCCS's stylized/anime faces,
+  so `crop_face` returned None → no face crop → PuLID off → strip fell back to
+  feeding the clothed full-body reference (the dress leaking).
+- New `_klein_identity_crop`: tries real detection, and when it misses falls back
+  to a heuristic upper-center HEAD crop (excludes shoulders/straps). Strip mode
+  now always gets an identity reference that carries the face/hair but NOT the
+  outfit, so the clothed body reference is withheld and the dress can't leak.
+  PuLID is gated to REAL detections only (InsightFace errors on anime crops).
+  Applies to Klein pose runs and the clone preview.
+## [1.87.1] - 2026-07-12
+
+### Added — base-outfit log on the clone "Generate Preview" path too
+- The v1.87.0 policy log only fired on pose runs; the clone Generate Preview had
+  no log line, so `rbmn.py logs base-outfit` came back empty after a preview.
+  Preview now logs `klein base-outfit (clone preview): mode=… strip_body_refs=…
+  pulid=… face_ref=…` as well.
+## [1.87.0] - 2026-07-12
+
+### Fixed — strip mode still copied the top from the FACE CROP; now references nothing clothed
+- With the full-body reference already withheld (1.86.0), the remaining leak was
+  the face crop: it was expanded 60% around the face, so a strappy dress's straps
+  and shoulders rode along and Klein copied them. Now, in strip mode:
+  (a) the face crop is TIGHT (20% expand — face + hair, no shoulders); and
+  (b) when PuLID is active it carries the face as an EMBEDDING (no pixel copy), so
+  the face-crop reference latent is dropped entirely — the ONLY thing referenced
+  is the pose skeleton, plus PuLID + the hair/skin/build text. Zero clothed pixels
+  are referenced, so no garment can leak. Without PuLID it falls back to the tight
+  face crop as the sole identity reference.
+- Added a log line each run: `klein base-outfit: mode=… strip_body_refs=… pulid=…
+  face_ref=…` so the active policy is visible in rbmn logs.
+## [1.86.0] - 2026-07-12
+
+### Fixed — strip mode STILL kept the reference's top (dress/straps) — now structural
+- Prompt wording alone couldn't beat it: Klein anchors hard to the clothed
+  full-body reference latent and copies its top. In strip mode the pose graph now
+  WITHHOLDS the full-body (clothed) reference entirely — identity rides on the
+  face crop + PuLID + a text descriptor of the character's hair/skin/build
+  (klein_identity_text) instead. With no clothed image in the reference chain,
+  there's nothing for Klein to copy the dress from, so the underwear/nude base
+  actually renders. Applies to Klein pose runs and the clone preview; only when a
+  face crop was detected (else it falls back to the old body-ref behavior). Keep
+  mode is unchanged (still uses the full outfit references).
+## [1.85.0] - 2026-07-12
+
+### Fixed — strip-mode base kept the reference's TOP (only bottoms became underwear)
+- In "strip to base body" mode Klein swapped the bottoms for briefs but clung to
+  the reference's shirt/top. The instruction was too passive. It's now an ACTIVE
+  undress command that names the upper body explicitly: remove the top / shirt /
+  jacket / dress and replace it with a plain bra (bare shoulders + midriff),
+  remove any bottoms for plain briefs; NSFW = fully nude (top and bottom removed).
+  The lead-in also states the references are clothed but for identity only and
+  must be undressed. Prompt-only; strongest for the Clone flow where the identity
+  reference is a clothed full-body image.
+## [1.84.1] - 2026-07-12
+
+### Fixed — per-run "Base outfit" control now also on the Clone sub-tab
+- v1.84.0 added the per-run base-outfit dropdown only to Create > New. The
+  Create > Clone sub-tab (the "✨ Generate Preview" flow) had no control, so it
+  was invisible when cloning from references. Added the same Klein-only dropdown
+  by the Clone sub-tab's Background/Generate Preview area.
+## [1.84.0] - 2026-07-12
+
+### Added — per-run "Base outfit" control on the Klein Create/Clone tabs
+- The base-clothing choice (strip to underwear/nude base vs keep the reference's
+  clothing) is now a visible dropdown right by the Generate buttons in the Klein
+  editor, not only in ⚙ Settings. Options: "Use Settings default", "Strip to a
+  clean base body", "Keep / clone the reference's clothing". It rides on the pose
+  run as GenerateIn.base_clothing and overrides the studio setting for that run;
+  blank = use the ⚙ Settings default. Wired through creator and cloner Klein runs
+  and the clone preview. Klein-mode only.
+## [1.83.0] - 2026-07-12
+
+### Added — on-screen "Klein base outfit" toggle (Settings panel)
+- Surfaces the v1.82.0 base-clothing behavior in the UI. The VNCCS
+  Native / Klein Hybrid Settings box gains a "Klein base outfit" control:
+  "Strip to a clean base body — underwear, or nude when NSFW (recommended)" vs
+  "Keep / clone the reference's clothing". Loads from and saves to
+  studio_vnccs_settings.klein_base_clothing via "Save host". Frontend verified
+  with the cloud tsc recipe (npm ci + tsc --noEmit, 0 errors).
+## [1.82.0] - 2026-07-12
+
+### Changed — Klein base poses are now a body-only BASE (underwear/nude), not a clothing clone
+- Corrects the intent of the 1.80.0/1.81.0 clothing work. Like VNCCS Native
+  bases, Klein base poses should capture the character's identity, face and body
+  but DROP the reference's clothing, leaving a clean body the Clothes/Emotions
+  modes can dress later. Klein pose runs and the "Generate Character" preview now
+  render the character in plain neutral UNDERWEAR by default (fully nude when the
+  NSFW flag is on), taking identity/face/hair/skin/body/marks from the references
+  while explicitly IGNORING any clothing, footwear or accessories they show.
+
+### Added — optional "keep the reference's clothing" mode (studio setting)
+- Set studio_vnccs_settings `klein_base_clothing` to `keep` (default `strip`) to
+  instead clone the outfit from the references — for when you have a full-body
+  reference whose costume you want as the base. In keep mode the outfit is
+  reproduced exactly and gaps are filled from the character's Analyze-Reference
+  `additional_details` text, with a hard rule against INVENTING items (no shoes
+  if there were no shoes). A visible on-screen toggle will follow; this ships the
+  behavior and the setting key now. NSFW nudity applies only to the strip base.
+## [1.81.0] - 2026-07-12
+
+### Fixed — Klein sprite background removal (edge halos + shadow remnants)
+- Cut-out Klein sprites kept a colored rim around the silhouette and left
+  shadow-tinted background, despite rendering on a flat solid field. Cause: the
+  ingest cutout led with rembg (a general subject-matting net that leaves a
+  green/blue edge halo and can keep shadowed background). For a KNOWN
+  solid-color render a real chroma key is both simpler and cleaner. New
+  `chroma_key_cutout` (numpy): samples the background color as the median of the
+  image border ring, makes pixels within an inner RGB distance fully
+  transparent and ramps alpha to opaque by an outer distance (a soft band that
+  yields a clean anti-aliased edge AND removes shadow-darkened background), then
+  despills the dominant background channel on the keyed edge so no fringe
+  survives. Klein ingest now uses it first, falling back to rembg/crude cutout
+  only when numpy/PIL are unavailable.
+
+### Changed — Klein pose prompt: don't ADD clothing; keep bare parts bare
+- Costume still drifted because the prompt told Klein to reproduce the outfit
+  but never forbade INVENTING items. The pose instruction now demands matching
+  the reference's state of dress exactly: barefoot stays barefoot (add no
+  footwear/socks), bare/unclothed parts stay bare, and Klein must not invent,
+  add or remove any shoes, boots, socks, stockings, straps, jewelry, garment or
+  accessory not clearly visible in the reference.
+
+## [1.80.0] - 2026-07-12
+
+### Fixed — parallel pose runs saved 3 rows of the SAME poses (ingest overwrite)
+- A 12-pose run fanned out across 3 workers came back as three identical rows
+  of 4 sprites. Root cause was on the INGEST side (distinct from the v1.78.0
+  upload-name fix): every chunk's Klein graph saved with the same
+  `filename_prefix`, and ComfyUI's SaveImage counter is per-worker-local, so
+  three fresh workers each produced `klein_sprites_00001_.png … _00004_.png`.
+  Ingest wrote every chunk's images to `assets/vnccs/{char}/{label}/{filename}`,
+  so later chunks OVERWROTE earlier chunks' files on our disk — 12 catalog
+  rows, but only the last chunk's 4 images. Ingest now namespaces every stored
+  file by its `prompt_id` (unique per chunk/job), so cross-worker filename
+  collisions can never overwrite. Covers Klein, native, clothes and emotions.
+
+### Changed — Klein background prompt: flat, evenly lit, no shadows
+- The cut-out sprites kept a rim of background where the character's cast
+  shadow darkened the green (the chroma/rembg cutout can't match shadowed
+  green to the sampled corner color). Klein pose and preview prompts now demand
+  a "solid flat background, evenly and uniformly lit, no shadows, no cast
+  shadow, no ground or floor plane", so the field stays uniform and the cutout
+  comes back clean.
+
+### Changed — stronger attire preservation in Klein pose prompts
+- Footwear, leg straps and stockings drifted pose to pose because the only
+  clothing signal was the full-body identity reference at ~1MP (tiny details)
+  and CFG=1 makes the empty negative inert. The pose instruction now explicitly
+  demands reproducing the ENTIRE outfit — every clothing item, footwear,
+  stockings, straps and accessory — exactly, adding/removing nothing. When the
+  character carries `additional_details` text (cloned characters do; wizard
+  characters intentionally don't), it rides along as an explicit "preserve
+  these character details exactly" anchor. Best-effort: if drift persists on
+  wizard-made characters, per-reference strength (ReferenceLatentPlus) remains
+  the heavier follow-up.
+
+## [1.79.0] - 2026-07-12
+
+### Added — Klein face-consistency settings in the ⚙ Settings panel
+- The VNCCS Native / Klein Hybrid Settings box gains a "Klein face
+  consistency" section: PuLID Auto/Off + strength (default 1.4), Face refine
+  Auto/Off + denoise (default 0.40). Persisted into studio_vnccs_settings via
+  "Save host" — the same keys the backend already honored.
+
+### Fixed — Clone "✨ Generate Preview" now previews the CLONE, not Anima
+- In Native mode the clone preview called the host's /vnccs/preview_generate,
+  which renders the checkpoint (Anima) from the tag sheet — not your
+  references. With references present it now runs the REAL CharacterCloner
+  meganode limited to ONE pose (upscaler off) and returns the posed clone
+  (preferring the sprite tap over face-crop/sheet taps). Klein mode already
+  rendered through the multi-ref identity chain.
+
+### Added — character mode identity: Native vs Klein everywhere
+- Characters now carry manifest.vnccs.variant ('native'|'klein'), stamped at
+  save (Create/Clone 💾), base-preview save, and ingest ('klein' engine wins
+  once set — a Klein character never silently flips back).
+- Character Studio main screen: the card badge reads "✨ VNCCS Native" or
+  "🧪 VNCCS Klein", and clicking a character opens the editor OF ITS MODE
+  (/studio/vnccs vs /studio/vnccs-klein). Deep-links and the in-page Library
+  "Load into Create" redirect to the right variant too.
+
+### Added — character thumbnails + choose-your-own
+- Main-screen character cards now show a real thumbnail: the chosen hero
+  image, else the ACTIVE base version, else the newest base version.
+- Every image tile in the character Library grid gains a ★ button — "use as
+  thumbnail" — POST /api/studio/vnccs/catalog/{id}/hero. A manually chosen
+  thumbnail is locked (ingest won't auto-replace it). Catalog list responses
+  include variant + hero_url; the VNCCS Library tab shows a mini-thumb and a
+  Native/Klein chip per character.
+
+## [1.78.0] - 2026-07-12
+
+### Fixed — Klein parallel pose runs rendered the SAME poses on every worker
+- Upload filenames were fixed per character (rbmn_klein_<name>_pose0.png …),
+  so when multiple workers share one ComfyUI input folder (multi-GPU boxes,
+  or one host reachable under several URLs) each chunk's pose captures
+  OVERWROTE the previous chunk's before the queued jobs executed — every
+  chunk then rendered the LAST chunk's poses ("3 rows of the same 4 poses").
+  All Klein uploads (pose captures, identity, face crop, emotion masks) now
+  carry a unique per-chunk token in the filename.
+
+### Added — Klein face refine: light FaceDetailer pass on every pose sprite
+- Faces were soft/blurry with off eyes when zoomed: the face occupies a tiny
+  fraction of a ~1MP sprite. When Impact-Pack's FaceDetailer + a face yolo
+  model are on the worker (auto-detected, VNCCS installs have them), every
+  Klein pose sprite now gets a LOW-DENOISE face refine at up to 1024px guide
+  size — denoise 0.40 keeps the likeness (the same technique VNCCS applies to
+  its own emotions); only sharpness, eyes and small-face artifacts change.
+  Runs before the optional GAN upscale. Inputs are FILTERED against the
+  worker's actual FaceDetailer schema, so Impact version drift can't fail
+  validation. Settings: klein_face_refine ('auto'|'off'),
+  klein_face_refine_denoise (0.40, clamp 0.10-0.80), klein_face_refine_steps
+  (6). Reported in /klein-status and as "+detail" in run labels.
+
+### Added — Clone tab: ✨ Generate Preview
+- The Clone subtab now has the same review-before-committing preview as
+  Create/New: renders the character ONCE (first default pose) from the
+  uploaded references — in Klein mode through the FULL identity chain
+  (native multi-ref + face crop + PuLID + face refine) — and files it as a
+  base VERSION (which then anchors identity for the real pose runs). The
+  preview/base-version browser now shows on the Clone subtab as well.
+  POST /preview accepts cloner_images for this.
+
+### Verified — Klein multi-reference method (no change needed)
+- Audited our multi-ref conditioning against the official ComfyUI Klein
+  templates, BFL's FLUX.2 guidance and the vendored VNCCS Klein9b workflow:
+  chained ReferenceLatent nodes (daisy-chain) IS the native/official method,
+  and prompts already use positional "image N" indexing. The grid/stitch
+  approach is a community alternative that loses per-image indexing — not
+  adopted. Studio Klein graphs are built programmatically in
+  vnccs_native/klein_poses.py; the main app's workflow templates
+  (workflows/*.json — KLEIN, KLEIN_INPAINT, studio graphs) are NOT touched
+  by any of the 1.77.x-1.78.0 changes.
+
+## [1.77.2] - 2026-07-12
+
+### Added — visible confirmation that the face-consistency machinery engaged
+- **GET /api/studio/vnccs/klein-status** — browser-friendly readiness report:
+  app version, per-worker Klein models + pose LoRA, whether PuLID-Flux2 will
+  engage (weight file, strength, provider) or the exact reason it won't
+  (disabled / pack missing / no weights), app-side face-detector state, and
+  the effective klein_pulid* settings. NOTE: these are backend settings keys
+  in studio_vnccs_settings — they have no Character-Studio UI fields; 'auto'
+  defaults mean zero configuration is needed.
+- **Run labels now carry the indicator**: Klein pose chunks show
+  "N pose(s) · Klein · face-ref+PuLID" (or "· face-ref" without PuLID) and
+  Klein emotion chunks show "N face(s) · Klein emotions · face-ref+PuLID"
+  (or "· face-anchor") in the existing progress UI — if the suffix is absent,
+  no face was detected and the run fell back to pre-1.77 behavior.
+- /generate/{step} Klein responses include a face_consistency object
+  (face_ref / pulid_file / pulid_strength).
+
+## [1.77.1] - 2026-07-12
+
+### Fixed — PuLID weight auto-pick prefers the newest version
+- With multiple PuLID weight files installed (e.g. pulid_flux2_klein_v1 AND
+  _v2), the auto-picker fell back to alphabetical order and chose v1. It now
+  ranks by version suffix (v2 beats v1) after the klein/9b name preference.
+  `klein_pulid_file` in studio settings still overrides.
+
+## [1.77.0] - 2026-07-12
+
+### Changed — Klein Hybrid: face-consistency wave (poses + emotions)
+- **Why faces drifted:** Klein only ever saw the identity as a full-body image
+  squeezed to 1MP (the face = a few dozen pixels of reference), and the
+  emotion recipe regenerated the WHOLE sprite from an empty latent anchored to
+  the (already-drifted) sprite itself, then pasted the face rectangle back.
+- **Pose runs now carry a face-crop reference:** a close-up crop of the
+  identity face (app-side YuNet/Haar detect) rides as the LAST reference
+  latent, and the prompt binds it explicitly ("Image N is a close-up of the
+  same character's face … must match exactly"). No face detected = previous
+  behavior, logged.
+- **Emotion runs are now CROP-AND-STITCH and anchored to the base version:**
+  the worker crops an expanded face-context box (app-side computed, min 256px,
+  ×8-aligned), samples ONLY that region at ~1MP (empty Flux2 latent at the
+  scaled crop size + SetLatentNoiseMask), conditions on BOTH the masked crop
+  context and a canonical identity face crop taken from the ACTIVE base
+  version (fallback: first sprite with a detectable face, then the raw base
+  image), and composites the region back into the sprite in-graph
+  (GrowMaskWithBlur seam → ImageScale back → ImageCompositeMasked at the crop
+  origin). Faces render at ~6-10x the old effective resolution and every
+  expression is anchored to the same canonical face.
+- Emotion prompts use the same-person binding language ("Image 2 is a close-up
+  of this same character's face … change only the expression").
+
+### Added — PuLID-Flux2 identity adapter support (auto-detected)
+- When a worker has the ComfyUI-PuLID-Flux2 node pack (iFayens) + weights in
+  models/pulid, Klein pose AND emotion graphs are automatically patched with
+  Apply PuLID ✦ Flux.2 fed by the identity face crop — the only true identity
+  adapter that exists for FLUX.2 (Klein 4B/9B are its best-supported models).
+  InsightFace AntelopeV2 + EVA-CLIP load on the worker; weight file is picked
+  by preferring "klein"/"9b"-named files.
+- Studio settings keys (all optional, no UI change needed):
+  `klein_pulid` ('auto' default | 'off'), `klein_pulid_file`,
+  `klein_pulid_strength` (default 1.4, the pack's recommended value, clamped
+  0-2), `klein_pulid_provider` ('CPU' default | 'CUDA' | 'ROCM').
+- Workers without the pack are untouched — runs behave exactly as before.
+
+## [1.76.0] - 2026-07-11
+
+### Changed — VNCCS Native/Klein: regenerating poses REPLACES the old images
+- Every generated image is now tagged with ITS pose name (chunks carry their
+  exact pose-name subset from the backend's own split, so the mapping is
+  reliable across parallel fan-out, both engines, and all taps —
+  finals AND intermediates).
+- At ingest, older images of the SAME pose — matched on label + pose name +
+  costume + base version — are deleted and swapped for the new ones. Rerun a
+  single pose, or the whole set with upscaling turned on, and the library
+  keeps ONE image per pose per context instead of accumulating
+  near-duplicates across base/clothing runs. Klein emotion runs replace per
+  (emotion × sprite) the same way.
+- Version-safe: poses linked to a DIFFERENT base version are never touched
+  (the per-version pose history stays intact), and images from before this
+  release carry no pose tag so they're left alone (prune those with ✕ once).
+- Qwen emotion runs still accumulate (the meganode's output order isn't
+  pose-mappable); use ✕ or rerun-and-prune there for now.
+
+## [1.75.1] - 2026-07-11
+
+### Fixed — Klein Hybrid: ImageScaleToTotalPixels validation failure
+- Newer ComfyUI requires a `resolution_steps` input on ImageScaleToTotalPixels;
+  the Klein graphs omitted it and every chunk failed prompt validation
+  ("required_input_missing: resolution_steps"). All scale nodes now send
+  resolution_steps=1 — the exact widget value in the vendored Klein9b
+  reference workflow.
+
+## [1.75.0] - 2026-07-11
+
+### Added — Klein Hybrid plan items 2-5 (pre-test wave)
+- **(2) Upscale + BG-removal for Klein sprites:** the pose graph honors the
+  upscaler control — any non-Off mode adds a GAN tail (ImageUpscaleWithModel,
+  model resolved per worker, settings key klein_upscale_model; SeedVR maps to
+  GAN here) scaled to the chosen resolution. Backgrounds are removed APP-SIDE
+  at ingest (rembg, chroma-distance fallback) via the new
+  IngestIn.postprocess='chroma' flag — Klein sprites land BG-removed like Qwen
+  finals.
+- **(3) Klein base preview:** in Klein mode, ✨ Generate Character runs a plain
+  Klein 9B T2I built from the tag sheet (832×1216, 4-step Flux2, cfg 1,
+  ConditioningZeroOut negative) instead of the host's checkpoint preview —
+  files as a base VERSION exactly like before. No pose LoRA needed for this.
+- **(4) Clone identity via native multi-ref:** Klein clone runs feed up to 4
+  raw reference images directly as reference latents (pose = image 1,
+  identity = images 2-5) instead of Qwen's source-grid collage.
+- **(5) Klein face-inpaint emotions:** in Klein mode, Generate Emotions runs
+  the KLEIN_INPAINT recipe per (cataloged sprite × emotion): app-side face
+  detection (YuNet/Haar + anime fallback) builds a feathered mask-in-alpha
+  RGBA, the worker inpaints only the face (GrowMaskWithBlur → SetLatentNoise-
+  Mask → dual ReferenceLatent → ImageCompositeMasked), pairs fan out across
+  workers, emotion prompts pull the host catalog's natural prompts. Clothing
+  sets don't apply in Klein mode (UI adjusts); sprites with no detectable face
+  are skipped and reported.
+
+## [1.74.0] - 2026-07-11
+
+### Added — Klein Hybrid: pose generation runs on Klein 9B (official VNCCS support)
+- In Klein mode, "Generate Poses" (Create AND Clone) now submits our
+  flattening of the official vnccs-utils reference workflow
+  ("VNCCS_Utils Pose Studio Klein9b.json"): Klein 9B fp8 + flux2 CLIP/VAE,
+  the **VNCCS_PoseStudioKlein9b_V1 LoRA** (VNCCS's own Klein pose LoRA, repo
+  MIUProject/VNCCS_PoseStudio_Klein), dual reference latents (pose capture =
+  ref 1, identity = ref 2, on positive AND negative), Flux2Scheduler 4 steps,
+  euler, cfg 1. New backend module
+  backend/services/character_studio/vnccs_native/klein_poses.py; template at
+  workflows/vnccs/KLEIN_POSES_TEMPLATE.json.
+- Pose captures render app-side (the same three.js-parity renderer) and upload
+  to each worker with the identity image; identity = ACTIVE base version →
+  newest cataloged sprite → first clone reference. Model/LoRA names resolve
+  per worker by basename (overridable via studio settings klein_unet/
+  klein_clip/klein_vae/klein_pose_lora); a missing LoRA errors with the exact
+  Model Manager repo to download.
+- Multi-worker fan-out splits poses across workers like Qwen runs; results
+  ingest as "Base poses (Klein)" with full run-recipe/seed tracking. Klein
+  runs are NOT recorded as VNCCS sprite-shard hosts (they don't populate the
+  worker-side character store — Qwen clothes/emotions can't chain off them
+  yet, noted in the UI).
+- GenerateIn.engine ('klein') on /generate and /generate-parallel; Native mode
+  is untouched (engine defaults to the Qwen meganode path).
+
+### Added — docs/KLEIN_MODE_PLAN.md
+- Full Qwen→Klein swap map: where VNCCS uses Qwen, which stages depend on
+  Qwen-only LoRAs (ClothesCore, EmotionCore — no Klein twins), where the swap
+  is easy (base preview, clone multi-ref, upscale/BG helpers), and a suggested
+  order of attack.
+
+## [1.73.0] - 2026-07-11
+
+### Changed — VNCCS Native: Pose Studio tab replaced by a Pose Library tab
+- The 3D Pose Studio tab (non-functional) is removed from the character
+  creation screens; pose creation will integrate into the Pose Library
+  instead. (The module stays in the repo, just unrouted.)
+- New **Pose Library** top-level tab — the same VNCCS host library the ➕
+  modal uses, promoted to a full page and auto-loaded on open: Hugging Face
+  pose-pack repositories (enable/disable, ⬇ download, add your own repo id),
+  pose browser with preview thumbnails, and "Add to pose set" straight into
+  the generation selection. The ➕ Pose Library modal inside the pose section
+  renders the identical panel, so both stay in sync.
+- Applies to Native AND Klein Hybrid (shared component).
+
+## [1.72.1] - 2026-07-10
+
+### Fixed — VNCCS Native: clone results no longer show every pose twice
+- A cloner run taps TWO final sprite sets — `original_sprites` and
+  `naked_sprites` (the undressed base the clothes step dresses) — and both
+  passed the "finals" filter, so a 16-pose clone displayed 32 images in the
+  live results and in the reopened character's pose grid. The default view now
+  shows the Original set only; the undressed set (and other intermediates)
+  lives behind the "show all pipeline outputs / intermediates" toggles.
+
+### Changed — Character Studio: header "✨ VNCCS Native" button removed
+- The New Character mode dialog covers mode entry now; existing characters
+  still open their own editor from their cards.
+
+### Note — all creation modes share these tweaks
+- VNCCS Klein Hybrid renders the same component as Native (variant prop), so
+  every fix and feature in this line applies to both automatically until the
+  Klein-specific steps start diverging.
+
+## [1.72.0] - 2026-07-10
+
+### Added — VNCCS Native: pose runs linked to their recipe (like emotion runs)
+- Every pose run (creator / cloner / clothes) now records its full recipe on
+  the character — pose names, the complete pose set data, costume, and seed
+  (parallel chunks carry the full run's recipe; deduped to one record per run,
+  last 12 kept).
+- **✓ done badges:** pose tiles (defaults AND library extras) show a green ✓
+  when that pose has already been generated in the current context — base
+  poses on Create, per-costume on Clothes.
+- **Previous pose runs** list in the pose section with **↻ Load**: restores
+  that run's exact pose selection (defaults re-selected by name; library poses
+  reattached from the stored pose data), the fixed seed, and — on the Clothes
+  tab — the costume. Hit Generate to redo the run.
+
+## [1.71.0] - 2026-07-10
+
+### Fixed — VNCCS Native: cloned characters show their generated pose set
+- The "Base poses" library grid was gated to the New sub-tab, so reopening a
+  CLONED character (which lands on the Clone sub-tab) hid its generated poses.
+  The grid now shows on both sub-modes, same controls (lightbox, ✕ delete,
+  intermediates toggle).
+
+### Added — VNCCS Native: Emotions tab remembers what you've made
+- Selecting a character on the Emotions tab loads its generated emotion sets:
+  a "Generated emotions" grid in the results panel (grouped per clothing set,
+  lightbox + ✕ delete), refreshed on tab open and after runs.
+- **Runs are linked to their recipe:** every emotions ingest records
+  emotions × clothing sets × seed (+ host/prompt_id/time) on the character and
+  stamps each image's asset meta. A "Previous emotion runs" list shows the
+  history with a **↻ Load** button that restores that run's emotion selection,
+  clothing sets AND fixed seed — hit Generate to redo it exactly.
+- **Done-tracking in the picker:** emotions that were already generated get a
+  ✓ badge on their tile and come PRE-SELECTED when the character loads.
+- All ingests (every step) now stamp the run seed into asset meta too.
+
+## [1.70.3] - 2026-07-10
+
+### Fixed — VNCCS Native: fresh clothes show up on the Emotions tab without a refresh
+- The Emotions tab's clothing-set list was fetched once per character from the
+  PINNED host only — after generating clothes (which run on the recorded shard
+  workers) the list was stale AND could miss costumes the pinned host has never
+  heard of, forcing a browser refresh. The list is now re-queried every time
+  the Emotions tab opens and unioned across ALL workers holding the character.
+- The Clothes tab's outfit gallery host-side names get the same multi-worker
+  union.
+
+## [1.70.2] - 2026-07-10
+
+### Changed — VNCCS Native: safer upscaler defaults
+- Upscaler now defaults to **Off** (was SeedVR) and the upscale resolution
+  defaults to **1024** (was 2048) — accidental runs no longer kick off heavy
+  SeedVR jobs that most machines choke on. The dropdown lists Off first;
+  SeedVR is labeled "best, heavy".
+
+## [1.70.1] - 2026-07-10
+
+### Added — delete characters everywhere (stories already had it)
+- **Main character grid:** every character card gets a 🗑 button (hover) —
+  engine characters delete via the existing route (datasets removed too);
+  VNCCS characters delete via the new catalog route below.
+- **VNCCS Native Library tab:** 🗑 Delete character per card.
+- **New `DELETE /api/studio/vnccs/catalog/{character_id}`** — removes the
+  catalog entry plus EVERY app-side asset it owns (pose runs, base/costume
+  preview versions, files on disk). Optional `?from_hosts=true` also deletes
+  the character's folder on the recorded VNCCS workers via the node's own
+  POST /vnccs/delete (the node UI's DEL) — the UI asks with a second confirm.
+- Story delete was already present (trash icon in the stories sidebar).
+
+## [1.70.0] - 2026-07-10
+
+### Added — Character Studio: New Character mode dialog + VNCCS Klein Hybrid
+- Clicking "New Character" on the main character screen now opens a mode
+  picker: **VNCCS Native** (the existing mode) or **VNCCS Klein Hybrid** — a
+  clone of the Native interface at /studio/vnccs-klein where Klein-powered
+  steps will be grafted in (currently identical to Native, labeled
+  experimental). The legacy engine-based form remains reachable via a small
+  link in the dialog (frozen, not fixed).
+
+### Added — VNCCS Native: create mode (New/Clone) persists per character
+- Characters remember HOW they're made: `manifest.vnccs.create_mode` with
+  **clone precedence** (once cloned, tweaks from the New form can't flip it
+  back). A clone run stamps it automatically; creator runs only set 'new' if
+  never cloned.
+- The Clone screen saves in full — analyzed fields AND the uploaded reference
+  image list — via 💾 Save and automatically with every clone run. Reopening a
+  cloned character from the character list lands directly on the Clone sub-tab
+  with references and fields restored for review/tweaking.
+
+### Added — docs/ENGINE_MODE_FEATURES.md
+- Full inventory of the legacy engine-based method: everything it was planned
+  to do, what it shipped, and the 14 EXTRAS it has over VNCCS Native (LoRA
+  dataset pipeline, multi-model base, per-stage engines, pose import breadth,
+  SeedVR2 post-process, Generate-All, push-to-project, …) — the checklist for
+  building new Native-derived modes.
+
+## [1.69.1] - 2026-07-10
+
+### Fixed — VNCCS Native: parallel clone runs failed on workers without the reference files
+- "Сначала загрузите изображение персонажа в Character Cloner" ("upload a
+  character image first") on fan-out chunks: the Cloner node reads its source
+  images from the worker's LOCAL ComfyUI input folder, but references were
+  uploaded to the pinned host only — every other worker loaded zero images and
+  errored. The parallel route now replicates the reference files to each chunk
+  worker before submitting (download from pinned /view → upload to the worker's
+  input folder); if replication to a worker fails, its chunk is rerouted to
+  the pinned host instead of failing.
+
+## [1.69.0] - 2026-07-10
+
+### Fixed — VNCCS Native: Cloner matches the node UI (no phantom preview button)
+- Verified against the node source: the cloner panel has NO "generate preview"
+  button — its own code says "(Preview removed: Using Native Preview Window
+  below)" and the big preview shows the SELECTED SOURCE IMAGE. The 1.68.0
+  "Generate Character preview" button is removed; instead the reference images
+  now work like the node: a large preview of the selected source, clickable
+  thumbnails (selected = highlighted, ✕ removes one, clear all), and clicking
+  the preview opens the lightbox with arrows across all references.
+- 💾 Save (analyzed fields → library) stays.
+
+### Changed — VNCCS Native: Create tab gets New / Clone sub-tabs
+- Cloner is no longer a separate top-level tab: Create now has "New" (the
+  existing form) and "Clone" (the reference-clone flow) sub-tabs, so you pick
+  how the character comes to life in one place.
+- Clothes and Emotions follow the active sub-mode's character: switching to
+  those tabs preselects the character you're working on in New or Clone
+  (applied once per character, so a manual dropdown pick isn't stomped).
+
+## [1.68.0] - 2026-07-10
+
+### Added — VNCCS Native: Cloner tab gets the Create-tab QoL
+- **✨ Generate Character preview** — renders ONE default-pose image from the
+  analyzed clone fields (fast) so you can audition the description before the
+  full reference-conditioned clone run. Each preview files as a base VERSION
+  with the same n/N ‹ › ● Active browser (and lightbox) as the Create tab,
+  which now also shows on the Cloner tab.
+- **💾 Save** — saves the clone's name + analyzed fields to your library
+  without generating.
+- Version browsing is per-character now: previewing a different character
+  starts a fresh version list instead of mixing with the previous one.
+- (Already present via the shared pose section: pose selection + library,
+  upscaler, ⚡ parallel split, and the 🎲 seed control.)
+
+## [1.67.0] - 2026-07-10
+
+### Changed — VNCCS Native: Emotions tab catches up (node-UI parity)
+- **Emotion picker with face images:** the multi-select list is replaced by an
+  image-tile grid using the node's own emotion face pictures
+  (`get_emotion_image` per emotion, with a "no image" placeholder exactly like
+  the node UI), plus All/None buttons. Click tiles to toggle.
+- **Character preview shows ALL poses:** the Emotions tab's preview strip now
+  merges every recorded worker's sprite list (same multi-worker fix the
+  Clothes mannequin got in 1.66.0) instead of one worker's shard.
+
+### Added — VNCCS Native: pose strips open in the lightbox
+- Clicking the preview image in the Clothes mannequin picker or the Emotions
+  character preview opens it full-size in the lightbox with ‹ › arrows /
+  arrow keys across the whole pose set. On the Clothes tab, arrowing in the
+  lightbox also UPDATES the mannequin selection — browse big, land on the pose
+  you want, close, and it's picked.
+
+## [1.66.0] - 2026-07-10
+
+### Changed — VNCCS Native: mannequin picker shows ALL generated base poses
+- The Clothes tab's mannequin strip previously listed only ONE worker's sprite
+  files — with multi-worker fan-out each machine stores just its shard, so only
+  a few poses were offered. The picker now merges every recorded worker's
+  sprite list, so you cycle through the character's FULL generated pose set
+  (including any poses you add later), with the source worker shown when more
+  than one is involved.
+- Each pose remembers which worker it lives on, and the costume preview runs
+  on that exact machine — so whichever pose you pick is the one that gets
+  dressed.
+
+## [1.65.0] - 2026-07-10
+
+### Added — VNCCS Native: browse a pose set inside the lightbox
+- Opening any image from a pose grid (base poses, costume poses, live run
+  results) now opens it as a GALLERY: ‹ › arrows on the lightbox edges (and
+  ←/→ arrow keys) step to the previous/next image in that set without closing,
+  with an "n / N" position badge up top. Zoom/pan reset per image; Esc closes.
+- Base/costume preview lightboxes: ←/→ arrow keys now cycle versions too.
+
+## [1.64.2] - 2026-07-10
+
+### Fixed — VNCCS Native: pose libraries live on the right tabs
+- The Create tab's library grid now shows ONLY the character's base poses
+  (creator/cloner finals) — costume and emotion poses no longer leak into it.
+  The "show pipeline intermediates" toggle still reveals everything.
+- The Clothes tab now shows the generated poses for the SELECTED costume
+  (creator-tagged clothes/emotions finals for that outfit), with the same
+  lightbox + ✕ delete controls, refreshed automatically after runs and when
+  switching characters/outfits.
+
+## [1.64.1] - 2026-07-10
+
+### Changed — VNCCS Native: base/costume preview image fills its panel
+- The Base image and Costume image previews were capped at 420px tall, which
+  left portrait sprites small and hard to read. They now render centered at the
+  full width of the results panel (click still opens the zoom/pan lightbox).
+
+## [1.64.0] - 2026-07-10
+
+### Fixed — VNCCS Native: costume preview finally dresses the pose you picked
+- Root cause was the multi-worker fan-out: each worker holds only ITS shard of
+  a character's pose sprites, and the mannequin strip browsed the PINNED host's
+  files while the preview ran on a recorded shard worker — "pose 3" was a
+  different file on each machine. The strip now browses the exact worker the
+  preview will run on (relay accepts a whitelisted `_vnccs_host` override; the
+  strip hint shows which worker), and the preview request pins that same
+  worker.
+
+### Fixed — VNCCS Native: re-running a generation actually regenerates
+- We submitted graphs with seed=0 and relied on VNCCS randomizing at execution
+  time — but ComfyUI caches nodes by their inputs, so a byte-identical
+  resubmission never executes and instantly returns the previous images (the
+  "instantly completes" effect). A concrete random seed is now rolled app-side
+  per run (node UI "randomize" parity), shared across all parallel chunks of
+  that run, and reported back (shown in the completion message).
+- New seed control next to the generate buttons: "🎲 New random seed each run"
+  (default, matches the node UI dice) or untick for a FIXED seed — type one or
+  leave blank to roll once and keep it (the field auto-fills with the seed
+  used, and fixed reruns then benefit from ComfyUI's cache, completing
+  instantly by design).
+- Request gen_settings now LAYER over saved gen_settings instead of replacing
+  them, so the seed control can't clobber saved model settings.
+
+## [1.63.0] - 2026-07-10
+
+### Fixed — VNCCS Native: costume preview honors the background color and mannequin pose
+- **Background:** the ClothesDesigner builds its prompt from
+  `gen_settings.background_color` inside the designer state — we never passed
+  the UI's selection, so previews always used the vendored baseline. The
+  selected background is now sent (the node supports Green/Blue; White/Alpha
+  fall back to Green — noted in the UI).
+- **Mannequin pose:** `selected_preview_sprite` was sent with costume
+  `'Original'`, but the pose strip you cycle enumerates sprites with NO
+  costume. When a character has both Original and Naked sprite folders the two
+  lists resolve different folders, so the node dressed the wrong sprite. Both
+  sides now enumerate identically (costume = null), so the preview dresses
+  exactly the pose shown in the strip.
+
+### Added — VNCCS Native: outfit gallery, prompt saving, import from another character
+- The Clothes tab now opens with an **Outfit gallery** for the selected
+  character: every costume as a card (active-version thumbnail, name, version
+  count; host-side costumes appear too). Click a card to load its name +
+  prompt set; **➕ New outfit** clears the form.
+- **⬇ Import from character…** — pick any cataloged character, see their
+  outfits with thumbnails, click one to copy its full prompt set (top / bottom /
+  head / face / shoes) into the slots to replicate on the current character.
+- **💾 Save outfit prompts** button under the slots (new
+  `POST /api/studio/vnccs/costume-info`) — saves prompt tweaks without
+  generating; prompts also auto-save with every costume preview and every full
+  costume generation run. Saved prompts live on the character manifest
+  (`costumes[name].costume_info`) and are what the gallery/import restore.
+- Costume version actions (Set active) now bind to the character selected on
+  the Clothes tab rather than the one loaded in Create.
+
+## [1.62.1] - 2026-07-10
+
+### Fixed — VNCCS Native: lightbox scroll-zoom no longer scrolls the page behind it
+- The results lightbox now locks page scrolling while open and registers a
+  non-passive wheel listener on the overlay (browsers force React's synthetic
+  wheel handler to be passive, so its `preventDefault()` was ignored) — the
+  mouse wheel zooms the image only, with `overscroll-behavior: contain` as a
+  further guard against scroll chaining.
+
+## [1.62.0] - 2026-07-10
+
+### Fixed — VNCCS Native: pose batches no longer overwrite each other in the library
+- **Root cause of "I don't see my poses, just 4 images":** every ingest *replaced*
+  the character's cataloged output list for that step, so each new pose batch —
+  and even each worker chunk of a parallel run — wiped the record of earlier
+  poses. Ingest now **merges** (appends, deduped) and the manifest update is
+  serialized so concurrent chunks can't drop each other's images.
+- **Self-heal on reload:** opening a character re-scans its asset folder and
+  re-links any previously orphaned images back into the catalog, so poses
+  "lost" by older versions reappear automatically.
+
+### Changed — VNCCS Native: character library view shows poses, not pipeline taps
+- Reloading a character now shows **final BG-removed sprites** under friendly
+  headings ("Base poses", "Costume poses — <outfit>", "Emotions") instead of raw
+  tap groups (`creator/sheet`, `creator/pose_generation`, …). A "show pipeline
+  intermediates" toggle reveals the faces / pre-BG passes when needed.
+- Costume/emotion finals are grouped per outfit; base-version filtering
+  ("poses linked to base vN") works as before.
+
+### Added — VNCCS Native: prune the library as you build
+- Every library image has a ✕ button (DELETE
+  `/api/studio/vnccs/catalog/{character_id}/images/{asset_id}`) — removes the
+  manifest entry, the Asset row and the file on disk; the hero thumbnail is
+  reassigned if you delete it.
+- After a generation run finishes, the library grid refreshes automatically so
+  new poses appear alongside the old ones — generate a few, prune, add more.
+
+## [1.61.0] - 2026-07-10
+
+### Added — VNCCS Native: Clothes tab gets the full staged flow (audition → version → poses)
+
+- **Results are now per-tab** — switching tabs clears the previous run's grid (the Clothes tab
+  no longer shows the Create tab's images).
+- **Mannequin pose picker**: the Clothes tab shows the character's existing pose sprites with
+  ‹ › cycling; the selected pose is the sprite the costume preview dresses
+  (`selected_preview_sprite`) — audition the outfit on the pose that matters.
+- **✨ Generate costume preview** (like the node UI): dresses the chosen mannequin sprite via
+  the host's `/vnccs/control_center/clothes_preview` (new `POST /api/studio/vnccs/`
+  `costume-preview`, runs on a worker that holds the character; auto-creates the costume).
+- **Costume versioning with prompt snapshots**: every preview is persisted as a version per
+  (character, costume) — n/N browser with ‹ ›, ● Active / Set active (also inside the
+  lightbox), newest = active default, and **cycling versions restores that image's outfit
+  prompts** so you can tweak an old look without rebuilding it. Stored in
+  `manifest["vnccs"]["costumes"]`; `POST /character/{id}/costume-active` switches.
+- **Pose runs link to the active costume version** (ingest tags `costume` +
+  `costume_version`) — same tweak-and-rerun loop as base versions.
+- **Character pickers fixed**: freshly generated characters now appear — the host list is
+  re-fetched when opening Clothes/Emotions and merged with our catalog names (characters can
+  live on shard workers the pinned host doesn't know). Costume name input gets a datalist of
+  the character's existing costumes.
+
+## [1.60.0] - 2026-07-10
+
+### Added — VNCCS Native: base-image versioning linked to pose runs
+
+- **Every "Generate Character" preview is now persisted as a base-image VERSION**
+  (`save_base_preview` → asset under assets/vnccs/<char>/base/ + entry in
+  `manifest["vnccs"]["base_versions"]`); the newest version automatically becomes the ACTIVE
+  default. `POST /character/{id}/base-active` switches the active version.
+- **Pose runs link to the base version that was active when they were ingested**
+  (asset meta `vnccs.base_version`) — tweak the base, set it active, rerun Generate Poses,
+  and every iteration stays grouped instead of starting over.
+- **Version browser UI**: the Base image panel shows `n / N` with ‹ › toggles, a green
+  "● Active" indicator and a "Set active" button; the border highlights the active version.
+  The lightbox gets the same controls (page versions, see active state, set active) while
+  zoom/pan still work.
+- **Library images filter by version**: by default the character's images show only those
+  linked to the base version being viewed (legacy unversioned images always shown); an
+  "all versions" checkbox reveals everything. `GET /catalog/{id}/images` now returns
+  `base_versions`, `active_base` and each image's `base_version`.
+
+## [1.59.0] - 2026-07-10
+
+### Fixed / Added — VNCCS Native: correct final sprites, character editor binding, Pose Studio loading
+
+- **Results now show the BG-REMOVED sprites** — verified in the generator source: the creator's
+  post-BG finals come out of the `sheet` output (`faces` duplicates it) and `upscaled` is the
+  PRE-BG upscale pass; clothes/cloner/emotions finals are the `sprites` outputs. The results
+  filter now prefers sprites/sheet (v1.58.1 wrongly preferred `upscaled`, showing green-BG
+  images). "Show all pipeline outputs" still reveals everything.
+- **VNCCS Native is now the editor for its characters**: clicking a VNCCS-created character on
+  the Character Studio screen (marked with a ✨ VNCCS badge) opens `/studio/vnccs?char=Name`
+  instead of the engine-mode editor. The page deep-links: prefills the Create form from the
+  saved form, sets the Clothes/Emotions character pickers, and shows ALL previously ingested
+  images grouped by output (`GET /api/studio/vnccs/catalog/{id}/images`, served via
+  /api/files) in the Results panel with lightbox — so characters can be re-edited and tweaked
+  over time. Library "Load into Create" uses the same loader.
+- **Pose Studio "Failed to fetch dynamically imported module"**: the backend only mounted
+  `/assets` and the SPA catch-all returned index.html for everything else — including the
+  vendored `/vnccs-pose/*.js` ES modules. `serve_spa` now serves real files from the build
+  (traversal-guarded, `.js` pinned to text/javascript for Windows mime-registry quirks) before
+  falling back to index.html.
+
+## [1.58.1] - 2026-07-10
+
+### Fixed — VNCCS Native: rear-facing sprites, tiny figures, duplicate outputs in Results
+
+- **Rear-facing generations**: the pose captures had long dark slivers scribbled across the
+  face — MakeHuman's cleaned weight map leaves ~350 face vertices (eyelid/eye area) with ZERO
+  bone weight, which collapsed to the origin during skinning and dragged sliver polygons over
+  the head; with no readable face, the QIE pose transfer rendered the character facing away.
+  Skinning now normalizes partial weight sums and binds orphan vertices to their nearest bone;
+  interior helper faces (eyes/teeth) are excluded and backfaces culled — mannequin faces are
+  now clean and front poses generate front-facing characters.
+- **Tiny figures**: capture framing fit the SMALLER canvas dimension against the LARGEST body
+  extent (standing figure ≈ 1/3 of the 640×1536 frame). Now fits the limiting axis to ~92% of
+  the canvas (matching the viewer's captures), with the per-axis no-clip clamp kept.
+- **Results show final sprites only** (like the node UI): the grid now displays the
+  post-BG-removal `upscaled` taps (or `sprites` for emotions) and hides sheet/faces/pre-BG
+  intermediates behind a "Show all pipeline outputs" toggle. Everything is still ingested into
+  the library regardless.
+
+## [1.58.0] - 2026-07-10
+
+### Added — VNCCS Native: multi-worker fan-out + real progress UI
+
+- **Parallel generation across the VNCCS fleet**: `POST /generate-parallel/{step}` splits work
+  across every reachable vnccs-capable worker (`GET /hosts`, `list_vnccs_hosts`). Sharding
+  respects VNCCS's local sprite storage: creator/cloner split the pose set round-robin and
+  record participating workers on the character (`manifest["vnccs"]["hosts"]`, shown in the
+  catalog); clothes chunks go only to recorded hosts (base sprite is local) with poses split
+  across them; emotions submit the same request to every recorded host — each worker processes
+  only its local sprites. A worker that rejects a chunk is skipped; the run continues.
+- **Progress UI**: overall progress bar (chunks completed / total) + a status row per chunk
+  (worker · chunk size · running/filing/done/error · live image count), with per-chunk ingest
+  as each finishes and a completion summary (total images, workers used, elapsed minutes).
+  ⚡ parallel toggle appears when >1 worker is online (default on; also on Emotions).
+- `/result/{prompt_id}` and `/view` accept a `host` override so chunk results poll/proxy the
+  worker they ran on; results grid + lightbox are host-aware.
+
+## [1.57.1] - 2026-07-10
+
+### Fixed — VNCCS Native: poses were rendering as identical A-poses (thumbnails AND generation)
+
+Root cause (found by comparing against the vendored three.js viewer source): the VNCCS node's
+Python fallback pose math — which our pre-renderer originally ported faithfully — is doubly
+wrong upstream. It composes Euler rotations Rz·Ry·Rx while the three.js panel uses XYZ order
+(Rx·Ry·Rz), AND it applies them in MakeHuman's bone-aligned rest frames while the viewer builds
+its bones with translation-only, world-axis-aligned frames. Result: every pose collapsed to a
+near-A-pose — so the pose thumbnails were all identical AND the captures fed to generation
+produced standing characters regardless of the selected pose.
+
+- **`_apply_pose` rewritten to replicate the three.js viewer FK exactly**
+  (`local = T(head_rel)·EulerXYZ(rot)`, `world = parent·local`, `skin = world·T(-head_abs)`,
+  model rotation in XYZ order). All 12 default silhouettes now match the node UI's Pose Manager
+  (leg raised, hand on hip, arms up, wide stances, side profile…), and generated sprites follow
+  the selected poses.
+- Capture framing gets a per-axis clamp so cam_zoom can never push limbs off-canvas.
+- Poses added from the Pose Library now show their preview thumbnails as cards (with ✕ remove),
+  matching the default-pose grid, instead of text chips.
+
+Note: generating poses without first rendering a character preview is fine — the Step-1 run
+saves the character config itself; and 1 selected pose returning 4 images is expected (the four
+pipeline outputs: sheet / faces / pose_generation / upscaled).
+
+## [1.57.0] - 2026-07-10
+
+### Added — VNCCS Native: node-parity pose manager + results lightbox
+
+- **Default poses ARE the node's out-of-the-box 12** (verified byte-identical from the vendored
+  STEP1 graph: same bones/rotations, mesh 0.66/0.5/0.85, 640×1536 camera). Thumbnails are now
+  rendered as black-on-white SILHOUETTES to match the node UI's Pose Manager exactly.
+- **Modifiable pose list like the node**: every default pose card gets a ✕ remove button
+  (plus the existing select checkbox-style toggle), "↺ Restore defaults", and "💾 Save pose
+  set" — the customized list (removed defaults + added library poses) persists in
+  `studio_vnccs_settings.pose_set` and preloads on the next visit.
+- **Add your own pose packs**: the Pose Library modal gets an "add Hugging Face repo id" input
+  (host route `pose_library/repositories/add`). Any HF repo with a `pose_library.json` manifest
+  works; the built-in pack is `MIUProject/VNCCS_PoseLibrary_Main`. Poses saved from our 3D
+  Pose Studio tab land in the host's local library too.
+- **Results lightbox**: click any result image (or the default-pose preview) to open a
+  full-screen viewer — scroll to zoom (cursor-anchored, up to 12×), drag to pan, double-click
+  to reset, Esc/✕ to close.
+
+## [1.56.1] - 2026-07-10
+
+### Fixed — VNCCS Native: empty Pose Library + stale-backend hint
+
+- **Pose packs downloadable in-app**: the host pose library is fed by Hugging Face pose
+  repositories that must be downloaded once (`/vnccs/pose_library/repositories` +
+  `/refresh`) — a fresh worker has an EMPTY library, which is what Lorenzo saw. The
+  "➕ Pose Library" modal now lists the host's repositories (the node UI's built-ins) with
+  enable toggles and Download buttons (per-repo + all-enabled), then reloads the pose list.
+- Library pose cards now show their preview images (`pose_library/preview/{name}`), and
+  entries whose full data wasn't returned by `list` are fetched on demand via
+  `pose_library/get/{name}` when added to the pose set.
+- "Preview failed: Method Not Allowed" is the SPA catch-all answering for a route the RUNNING
+  backend doesn't have (405 on POST /preview = the backend process predates v1.56.0). The
+  error now says so explicitly and tells you to restart the backend.
+
+## [1.56.0] - 2026-07-10
+
+### Changed — VNCCS Native: staged creation flow (matches the panel's intent; fixes the
+"Timed out waiting for VNCCS generation" experience — the old Create button ran the FULL
+12-pose + SeedVR pipeline in one shot)
+
+- **Create tab reworked**: "✨ Generate Character" now renders ONE default-pose preview via the
+  host's `/vnccs/preview_generate` (fast; new `POST /api/studio/vnccs/preview` merges the
+  vendored gen_settings baseline + saved overrides). "💾 Save" persists the form to the Studio
+  catalog (`POST /character/save`, stored in `manifest["vnccs"]["form"]`); Library cards get
+  "Load into Create". Then pick poses and hit "Generate Poses" for the full pipeline.
+- **Pose selection**: default 12 VNCCS poses shown with app-rendered thumbnails
+  (`GET /pose-defaults`, best-effort via pose_render) + "➕ Pose Library" modal to add host
+  library poses (full data). New `pose_set` on `POST /generate/{step}` replaces the Pose Studio
+  pose list (capped 16 = node CSR limit); the app-side capture pre-render follows the subset.
+  Shared across Create / Cloner / Clothes.
+- **Upscaler controls** on Create / Cloner / Clothes: SeedVR/GAN/Off + upscale resolution +
+  pose target size → `generator_overrides` merged into the generator widget_data
+  (`upscaler.mode/resolution`, `pose_generation.target_size`) — rest of the vendored
+  upscaler/BG-remove config preserved.
+- **Clothes/Emotions character preview**: pose-sprite strip with prev/next switching (host
+  `get_character_pose_preview` + `_meta`), Emotions adds a costume switcher for the preview.
+- **Emotions costumes**: host costume list (`get_character_costumes`) rendered as checkboxes —
+  generate all selected emotions × all selected clothing sets (incl. the base set); free-text
+  fallback when the list is empty.
+- Poll timeout 20 → 60 min with elapsed-minutes status; timeout message now explains the job
+  may still be running on the host and suggests fewer poses / Upscaler=Off.
+
+## [1.55.1] - 2026-07-10
+
+### Fixed — VNCCS Native: Pose Studio crash on headless generation (2nd live-test error)
+
+`VNCCS_PoseStudio` died with `could not broadcast input array from shape (19158,3) into shape
+(19158,)`. Reproduced locally against the vendored MakeHuman data: the node's headless Python
+fallback renderer has an UPSTREAM bug — poses with non-zero `modelRotation` (all rear/side
+views; 8 of the 12 default poses) hit `np.dot(posed, rot.T)` where `rot` is `np.matrix`, the
+vertex array silently adopts matrix semantics, and the screen projection breaks. The ComfyUI
+panel never hits this because the browser pre-renders the poses (CSR `captured_images` path).
+
+- **New `vnccs_native/pose_render.py`**: faithful port of the node's fallback renderer
+  (MakeHuman solve → FK skinning → flat-shaded PIL render) with `np.asarray` guards on every
+  matrix product, running app-side against the vendored `vnccs-utils/CharacterData`.
+- **`_inject_pose_captures`** in `workflows.py`: every assembled step graph containing a
+  Pose Studio node (creator/cloner/clothes) gets its 12 poses pre-rendered and injected as
+  `pose_data["captured_images"]` (+ lighting_prompts), so the node takes its well-tested CSR
+  path — the same one the panel uses. First generate pays ~17 s (data load + renders), then
+  cached. Honors view size, bg color, lights and cam_zoom from the pose data.
+- Best-effort: if `vnccs-utils/CharacterData` is missing or anything fails, the graph is
+  submitted unchanged (previous behaviour).
+
+## [1.55.0] - 2026-07-09
+
+### Fixed — VNCCS Native: "No Checkpoint selected in Character Creator V2" (first live test)
+
+Root cause: the GUI meganodes (CharacterCreatorV2/CharacterCloner/ClothesDesigner) declare
+`widget_data` as a HIDDEN input, so the UI→API converter dropped it and the assembler rebuilt
+it from `{}` — the creator then ran with empty gen_settings → illustrious mode → empty
+ckpt_name → ValueError on the worker.
+
+- **`_seed_hidden_widget_data`** (`vnccs_native/workflows.py`): each meganode's original
+  widget_data JSON is now carried over from the vendored graph before patching, so steps run
+  with the graph's WORKING baseline (Creator: anima + anima-base-v1.0 + Qwen CLIP/VAE + turbo
+  LoRA + mode_settings profiles; the generator's SeedVR-upscaler/BG-remove config was already
+  carried as a declared widget). Verified against the node source + Lorenzo's node-UI
+  screenshots (samples/vnccs/, untracked).
+- **Mode-aware gen_settings merge** (`_merge_gen_settings`): VNCCS `normalize_gen_settings`
+  applies `mode_settings[mode]` LAST, so overrides are now written both top-level AND into the
+  active mode profile (previously e.g. steps overrides would be silently shadowed by the
+  baseline profile). Baseline's fixed template seed is reset to 0 (=random per run,
+  `generate_seed(0)`) unless a seed is pinned.
+- **Emotions honors saved generation settings too**: merged into the EmotionGeneratorV2
+  `generation_settings` JSON widget (+ generation_model synced to the mode).
+
+### Added
+
+- **Settings → Character generation** section on the VNCCS Native page: mode
+  (anima/illustrious), base model picked from the host's diffusion_models/checkpoints lists,
+  steps/cfg/sampler/scheduler (host lists), seed (blank = random). Blank everything = the
+  vendored graph's working defaults. Saved in `studio_vnccs_settings.gen_settings`.
+
+## [1.54.0] - 2026-07-09
+
+### Added — VNCCS Native LLM Wizards (Character · Clothes · Cloner-Analyze)
+
+The wizard buttons from the VNCCS ComfyUI panel now exist in VNCCS Native:
+
+- **✨ Character Wizard** (Create tab): plain-language idea → fills sex/age/race/skin/hair/
+  eyes/face/body/details.
+- **✨ Clothes Wizard** (Clothes tab): outfit idea → fills the five costume slots.
+- **🔎 Analyze reference** (Cloner tab): vision-describes the first uploaded reference into an
+  editable character-info panel (incl. aesthetics + NSFW) that is now actually SENT with the
+  clone job (previously the cloner submitted an empty `character_info`).
+
+Backend: `POST /api/studio/vnccs/wizard/{character|clothes|clone-analyze}` — **host-first,
+Ollama fallback**. Host path relays to the real VNCCS wizard routes (identical Qwen2.5-VL GGUF,
+prompts, tag catalog and post-processing = same result as the VNCCS panel; note the host loads
+the LLM per request and auto-downloads ~5 GB on first ever use). On host failure the app reruns
+the VERBATIM VNCCS prompts (new `vnccs_native/wizards.py`) on its own Ollama (`ollama_model` /
+`ollama_vision_model`), pulling the same tag catalog from the host `/vnccs/get_tags`; the UI
+shows which backend produced the fields. `backend: "host"|"ollama"` forces a path.
+
+## [1.53.2] - 2026-07-09
+
+### Fixed — full past-asks audit fix-wave (6 parallel audits vs every prior request; report: AUDIT_2026-07-09)
+
+- **Studio "FLUX.2 Klein T2I" base-model option was inert** (`services/jobs/dispatcher.py`):
+  no-ref `klein_t2i` jobs are always routed through the first-pass redirect, and
+  `flux2_klein_dev_9b` matched no branch — picking it silently rendered Z-Image Turbo.
+  An explicit per-job Klein override now skips the redirect and runs the real Klein T2I
+  workflow (`KLEIN_EDIT_ULTRA_WORKFLOW_Text2Image.json`); asset meta keeps the Klein label
+  instead of being resolved to the first-pass generator.
+- **Pose Organizer scans could die silently** (`api/tools.py`): the scan background task was
+  created without retaining a reference, so Python could garbage-collect it mid-run on large
+  folders. Now retained in `_BG_TASKS` with a done-callback, mirroring the sample-gen path.
+- **Talkie video prompts survive text export/import** (`services/project_text_io.py`):
+  `_project_renders_video` excluded talkie, so `video_*` fields were dropped on round-trip
+  even though the lip-sync engines consume the scene video prompt.
+- **Batch mode can create Talkie projects** (`BatchItemAddModal.tsx`): added the missing
+  "Talkie (Lip-Sync)" render type (backend already supported it) with a portrait-setup hint;
+  talkie uses the narration-style SRT/Whisper options.
+- **Mobile projects list labels talkie** (`MobileProjects.tsx`): was showing the raw mode string.
+
+### Docs
+
+- README: removed the stale "ultra pipeline not included yet" note (it ships) and added the
+  missing `anima-turbo-lora-v0.1.safetensors` row to the Anima model table.
+- `docs/MODEL_PROMPTING.md`: added the missing Anima section (quality-tag formula, dispatch-side
+  `ANIMA_DEFAULT_NEGATIVE`, narration-mode precedence note).
+- `vnccs_native/graph.py`: documented the hidden-`widget_data` coupling — new VNCCS step nodes
+  MUST get a matching `_apply_*` patch in workflows.py.
+
+### Known items deliberately left open (from the audit, for later decision)
+
+- Anima inpaint ignores the object `reference_asset_id` (prompt-guided only, unlike Klein).
+- Narration/talkie modes override the Anima prompt formula with the narration system prompt.
+- CustomBaseModal (Advanced) uses the saved — not live — NSFW toggle for `krea2_sfw_override`.
+
+## [1.53.1] - 2026-07-09
+
+### Fixed — VNCCS Native audit fix-wave (2 parallel read-only audits: backend + frontend)
+
+- **`submit_prompt` NameError on the error path** (`vnccs_native/client.py`): `json` was only imported
+  locally, so a host `node_errors` response raised `NameError` and masked the real error as a 500.
+  Added a module-level `import json`.
+- **Relay whitelist `..` traversal bypass** (`vnccs_native/client.py`): `_path_allowed("models/../../prompt")`
+  returned True and `urljoin` collapsed it to a non-`/vnccs/` core route (`/prompt`, `/view`). Now any
+  subpath containing a `..` segment is rejected.
+- **Ingest clobbered prior-step outputs** (`vnccs_native/ingest.py`): outputs were keyed by label, and
+  labels overlap across steps (`faces`/`pose_generation`/`upscaled` in both creator and clothes), so
+  ingesting Clothes overwrote the Creator's catalog entries. Outputs are now namespaced `"{step}/{label}"`;
+  `catalog.link_to_project` matches on the label suffix.
+- **`/result` reported errored jobs as `completed`** (`api/vnccs_native.py`): a host `error` status with no
+  outputs now returns `status: "error"` so the UI surfaces the failure instead of trying to ingest nothing.
+- **Pose Studio morph-worker listener leak** (`PoseStudio3D.tsx`): the `error` branch of a solve now removes
+  its `message` listener (previously only the success branch did).
+- **`editModel` dropped other saved Control-Center keys** (`VNCCSNativePage.tsx`): picking an edit-model
+  override now merges with the saved `control_center` blob instead of replacing it.
+
+
+## [1.53.0] - 2026-07-09
+
+### Added — VNCCS Native mode: Cloner + project-linking (Phase 6)
+
+Completes the VNCCS Native build: clone characters from reference photos, and make any cataloged
+VNCCS character usable inside real projects.
+
+- **Cloner (Step 1 clone).** Backend: `VNCCSClient.upload_image` (→ host `/upload/image`), a
+  `POST /api/studio/vnccs/upload` endpoint, and `_apply_cloner_images` which injects the uploaded
+  refs into `CharacterCloner.source_images`. `assemble_step`/`build_cloner_graph` take `cloner_images`
+  (unit-tested). Frontend: a **Cloner** tab — upload reference images (multi), name, generate → the
+  same poll/ingest pipeline. The clone emits both clothed and nude sprite paths.
+- **Catalog + project-linking.** `catalog.py`: `list_catalog` (all ingested VNCCS characters via
+  `manifest["vnccs"]`) and `link_to_project` (copies a character's images into a target project as
+  `CHARACTER` reference assets so they can be used in that project's scenes). Endpoints
+  `GET /catalog` + `POST /link`. Frontend: a **Library** tab listing cataloged characters with a
+  project picker and one-click "Link to project".
+
+This closes the phased VNCCS Native replica: Create · Cloner · Clothes · Emotions · 3D Pose Studio ·
+Library, all driving the real VNCCS nodes on a pinned host and cataloged in our system.
+
+
+## [1.52.0] - 2026-07-09
+
+### Added — VNCCS Native mode: 3D Pose Studio (Phase 5, v1)
+
+The interactive 3D pose editor, built by **reusing the portable, ComfyUI-independent
+`PoseViewerCore`** rather than porting it — the vendored engine does the Three.js camera/FK/IK/hand
+gizmos; our host only wires controls + the pose-library round-trip.
+
+- **Vendored** the portable JS to `frontend/public/vnccs-pose/` (served static, self-resolving via
+  `import.meta.url`): `vnccs_pose_studio_core.js`, `three.module.js`, `OrbitControls.js`,
+  `TransformControls.js`, `vnccs_hand_presets.js`, `vnccs_openpose_import.js`, `vnccs_mixamo_import.js`,
+  `vnccs_camera_control.js`, `vnccs_pose_morph_worker.js`. The morph worker's `MORPH_URL` is patched to
+  our proxy (`/api/studio/vnccs/r/character_studio/morph_data.bin`) and given an `init` message that
+  returns the bone/joint topology for the first `viewer.loadData()`.
+- **`PoseStudio3D.tsx`** (React host, lazy-loaded): mounts `PoseViewerCore` on a canvas, runs `init()`,
+  drives the morph worker (topology → morphed vertices → `loadData`/`updateBodyVertices`), and exposes
+  camera orbit + IK/FK toggle + body-shape sliders + capture. Author a pose and **Save to Pose Library**
+  (`getPose()` + a captured preview → `/vnccs/pose_library/save`) — the same library the generation
+  pipeline consumes. A "Pose Studio" tab was added to the VNCCS Native page (three.js only loads on open).
+
+*Note:* this phase needs a live VNCCS host to fully exercise (it fetches `morph_data.bin` through the
+proxy) and fails gracefully otherwise; Phases 1-4 are fully offline-verifiable, this one is not.
+
+
+## [1.51.0] - 2026-07-09
+
+### Added — VNCCS Native mode: Clothes (Step 2) + Emotions (Step 3)
+
+Extends the VNCCS Native Character Studio mode (v1.50.0) with the next two pipeline steps,
+both end-to-end (backend assembly + frontend + ingest into our catalog).
+
+- **Backend** (`vnccs_native/workflows.py`): step-specific injectors added to `assemble_step` —
+  `_apply_clothes_form` patches `ClothesDesigner.widget_data` (the 5 costume slots
+  top/bottom/head/face/shoes + clone-image + ClothesCore LoRA), and `_apply_emotions_form`
+  patches `EmotionGeneratorV2` (`character` + `costumes_data`/`emotions_data` as JSON strings +
+  generation_model/prompt_style). New `build_clothes_graph` / `build_emotions_graph`. The
+  `/generate/{step}` endpoint now accepts the clothes/emotions fields. Both assemblies unit-tested
+  against the real vendored graphs.
+- **Frontend** (`VNCCSNativePage.tsx`): a Create / Clothes / Emotions tab bar sharing one
+  generate→poll→ingest engine. Clothes = character picker + costume name + 5 slot fields; Emotions =
+  character picker + costumes + a multi-select emotion catalog loaded from the host
+  (`/api/studio/vnccs/emotions`). Host character list drives the pickers.
+
+
+## [1.50.0] - 2026-07-09
+
+### Added — VNCCS Native mode (Phases 1-2: reuse layer + Creator end-to-end)
+
+A NEW Character Studio mode, separate from the engine mode, that drives the *real* VNCCS
+meganode pipeline on a pinned host and catalogs the outputs in our system. Built as a **thin
+app over VNCCS** (the workers already run it), not a reimplementation.
+
+- **Reuse layer (Phase 1).** `backend/services/character_studio/vnccs_native/`:
+  - `client.py` — `VNCCSClient`: a security-whitelisted generic *relay* to the workers'
+    `~80 /vnccs/*` routes (character/costume/emotion store, LLM wizards, HF pose library,
+    previews, context lists) + typed helpers + core ComfyUI routes (`/object_info`, `/prompt`,
+    `/history`, `/view`). `_path_allowed` blocks non-vnccs paths + traversal (unit-tested).
+  - `host.py` — pins Studio-VNCCS work to one host (configured URL, else first vnccs-capable worker).
+  - `api/vnccs_native.py` — `/api/studio/vnccs/*`: host config, typed context-lists/characters/
+    emotions/pose-library, and a generic JSON/binary relay (`/r/{subpath}`).
+  - `AppSettings.studio_vnccs_host` + `studio_vnccs_settings` (+ additive migration).
+- **Generation engine (Phase 2).**
+  - `graph.py` — faithful ComfyUI UI→API `/prompt` converter using the worker's `object_info`
+    (no guessing at widget names); resolves Reroutes, taps generator outputs with SaveImage,
+    patches JSON widgets. Unit-tested against the real Creator graph.
+  - `workflows.py` — `assemble_step` / `build_creator_graph` / `build_cloner_graph`: inject our
+    character form + gen-settings + Control-Center config into the vendored VNCCS Step graphs
+    (`workflows/vnccs/STEP1_CREATOR|STEP1_CLONER|STEP2_CLOTHES|STEP3_EMOTIONS.json`).
+  - `ingest.py` — downloads tapped outputs into our asset store and catalogs them on a
+    `StudioCharacter` (VNCCS link stored in `manifest["vnccs"]` — no schema change).
+  - Endpoints: `POST /generate/{step}`, `GET /result/{prompt_id}`, `GET /view`, `POST /ingest`.
+  - **Frontend:** `components/VNCCSNative/` (`vnccsNativeApi.ts` + `VNCCSNativePage.tsx`) — settings
+    (host pin + optional model), the VNCCS character form, and generate→poll→ingest with a results
+    gallery. Route `/studio/vnccs` + a "✨ VNCCS Native" button on the Character Studio header.
+
+Remaining (later phases): costumes, emotions, cloner UI, the 3D Pose Studio (reusing the portable
+`vnccs_pose_studio_core.js`), and project/scene linking.
+
+
+## [1.49.0] - 2026-07-08
+
+### Fixed — deep VNCCS + Anima parity (phased audit vs vnccs/ + anima/ source)
+
+- **Qwen pose was fed a backwards/over-specified prompt.** VNCCS drives pose/emotion/clothes via the
+  task LoRA + a GENERIC system instruction + minimal prompt + latent_image_index. Our qwen prompts
+  described the images backwards (claimed image1=character when image1 is the skeleton) and overrode
+  the generic instruction — fighting the LoRA. Now: pose uses a minimal prompt + VNCCS_QIE_INSTRUCTION
+  (image1=skeleton, image2=identity, latent_image_index=1, PoseStudio LoRA), matching VNCCS exactly.
+- **Costume qwen** now uses VNCCS's `Dress the character:\n{outfit}\nsolid <bg> background` prompt +
+  the generic instruction, and `latent_image_index` 2→1 (VNCCS never uses 2 for clothes).
+- **Emotion**: qwen path uses the generic instruction; `auto` now prefers **FaceDetailer** (VNCCS's real
+  emotion mechanism) when the worker has Impact-Pack. FaceDetailer params corrected to VNCCS values —
+  bbox_threshold 0.5→0.1, bbox_crop_factor 3.0→4.5, sam_dilation 0→25, tiled encode/decode on, and the
+  emotion text is now set into the FaceDetailer wildcard too.
+- **Anima ULTRA dimension bug**: prepare_anima_workflow now sets the WIDTH/HEIGHT INTConstant nodes, so
+  the SEGS body-detailer mask + i2i resize honor the project resolution (was hardcoded to 1920×1080 /
+  produced mismatched SEGS at other sizes). ANIMA_INPAINT.json fallback set to turbo-only LoRA (matches
+  the reference inpaint export).
+- Confirmed our bundled pose presets + ClothesCore RC3.7 + base SFW/NSFW clothing tokens are
+  byte/string-exact matches to the VNCCS source.
+
+## [1.48.0] - 2026-07-08
+
+### Fixed/Added — past-asks audit fix-wave (vs VNCCS source)
+
+- **Pose render now matches VNCCS exactly** (LoRA fidelity): OpenPose line thickness 4→3, the one
+  divergent bone color `neck->l_shoulder`→(255,85,0) (VNCCS FALLBACK_PALETTE), and DEFAULT_SKELETON
+  restored to VNCCS values (reverted an incorrect flip). Confirmed our bundled pose_presets.json is
+  byte-identical to VNCCS's vnccs_poseset.json.
+- **Per-character NSFW now truly overrides the global SFW toggle** — the global SFW suffix is suppressed
+  when a character is set NSFW (was still appended, fighting the nude clothing phrase).
+- **Character clone extracts `nsfw` + `aesthetics`** (VNCCS parity) with a skin-color enumeration +
+  anti-pale guard; the NSFW toggle now auto-populates from a reference image (applyTagSheet preserves
+  booleans instead of stringifying them).
+- **Anima img2img + inpaint are now triggerable** (were wired in dispatch but dead): Custom Base
+  Advanced gets an img2img source (→ anima_i2i); the Inpaint modal gets a Klein/Anima engine selector
+  (→ anima_inpaint). Added a default Anima negative prompt (user's token list) to all Anima renders.
+- **Pose Organizer 'vision scan' implemented** — was a dead no-op param; now optionally describes each
+  pose with the Ollama vision model and adds semantic tags (UI toggle in the organizer).
+- **Emotion prompt folds the booru description tags** with natural_prompt (VNCCS convention), not
+  natural_prompt alone.
+
+## [1.47.0] - 2026-07-08
+
+### Added — Pose/Expression Library pickers in Studio + skeleton fix
+
+- **Pose Library picker** in the Character Studio pose tab: browse/search/select from the Tools Pose
+  Library and add the chosen poses to the character's pose set (via /pose-library/to-presets).
+- **Expression Library picker** in the emotion tab: pick expressions from the Tools Expression Library
+  and generate them directly. `emotions/generate` now accepts `custom_expressions` [{name, natural_prompt}].
+- Shared `StudioLibraryPicker` modal (pose thumbnails / expression list, category + search, multi-select).
+
+### Fixed
+
+- `DEFAULT_SKELETON` fallback flipped to standard front-facing OpenPose convention (subject-right on the
+  viewer's left), matching the bundled pose presets. (Confirmed the actual bundled presets were already
+  correct — the earlier 'wrong direction' was the centering bug fixed in 1.45.4; no global flip applied,
+  which would have broken the correct presets + imported OpenPose.)
+
+## [1.46.0] - 2026-07-08
+
+### Added — direct PNG OpenPose control images
+
+- **Import PNG poses** (Character Studio pose tab): bulk-import PNG/JPG OpenPose skeleton images (a
+  single image or a .zip of thousands) as pose presets. `POST /pose-presets/import-images`.
+- These presets use the image **directly as the pose control** (no keypoint conversion, no re-render),
+  so your existing OpenPose skeleton collections work as-is and bypass the renderer entirely. They
+  appear in the pose grid with their own thumbnail and generate on either engine.
+
+### Fixed
+
+- Pose skeleton is now scaled + centered into the target canvas (was drawn at raw 512x1536 coords →
+  off-center). Corrected the stale 'Klein has no pose-control' warning (Klein uses the RefControl Pose
+  LoRA). Worker-aware LoRA-name resolution + ClothesCore filename (from 1.45.3).
+
+### Known / next
+
+- Built-in joint poses appear mirrored vs standard OpenPose (subject-right on viewer-right) — pending
+  confirmation before flipping; PNG-direct poses are unaffected. Pose/Expression Library pickers inside
+  the Studio tabs still to come.
+
+## [1.45.4] - 2026-07-08
+
+### Fixed — pose skeleton centering + stale Klein message
+
+- **Off-center / mis-scaled poses (both engines):** pose joints are authored in a native 512x1536
+  space but the OpenPose control skeleton was drawn at raw coordinates on the target canvas, so the
+  figure landed off to one side. render_pose now scales + centers the skeleton into the target
+  dimensions (aspect-preserved) — fixes the character being pushed to the left / wrong size.
+- **Stale Klein pose warning corrected:** the PoseStudio tab said Klein has 'no pose-control'. Klein
+  DOES do pose transfer via the RefControl Pose LoRA (set cs_klein_pose_lora + install
+  refcontrol_v2_poses.safetensors); message updated. Qwen (VNCCS) still recommended for strongest control.
+
+## [1.45.3] - 2026-07-08
+
+### Fixed — LoRA path resolution (worker-aware) + pose sizing
+
+- **Definitive LoRA-not-found fix.** Before submitting any workflow, the dispatcher now resolves every
+  LoRA reference (LoraLoader `lora_name`, pysssss LoraLoader, and rgthree Power-Lora `lora_N` slots) to
+  the worker's EXACT listed string, matched by filename against `/object_info`. This handles subfolders
+  and Windows backslashes (e.g. `qwen\\VNCCS\\VNCCS_QIE2511_PoseStudio_ART_V5.9.5.safetensors`) with no
+  config — replaces the fragile v1.45.2 slash-prefix approach (reverted). Covers both the Qwen pose
+  engine and the Klein RefControl pose LoRA.
+- Fixed the ClothesCore task-LoRA filename (`RC3.7`, was `RC3.x`).
+- **Pose sizing:** the OpenPose control skeleton is now rendered at the TARGET character dimensions
+  instead of a fixed 512x1536 canvas, so pose proportions match the output (QIE follows the skeleton's
+  size via `latent_image_index=1`; Klein resizes the ref). Fixes distorted/mis-scaled poses.
+
+## [1.45.2] - 2026-07-08
+
+### Fixed — Character Studio pose/costume/emotion LoRA path
+
+- VNCCS/Qwen task LoRAs (PoseStudio/ClothesCore/EmotionCore) live in a `models/loras` **subfolder** on
+  the worker, so ComfyUI lists them WITH the prefix — a bare filename failed with
+  `value_not_in_list` (400 from /prompt), breaking pose (and costume/emotion) generation on the Qwen
+  engine. The dispatcher now prepends a configurable subfolder (`AppSettings.cs_qie_lora_subdir`,
+  default `qwen/VNCCS/`) to the bare task-LoRA name at dispatch (skipped if the name already has a
+  path). Migration adds the column; STUDIO_QIE_EDIT.json fallback default updated too. Override the
+  column if your worker lists the LoRAs with a different prefix / slash direction.
+
+## [1.45.1] - 2026-07-08
+
+### Fixed — Talkie audit fix-wave
+
+- **Talkie had no working video entry point** (BLOCKING): the frontend + backend start-image guards
+  rejected Talkie scenes (which have no per-scene image). Both now bypass the guard for Talkie when a
+  portrait is set (the dispatcher injects it as the source).
+- **Autogen** no longer generates a throwaway per-scene image for Talkie scenes (would hang on
+  lip-sync-only workers and override the portrait); FF is treated as satisfied. The dispatcher now
+  ALWAYS forces the portrait as the source for Talkie video jobs (overrides any per-scene image).
+- `prepare_lipsync_workflow` warns loudly when the portrait/audio can't be wired (empty or unmatched
+  node title) instead of silently rendering an empty clip.
+- Simplified the Sonic capability matcher; SceneEditor hides the Stems tab for Talkie; AudioSetup uses
+  narration labels (Script) for Talkie.
+- Talkie video-gen guard now shows a Talkie-specific message ('upload a portrait in Talkie Setup')
+  when no portrait is set. Corrected LatentSync VRAM guidance in docs (~8-12 GB with optimizations;
+  MuseTalk ~4 GB is the low-VRAM pick). LTX Talkie path audited clean end-to-end.
+
+## [1.45.0] - 2026-07-08
+
+### Added — Talkie mode (talking-head lip-sync)
+
+- New project mode **Talkie**: upload one portrait + a narration, and each scene renders that
+  stationary portrait lip-syncing the scene's narration slice into a talking-head clip. Reuses the
+  narration pipeline (Whisper/AAF segmentation, per-scene audio slicing, subtitles,
+  `assemble_narration_video`) — it's narration-like but video-producing.
+- Four capability-routed lip-sync engines (auto-detected per worker):
+  - **lipsync_ltx** — reuses your existing LTX-2.3 image+audio path (natural head motion). Works out
+    of the box, no install. This is the default.
+  - **lipsync_latentsync / lipsync_musetalk / lipsync_sonic** — dedicated stationary/expressive
+    engines. Wired end-to-end (routing, capability detection, defensive title-based
+    `prepare_lipsync_workflow`); drop your tested ComfyUI export at `workflows/LIPSYNC_LATENTSYNC.json`
+    / `LIPSYNC_MUSETALK.json` / `LIPSYNC_SONIC.json` to activate (see docs/TALKIE_MODE.md).
+- Dispatcher **Talkie routing**: any video job in a Talkie project is redirected to the chosen engine
+  and gets the project's portrait injected as the source image (works for manual + autogen + batch).
+- `PUT /api/projects/{id}/talkie-config` sets `portrait_asset_id` + `talkie_engine` (project.settings).
+  Frontend: a **Talkie Setup** toolbar button (portrait upload + engine picker), mode option in
+  project creation, and narration-like gating throughout. No DB migration.
+
+## [1.44.0] - 2026-07-08
+
+### Added — Generate Sample (poses & expressions from our own models)
+
+- Tools → Pose Library, Pose Organizer, and Expression Library each get a **Generate Sample** button
+  opening a modal where you pick a **prompt + model** (Z-Image / Krea2 / Anima / Klein) + **count**
+  (1–8) + size, with an **Isolate subject** toggle that auto-appends the right framing directives
+  (full-body, plain background for poses; head-and-shoulders for expressions) plus sensible negatives.
+- Results stream into a **grid gallery** (click any tile to view large in a lightbox); multi-select the
+  ones you want, add a **category + name + tags**, and commit to the library — no need to source a
+  reference elsewhere.
+  - **Poses** run the chosen image(s) through **DWPose** on a worker to extract real editable keypoints
+    (auto-tagged + deduped), stored canonically like the rest of the Pose Library.
+  - **Expressions** store the chosen crop as the entry's reference image + a natural-language prompt
+    (defaults to your gen prompt) the emotion engines consume.
+- Backend (`backend/api/tools.py`): `POST /api/tools/sample/generate` (background task, per-model t2i
+  via the existing prepare_* workflows), `GET /sample/{id}` status polling, `GET /sample/{id}/image/{name}`,
+  `POST /sample/{id}/commit` (pose→keypoints, expression→reference), and `GET /expression-library/{id}/thumbnail`.
+- Expression Library rows now show a thumbnail when an entry has a reference image.
+
+## [1.43.0] - 2026-07-08
+
+### Added — Mobile Mode (touch-first)
+
+- New **Mobile Mode** card on the home page opens a dedicated touch-first app at `/mobile`, built for
+  phone/tablet use over the LAN (relative `/api` base + existing viewport meta — works as-is).
+- **Projects** (`/mobile`): tappable project list. **Project shell** with a bottom tab bar
+  (Overview · Scenes · Cast · Queue) and large tap targets throughout.
+- **Overview** (`/mobile/p/:id`): scene/asset counts, quick-nav tiles (incl. Storyboard), and an
+  **Auto-Generate** bottom sheet (all 7 pipeline modes) driving `startSequentialAutoGen` with a live
+  progress bar, current scene/step, Stop, and a link into batch details.
+- **Scenes** (`/mobile/p/:id/scenes`): per-scene cards with First/Last frame thumbnails (+version
+  count), lyric/narration text, and audio playback. Tapping a frame opens the shared regen modal
+  (version strip + active selector + prompt/refs/model/seed/two-pass generate) reused from Storyboard.
+- **Cast** (`/mobile/p/:id/characters`): create/edit characters (name+description via the concept),
+  generate their base image (`generateCharacterImage`, polled), version strip with set-active + delete,
+  and character delete.
+- **Queue** (`/mobile/p/:id/queue`): live generation jobs (from the global SSE store, seeded via
+  `getJobs`) with progress + cancel/retry/delete, inline auto-gen status, and batch-run cards.
+- **Batch detail** (`/mobile/batch/:id`): live progress, per-worker `active_jobs` render %, latest
+  asset preview, activity feed, error log, and resume/cancel.
+- Shared pieces: `MobileShell` (header + bottom tabs), `MobileSheet` (bottom sheet), `useProjectData`
+  (loads + hydrates the store for standalone routes, mirroring StoryboardPage).
+
+## [1.42.0] - 2026-07-08
+
+### Added — Storyboard Mode
+
+- New **Storyboard Mode** button in the per-project toolbar opens a full-window, ComfyUI-style
+  zoomable/pannable canvas (`/project/:id/storyboard`) showing every scene left-to-right.
+- Each scene card shows the **First Frame** and **Last Frame** active images (with a version-count
+  badge), the scene name, its lyric/narration text (`scene.parameters.lyrics`, with a word-timing
+  fallback), and a **play/pause** control for the scene's sliced audio (`audio_clip_path`).
+- Clicking a frame opens a regen modal: large preview with version cycling, a **version strip with an
+  active-state selector** (Set Active writes `chosen_image_path`/`chosen_last_frame_path`) and
+  per-version delete, a First/Last frame toggle, and a generate form (editable prompt + Enhance,
+  ReferenceSelector, workflow/custom-model dropdown, seed, two-pass) that dispatches via the existing
+  `generate/image` endpoint. Everything is a live reflection of the timeline data — no new backend.
+- Canvas: wheel-to-zoom (cursor-anchored), drag-to-pan, zoom in/out/reset controls; live per-scene
+  “Rendering” badges and auto-refresh driven by the job SSE stream.
+
+## [1.41.1] - 2026-07-08
+
+### Fixed — audit fix-wave (full front/back review of 1.30.1→1.41.0)
+
+- **Base render never showed progress for Restyle / Advanced / any out-of-band base job.** The
+  status endpoint forced `base.status="done"` whenever an old base asset resolved, so a freshly
+  queued base job (restyle, advanced, controlnet) was invisible and nothing polled for it. Now
+  reports `running` when the newest base job is pending/running regardless of an existing asset,
+  so both the parent poll and the sheet self-poll pick up completion and the new version appears.
+- **NSFW toggle only applied after a Save.** Quick "Generate Base Render" read the persisted
+  `character_info.nsfw`, ignoring an unsaved toggle. `GenerateBaseIn` now accepts an optional
+  `nsfw` override and the sheet passes the live toggle value.
+- **Anima base jobs weren't model-routed on multi-worker fleets.** `_get_required_models` omitted
+  `anima_t2i/i2i/inpaint/controlnet`, so they fell through to no constraint and could dispatch to a
+  worker lacking the Anima model. Now constrained to the single-image-generator model slot.
+- **Pose Organizer only loaded/committed the first 240 candidates.** Status poll now requests the
+  full candidate set (backend-capped) so select-all / commit cover every scanned pose.
+- **Pose Organizer poll hammered the endpoint after a hard error.** The poll now clears its interval
+  in the catch path (e.g. scan row gone) instead of retrying every 1.5s forever.
+- **Scan summary `sample_only` counter always read 0** (candidates were tagged `"sample"`); the
+  source-type tag now matches the counter key.
+
+## [1.41.0] - 2026-07-08
+
+### Added — Anima Ultra pipeline (FaceDetailer + Ultimate SD Upscale)
+
+- Derived `ANIMA_T2I_ULTRA.json` / `ANIMA_I2I_ULTRA.json` / `ANIMA_INPAINT_CN.json` from the source
+  ultra workflows: FaceDetailer/EditDetailer face-hand-eye refinement + Ultimate SD upscale. Each is
+  reduced to a single final output (the fully detailed+upscaled image) with dynamic inputs cleared
+  and parameterized (prompt/negative/seed/dims/image via `prepare_anima_workflow`).
+- New `app_settings.anima_ultra` (default on) + a Settings toggle (shown when Anima is the
+  generator). When on, the Anima t2i redirect and the i2i/inpaint dispatch prefer the ULTRA/CN
+  workflows; off falls back to the clean cores.
+- Requires Impact-Pack + UltimateSDUpscale nodes and the detector/SAM/upscale models on the worker
+  (see README). User confirmed all Anima nodes/models are installed.
+
+## [1.40.0] - 2026-07-08
+
+### Added — Anima LLLite ControlNet
+
+- `ANIMA_CONTROLNET.json` + `anima_controlnet` workflow type: control-guided Anima generation via
+  the `AnimaLLLiteApply` node (wraps the model with an LLLite controlnet + a control-hint image).
+  `prepare_anima_workflow` now parameterizes `lllite_name`/`strength` and the control/seed nodes.
+- Usable from **Create Custom Base (Advanced)**: upload a control image (pose skeleton, depth, …),
+  pick the LLLite model (Pose / Inpainting), and generate — lands as a base version. Pairs
+  naturally with a pose skeleton exported from the Pose Library.
+- Requires the `AnimaLLLiteApply` node + LLLite models (`anima-lllite-pose-1.safetensors`,
+  `anima-lllite-inpainting-v1.safetensors`) on the worker. The reference "ultra" FaceDetailer /
+  UltimateSDUpscale pipeline remains a documented, opt-in follow-up (many extra detector/upscale
+  models).
+
+## [1.39.0] - 2026-07-08
+
+### Added — Anima anime base model (t2i first-pass + img2img + inpaint)
+
+- **Anima** is now selectable as the Single Image Generator (Settings + Character Studio base model
+  dropdowns). Qwen-VAE + Qwen-0.6B-CLIP anime base, turbo sampling (er_sde/simple, 12 steps, cfg 1).
+- Bundled clean workflows `ANIMA_T2I.json` / `ANIMA_I2I.json` / `ANIMA_INPAINT.json`;
+  `prepare_anima_workflow` parameterizes prompt/negative/dims/seed/image/denoise.
+- Dispatch: `klein_t2i` redirects to Anima when the generator is `anima`; new `anima_i2i` and
+  `anima_inpaint` workflow types (source image via reference/masked asset).
+- **Anima prompt enhancer**: dedicated system prompt (quality tags → subject tags → optional
+  @artist → anime tags → natural-language scene) so LLM enhancement outputs Anima-format prompts;
+  a strong default anime negative is baked into the workflows.
+- Requires the Anima models on the worker (see README) — core ComfyUI nodes + rgthree Power Lora
+  Loader only; a recent ComfyUI with the `er_sde` sampler. The reference "ultra" pipeline
+  (FaceDetailer/UltimateSDUpscale/AnimaLLLite controlnet) is documented but not yet built in.
+
+## [1.38.0] - 2026-07-07
+
+### Added — per-character SFW/NSFW base + clothing-from-reference costumes
+
+- **Per-character SFW/NSFW toggle** (Sheet tab, default SFW; stored in `character_info.nsfw`).
+  Mirrors VNCCS: the base render's clothing default becomes underwear (SFW:
+  `bare chest, wear white boxers` / `wear white bra and panties`) or nude (NSFW:
+  `naked, nude, ...`) so costumes layer over a clothing-ready body. Overrides the global
+  `krea2_sfw_mode` per character — base jobs pass `krea2_sfw_override`, the dispatcher honors it
+  over the global (NSFW → NSFW Krea2 workflow). Applies to generate-base, generate-all, and the
+  advanced generator.
+- **Clothing reference image on costumes**: a costume can carry a garment reference image
+  (`reference_asset_id`). When set, generation dresses the character (image 1) in the exact
+  clothing from the reference (image 2) via the edit models — `klein_2ref` (Klein) or
+  `studio_qie_edit` w/ ClothesCore (Qwen) — so one outfit can be applied across characters, or a
+  garment generated elsewhere swapped in. Upload it in the costume form; overrides the text fields.
+
+## [1.37.0] - 2026-07-07
+
+### Added — Create Custom Base Image (Advanced)
+
+- New **Create Custom Base (Advanced)** button on the Sheet tab opens a modal to build a base
+  render freehand: write a prompt, **LLM-enhance** it (uses the character sheet as context via the
+  app's PromptEnhancer + configured LLM), add up to 5 **reference images** (→ Klein `klein_Nref`
+  edit; none → text-to-image), and pick the first-pass **model**.
+- Endpoints: `POST /characters/{id}/enhance-base-prompt` (returns the optimized prompt for review)
+  and `POST /characters/{id}/generate-base-advanced` (dispatches the render).
+- Results land as a new **base version** and auto-activate, so you can freehand-experiment or
+  define exactly what you want and let the LLM write the optimal prompt.
+
+## [1.36.0] - 2026-07-07
+
+### Added — Base image editor: versions + restyle (Character Studio Sheet tab)
+
+- The base render now keeps **versions**. Every generate + restyle is recorded, uploads add
+  themselves, and `/status` returns `base.versions` + `base.active_asset_id`.
+- New **Edit / Versions** button on the base render opens a modal: view any version in a lightbox,
+  and click a version to make it the **active base** (`POST /characters/{id}/base-versions/set-active`
+  updates the scene's chosen_image_path, so the whole pipeline edits from it).
+- **Restyle** (`POST /characters/{id}/restyle-base`) redraws the current base with the Klein edit
+  model, keeping the character/pose/composition and only changing the art style. Style source:
+  the character's style, a custom style, a **reference image** (klein_2ref art-style match), or a
+  **video project's** `style_text`. The restyle lands as a new version and auto-activates. Ideal
+  for an uploaded character photo that needs a specific look.
+
+## [1.35.1] - 2026-07-07
+
+### Fixed — DWPose extraction node contract (verified against comfyui_controlnet_aux source)
+
+- Nodes are **`DWPreprocessor`** ("DWPose Estimator") → **`SavePoseKpsAsJsonFile`** ("Save Pose
+  Keypoints", forces execution) + core `LoadImage`. Keypoints are read from `DWPreprocessor`'s
+  `ui.openpose_json` in `/history`.
+- Bug fix: `openpose_json` is `[json.dumps([frame_dict, ...])]` (a JSON **array of frames**); the
+  parser now flattens that array instead of handing a list to the single-pose converter.
+- Workflow now uses the node's documented defaults (`bbox_detector=yolox_l.onnx`,
+  `pose_estimator=dw-ll_ucoco_384_bs5.torchscript.pt`, `scale_stick_for_xinsr_cn=disable`).
+
+## [1.35.0] - 2026-07-07
+
+### Added — Tools Phase 2: DWPose image→pose extraction + HD mannequin thumbnails
+
+- **Extract poses from images (DWPose)**: the Pose Organizer can now turn arbitrary images —
+  photos, character art, downloaded skeleton/mannequin renders — into real editable keypoints via
+  a GPU worker. Runs DWPose (`comfyui_controlnet_aux` `DWPreprocessor`), reads the OpenPose
+  keypoints back from the worker's `/history`, converts to the 18-joint schema, auto-tags, and adds
+  to the library. New `dwpose` worker capability (auto-detected). Requires `comfyui_controlnet_aux`
+  on a GPU ComfyUI worker.
+- **HD mannequin thumbnails**: render a clean grey artist-mannequin thumbnail per library pose via
+  the Klein RefControl Pose LoRA (image 1 = OpenPose skeleton, image 2 = 2D schematic mannequin) —
+  select poses → HD thumbnails. Reuses the existing Klein worker + `refcontrol_v2_poses.safetensors`;
+  no new nodes.
+- `GET /api/tools/capabilities` (dwpose/klein); the UI gates both actions on worker availability.
+
+  Note: both flows call the worker directly (upload → queue → poll `/history` → download) and need
+  first-run validation on your GPU worker — in particular the `DWPreprocessor` widget names and the
+  direct Klein render. The instant 2D mannequin thumbnail remains the default; HD is opt-in.
+
+## [1.34.0] - 2026-07-07
+
+### Added — Tools section: Pose Library + Pose Organizer + Expression Library
+
+New **Tools** main section (Home → Tools, `/tools`) — a reusable asset-library system.
+
+**Pose Organizer**
+- Scan a **server folder path** or an uploaded **`.zip`** of pose files (background scan, poll for
+  progress). Each file is classified (heuristics: keypoints / openpose-image / depth / natural),
+  OpenPose keypoints converted to the VNCCS 18-joint schema, **auto-tagged from geometry**
+  (front/back/profile, standing/sitting/crouching/lying, arms up/down), and **deduped** by pose
+  shape (cross-scan + against the library). Paired sample images are used as free thumbnails;
+  otherwise a 2D mannequin thumbnail is rendered.
+- Review grid with duplicate/img-only badges, lightbox, bulk select, category + extra tags, and
+  commit-selected-to-library.
+
+**Pose Library**
+- Browse committed poses by category/tag/search with thumbnails + lightbox. Poses stored
+  **canonically as keypoints** (re-renderable to any control format via `/pose-library/{id}/control`).
+- **Send to Pose picker** (bridges selected poses into the Character Studio custom-pose store so
+  they're pickable on a character's Poses tab), retag/recategorize, delete, and **export/import
+  portable pose packs** (`.zip` of keypoints + tags + thumbnails + manifest).
+
+**Expression Library**
+- Reusable facial expressions as name + natural-language prompt (+ category/tags). **Import the
+  bundled 157-emotion catalog** in one click, add your own, edit prompts inline, filter/search,
+  delete.
+
+**Also**
+- Character Studio Poses tab: explicit **view** button on each card opens the pose in a lightbox
+  without toggling selection.
+- New tables `pose_library`, `expression_library`, `library_scans` (created on startup).
+- Planned Phase 2 (scaffolding present): DWPose extraction from arbitrary reference images, and
+  optional HD mannequin thumbnail renders via the pose LoRA.
+
+## [1.33.0] - 2026-07-07
+
+### Added — OpenPose import + working Klein pose transfer (RefControl LoRA)
+
+**OpenPose → pose library converter**
+- New `POST /pose-presets/import-openpose` (multipart) ingests OpenPose keypoint files as
+  categorized pose presets. Accepts a single `.json` (one OpenPose object or an array) or a
+  `.zip` of thousands. Auto-detects **BODY_25** vs **COCO-18**, remaps to the VNCCS 18-joint
+  schema, and scales each pose into the 512x1536 canvas (aspect preserved, centered).
+- Poses tab gains an **Import OpenPose** button (categorizes by filename).
+
+**Klein RefControl Pose LoRA — real pose transfer without the VNCCS worker**
+- Pose control images now render as the standard **colored OpenPose skeleton on black** (what
+  pose LoRAs actually consume) instead of the mannequin schematic; the mannequin stays as the
+  browsable library thumbnail.
+- The Klein pose path now uses the RefControl Pose LoRA when configured: image 1 = pose
+  skeleton, image 2 = identity, trigger `apply pose from image 1 with reference from image 2`,
+  LoRA enabled in the existing rgthree Power Lora Loader node. New `app_settings.cs_klein_pose_lora`
+  column (default `refcontrol_v2_poses.safetensors`; empty disables → weak 2-ref fallback).
+- Requires `refcontrol_v2_poses.safetensors` present on each Klein worker (FLUX.2 Klein Base 9B).
+
+### Docs
+
+- Updated README (pose LoRA in the Klein LoRA table + a Character Studio requirements block:
+  Qwen/VNCCS, FaceDetailer, SeedVR2, RMBG2, Ollama models), `docs/CHARACTER_STUDIO.md`
+  (pose-control render, RefControl path, requirements checklist), `docs/CHARACTER_STUDIO_P2_API.md`
+  (1.30.1→1.33.0 endpoint addendum), and `HANDOVER_PROMPT.md` (→ v1.33.0 current state).
+
+## [1.32.2] - 2026-07-07
+
+### Added — click-to-lightbox on all Character Studio thumbnails
+
+- Emotions tab (full result + face crop), Poses tab (rendered pose result), Process panel
+  (cutout/upscale results), and Dataset caption thumbnails now open a full-size lightbox on
+  click, matching the base render / Renders / Costumes tabs. Pose preset thumbnails keep their
+  click-to-select behavior (only the rendered result opens the lightbox).
+
+## [1.32.1] - 2026-07-07
+
+### Fixed — emotions-from-costume: "has no rendered base sprite yet" on a rendered costume
+
+- The emotion endpoint resolved the costume source only via the sprite's `image_rel` (rel-path
+  lookup). It now prefers the sprite's `asset_id` — which is always set once the costume renders
+  (it's what draws the thumbnail) — and falls back to `image_rel`, so a successfully rendered
+  costume is reliably found. Clearer messages distinguish "costume not found" from "not rendered
+  yet."
+
+## [1.32.0] - 2026-07-07
+
+### Added / Fixed — Character Studio pose & consistency follow-ups
+
+- **Renders tab lightbox**: clicking a shot thumbnail now opens the full-size image in a lightbox
+  (was opening a new browser tab).
+- **Klein emotions no longer hard-fail on anime**: when YuNet/Haar detect no face, the emotion
+  mask now falls back to a heuristic upper-center face region (method="heuristic") so
+  `klein_inpaint` can run instead of erroring. Qwen is still recommended (no detection needed).
+- **Engine guidance**: Poses tab warns when the engine isn't Qwen (Klein has no pose-control and
+  reproduces the base pose); Emotions tab warns when using Klein (drift + face-detection reliance).
+- **Identity-lock prompts**: pose/costume/emotion/shot edit instructions now append an identity
+  clause ("BOTH eyes the SAME color, same features/hair/skin — no drift") to reduce Klein's
+  color/identity blending (e.g. mismatched eye colors).
+- **Pose library import + categories**: new `POST /pose-presets/import` ingests a VNCCS poseset
+  JSON (or a flat pose list) as categorized custom presets; the Poses tab gains an Import button
+  and a category filter. `/pose-presets` now returns a `category` per preset.
+
 ## [1.31.3] - 2026-07-07
 
 ### Fixed — pose refs looked like wireframes; costume images now open a lightbox

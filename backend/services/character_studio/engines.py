@@ -29,8 +29,30 @@ from typing import Any, Optional
 # Task LoRA filenames (already vendored on the VNCCS-capable worker; see
 # docs/CHARACTER_STUDIO.md P2 section and CLAUDE.md "already done" note).
 POSE_LORA = "VNCCS_QIE2511_PoseStudio_ART_V5.9.5.safetensors"
-CLOTHES_LORA = "VNCCS_QIE2511_ClothesCore-RC3.x.safetensors"
+CLOTHES_LORA = "VNCCS_QIE2511_ClothesCore-RC3.7.safetensors"
 EMOTION_LORA = "VNCCS_QIE2511_EmotionCore-RC1.safetensors"
+
+# Appended to edit instructions to fight identity drift (Klein especially
+# blends colors/features across reference images — e.g. mismatched eye
+# colors). Harmless for Qwen, meaningfully steadier for Klein.
+IDENTITY_LOCK = (
+    " Preserve the character's exact identity: same facial features and "
+    "proportions, BOTH eyes the SAME color, same hairstyle and hair color, "
+    "same skin tone. Do not alter or drift these."
+)
+
+# The EXACT system instruction VNCCS's character_generator feeds to
+# VNCCS_QWEN_Encoder for pose/emotion/clothes edits. VNCCS drives the actual
+# transformation via the task LoRA (PoseStudio/EmotionCore/ClothesCore) +
+# latent_image_index + minimal `prompt`; the instruction stays generic. Our
+# earlier bespoke/backwards instructions fought the LoRA — this matches VNCCS.
+VNCCS_QIE_INSTRUCTION = (
+    "Describe the character and their key features (body shape, physical "
+    "characteristics, clothing, items, accessories). Then explain how the "
+    "user's text instruction should alter or modify the character. Generate a "
+    "new image that meets the user's requirements while maintaining consistency "
+    "with the original character where appropriate."
+)
 
 
 class EngineUnavailableError(Exception):
@@ -106,6 +128,16 @@ def resolve_engine(op: str, requested: str, comfy_dispatcher) -> str:
         return "facedetailer"
 
     # auto
+    if op == "emotion" and online:
+        # VNCCS's real emotion mechanism is FaceDetailer (face-crop re-render);
+        # prefer it when the worker also has Impact-Pack, else fall back to the
+        # in-place QIE edit ('qwen').
+        try:
+            if comfy_dispatcher is not None and comfy_dispatcher.select_worker(
+                    {"impact"}, set(), exclude_runpod=True) is not None:
+                return "facedetailer"
+        except Exception:
+            pass
     return "qwen" if online else "klein"
 
 
@@ -113,7 +145,8 @@ def resolve_engine(op: str, requested: str, comfy_dispatcher) -> str:
 def pose_edit_params(engine: str, *, pose_asset_id: str, identity_asset_id: str,
                       prompt: str = "", seed: int = 0,
                       target_size: int = 1024,
-                      width: int = 0, height: int = 0) -> dict[str, Any]:
+                      width: int = 0, height: int = 0,
+                      pose_lora: str = "", pose_lora_strength: float = 0.9) -> dict[str, Any]:
     """Build Job.parameters for a pose-conditioned render.
 
     qwen: studio_qie_edit, image1=pose skeleton (control/canvas),
@@ -131,21 +164,48 @@ def pose_edit_params(engine: str, *, pose_asset_id: str, identity_asset_id: str,
     )
     if prompt:
         base_instruction += f" Additional direction: {prompt.strip()}"
+    base_instruction += IDENTITY_LOCK
 
     if engine == "qwen":
+        # VNCCS pose recipe: pose transfer is driven by the PoseStudio LoRA +
+        # image1=skeleton + latent_image_index=1 + the GENERIC instruction. The
+        # prompt is minimal (VNCCS passes only the character/background text) —
+        # over-describing the pose fights the LoRA.
+        _pose_prompt = "Change background to solid white color"
+        if prompt.strip():
+            _pose_prompt = f"{prompt.strip()}, Change background to solid white color"
         return {
             "workflow_type": "studio_qie_edit",
-            "image1_asset_id": pose_asset_id,     # control image (pose skeleton) → output canvas
+            "image1_asset_id": pose_asset_id,     # pose skeleton (control) → output canvas
             "image2_asset_id": identity_asset_id,  # identity
-            "prompt": base_instruction,
-            "instruction": base_instruction,
+            "prompt": _pose_prompt,
+            "instruction": VNCCS_QIE_INSTRUCTION,
             "task_lora": POSE_LORA,
             "task_lora_strength": 1.0,
             "target_size": target_size,
             "latent_image_index": 1,
             "seed": seed,
         }
-    # klein — identity first (slot 1), pose skeleton second (slot 2)
+    # klein + RefControl Pose LoRA (real pose transfer): image 1 = pose
+    # skeleton (control), image 2 = identity reference. Trigger phrase per the
+    # LoRA card. This is the path that actually transfers pose on Klein.
+    if pose_lora:
+        rc_prompt = "apply pose from image 1 with reference from image 2." + IDENTITY_LOCK
+        if prompt:
+            rc_prompt += f" Additional direction: {prompt.strip()}"
+        return {
+            "workflow_type": "klein_2ref",
+            "reference_asset_ids": [pose_asset_id, identity_asset_id],
+            "prompt": rc_prompt,
+            "width": width or target_size,
+            "height": height or target_size,
+            "pose_lora": pose_lora,
+            "pose_lora_strength": pose_lora_strength,
+            "seed": seed,
+        }
+    # klein without the LoRA — identity first (slot 1), pose skeleton second
+    # (slot 2). Weak fallback path (no RefControl Pose LoRA configured), so this mostly reproduces the
+    # base pose. Kept as a fallback when the LoRA is disabled.
     return {
         "workflow_type": "klein_2ref",
         "reference_asset_ids": [identity_asset_id, pose_asset_id],
@@ -158,6 +218,7 @@ def pose_edit_params(engine: str, *, pose_asset_id: str, identity_asset_id: str,
 
 # ── Costume ─────────────────────────────────────────────────────────────────
 def costume_params(engine: str, *, identity_asset_id: str, description: str = "",
+                    clothing_ref_asset_id: Optional[str] = None,
                     seed: int = 0, target_size: int = 1024,
                     width: int = 0, height: int = 0) -> dict[str, Any]:
     """Build Job.parameters for a costume/outfit render.
@@ -170,24 +231,57 @@ def costume_params(engine: str, *, identity_asset_id: str, description: str = ""
            (see backend/services/jobs/dispatcher.py klein_map) — we use it
            directly with a single identity reference.
     """
-    desc = (description or "").strip() or "a simple casual outfit"
-    prompt = (
-        f"Dress the character: {desc}. Keep the face, hair, and identity "
-        "unchanged. Keep the same pose and plain background."
-    )
+    desc = (description or "").strip()
+
+    # Clothing-from-reference: dress the character (image 1) in the garment
+    # shown in a reference image (image 2), via the edit models. Lets one piece
+    # of clothing be applied across characters, or a garment generated elsewhere
+    # be swapped in.
+    if clothing_ref_asset_id:
+        ref_prompt = (
+            "Dress the character in image 1 with the exact clothing/outfit shown in image 2. "
+            "Reproduce the garment's design, colors, fabric and details from image 2 precisely. "
+            "Keep image 1's face, hair, identity, body shape, pose and plain background unchanged."
+            + (f" {desc}." if desc else "") + IDENTITY_LOCK
+        )
+        if engine == "qwen":
+            return {
+                "workflow_type": "studio_qie_edit",
+                "image1_asset_id": identity_asset_id,        # canvas = the character
+                "image2_asset_id": clothing_ref_asset_id,    # the garment reference
+                "prompt": ref_prompt, "instruction": VNCCS_QIE_INSTRUCTION,
+                "task_lora": CLOTHES_LORA, "task_lora_strength": 1.0,
+                "target_size": target_size, "latent_image_index": 1, "seed": seed,
+            }
+        return {
+            "workflow_type": "klein_2ref",
+            "reference_asset_ids": [identity_asset_id, clothing_ref_asset_id],
+            "prompt": ref_prompt,
+            "width": width or target_size, "height": height or target_size,
+            "seed": seed,
+        }
+
+    desc = desc or "a simple casual outfit"
+    # VNCCS clothes recipe: prompt = "Dress the character:\n{outfit}\nsolid <bg>
+    # background"; transformation driven by ClothesCore LoRA + generic
+    # instruction + latent_image_index=1 (VNCCS never uses index 2 for clothes).
+    prompt = f"Dress the character:\n{desc}\nsolid white background"
     if engine == "qwen":
         return {
             "workflow_type": "studio_qie_edit",
-            "image1_asset_id": identity_asset_id,  # control == identity (in-place edit)
-            "image2_asset_id": identity_asset_id,  # identity
+            "image1_asset_id": identity_asset_id,
+            "image2_asset_id": identity_asset_id,
             "prompt": prompt,
-            "instruction": prompt,
+            "instruction": VNCCS_QIE_INSTRUCTION,
             "task_lora": CLOTHES_LORA,
             "task_lora_strength": 1.0,
             "target_size": target_size,
-            "latent_image_index": 2,
+            "latent_image_index": 1,
             "seed": seed,
         }
+    # klein path: no ClothesCore LoRA, so keep an explicit edit instruction.
+    prompt = (f"Dress the character: {desc}. Keep the face, hair, and identity "
+              "unchanged. Keep the same pose and plain background." + IDENTITY_LOCK)
     # klein_1ref: single identity reference. (klein_1ref IS a real dispatcher
     # workflow_type — verified in backend/services/jobs/dispatcher.py; no
     # need for the klein_2ref-with-one-ref workaround the spec anticipated.)
@@ -217,8 +311,8 @@ def emotion_params(engine: str, *, identity_asset_id: str, natural_prompt: str,
            the masked asset before calling this).
     """
     prompt = (
-        f"{natural_prompt.strip()} Keep identity, hair, outfit and pose "
-        "unchanged — only the facial expression changes."
+        f"{natural_prompt.strip()}\nOnly the facial expression changes; keep "
+        "identity, hair, outfit and pose unchanged."
     )
     if engine == "facedetailer":
         # VNCCS's exact emotion mechanism: face-crop re-render (YOLO bbox +
@@ -237,7 +331,7 @@ def emotion_params(engine: str, *, identity_asset_id: str, natural_prompt: str,
             "image1_asset_id": identity_asset_id,
             "image2_asset_id": identity_asset_id,
             "prompt": prompt,
-            "instruction": prompt,
+            "instruction": VNCCS_QIE_INSTRUCTION,
             "task_lora": EMOTION_LORA,
             "task_lora_strength": 1.0,
             "target_size": target_size,

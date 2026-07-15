@@ -1,0 +1,1185 @@
+{
+ "560": {
+  "inputs": {
+   "unet_name": "anima-base-v1.0.safetensors",
+   "weight_dtype": "default"
+  },
+  "class_type": "UNETLoader",
+  "_meta": {
+   "title": "Load Diffusion Model"
+  }
+ },
+ "561": {
+  "inputs": {
+   "vae_name": "qwen_image_vae.safetensors"
+  },
+  "class_type": "VAELoader",
+  "_meta": {
+   "title": "Load VAE"
+  }
+ },
+ "562": {
+  "inputs": {
+   "clip_name": "qwen_3_06b_base.safetensors",
+   "type": "stable_diffusion",
+   "device": "default"
+  },
+  "class_type": "CLIPLoader",
+  "_meta": {
+   "title": "Load CLIP"
+  }
+ },
+ "835": {
+  "inputs": {
+   "seed": 141
+  },
+  "class_type": "ttN seed",
+  "_meta": {
+   "title": "SEED"
+  }
+ },
+ "836": {
+  "inputs": {
+   "text": "",
+   "clip": [
+    "842",
+    1
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "CLIP Text Encode (Negative Prompt)"
+  }
+ },
+ "838": {
+  "inputs": {
+   "text": "",
+   "clip": [
+    "842",
+    1
+   ]
+  },
+  "class_type": "CLIPTextEncode",
+  "_meta": {
+   "title": "CLIP Text Encode (Positive Prompt)"
+  }
+ },
+ "842": {
+  "inputs": {
+   "PowerLoraLoaderHeaderWidget": {
+    "type": "PowerLoraLoaderHeaderWidget"
+   },
+   "lora_1": {
+    "on": true,
+    "lora": "anima-highres-aesthetic-boost.safetensors",
+    "strength": 1
+   },
+   "lora_2": {
+    "on": true,
+    "lora": "anima-preview-3-masterpieces-v5.safetensors",
+    "strength": 1
+   },
+   "lora_3": {
+    "on": true,
+    "lora": "anima_p3_rdbt_v0.29.b.122.safetensors",
+    "strength": 1
+   },
+   "lora_4": {
+    "on": false,
+    "lora": "anima-turbo-lora-v0.1.safetensors",
+    "strength": 1
+   },
+   "➕ Add Lora": "",
+   "model": [
+    "560",
+    0
+   ],
+   "clip": [
+    "562",
+    0
+   ]
+  },
+  "class_type": "Power Lora Loader (rgthree)",
+  "_meta": {
+   "title": "Power Lora Loader (rgthree)"
+  }
+ },
+ "843": {
+  "inputs": {
+   "value": 1920
+  },
+  "class_type": "INTConstant",
+  "_meta": {
+   "title": "WIDTH"
+  }
+ },
+ "844": {
+  "inputs": {
+   "value": 1080
+  },
+  "class_type": "INTConstant",
+  "_meta": {
+   "title": "HEIGHT"
+  }
+ },
+ "849": {
+  "inputs": {
+   "filename_prefix": "anima_ultra",
+   "images": [
+    "834:797",
+    0
+   ]
+  },
+  "class_type": "SaveImage",
+  "_meta": {
+   "title": "DETAILED UPSCALED"
+  }
+ },
+ "853": {
+  "inputs": {
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 12,
+   "cfg": 1,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 1,
+   "model": [
+    "918",
+    0
+   ],
+   "positive": [
+    "838",
+    0
+   ],
+   "negative": [
+    "836",
+    0
+   ],
+   "latent_image": [
+    "951:949",
+    0
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler"
+  }
+ },
+ "911": {
+  "inputs": {
+   "ckpt_name": "depth_anything_v2_vitl.pth",
+   "resolution": 512,
+   "image": [
+    "915",
+    0
+   ]
+  },
+  "class_type": "DepthAnythingV2Preprocessor",
+  "_meta": {
+   "title": "Depth Anything V2 - Relative"
+  }
+ },
+ "912": {
+  "inputs": {
+   "any_01": [
+    "915",
+    0
+   ]
+  },
+  "class_type": "Any Switch (rgthree)",
+  "_meta": {
+   "title": "Any Switch (rgthree)"
+  }
+ },
+ "913": {
+  "inputs": {
+   "detect_hand": "enable",
+   "detect_body": "enable",
+   "detect_face": "enable",
+   "resolution": 512,
+   "bbox_detector": "yolox_l.onnx",
+   "pose_estimator": "dw-ll_ucoco_384_bs5.torchscript.pt",
+   "scale_stick_for_xinsr_cn": "disable",
+   "image": [
+    "915",
+    0
+   ]
+  },
+  "class_type": "DWPreprocessor",
+  "_meta": {
+   "title": "DWPose Estimator"
+  }
+ },
+ "914": {
+  "inputs": {
+   "any_01": [
+    "913",
+    0
+   ],
+   "any_02": [
+    "911",
+    0
+   ],
+   "any_03": [
+    "912",
+    0
+   ]
+  },
+  "class_type": "Any Switch (rgthree)",
+  "_meta": {
+   "title": "Any Switch (rgthree)"
+  }
+ },
+ "915": {
+  "inputs": {
+   "image": ""
+  },
+  "class_type": "LoadImage",
+  "_meta": {
+   "title": "Load Image"
+  }
+ },
+ "918": {
+  "inputs": {
+   "lllite_name": "anima-lllite-pose-1.safetensors",
+   "strength": 1,
+   "start_percent": 0,
+   "end_percent": 1,
+   "preserve_wrapper": true,
+   "model": [
+    "842",
+    0
+   ],
+   "image": [
+    "914",
+    0
+   ]
+  },
+  "class_type": "AnimaLLLiteApply",
+  "_meta": {
+   "title": "Apply Anima ControlNet-LLLite"
+  }
+ },
+ "833:796": {
+  "inputs": {
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 12,
+   "cfg": 3,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.25,
+   "mode_type": "Linear",
+   "tile_width": [
+    "951:947",
+    1
+   ],
+   "tile_height": [
+    "951:947",
+    2
+   ],
+   "mask_blur": 32,
+   "tile_padding": 192,
+   "seam_fix_mode": "None",
+   "seam_fix_denoise": 1,
+   "seam_fix_width": 64,
+   "seam_fix_mask_blur": 8,
+   "seam_fix_padding": 16,
+   "force_uniform_tiles": true,
+   "tiled_decode": false,
+   "batch_size": 1,
+   "upscaled_image": [
+    "951:938",
+    0
+   ],
+   "model": [
+    "951:935",
+    0
+   ],
+   "positive": [
+    "838",
+    0
+   ],
+   "negative": [
+    "836",
+    0
+   ],
+   "vae": [
+    "561",
+    0
+   ]
+  },
+  "class_type": "UltimateSDUpscaleNoUpscale",
+  "_meta": {
+   "title": "Ultimate SD Upscale (No Upscale)"
+  }
+ },
+ "834:797": {
+  "inputs": {
+   "upscale_by": 2,
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 12,
+   "cfg": 2,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.28,
+   "mode_type": "Linear",
+   "tile_width": [
+    "951:947",
+    1
+   ],
+   "tile_height": [
+    "951:947",
+    2
+   ],
+   "mask_blur": 32,
+   "tile_padding": 192,
+   "seam_fix_mode": "None",
+   "seam_fix_denoise": 1,
+   "seam_fix_width": 64,
+   "seam_fix_mask_blur": 8,
+   "seam_fix_padding": 16,
+   "force_uniform_tiles": true,
+   "tiled_decode": false,
+   "batch_size": 1,
+   "image": [
+    "833:796",
+    0
+   ],
+   "model": [
+    "951:935",
+    0
+   ],
+   "positive": [
+    "838",
+    0
+   ],
+   "negative": [
+    "836",
+    0
+   ],
+   "vae": [
+    "561",
+    0
+   ],
+   "upscale_model": [
+    "834:798",
+    0
+   ]
+  },
+  "class_type": "UltimateSDUpscale",
+  "_meta": {
+   "title": "Ultimate SD Upscale"
+  }
+ },
+ "834:798": {
+  "inputs": {
+   "model_name": "4x-ClearRealityV1.pth"
+  },
+  "class_type": "UpscaleModelLoader",
+  "_meta": {
+   "title": "Load Upscale Model"
+  }
+ },
+ "837:799": {
+  "inputs": {
+   "upscale_by": 2,
+   "seed": 1072278209734030,
+   "steps": 12,
+   "cfg": 2,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.28,
+   "mode_type": "Linear",
+   "tile_width": [
+    "951:947",
+    1
+   ],
+   "tile_height": [
+    "951:947",
+    2
+   ],
+   "mask_blur": 32,
+   "tile_padding": 192,
+   "seam_fix_mode": "None",
+   "seam_fix_denoise": 1,
+   "seam_fix_width": 64,
+   "seam_fix_mask_blur": 8,
+   "seam_fix_padding": 16,
+   "force_uniform_tiles": true,
+   "tiled_decode": false,
+   "batch_size": 1,
+   "image": [
+    "951:938",
+    0
+   ],
+   "model": [
+    "951:935",
+    0
+   ],
+   "positive": [
+    "838",
+    0
+   ],
+   "negative": [
+    "836",
+    0
+   ],
+   "vae": [
+    "561",
+    0
+   ],
+   "upscale_model": [
+    "837:800",
+    0
+   ]
+  },
+  "class_type": "UltimateSDUpscale",
+  "_meta": {
+   "title": "Ultimate SD Upscale"
+  }
+ },
+ "837:800": {
+  "inputs": {
+   "model_name": "4x_foolhardy_Remacri.pth"
+  },
+  "class_type": "UpscaleModelLoader",
+  "_meta": {
+   "title": "Load Upscale Model"
+  }
+ },
+ "951:921": {
+  "inputs": {
+   "value": 2.5
+  },
+  "class_type": "PrimitiveFloat",
+  "_meta": {
+   "title": "BBOX Crop Factor"
+  }
+ },
+ "951:922": {
+  "inputs": {
+   "value": 512
+  },
+  "class_type": "PrimitiveFloat",
+  "_meta": {
+   "title": "Guide Size"
+  }
+ },
+ "951:923": {
+  "inputs": {
+   "value": 1536
+  },
+  "class_type": "PrimitiveFloat",
+  "_meta": {
+   "title": "Max Size"
+  }
+ },
+ "951:924": {
+  "inputs": {
+   "guide_size": [
+    "951:922",
+    0
+   ],
+   "guide_size_for": true,
+   "max_size": [
+    "951:923",
+    0
+   ],
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 16,
+   "cfg": 6,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.26,
+   "feather": 16,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "bbox_threshold": 0.4,
+   "bbox_dilation": 8,
+   "bbox_crop_factor": [
+    "951:921",
+    0
+   ],
+   "sam_detection_hint": "none",
+   "sam_dilation": 4,
+   "sam_threshold": 0.9000000000000001,
+   "sam_bbox_expansion": 0,
+   "sam_mask_hint_threshold": 0.7,
+   "sam_mask_hint_use_negative": "False",
+   "drop_size": 16,
+   "refiner_ratio": 0.2,
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 64,
+   "tiled_encode": [
+    "951:939",
+    0
+   ],
+   "tiled_decode": [
+    "951:939",
+    0
+   ],
+   "image": [
+    "951:925",
+    0
+   ],
+   "detailer_pipe": [
+    "951:928",
+    0
+   ]
+  },
+  "class_type": "FaceDetailerPipe",
+  "_meta": {
+   "title": "FaceDetailer (pipe)"
+  }
+ },
+ "951:925": {
+  "inputs": {
+   "guide_size": [
+    "951:922",
+    0
+   ],
+   "guide_size_for": true,
+   "max_size": [
+    "951:923",
+    0
+   ],
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 16,
+   "cfg": 6,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.3,
+   "feather": 16,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "bbox_threshold": 0.44,
+   "bbox_dilation": 8,
+   "bbox_crop_factor": [
+    "951:921",
+    0
+   ],
+   "sam_detection_hint": "none",
+   "sam_dilation": 4,
+   "sam_threshold": 0.9000000000000001,
+   "sam_bbox_expansion": 0,
+   "sam_mask_hint_threshold": 0.7,
+   "sam_mask_hint_use_negative": "False",
+   "drop_size": 16,
+   "refiner_ratio": 0.2,
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 64,
+   "tiled_encode": [
+    "951:939",
+    0
+   ],
+   "tiled_decode": [
+    "951:939",
+    0
+   ],
+   "image": [
+    "951:926",
+    0
+   ],
+   "detailer_pipe": [
+    "951:929",
+    0
+   ]
+  },
+  "class_type": "FaceDetailerPipe",
+  "_meta": {
+   "title": "NSFWDetailer (pipe)"
+  }
+ },
+ "951:926": {
+  "inputs": {
+   "guide_size": [
+    "951:922",
+    0
+   ],
+   "guide_size_for": true,
+   "max_size": [
+    "951:923",
+    0
+   ],
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 16,
+   "cfg": 6,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.24,
+   "feather": 16,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "bbox_threshold": 0.22,
+   "bbox_dilation": 8,
+   "bbox_crop_factor": [
+    "951:921",
+    0
+   ],
+   "sam_detection_hint": "none",
+   "sam_dilation": 4,
+   "sam_threshold": 0.9000000000000001,
+   "sam_bbox_expansion": 0,
+   "sam_mask_hint_threshold": 0.7,
+   "sam_mask_hint_use_negative": "False",
+   "drop_size": 16,
+   "refiner_ratio": 0.2,
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 64,
+   "tiled_encode": [
+    "951:939",
+    0
+   ],
+   "tiled_decode": [
+    "951:939",
+    0
+   ],
+   "image": [
+    "951:927",
+    0
+   ],
+   "detailer_pipe": [
+    "951:930",
+    0
+   ]
+  },
+  "class_type": "FaceDetailerPipe",
+  "_meta": {
+   "title": "BodyDetailer (pipe)"
+  }
+ },
+ "951:927": {
+  "inputs": {
+   "guide_size": [
+    "951:922",
+    0
+   ],
+   "guide_size_for": true,
+   "max_size": [
+    "951:923",
+    0
+   ],
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 16,
+   "cfg": 6,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.4,
+   "feather": 16,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "bbox_threshold": 0.5,
+   "bbox_dilation": 8,
+   "bbox_crop_factor": [
+    "951:921",
+    0
+   ],
+   "sam_detection_hint": "none",
+   "sam_dilation": 4,
+   "sam_threshold": 0.9000000000000001,
+   "sam_bbox_expansion": 0,
+   "sam_mask_hint_threshold": 0.7,
+   "sam_mask_hint_use_negative": "False",
+   "drop_size": 16,
+   "refiner_ratio": 0.2,
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 64,
+   "tiled_encode": [
+    "951:939",
+    0
+   ],
+   "tiled_decode": [
+    "951:939",
+    0
+   ],
+   "image": [
+    "951:948",
+    0
+   ],
+   "detailer_pipe": [
+    "951:931",
+    0
+   ]
+  },
+  "class_type": "FaceDetailerPipe",
+  "_meta": {
+   "title": "HandDetailer (pipe)"
+  }
+ },
+ "951:928": {
+  "inputs": {
+   "wildcard": "[CONCAT] {face|face,detailed face}",
+   "Select to add LoRA": "Select the LoRA to add to the text",
+   "Select to add Wildcard": "Select the Wildcard to add to the text",
+   "detailer_pipe": [
+    "951:940",
+    0
+   ],
+   "bbox_detector": [
+    "951:934",
+    0
+   ]
+  },
+  "class_type": "EditDetailerPipe",
+  "_meta": {
+   "title": "Edit DetailerPipe"
+  }
+ },
+ "951:929": {
+  "inputs": {
+   "wildcard": "[LAB]\n[ALL] nsfw\n[NIPPLES] nsfw, nipples\n[PUSSY] nsfw, pussy\n[ANUS] nsfw, (anus)\n[PENIS] nsfw, penis\n[TESTICLES] nsfw, testicles",
+   "Select to add LoRA": "Select the LoRA to add to the text",
+   "Select to add Wildcard": "Select the Wildcard to add to the text",
+   "detailer_pipe": [
+    "951:940",
+    0
+   ],
+   "bbox_detector": [
+    "951:933",
+    0
+   ],
+   "segm_detector": [
+    "951:933",
+    1
+   ]
+  },
+  "class_type": "EditDetailerPipe",
+  "_meta": {
+   "title": "Edit DetailerPipe"
+  }
+ },
+ "951:930": {
+  "inputs": {
+   "wildcard": "[CONCAT] body",
+   "Select to add LoRA": "Select the LoRA to add to the text",
+   "Select to add Wildcard": "Select the Wildcard to add to the text",
+   "detailer_pipe": [
+    "951:940",
+    0
+   ],
+   "bbox_detector": [
+    "951:932",
+    0
+   ],
+   "segm_detector": [
+    "951:932",
+    1
+   ]
+  },
+  "class_type": "EditDetailerPipe",
+  "_meta": {
+   "title": "Edit DetailerPipe"
+  }
+ },
+ "951:931": {
+  "inputs": {
+   "wildcard": "[CONCAT] hand, perfect hands",
+   "Select to add LoRA": "Select the LoRA to add to the text",
+   "Select to add Wildcard": "Select the Wildcard to add to the text",
+   "detailer_pipe": [
+    "951:940",
+    0
+   ],
+   "bbox_detector": [
+    "951:944",
+    0
+   ]
+  },
+  "class_type": "EditDetailerPipe",
+  "_meta": {
+   "title": "Edit DetailerPipe"
+  }
+ },
+ "951:932": {
+  "inputs": {
+   "model_name": "segm/yolo11m-seg.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ },
+ "951:934": {
+  "inputs": {
+   "model_name": "bbox/face_yolov9c.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ },
+ "951:935": {
+  "inputs": {
+   "strength": 1,
+   "model": [
+    "918",
+    0
+   ]
+  },
+  "class_type": "DifferentialDiffusion",
+  "_meta": {
+   "title": "Differential Diffusion"
+  }
+ },
+ "951:936": {
+  "inputs": {
+   "model_name": "bbox/Eyeful_v2-Paired.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ },
+ "951:937": {
+  "inputs": {
+   "wildcard": "[CONCAT] {eyes|eyes,detailed eyes}",
+   "Select to add LoRA": "Select the LoRA to add to the text",
+   "Select to add Wildcard": "Select the Wildcard to add to the text",
+   "detailer_pipe": [
+    "951:940",
+    0
+   ],
+   "bbox_detector": [
+    "951:936",
+    0
+   ]
+  },
+  "class_type": "EditDetailerPipe",
+  "_meta": {
+   "title": "Edit DetailerPipe"
+  }
+ },
+ "951:938": {
+  "inputs": {
+   "guide_size": [
+    "951:922",
+    0
+   ],
+   "guide_size_for": true,
+   "max_size": [
+    "951:923",
+    0
+   ],
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 16,
+   "cfg": 6,
+   "sampler_name": "er_sde",
+   "scheduler": "simple",
+   "denoise": 0.24,
+   "feather": 16,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "bbox_threshold": 0.38,
+   "bbox_dilation": 8,
+   "bbox_crop_factor": [
+    "951:921",
+    0
+   ],
+   "sam_detection_hint": "none",
+   "sam_dilation": 4,
+   "sam_threshold": 0.9000000000000001,
+   "sam_bbox_expansion": 0,
+   "sam_mask_hint_threshold": 0.7,
+   "sam_mask_hint_use_negative": "False",
+   "drop_size": 16,
+   "refiner_ratio": 0.2,
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 64,
+   "tiled_encode": [
+    "951:939",
+    0
+   ],
+   "tiled_decode": [
+    "951:939",
+    0
+   ],
+   "image": [
+    "951:924",
+    0
+   ],
+   "detailer_pipe": [
+    "951:937",
+    0
+   ]
+  },
+  "class_type": "FaceDetailerPipe",
+  "_meta": {
+   "title": "EyesDetailer (pipe)"
+  }
+ },
+ "951:939": {
+  "inputs": {
+   "value": false
+  },
+  "class_type": "PrimitiveBoolean",
+  "_meta": {
+   "title": "Tiled Detailer"
+  }
+ },
+ "951:940": {
+  "inputs": {
+   "wildcard": "",
+   "Select to add LoRA": "Select the LoRA to add to the text",
+   "Select to add Wildcard": "Select the Wildcard to add to the text",
+   "model": [
+    "951:935",
+    0
+   ],
+   "clip": [
+    "842",
+    1
+   ],
+   "vae": [
+    "561",
+    0
+   ],
+   "positive": [
+    "838",
+    0
+   ],
+   "negative": [
+    "836",
+    0
+   ],
+   "bbox_detector": [
+    "951:945",
+    0
+   ],
+   "sam_model_opt": [
+    "951:946",
+    0
+   ]
+  },
+  "class_type": "ToDetailerPipe",
+  "_meta": {
+   "title": "ToDetailerPipe"
+  }
+ },
+ "951:941": {
+  "inputs": {
+   "combined": false,
+   "crop_factor": 1,
+   "bbox_fill": false,
+   "drop_size": 10,
+   "contour_fill": false,
+   "mask": [
+    "951:942",
+    0
+   ]
+  },
+  "class_type": "MaskToSEGS",
+  "_meta": {
+   "title": "MASK to SEGS"
+  }
+ },
+ "951:942": {
+  "inputs": {
+   "value": 1,
+   "width": [
+    "843",
+    0
+   ],
+   "height": [
+    "844",
+    0
+   ]
+  },
+  "class_type": "SolidMask",
+  "_meta": {
+   "title": "SolidMask"
+  }
+ },
+ "951:943": {
+  "inputs": {
+   "samples": [
+    "853",
+    0
+   ],
+   "vae": [
+    "561",
+    0
+   ]
+  },
+  "class_type": "VAEDecode",
+  "_meta": {
+   "title": "VAE Decode"
+  }
+ },
+ "951:944": {
+  "inputs": {
+   "model_name": "bbox/hand_yolov9c.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ },
+ "951:945": {
+  "inputs": {
+   "model_name": "bbox/face_yolov9c.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "Default DetectorProvider"
+  }
+ },
+ "951:946": {
+  "inputs": {
+   "model_name": "sam_vit_b_01ec64.pth",
+   "device_mode": "AUTO"
+  },
+  "class_type": "SAMLoader",
+  "_meta": {
+   "title": "SAMLoader (Impact)"
+  }
+ },
+ "951:947": {
+  "inputs": {
+   "image": [
+    "951:938",
+    0
+   ]
+  },
+  "class_type": "GetImageSizeAndCount",
+  "_meta": {
+   "title": "Get Image Size & Count"
+  }
+ },
+ "951:949": {
+  "inputs": {
+   "pixels": [
+    "951:950",
+    0
+   ],
+   "vae": [
+    "561",
+    0
+   ]
+  },
+  "class_type": "VAEEncode",
+  "_meta": {
+   "title": "VAE Encode"
+  }
+ },
+ "951:950": {
+  "inputs": {
+   "width": [
+    "843",
+    0
+   ],
+   "height": [
+    "844",
+    0
+   ],
+   "upscale_method": "nearest-exact",
+   "keep_proportion": "pad_edge",
+   "pad_color": "0, 0, 0",
+   "crop_position": "center",
+   "divisible_by": 1,
+   "device": "cpu",
+   "image": [
+    "914",
+    0
+   ]
+  },
+  "class_type": "ImageResizeKJv2",
+  "_meta": {
+   "title": "Resize Image v2"
+  }
+ },
+ "951:948": {
+  "inputs": {
+   "guide_size": 512,
+   "guide_size_for": true,
+   "max_size": 1024,
+   "seed": [
+    "835",
+    0
+   ],
+   "steps": 9,
+   "cfg": 3,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "denoise": 0.2,
+   "feather": 5,
+   "noise_mask": true,
+   "force_inpaint": true,
+   "wildcard": "",
+   "cycle": 1,
+   "inpaint_model": false,
+   "noise_mask_feather": 20,
+   "tiled_encode": false,
+   "tiled_decode": false,
+   "image": [
+    "951:943",
+    0
+   ],
+   "segs": [
+    "951:941",
+    0
+   ],
+   "model": [
+    "951:935",
+    0
+   ],
+   "clip": [
+    "842",
+    1
+   ],
+   "vae": [
+    "561",
+    0
+   ],
+   "positive": [
+    "838",
+    0
+   ],
+   "negative": [
+    "836",
+    0
+   ]
+  },
+  "class_type": "DetailerForEach",
+  "_meta": {
+   "title": "Detailer (SEGS)"
+  }
+ },
+ "951:933": {
+  "inputs": {
+   "model_name": "segm/ntd11_anime_nsfw_segm_v5-variant1.pt"
+  },
+  "class_type": "UltralyticsDetectorProvider",
+  "_meta": {
+   "title": "UltralyticsDetectorProvider"
+  }
+ }
+}

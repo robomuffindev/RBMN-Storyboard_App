@@ -945,7 +945,7 @@ async def _process_single_item(
         initial_text = config.lyrics_text.strip() or ""
         # Narration batches feed pure-speech audio — skip Demucs to save
         # ~30 min / item and avoid phase artifacts from stem separation.
-        _skip_demucs = config.render_type in ("narration_video", "narration_images")
+        _skip_demucs = config.render_type in ("narration_video", "narration_images", "talkie")
 
         # ── SRT pre-parse ────────────────────────────────────────────
         # If the user attached an SRT for this item, parse it now so we

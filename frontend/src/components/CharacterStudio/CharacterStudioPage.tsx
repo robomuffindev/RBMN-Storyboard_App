@@ -34,6 +34,9 @@ import { GenerateAllModal } from './GenerateAllModal';
 import { CharacterWizardButton } from './CharacterWizardButton';
 import { CloneFromImageButton } from './CloneFromImageButton';
 import { StyleSelect, DEFAULT_STYLE } from './characterStudioStyles';
+import { ImageLightbox } from './p2Shared';
+import { BaseEditorModal } from './BaseEditorModal';
+import { CustomBaseModal } from './CustomBaseModal';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,7 +62,9 @@ interface CharacterInfoT {
   additional_details?: string;
   outfit?: string;
   background_color?: string;
-  [key: string]: string | undefined;
+  nsfw?: boolean;
+  style?: string;
+  [key: string]: string | boolean | undefined;
 }
 
 interface CharacterT {
@@ -103,7 +108,14 @@ interface ShotStatusT {
 }
 
 interface CharacterStatusT extends CharacterStatusP2T {
-  base: { image_rel?: string; asset_id?: string; status?: string | null; error?: string | null } | null;
+  base: {
+    image_rel?: string;
+    asset_id?: string;
+    status?: string | null;
+    error?: string | null;
+    versions?: { asset_id: string; image_rel?: string; source?: string; style?: string; created_at?: string | null }[];
+    active_asset_id?: string | null;
+  } | null;
   shots: Record<string, ShotStatusT>;
   shot_plan: ShotPlanItemT[];
   studio_project_id: string;
@@ -174,7 +186,7 @@ const api = {
 
   getCatalogs: () => apiFetch<CatalogsT>('/catalogs'),
 
-  generateBase: (id: string, data: { extra?: string; prompt_override?: string; model?: string }) =>
+  generateBase: (id: string, data: { extra?: string; prompt_override?: string; model?: string; nsfw?: boolean }) =>
     apiFetch<{ job_id: string; prompt: string }>(`/characters/${id}/generate-base`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -183,6 +195,26 @@ const api = {
     apiFetch<{ ok: boolean; asset_id: string; image_rel: string }>(`/characters/${id}/set-base`, {
       method: 'POST',
       body: JSON.stringify({ asset_id: assetId }),
+    }),
+  setActiveBase: (id: string, assetId: string) =>
+    apiFetch<{ ok: boolean }>(`/characters/${id}/base-versions/set-active`, {
+      method: 'POST',
+      body: JSON.stringify({ asset_id: assetId }),
+    }),
+  restyleBase: (id: string, data: { style_key?: string; reference_asset_id?: string; project_id?: string; extra?: string }) =>
+    apiFetch<{ job_id: string }>(`/characters/${id}/restyle-base`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  enhanceBasePrompt: (id: string, data: { prompt: string; reference_asset_ids?: string[] }) =>
+    apiFetch<{ enhanced_prompt: string }>(`/characters/${id}/enhance-base-prompt`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  generateBaseAdvanced: (id: string, data: { prompt: string; model?: string; reference_asset_ids?: string[]; control_asset_id?: string; lllite_name?: string; img2img_asset_id?: string; denoise?: number; negative?: string }) =>
+    apiFetch<{ job_id: string; prompt: string }>(`/characters/${id}/generate-base-advanced`, {
+      method: 'POST',
+      body: JSON.stringify(data),
     }),
   resetShotPlan: (id: string) =>
     apiFetch<{ shot_plan: ShotPlanItemT[] }>(`/characters/${id}/reset-shot-plan`, { method: 'POST' }),
@@ -521,7 +553,9 @@ function StoriesSidebar({
 // Character grid + create card
 // ---------------------------------------------------------------------------
 
-function CharacterCard({ character, storyName, onClick }: { character: CharacterT; storyName: string | null; onClick: () => void }) {
+function CharacterCard({ character, storyName, onClick, onDelete }: {
+  character: CharacterT; storyName: string | null; onClick: () => void; onDelete: () => void;
+}) {
   const initials = character.name
     .split(/\s+/)
     .map((p) => p[0])
@@ -535,10 +569,40 @@ function CharacterCard({ character, storyName, onClick }: { character: Character
       onClick={onClick}
       className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-purple-600 hover:shadow-lg transition-all cursor-pointer group flex flex-col gap-3"
     >
-      <div className="h-28 rounded-md bg-gradient-to-br from-purple-900/30 to-gray-800 flex items-center justify-center">
-        <span className="text-3xl font-bold text-purple-300/80 group-hover:text-purple-200 transition-colors">
-          {initials || '?'}
-        </span>
+      <div className="relative h-28 rounded-md bg-gradient-to-br from-purple-900/30 to-gray-800 flex items-center justify-center overflow-hidden">
+        {(() => {
+          // thumbnail: user-chosen hero, else active base version, else newest
+          const v = ((character.manifest as Record<string, unknown> | undefined)?.vnccs || null) as
+            { variant?: string; hero_url?: string;
+              active_base?: string; base_versions?: Array<{ id?: string; url?: string }> } | null;
+          const vers = (v?.base_versions || []).filter(Boolean);
+          const thumb = v?.hero_url
+            || vers.find((b) => b.id && b.id === v?.active_base)?.url
+            || (vers.length ? vers[vers.length - 1].url : null);
+          return thumb ? (
+            <img src={thumb} alt={character.name}
+                 className="absolute inset-0 w-full h-full object-cover object-top opacity-90" />
+          ) : null;
+        })()}
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title="Delete character"
+          className="absolute top-1.5 left-1.5 p-1 rounded bg-gray-950/70 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+        >
+          <Trash2 size={13} />
+        </button>
+        {Boolean((character.manifest as Record<string, unknown> | undefined)?.vnccs) && (
+          <span className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded bg-purple-900/80 text-purple-200 border border-purple-600/60">
+            {(((character.manifest as Record<string, unknown> | undefined)?.vnccs as { variant?: string } | undefined)?.variant === 'klein')
+              ? '🧪 VNCCS Klein' : '✨ VNCCS Native'}
+          </span>
+        )}
+        {!(((character.manifest as Record<string, unknown> | undefined)?.vnccs as { hero_url?: string; base_versions?: unknown[] } | undefined)?.hero_url
+           || ((((character.manifest as Record<string, unknown> | undefined)?.vnccs as { base_versions?: unknown[] } | undefined)?.base_versions || []).length > 0)) && (
+          <span className="text-3xl font-bold text-purple-300/80 group-hover:text-purple-200 transition-colors">
+            {initials || '?'}
+          </span>
+        )}
       </div>
       <div>
         <div className="flex items-center gap-2">
@@ -909,6 +973,8 @@ function SheetTab({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [baseEditorOpen, setBaseEditorOpen] = useState(false);
+  const [customBaseOpen, setCustomBaseOpen] = useState(false);
   const [pendingBase, setPendingBase] = useState(false);
   const [baseStartedAt, setBaseStartedAt] = useState<number | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -973,6 +1039,7 @@ function SheetTab({
         extra: extra.trim() || undefined,
         prompt_override: promptOverride.trim() || undefined,
         model: baseModel || undefined,
+        nsfw: typeof info.nsfw === 'boolean' ? info.nsfw : undefined,
       });
       setPendingBase(true);
       setBaseStartedAt(Date.now());
@@ -1018,7 +1085,9 @@ function SheetTab({
       const merged = { ...prev };
       for (const [k, v] of Object.entries(wi)) {
         if (v === undefined || v === null) continue;
-        merged[k] = String(v);
+        // Preserve booleans (e.g. nsfw) — String(false) is truthy and would
+        // wrongly tick the NSFW toggle.
+        merged[k] = typeof v === 'boolean' ? v : String(v);
       }
       return merged;
     });
@@ -1114,6 +1183,21 @@ function SheetTab({
         />
 
         {kind === 'character' && (
+          <label className="flex items-start gap-2 text-sm text-gray-300 bg-gray-800/40 border border-gray-800 rounded-md px-3 py-2">
+            <input
+              type="checkbox"
+              checked={!!(info as any).nsfw}
+              onChange={(e) => setInfo((prev) => ({ ...prev, nsfw: e.target.checked }))}
+              className="mt-0.5"
+            />
+            <span>
+              <b>NSFW base</b> — renders a nude base (vs SFW underwear) so costumes layer cleanly over a
+              clothing-ready body. Per-character; overrides the global SFW/NSFW setting. Default: SFW.
+            </span>
+          </label>
+        )}
+
+        {kind === 'character' && (
           <>
             <div className="flex items-center justify-between gap-3 mt-2">
               <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">Character Info</h3>
@@ -1141,7 +1225,7 @@ function SheetTab({
                     <label key={f.key} className="flex flex-col gap-1 text-sm">
                       <span className="text-gray-400">{f.label}</span>
                       <select
-                        value={info[f.key] || ''}
+                        value={(info[f.key] as string) || ''}
                         onChange={(e) => setInfo((prev) => ({ ...prev, [f.key]: e.target.value }))}
                         className="bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-gray-100 focus:outline-none focus:border-purple-600"
                       >
@@ -1159,7 +1243,7 @@ function SheetTab({
                   <div key={f.key} className="flex flex-col gap-1 text-sm">
                     <TextField
                       label={f.label}
-                      value={info[f.key] || ''}
+                      value={(info[f.key] as string) || ''}
                       onChange={(v) => setInfo((prev) => ({ ...prev, [f.key]: v }))}
                       list={Array.isArray(catalogArr) ? listId : undefined}
                     />
@@ -1226,6 +1310,7 @@ function SheetTab({
                 <option value="">Use First Frame default ({defaultModel})</option>
                 <option value="z_image_turbo">Z-Image Turbo</option>
                 <option value="krea2_turbo">Krea 2 Turbo</option>
+                <option value="anima">Anima (anime base)</option>
                 <option value="flux2_klein_dev_9b">FLUX.2 Klein T2I</option>
               </select>
             </label>
@@ -1274,6 +1359,14 @@ function SheetTab({
               {uploading ? <Spinner size={13} /> : <Upload size={13} />}
               Upload image as base
             </button>
+            <button
+              type="button"
+              onClick={() => setCustomBaseOpen(true)}
+              className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-md text-sm font-medium flex items-center gap-2 text-gray-300 self-start"
+            >
+              <Sparkles size={13} className="text-indigo-400" />
+              Create Custom Base (Advanced)
+            </button>
             {uploadError && <ErrorText msg={uploadError} />}
           </div>
 
@@ -1301,6 +1394,16 @@ function SheetTab({
                 <span className="text-gray-600 text-sm">No base render yet</span>
               )}
             </div>
+            {baseUrl && (
+              <button
+                type="button"
+                onClick={() => setBaseEditorOpen(true)}
+                className="mt-2 w-full px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-md text-sm flex items-center justify-center gap-2 text-gray-300"
+              >
+                <Pencil size={13} /> Edit / Versions
+                {status?.base?.versions?.length ? ` (${status.base.versions.length})` : ''}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1324,6 +1427,34 @@ function SheetTab({
             className="max-w-full max-h-full object-contain rounded-lg"
           />
         </div>
+      )}
+
+      {baseEditorOpen && (
+        <BaseEditorModal
+          characterId={character.id}
+          studioProjectId={status?.studio_project_id}
+          versions={status?.base?.versions || []}
+          activeAssetId={status?.base?.active_asset_id || status?.base?.asset_id}
+          characterStyle={info.style || DEFAULT_STYLE}
+          onClose={() => setBaseEditorOpen(false)}
+          onChanged={onStatusRefresh}
+          api={{ setActiveBase: api.setActiveBase, restyleBase: api.restyleBase }}
+        />
+      )}
+
+      {customBaseOpen && (
+        <CustomBaseModal
+          characterId={character.id}
+          studioProjectId={status?.studio_project_id}
+          defaultModel={defaultModel}
+          onClose={() => setCustomBaseOpen(false)}
+          onGenerated={() => {
+            setPendingBase(true);
+            setBaseStartedAt(Date.now());
+            onStatusRefresh();
+          }}
+          api={{ enhanceBasePrompt: api.enhanceBasePrompt, generateBaseAdvanced: api.generateBaseAdvanced }}
+        />
       )}
     </div>
   );
@@ -1439,9 +1570,7 @@ function RendersTab({
     }
   };
 
-  const openFull = (url: string | null) => {
-    if (url) window.open(url, '_blank', 'noopener,noreferrer');
-  };
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   return (
     <div className="flex flex-col gap-4">
@@ -1531,7 +1660,7 @@ function RendersTab({
                       <img
                         src={thumbUrl}
                         alt={shot.label}
-                        onClick={() => openFull(thumbUrl)}
+                        onClick={() => setLightboxUrl(thumbUrl)}
                         className="w-14 h-14 object-cover rounded cursor-pointer border border-gray-700 hover:border-purple-500"
                       />
                     ) : (
@@ -1553,6 +1682,8 @@ function RendersTab({
           </tbody>
         </table>
       </div>
+
+      {lightboxUrl && <ImageLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
 
       <ProcessPanel
         characterId={character.id}
@@ -1686,6 +1817,7 @@ function DatasetRow({
   const [detail, setDetail] = useState<DatasetT | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -1804,7 +1936,13 @@ function DatasetRow({
                           <tr key={imgName} className="border-t border-gray-800 align-top">
                             <td className="px-2 py-2">
                               {thumb ? (
-                                <img src={thumb} alt={imgName} className="w-12 h-12 object-cover rounded border border-gray-700" />
+                                <img
+                                  src={thumb}
+                                  alt={imgName}
+                                  onClick={() => setLightboxUrl(thumb)}
+                                  title="Click to enlarge"
+                                  className="w-12 h-12 object-cover rounded border border-gray-700 cursor-pointer"
+                                />
                               ) : (
                                 <div className="w-12 h-12 rounded bg-gray-800 border border-gray-700 flex items-center justify-center text-gray-600 text-[9px]">
                                   {imgName.slice(0, 6)}
@@ -1873,6 +2011,8 @@ function DatasetRow({
           )}
         </div>
       )}
+
+      {lightboxUrl && <ImageLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </div>
   );
 }
@@ -2199,6 +2339,7 @@ export default function CharacterStudioPage() {
   const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showModePicker, setShowModePicker] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -2300,10 +2441,37 @@ export default function CharacterStudioPage() {
                       key={c.id}
                       character={c}
                       storyName={storyNameFor(c.story_id)}
-                      onClick={() => setSelectedCharacterId(c.id)}
+                      onClick={() => {
+                        // VNCCS-Native-created characters open in the VNCCS
+                        // Native editor (their images/config live there), not
+                        // the engine-mode editor.
+                        const vn = ((c.manifest as Record<string, unknown> | undefined)?.vnccs || null) as { variant?: string } | null;
+                        if (vn) {
+                          navigate(`/studio/${vn.variant === 'klein' ? 'vnccs-klein' : 'vnccs'}?char=${encodeURIComponent(c.name)}`);
+                        } else {
+                          setSelectedCharacterId(c.id);
+                        }
+                      }}
+                      onDelete={async () => {
+                        const isVnccs = Boolean((c.manifest as Record<string, unknown> | undefined)?.vnccs);
+                        if (!window.confirm(`Delete character "${c.name}"?${isVnccs ? ' Its VNCCS library images are removed from the app.' : ' Its datasets are removed too.'}`)) return;
+                        try {
+                          if (isVnccs) {
+                            const fromHosts = window.confirm(
+                              'ALSO delete it from the VNCCS workers (node-side sprites/config)?\n\nOK = workers too · Cancel = keep worker files');
+                            const r = await fetch(`/api/studio/vnccs/catalog/${c.id}?from_hosts=${fromHosts}`, { method: 'DELETE' });
+                            if (!r.ok) throw new Error(await r.text());
+                          } else {
+                            await api.deleteCharacter(c.id);
+                          }
+                          loadCharacters();
+                        } catch (e) {
+                          window.alert(`Delete failed: ${(e as Error).message}`);
+                        }
+                      }}
                     />
                   ))}
-                  <NewCharacterCard onClick={() => setShowCreate(true)} />
+                  <NewCharacterCard onClick={() => setShowModePicker(true)} />
                 </div>
               )}
 
@@ -2317,6 +2485,51 @@ export default function CharacterStudioPage() {
           </div>
         )}
       </div>
+
+      {showModePicker && (
+        <div
+          className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center"
+          onClick={() => setShowModePicker(false)}
+        >
+          <div
+            className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-[560px] max-w-[92vw]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold mb-1">New Character</h2>
+            <p className="text-sm text-gray-400 mb-4">Pick the creation mode.</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div
+                onClick={() => { setShowModePicker(false); navigate('/studio/vnccs'); }}
+                className="border border-gray-700 rounded-lg p-4 cursor-pointer hover:border-purple-500 hover:bg-gray-800/60 transition-all"
+              >
+                <div className="text-2xl mb-2">✨</div>
+                <div className="font-medium mb-1">VNCCS Native</div>
+                <div className="text-xs text-gray-400">
+                  The full staged flow on the VNCCS meganodes — New or Clone, base versions,
+                  costumes, emotions, multi-worker poses.
+                </div>
+              </div>
+              <div
+                onClick={() => { setShowModePicker(false); navigate('/studio/vnccs-klein'); }}
+                className="border border-gray-700 rounded-lg p-4 cursor-pointer hover:border-purple-500 hover:bg-gray-800/60 transition-all"
+              >
+                <div className="text-2xl mb-2">🧪</div>
+                <div className="font-medium mb-1">VNCCS Klein Hybrid</div>
+                <div className="text-xs text-gray-400">
+                  Same interface, separate mode — Klein-powered steps will be grafted into this
+                  process. Currently identical to Native.
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => { setShowModePicker(false); setShowCreate(true); }}
+              className="mt-4 text-xs text-gray-500 hover:text-gray-300 underline"
+            >
+              use the legacy engine-based form instead
+            </button>
+          </div>
+        </div>
+      )}
 
       {showCreate && (
         <CreateCharacterForm

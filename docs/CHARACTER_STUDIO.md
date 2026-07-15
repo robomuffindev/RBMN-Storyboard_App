@@ -51,7 +51,12 @@ captioning. We own all state app-side and dispatch through our normal job system
   emotions.json (157), pose_presets.json — imported from VNCCS (their catalog JSONs, ours to
   serve; the vnccs/ reference folder itself stays gitignored).
 
-## Phases (status as of v1.30.0, 2026-07-06)
+## Phases (status as of v1.44.0, 2026-07-08)
+
+> The Studio pose/emotion system is the ancestor of the standalone **Tools** section
+> (Pose Library + Expression Library + **Generate Sample**) added in 1.34.0/1.44.0 —
+> see `docs/TOOLS.md`. Poses committed there are usable on Studio characters via the
+> pose picker.
 
 - **P1 (SHIPPED 1.27.0):** Stories CRUD, character sheet (tag builder), base render, shot-plan
   generation via Klein refs, dataset builder (dual-style captions + review/edit + kohya/ai-toolkit
@@ -67,6 +72,17 @@ captioning. We own all state app-side and dispatch through our normal job system
   clone-from-image wizards. Deep audit (v1.29.1): reports in `diagnostics/audit_studio_*.md`;
   key invariant fixed there: **any file copied into a project as a character image MUST get an
   Asset row** or generation attaches zero refs.
+- **P2.1 (SHIPPED 1.30.1–1.33.0):** post-first-test fixes + real Klein pose transfer.
+  Base-render controls (per-render model dropdown, lightbox, upload-image-as-base, live status +
+  reliable preview refresh); selectable **art style** per character/story (anime/realistic/3D/etc.,
+  threaded into base prompt + wizard + captions); tag-sheet auto-fill on the edit page + **clone
+  from reference image**; click-to-lightbox on every studio thumbnail; graceful failure + Qwen
+  guidance on Klein poses/emotions; **anime face heuristic** fallback for Klein emotions;
+  identity-lock prompts (reduce eye-color/identity drift); **pose library import** (VNCCS poseset
+  + OpenPose keypoint files → categorized presets); and the **Klein RefControl Pose LoRA** path so
+  Klein does true pose transfer without a VNCCS worker. Also fixed: pose/costume `width=0` dispatch
+  refusal, PATCH-character wiping fields, emotions-from-costume source lookup, probe-warning noise.
+
 - **P3 (open):** direct trainer execution (ai-toolkit/kohya launch from the app), LTX IC-LoRA
   motion/turntable datasets, 3D pose editor (2D shipped), FaceDetailer graph auto-adaptation to
   Impact-Pack version drift.
@@ -77,7 +93,7 @@ captioning. We own all state app-side and dispatch through our normal job system
 |---|---|---|---|
 | Base render | first-pass gen (Z-Image/Krea2) | — | |
 | Shots | klein_1ref edits | — | |
-| Poses | klein_2ref + skeleton ref | studio_qie_edit + PoseStudio LoRA | |
+| Poses | klein_2ref + OpenPose skeleton + **RefControl Pose LoRA** (`refcontrol_v2_poses.safetensors`) | studio_qie_edit + PoseStudio LoRA | |
 | Costumes | klein_1ref | studio_qie_edit + ClothesCore | |
 | Emotions | klein_inpaint + CPU face mask | studio_qie_edit + EmotionCore | studio_facedetailer (`impact`+`vnccs`) |
 | Cutout | CPU rembg/chroma | studio_rmbg2 | |
@@ -86,3 +102,56 @@ captioning. We own all state app-side and dispatch through our normal job system
 Capabilities auto-detect from each worker's node list on connect (VNCCS_QWEN_Encoder→vnccs,
 FaceDetailer→impact, SeedVR2VideoUpscaler→seedvr2). Default QIE GGUF filename in the graphs:
 `qwen-image-edit-2511-Q5_0.gguf` (override per job via `qie_model_gguf`).
+
+## Pose control images (1.33.0)
+
+Pose CONTROL images (fed to the model) render as the standard **colored OpenPose skeleton on
+black** — what both the VNCCS QIE PoseStudio LoRA and the Klein RefControl Pose LoRA consume.
+The **mannequin schematic** (peach body ovals on gray) is now used only for the browsable library
+thumbnails. `render_pose(..., style="openpose"|"mannequin")` in `pose_renderer.py`.
+
+Pose-file ingestion (`pose_renderer.openpose_*`): OpenPose keypoint JSON (`pose_keypoints_2d`,
+auto-detects **BODY_25** vs **COCO-18**) is remapped to the VNCCS 18-joint schema and scaled into
+the 512×1536 canvas (aspect preserved, centered). Endpoints: `POST /pose-presets/import` (VNCCS
+poseset JSON) and `POST /pose-presets/import-openpose` (multipart: one `.json`, an array, or a
+`.zip` of thousands). Both land as categorized custom presets; the Poses tab has Import buttons +
+a category filter.
+
+## Klein RefControl Pose LoRA path (1.33.0)
+
+Klein poses now do real pose transfer via `thedeoxen/refcontrol-FLUX.2-klein-9B-reference-pose-lora`:
+- Image 1 = OpenPose skeleton (control), Image 2 = identity reference (order swapped vs the old weak
+  path). Trigger prompt: `apply pose from image 1 with reference from image 2`.
+- The LoRA is enabled in the Klein workflow's existing rgthree **Power Lora Loader** node (`lora_1`
+  slot) at dispatch time via `prepare_klein_workflow(pose_lora=..., pose_lora_strength=0.9)`.
+- Filename comes from `app_settings.cs_klein_pose_lora` (default `refcontrol_v2_poses.safetensors`;
+  set empty to disable → falls back to the weak identity-first 2-ref path).
+
+## Requirements checklist — what each capability needs
+
+App-side (already in deps): `opencv-python-headless` (pose render + face detect), YuNet ONNX
+auto-downloads on first emotion run (Haar cascade fallback ships with opencv; anime falls back to a
+heuristic face box).
+
+Ollama (Settings → LLM / Vision — talks HTTP, NOT ComfyUI):
+- **Text model** (`ollama_model`) — required for the Wizard / clone tag-sheet extraction.
+- **Vision model** (`ollama_vision_model`) — required for dataset captioning + clone-from-image.
+
+ComfyUI workers:
+- **Klein base render / shots / costumes / poses / emotions** — any Klein worker (`klein` cap). ✅ works today.
+- **Klein pose transfer** — needs `refcontrol_v2_poses.safetensors` in each Klein worker's
+  `models/loras/` (FLUX.2 Klein Base 9B recommended; runs on distilled at lower fidelity). ✅ installed.
+- **Qwen engine** (best pose/costume/emotion quality, no face-detect needed) — a VNCCS-equipped
+  ComfyUI advertising `vnccs`: the `VNCCS_QWEN_Encoder` node, the QIE-2511 GGUF
+  (`qwen-image-edit-2511-Q5_0.gguf` default, override via `qie_model_gguf`), and the three task LoRAs
+  `VNCCS_QIE2511_PoseStudio_ART_V5.9.5`, `VNCCS_QIE2511_ClothesCore-RC3.x`,
+  `VNCCS_QIE2511_EmotionCore-RC1`. Not present on the current worker pool.
+- **FaceDetailer emotion engine** — Impact-Pack + Impact-Subpack (`impact` cap) **plus** the VNCCS
+  models, and `bbox/face_yolov8m.pt` + `sam_vit_b_01ec64.pth`.
+- **Premium upscale** — a SeedVR2 upscaler node (`SeedVR2VideoUpscaler` → `seedvr2` cap). Else GAN
+  upscale on any `upscale`-capable worker.
+- **Worker-side cutout** — an RMBG2 node; otherwise the app runs CPU rembg/chroma locally.
+
+Caps auto-detect from each worker's node list on connect (VNCCS_QWEN_Encoder→vnccs,
+FaceDetailer→impact, SeedVR2VideoUpscaler→seedvr2). The Studio detail header shows a live
+engine-availability badge (Klein ✓ / Qwen / SeedVR2 / FaceDetailer).

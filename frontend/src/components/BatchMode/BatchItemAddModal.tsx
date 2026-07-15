@@ -16,7 +16,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
   const [conceptDirection, setConceptDirection] = useState('');
   const [style, setStyle] = useState('');
   const [colorScheme, setColorScheme] = useState('');
-  const [renderType, setRenderType] = useState<'music_video' | 'narration_video' | 'narration_images'>('music_video');
+  const [renderType, setRenderType] = useState<'music_video' | 'narration_video' | 'narration_images' | 'talkie'>('music_video');
   const [videoMode, setVideoMode] = useState<'i2v' | 'v2v' | 'fflf'>('fflf');
   const [imageMode, setImageMode] = useState<'missing' | 'all_with_refs'>('missing');
   const [twoPass, setTwoPass] = useState(false);  // default OFF — two-pass doubles work per scene, opt-in only
@@ -31,7 +31,7 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
 
-  const isNarrationMode = renderType === 'narration_video' || renderType === 'narration_images';
+  const isNarrationMode = renderType === 'narration_video' || renderType === 'narration_images' || renderType === 'talkie';
   const canDisableWhisper = isNarrationMode && srtFile !== null;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -250,7 +250,22 @@ export default function BatchItemAddModal({ onAdd, onClose }: BatchItemAddModalP
               />
               Narration (Images only)
             </label>
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-300">
+              <input
+                type="radio"
+                name="renderType"
+                checked={renderType === 'talkie'}
+                onChange={() => setRenderType('talkie')}
+                className="w-4 h-4"
+              />
+              Talkie (Lip-Sync)
+            </label>
           </div>
+          {renderType === 'talkie' && (
+            <p className="text-xs text-gray-500 mt-1">
+              Talkie needs a portrait — open the project after the batch creates it and set one via the "Talkie Setup" toolbar button.
+            </p>
+          )}
         </div>
 
         {/* SRT upload — narration modes only */}

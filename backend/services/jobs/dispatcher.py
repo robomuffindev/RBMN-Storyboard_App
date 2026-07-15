@@ -28,8 +28,10 @@ from ..comfyui.workflow import (
     prepare_transition_workflow,
     prepare_zimage_workflow,
     prepare_krea2_workflow,
+    prepare_anima_workflow,
     prepare_sequencer_workflow,
     prepare_ltx_director_workflow,
+    prepare_lipsync_workflow,
     prepare_klein_inpaint_workflow,
     prepare_studio_qie_edit_workflow,
     prepare_studio_rmbg2_workflow,
@@ -522,6 +524,17 @@ class JobDispatcher:
             f"scene_id={job.scene_id}, "
             f"two_pass_character_ref_ids={params.get('two_pass_character_ref_ids')}"
         )
+
+        # ── Character-Studio VNCCS/Klein pose & emotion chunks ──
+        # These run through a dedicated handler that reuses the VNCCS
+        # build+submit+ingest code and does its own worker selection,
+        # monitoring, cancel and SSE — bypassing the generic
+        # build/select/complete path below.  One Job == one pose chunk;
+        # the whole run shares parameters["run_id"].
+        _wf_type = str(params.get("workflow_type") or "")
+        if _wf_type.startswith("studio_pose") or _wf_type == "studio_emotion":
+            await self._process_studio_pose_job(job)
+            return
 
         # ── Fast-path for retries: if already submitted, skip to monitoring ──
         existing_prompt_id = job.prompt_id
@@ -1088,6 +1101,228 @@ class JobDispatcher:
 
         await self.job_queue.mark_done(job.id, result)
 
+    async def _process_studio_pose_job(self, job: Job) -> None:
+        """Dispatch one Character-Studio chunk through the central queue.
+
+        Covers Klein pose runs (studio_pose) and native VNCCS meganode steps
+        (studio_pose_native: creator/cloner/clothes/emotions).  Reuses the
+        existing VNCCS submit (_klein_submit / _native_submit) and
+        ``ingest_result`` verbatim; this handler only supplies queue scheduling,
+        worker selection/pinning, monitoring, cancel and SSE.  One Job == one
+        chunk; the run shares ``parameters['run_id']``.  It does its own worker
+        selection and returns, bypassing the generic build/select/complete path.
+        """
+        job_id_str = str(job.id)
+        params = job.parameters or {}
+        wf_type = str(params.get("workflow_type") or "studio_pose")
+
+        try:
+            from backend.api.vnccs_native import (
+                _klein_submit, _native_submit, _klein_identity_bytes,
+                _resolve_lock_base, GenerateIn,
+            )
+            from backend.services.character_studio.vnccs_native.ingest import ingest_result
+            from backend.services.character_studio.vnccs_native.client import VNCCSError
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[{job_id_str}] studio job: import failed")
+            await self.job_queue.mark_failed(job.id, f"Studio job handler import failed: {e}")
+            return
+
+        if wf_type not in ("studio_pose", "studio_pose_native"):
+            # studio_emotion (Klein crop-and-stitch) is not queued yet.
+            await self.job_queue.mark_failed(
+                job.id, f"Studio job type '{wf_type}' is not queued yet.")
+            return
+
+        gi = params.get("generate_in") or {}
+        try:
+            body = GenerateIn(**gi)
+        except Exception as e:  # noqa: BLE001
+            await self.job_queue.mark_failed(job.id, f"Bad studio job parameters: {e}")
+            return
+        st_settings = params.get("studio_settings") or {}
+        pose_subset = params.get("pose_subset") or []
+        seed = int(params.get("seed") or 0)
+        recipe = params.get("ingest_recipe") or {}
+        step = params.get("step") or "creator"
+        ref_host = params.get("ref_host") or ""
+        pin_host = params.get("pin_host") or None
+
+        # Resume guard: a manual retry of an already-submitted chunk — clear the
+        # stale prompt and run fresh (a duplicate the user can delete beats
+        # resuming an expired prompt).
+        if job.prompt_id or job.worker_url:
+            async with self._session_factory() as session:
+                db_job = await session.get(Job, job.id)
+                if db_job:
+                    db_job.prompt_id = None
+                    db_job.worker_url = None
+                    session.add(db_job)
+                    await session.commit()
+
+        # 1) choose a worker: PINNED (native clothes/emotions must run on the
+        #    host that already holds the character's sprites) or least-loaded vnccs.
+        reserved = False
+        if pin_host:
+            worker_url = pin_host
+            w = self.comfy_dispatcher.workers.get(pin_host)
+            if w is not None:
+                w.in_flight += 1
+                reserved = True
+        else:
+            try:
+                worker = self.comfy_dispatcher.select_worker(
+                    required_caps={"vnccs"}, exclude_runpod=True, reserve=True)
+            except ValueError:
+                worker = None
+            if worker is None:
+                await self.job_queue.mark_failed(
+                    job.id, "No VNCCS-capable worker is online for this run.")
+                return
+            worker_url = worker.url
+            reserved = True
+
+        self.on_progress(job_id_str, {
+            "event": "worker_assigned", "worker_url": worker_url,
+            "scene_id": None, "job_type": job.job_type})
+
+        try:
+            # 2) build + submit via the matching VNCCS path
+            if wf_type == "studio_pose":
+                async with self._session_factory() as session:
+                    lock_base = _resolve_lock_base(st_settings, body)
+                    identity_bytes = await _klein_identity_bytes(
+                        session, body, ref_host or worker_url, lock_base)
+                prompt_id, tap_map, _extras = await asyncio.to_thread(
+                    _klein_submit, worker_url, st_settings, body, pose_subset,
+                    identity_bytes, seed)
+            else:  # studio_pose_native
+                gen_settings = params.get("gen_settings") or {}
+                control_center = params.get("control_center")
+                prompt_id, tap_map = await asyncio.to_thread(
+                    _native_submit, step, worker_url, ref_host or worker_url, body,
+                    pose_subset, gen_settings, control_center)
+
+            async with self._session_factory() as session:
+                db_job = await session.get(Job, job.id)
+                if db_job:
+                    db_job.prompt_id = prompt_id
+                    db_job.worker_url = worker_url
+                    session.add(db_job)
+                    await session.commit()
+
+            self.on_progress(job_id_str, {"event": "processing_started",
+                                          "job_type": job.job_type})
+
+            # 3) monitor until done / error / cancel / timeout
+            status, images = await self._wait_studio_prompt(
+                job.id, worker_url, prompt_id)
+            if status == "cancelled":
+                return  # the cancel endpoint already flipped the row to CANCELLED
+            if status != "completed":
+                await self.job_queue.mark_failed(
+                    job.id, "Worker reported an error (or timed out) during the run.")
+                return
+
+            # 4) ingest THIS chunk via the existing catalog/manifest path
+            async with self._session_factory() as session:
+                await ingest_result(
+                    session, host=worker_url, prompt_id=prompt_id,
+                    character_name=params.get("character_name") or body.character_name,
+                    step=step, tap_map=tap_map,
+                    costume=recipe.get("costume"),
+                    emotions=recipe.get("emotions"),
+                    costumes=recipe.get("costumes"),
+                    seed=seed,
+                    pose_names=recipe.get("pose_names"),
+                    pose_set_full=recipe.get("pose_set"),
+                    postprocess=recipe.get("postprocess"),
+                    chunk_pose_names=params.get("pose_names"),
+                    engine=recipe.get("engine"),
+                )
+
+            # native creator/cloner establish which workers hold the sprites
+            if wf_type == "studio_pose_native" and step in ("creator", "cloner"):
+                try:
+                    from backend.api.vnccs_native import _record_character_hosts
+                    async with self._session_factory() as session:
+                        await _record_character_hosts(
+                            session,
+                            (params.get("character_name") or body.character_name).strip(),
+                            [worker_url])
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[{job_id_str}] host recording failed: {e}")
+
+            result = {"prompt_id": prompt_id, "worker": worker_url,
+                      "run_id": params.get("run_id"), "image_count": len(images)}
+            self.on_progress(job_id_str, {
+                "event": "completed", "project_id": params.get("project_id"),
+                "scene_id": None, "character_gen": True, "job_type": job.job_type})
+            await self.job_queue.mark_done(job.id, result)
+
+        except VNCCSError as e:
+            logger.warning(f"[{job_id_str}] studio job VNCCS error: {e}")
+            await self.job_queue.mark_failed(job.id, f"VNCCS run failed: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[{job_id_str}] studio job failed")
+            await self.job_queue.mark_failed(job.id, f"Studio run error: {e}")
+        finally:
+            if reserved:
+                self.comfy_dispatcher.release_worker(worker_url)
+
+    async def _wait_studio_prompt(self, job_id, worker_url: str, prompt_id: str,
+                                  timeout_s: int = 3600):
+        """Poll a VNCCS worker's history for ``prompt_id`` until it completes,
+        errors, is cancelled (Job row flipped to CANCELLED), or times out.
+        Returns ``(status, images)`` where status is one of
+        ``completed`` / ``error`` / ``cancelled``.  Mirrors the /result poll.
+        """
+        import time as _t
+        from backend.services.character_studio.vnccs_native.client import (
+            VNCCSClient, VNCCSError,
+        )
+        deadline = _t.monotonic() + max(60, int(timeout_s))
+        last_emit = 0.0
+
+        def _poll():
+            hist = VNCCSClient(worker_url, timeout=30).get_history(prompt_id, timeout=30)
+            entry = hist.get(prompt_id) if isinstance(hist, dict) else None
+            if not entry:
+                return "pending", []
+            st = (entry.get("status") or {}).get("status_str") or "running"
+            imgs = []
+            for _nid, out in (entry.get("outputs") or {}).items():
+                for im in (out.get("images", []) or []):
+                    imgs.append(im)
+            if st == "error":
+                return "error", imgs
+            done = bool(entry.get("outputs")) or st == "success"
+            return ("completed" if done else st), imgs
+
+        while True:
+            # cancellation check — the run/job cancel endpoints flip the row
+            async with self._session_factory() as session:
+                db_job = await session.get(Job, job_id)
+                if db_job is None or db_job.status == JobStatus.CANCELLED:
+                    return "cancelled", []
+            try:
+                status, images = await asyncio.to_thread(_poll)
+            except VNCCSError:
+                status, images = "pending", []
+            if status == "completed":
+                return "completed", images
+            if status == "error":
+                return "error", images
+            now = _t.monotonic()
+            if now - last_emit > 5.0:
+                self.on_progress(str(job_id), {"event": "progress", "percent": 0,
+                                               "job_type": "image"})
+                last_emit = now
+            if now > deadline:
+                logger.error(f"[{job_id}] studio pose prompt {prompt_id} timed out")
+                return "error", []
+            await asyncio.sleep(4.0)
+
     async def _build_workflow(self, job: Job) -> dict:
         """
         Build the ComfyUI workflow dict from job parameters.
@@ -1143,6 +1378,39 @@ class JobDispatcher:
                             params["skip_audio_mux"] = True
             except Exception as _av_err:
                 logger.warning(f"AV-native routing check failed (continuing with original workflow_type): {_av_err}")
+
+        # Talkie routing: in a Talkie (talking-head lip-sync) project, every
+        # video job renders the project's single uploaded portrait lip-syncing
+        # the scene's narration slice. Override the workflow_type to the chosen
+        # lip-sync engine and inject the portrait as the source image, so
+        # autogen / batch / manual all inherit it. lipsync_ltx reuses the
+        # existing LTX i2v path (zero install); latentsync/musetalk/sonic use
+        # their own workflow JSONs when a capable worker is online.
+        if job and job.project_id and (not workflow_type or workflow_type.startswith(("ltx_", "lipsync_"))):
+            try:
+                async with self._session_factory() as _tk_session:
+                    _tk_project = await _tk_session.get(Project, job.project_id)
+                    if _tk_project and str(getattr(_tk_project, "mode", "")) == "talkie":
+                        _tk_settings = _tk_project.settings or {}
+                        _tk_scene = await _tk_session.get(Scene, job.scene_id) if job.scene_id else None
+                        _tk_sp = (_tk_scene.parameters or {}) if _tk_scene else {}
+                        engine = (_tk_sp.get("talkie_engine")
+                                  or _tk_settings.get("talkie_engine")
+                                  or "lipsync_ltx")
+                        if engine not in ("lipsync_ltx", "lipsync_latentsync",
+                                          "lipsync_musetalk", "lipsync_sonic"):
+                            engine = "lipsync_ltx"
+                        workflow_type = engine
+                        params["workflow_type"] = engine
+                        params["lipsync_enabled"] = True
+                        _portrait = _tk_settings.get("portrait_asset_id")
+                        if _portrait:
+                            # Force the portrait as the source image (one portrait per
+                            # Talkie project) — overrides any per-scene / autogen image.
+                            params["first_frame_asset_id"] = _portrait
+                        logger.info(f"[{job.id}] Talkie routing: engine={engine}, portrait={bool(_portrait)}")
+            except Exception as _tk_err:
+                logger.warning(f"Talkie routing check failed (continuing): {_tk_err}")
 
         return await self._build_builtin_workflow(workflow_type, params, job)
 
@@ -1252,7 +1520,15 @@ class JobDispatcher:
                 sfw_result = await sfw_session.execute(sfw_stmt)
                 sfw_settings = sfw_result.scalars().first()
                 if sfw_settings:
-                    if sfw_settings.restrict_explicit_content:
+                    # Per-character NSFW override wins over the global SFW toggle:
+                    # krea2_sfw_override is True (force SFW), False (force NSFW),
+                    # or absent (follow the global restrict_explicit_content).
+                    _char_sfw = params.get("krea2_sfw_override")
+                    if _char_sfw is False:
+                        sfw_suffix = ""  # character explicitly NSFW — never append SFW suffix
+                    elif _char_sfw is True:
+                        sfw_suffix = ", SFW, fully clothed, modest, tasteful, family-friendly"
+                    elif sfw_settings.restrict_explicit_content:
                         sfw_suffix = ", SFW, fully clothed, modest, tasteful, family-friendly"
                     if sfw_settings.global_negative_prompt:
                         global_negative_prompt = sfw_settings.global_negative_prompt.strip()
@@ -1441,6 +1717,12 @@ class JobDispatcher:
             except Exception as e:
                 logger.debug(f"first-pass generator lookup failed: {e} — defaulting Z-Image")
 
+            # Per-character SFW/NSFW override (Character Studio base) wins over the
+            # global krea2_sfw_mode. nsfw=True → NSFW Krea2 workflow.
+            _sfw_override = _params.get("krea2_sfw_override")
+            if _sfw_override is not None:
+                krea2_sfw = bool(_sfw_override)
+
             # Per-job override: the Character Studio base-render model dropdown
             # lets the user pick the first-pass model for a single render
             # without touching the global Settings default.
@@ -1450,6 +1732,20 @@ class JobDispatcher:
                 logger.info(
                     f"[{_job_id or 'N/A'}] First-pass generator overridden per-job -> {generator}"
                 )
+
+            # ── FLUX.2 Klein T2I (explicit per-job override ONLY) ──
+            # A no-ref render normally NEVER runs through Klein (see docstring),
+            # but the Studio base-model dropdown offers "flux2_klein_dev_9b" and
+            # an explicit per-job pick means the user wants the real Klein T2I
+            # workflow.  Returning None lets _build_workflow fall through to the
+            # klein_map "klein_t2i" entry (KLEIN_EDIT_ULTRA_WORKFLOW_Text2Image.json).
+            # Previously this value matched no branch and silently fell through
+            # to Z-Image Turbo below.
+            if _sig_override == "flux2_klein_dev_9b":
+                logger.info(
+                    f"[{_job_id or 'N/A'}] Explicit Klein T2I override — skipping first-pass redirect"
+                )
+                return None
 
             # ── Krea 2 Turbo (gated on workflow file presence) ──
             if generator == "krea2_turbo":
@@ -1546,6 +1842,29 @@ class JobDispatcher:
                         f"KREA2_TURBO_T2I.json not found in workflows/ — using Z-Image "
                         f"Turbo until the tested Krea 2 workflow is added"
                     )
+
+            # ── Anima anime base (first-pass T2I) ──
+            if generator == "anima":
+                _use_ultra = True
+                try:
+                    _use_ultra = bool(getattr(_fp_set, "anima_ultra", True)) if _fp_set else True
+                except Exception:
+                    _use_ultra = True
+                _ultra = workflows_dir / "ANIMA_T2I_ULTRA.json"
+                _anima_path = _ultra if (_use_ultra and _ultra.exists()) else (workflows_dir / "ANIMA_T2I.json")
+                if _anima_path.exists():
+                    try:
+                        logger.info(f"[{_job_id or 'N/A'}] Redirecting to Anima base T2I")
+                        _params["workflow_type"] = "anima_t2i"
+                        _orig_params["_effective_workflow_type"] = "anima_t2i"
+                        return prepare_anima_workflow(
+                            workflow_path=str(_anima_path), prompt=p_text,
+                            width=_params.get("width", 1024), height=_params.get("height", 1024),
+                            seed=_seed, negative=_params.get("negative_prompt") or "")
+                    except Exception as e:
+                        logger.warning(f"[{_job_id or 'N/A'}] Anima redirect failed ({e}) — falling back to Z-Image")
+                else:
+                    logger.warning(f"[{_job_id or 'N/A'}] single_image_generator=anima but ANIMA_T2I.json missing — falling back to Z-Image")
 
             # ── Z-Image Turbo (default + fallback) ──
             try:
@@ -1682,6 +2001,8 @@ class JobDispatcher:
                 height=params.get("height", 576),
                 seed=seed,
                 ref_images=ref_images,
+                pose_lora=params.get("pose_lora", ""),
+                pose_lora_strength=params.get("pose_lora_strength", 0.9),
             )
 
         # ===== Klein inpaint (mask-paint edit of a rendered image) =====
@@ -1696,6 +2017,8 @@ class JobDispatcher:
             _img2 = _img2 or params.get("image2_path") or ""
             if not _img1 or not _img2:
                 raise ValueError("studio_qie_edit requires image1 (control) and image2 (identity)")
+            # Task LoRA is passed as a bare filename; submit_job resolves it
+            # to the worker's exact listed string (subfolder/slash-agnostic).
             return prepare_studio_qie_edit_workflow(
                 str(_wf_path),
                 image1_path=_img1,
@@ -1766,6 +2089,47 @@ class JobDispatcher:
                 str(_wf_path), image_path=_img,
                 model_name=params.get("upscale_model") or None,
             )
+
+        if workflow_type == "anima_controlnet":
+            _wf_path = workflows_dir / "ANIMA_CONTROLNET.json"
+            if not _wf_path.exists():
+                raise ValueError("workflow_type=anima_controlnet but ANIMA_CONTROLNET.json is missing from workflows/")
+            _ctrl = await self._resolve_single_asset_path(params.get("control_asset_id"))
+            _ctrl = _ctrl or params.get("control_path") or ""
+            if not _ctrl:
+                raise ValueError("anima_controlnet requires a control image (control_asset_id)")
+            return prepare_anima_workflow(
+                str(_wf_path), prompt=params.get("prompt", "") or "",
+                width=params.get("width", 1024), height=params.get("height", 1024),
+                seed=seed, negative=params.get("negative_prompt") or "",
+                image=_ctrl,
+                lllite_name=params.get("lllite_name") or "anima-lllite-pose-1.safetensors",
+                lllite_strength=params.get("lllite_strength"))
+
+        if workflow_type in ("anima_i2i", "anima_inpaint"):
+            _is_inpaint = workflow_type == "anima_inpaint"
+            if _is_inpaint:
+                _wf_path = workflows_dir / "ANIMA_INPAINT_CN.json"
+                if not _wf_path.exists():
+                    _wf_path = workflows_dir / "ANIMA_INPAINT.json"
+            else:
+                _wf_path = workflows_dir / "ANIMA_I2I_ULTRA.json"
+                if not _wf_path.exists():
+                    _wf_path = workflows_dir / "ANIMA_I2I.json"
+            if not _wf_path.exists():
+                raise ValueError(f"workflow_type={workflow_type} but no Anima workflow file found in workflows/")
+            _refs = params.get("reference_asset_ids") or []
+            _src_id = (params.get("source_masked_asset_id") if _is_inpaint else None) or (_refs[0] if _refs else None)
+            _src = await self._resolve_single_asset_path(_src_id)
+            _src = _src or params.get("image_path") or ""
+            if not _src:
+                raise ValueError(f"{workflow_type} requires a source image")
+            _default_denoise = 1.0 if _is_inpaint else 0.6
+            return prepare_anima_workflow(
+                str(_wf_path), prompt=params.get("prompt", "") or "",
+                width=params.get("width", 1024), height=params.get("height", 1024),
+                seed=seed, negative=params.get("negative_prompt") or "",
+                image=_src, denoise=float(params.get("denoise") or _default_denoise))
 
         if workflow_type == "klein_inpaint":
             inpaint_path = workflows_dir / "KLEIN_INPAINT.json"
@@ -1978,12 +2342,47 @@ class JobDispatcher:
             # has the model's audio baked in; after download we ALSO extract it
             # to a sidecar WAV so the mixer can control its level independently.
             "ltx_av_native": "LTX-2-3_AV_NATIVE.json",
+            # Talkie: lip-sync a stationary portrait to narration.
+            # lipsync_ltx reuses the LTX i2v graph (image+audio→talking clip).
+            "lipsync_ltx": "LTX-2-3_ULTRA_WORKFLOW_Image2Video.json",
         }
 
         # AV-native auto-sets skip_audio_mux so the post-download "replace model
         # audio with scene audio" step doesn't overwrite what we just generated.
         if workflow_type == "ltx_av_native":
             _record(skip_audio_mux=True)
+
+        # Dedicated talking-head lip-sync engines (LatentSync / MuseTalk / Sonic).
+        # These use their own ComfyUI graphs — export your tested workflow to the
+        # named file. Portrait = the project's uploaded image; audio = the scene's
+        # narration slice. lipsync_ltx is NOT here — it reuses the LTX i2v path.
+        lipsync_map = {
+            "lipsync_latentsync": "LIPSYNC_LATENTSYNC.json",
+            "lipsync_musetalk": "LIPSYNC_MUSETALK.json",
+            "lipsync_sonic": "LIPSYNC_SONIC.json",
+        }
+        if workflow_type in lipsync_map:
+            workflow_path = str(workflows_dir / lipsync_map[workflow_type])
+            if not Path(workflow_path).exists():
+                raise FileNotFoundError(
+                    f"{lipsync_map[workflow_type]} not found in workflows/. Export your tested "
+                    f"{workflow_type} ComfyUI graph to that path (see docs/TALKIE_MODE.md).")
+            _ls_first = await self._resolve_single_asset_path(params.get("first_frame_asset_id"))
+            _ls_audio = await self._resolve_single_asset_path(params.get("audio_asset_id"))
+            if not _ls_first or not _ls_audio:
+                _ls_res = await self._auto_resolve_video_assets(job, params)
+                _ls_first = _ls_first or _ls_res.get("first_frame")
+                _ls_audio = _ls_audio or _ls_res.get("audio")
+            return prepare_lipsync_workflow(
+                workflow_path=workflow_path,
+                image=_ls_first or "",
+                audio_path=_ls_audio or "",
+                width=params.get("width", 512),
+                height=params.get("height", 512),
+                seed=seed,
+                duration=params.get("duration"),
+                framerate=params.get("framerate", 25),
+            )
 
         if workflow_type in ltx_map:
             workflow_path = str(workflows_dir / ltx_map[workflow_type])
@@ -3499,7 +3898,7 @@ class JobDispatcher:
             try:
                 from backend.database.models import Project as _Project
                 proj = await session.get(_Project, project_id)
-                if proj and getattr(proj, "mode", None) in ("narration_video", "narration_images"):
+                if proj and getattr(proj, "mode", None) in ("narration_video", "narration_images", "talkie"):
                     logger.debug(
                         f"Stem mix skipped for narration project {project_id} "
                         f"(scene {scene.order_index}, vocals_only={vocals_only}) — "
@@ -4282,6 +4681,10 @@ class JobDispatcher:
             "klein_t2i": {"klein"},
             "z_image_turbo": set(),  # No special capability needed
             "krea2_turbo": set(),   # No special capability needed (first-pass T2I)
+            "anima_t2i": set(),     # Anima anime base (first-pass T2I)
+            "anima_i2i": set(),     # Anima img2img
+            "anima_inpaint": set(), # Anima inpaint
+            "anima_controlnet": set(), # Anima LLLite ControlNet
             "ltx_fflf": {"ltx"},
             "ltx_i2v": {"ltx"},
             "ltx_v2v_extend": {"ltx"},
@@ -4293,6 +4696,10 @@ class JobDispatcher:
             "ltx_seq_v2v": {"ltx"},
             "ltx_av_native": {"ltx"},
             "ltx_director": {"ltx"},
+            "lipsync_ltx": {"ltx"},
+            "lipsync_latentsync": {"latentsync"},
+            "lipsync_musetalk": {"musetalk"},
+            "lipsync_sonic": {"sonic"},
             "klein_inpaint": {"klein"},
             "studio_qie_edit": {"vnccs"},
             "studio_rmbg2": {"vnccs"},
@@ -4353,13 +4760,22 @@ class JobDispatcher:
         if workflow_type in ("z_image_turbo", "krea2_turbo"):
             return {single_img_model}
         if workflow_type in (
+            "anima_t2i", "anima_i2i", "anima_inpaint", "anima_controlnet",
+        ):
+            # Anima base jobs use the single-image generator slot; when it is
+            # set to "anima" this constrains dispatch to workers declaring it.
+            return {single_img_model}
+        if workflow_type in (
             "ltx_fflf", "ltx_i2v",
             "ltx_v2v_extend", "ltx_v2v_pass1", "ltx_v2v_pass2",
             "ltx_transition",
             "ltx_seq_i2v", "ltx_seq_fflf", "ltx_seq_v2v",
             "ltx_av_native", "ltx_director",
+            "lipsync_ltx",
         ):
             return {vid_model}
+        if workflow_type in ("lipsync_latentsync", "lipsync_musetalk", "lipsync_sonic"):
+            return set()  # dedicated lip-sync engines gate on capability, not model slot
         return set()
 
     @staticmethod
@@ -4659,7 +5075,12 @@ class JobDispatcher:
                 # model that actually produced it (Krea 2 / Z-Image), not "klein_t2i"
                 # (which the frontend maps to "Z-Image Turbo").
                 _recorded_wf = params.get("workflow_type", "") or ""
-                if _recorded_wf == "klein_t2i":
+                # Exception: an explicit per-job Klein override SKIPS the redirect,
+                # so the asset really was produced by Klein — keep the label.
+                if (
+                    _recorded_wf == "klein_t2i"
+                    and params.get("single_image_generator_override") != "flux2_klein_dev_9b"
+                ):
                     try:
                         from sqlmodel import select as _wf_select
                         from backend.database.models import AppSettings as _WfAS

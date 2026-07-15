@@ -156,11 +156,11 @@
    "feather": 5,
    "noise_mask": true,
    "force_inpaint": true,
-   "bbox_threshold": 0.5,
+   "bbox_threshold": 0.1,
    "bbox_dilation": 10,
-   "bbox_crop_factor": 3.0,
+   "bbox_crop_factor": 4.5,
    "sam_detection_hint": "center-1",
-   "sam_dilation": 0,
+   "sam_dilation": 25,
    "sam_threshold": 0.93,
    "sam_bbox_expansion": 0,
    "sam_mask_hint_threshold": 0.7,
@@ -169,7 +169,9 @@
    "wildcard": "",
    "cycle": 1,
    "inpaint_model": false,
-   "noise_mask_feather": 20
+   "noise_mask_feather": 20,
+   "tiled_encode": true,
+   "tiled_decode": true
   },
   "_meta": {
    "title": "STUDIO FACEDETAILER"

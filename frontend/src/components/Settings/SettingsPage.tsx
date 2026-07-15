@@ -71,6 +71,7 @@ export default function SettingsPage() {
     export_color_match_clips: false,
     export_lfff_trim_enabled: true,
     single_image_generator: 'z_image_turbo',
+    anima_ultra: true,
     krea2_model_name: 'krea2_turbo_fp8.safetensors',
     krea2_sfw_mode: true,
     use_distilled_lora: true,
@@ -149,7 +150,7 @@ export default function SettingsPage() {
 
   // Known preset keys for image and video models
   const IMAGE_MODEL_PRESETS = ['flux2_klein_dev_9b', 'flux1_dev', 'z_image', 'qwen_edit'];
-  const SINGLE_IMAGE_PRESETS = ['z_image_turbo', 'krea2_turbo', 'flux2_klein_dev_9b'];
+  const SINGLE_IMAGE_PRESETS = ['z_image_turbo', 'krea2_turbo', 'anima', 'flux2_klein_dev_9b'];
   const VIDEO_MODEL_PRESETS = ['ltx_2.3', 'wan_2.2'];
 
   useEffect(() => {
@@ -178,6 +179,7 @@ export default function SettingsPage() {
         export_color_match_clips: savedSettings.export_color_match_clips === true,
         export_lfff_trim_enabled: savedSettings.export_lfff_trim_enabled ?? true,
         single_image_generator: savedSettings.single_image_generator || 'z_image_turbo',
+        anima_ultra: savedSettings.anima_ultra ?? true,
         krea2_model_name: savedSettings.krea2_model_name || 'krea2_turbo_fp8.safetensors',
         krea2_sfw_mode: savedSettings.krea2_sfw_mode ?? true,
         use_distilled_lora: savedSettings.use_distilled_lora ?? true,
@@ -1030,6 +1032,7 @@ export default function SettingsPage() {
               >
                 <option value="z_image_turbo">Z-Image Turbo</option>
                 <option value="krea2_turbo">Krea 2 Turbo</option>
+                <option value="anima">Anima (anime base)</option>
                 <option value="flux2_klein_dev_9b">FLUX.2 Klein T2I (fallback)</option>
                 <option value="custom">Custom...</option>
               </select>
@@ -1048,6 +1051,24 @@ export default function SettingsPage() {
               <p className="text-xs text-gray-500 mt-1">
                 Model used for text-to-image generation when no reference images are needed (e.g., first-pass scene images, character gen without refs). Z-Image Turbo generates images in 8 steps. Krea 2 Turbo is an aesthetic-first 8-step model (requires KREA2_TURBO_T2I.json in the workflows folder — falls back to Z-Image until added).
               </p>
+
+              {settings.single_image_generator === 'anima' && (
+                <div className="mt-3">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.anima_ultra !== false}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, anima_ultra: e.target.checked }))}
+                    />
+                    <span className="text-sm font-medium">Anima Ultra pipeline (FaceDetailer + upscale)</span>
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Uses the ANIMA_*_ULTRA workflows (face/hand/eye refinement + Ultimate SD upscale). Requires the
+                    extra detector / SAM / upscale models on the worker. Turn off to use the clean core Anima
+                    workflows (faster, fewer models).
+                  </p>
+                </div>
+              )}
 
               {settings.single_image_generator === 'krea2_turbo' && (
                 <div className="mt-3">

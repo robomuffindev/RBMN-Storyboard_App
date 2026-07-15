@@ -1,0 +1,289 @@
+{
+  "_comment": "API-format template of the Klein Hybrid pose graph (one pose). Generated from klein_poses.py (flattens vnccs-utils 'VNCCS_Utils Pose Studio Klein9b.json'). Documentation only \u2014 the app builds this per run.",
+  "tap_map": {
+    "sprites": "save"
+  },
+  "graph": {
+    "u": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "flux-2-klein-9b-fp8.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    "c": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen_3_8b_fp8mixed_abliterated.safetensors",
+        "type": "flux2",
+        "device": "default"
+      }
+    },
+    "v": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "flux2-vae.safetensors"
+      }
+    },
+    "lora": {
+      "class_type": "LoraLoaderModelOnly",
+      "inputs": {
+        "model": [
+          "u",
+          0
+        ],
+        "lora_name": "Klein9b/VNCCS/VNCCS_PoseStudioKlein9b_V1.safetensors",
+        "strength_model": 1.0
+      }
+    },
+    "id0_load": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "<identity>.png"
+      }
+    },
+    "id0_scale": {
+      "class_type": "ImageScaleToTotalPixels",
+      "inputs": {
+        "image": [
+          "id0_load",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "megapixels": 1.0,
+        "resolution_steps": 1
+      }
+    },
+    "id0_enc": {
+      "class_type": "VAEEncode",
+      "inputs": {
+        "pixels": [
+          "id0_scale",
+          0
+        ],
+        "vae": [
+          "v",
+          0
+        ]
+      }
+    },
+    "p0_load": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "<pose_capture_0>.png"
+      }
+    },
+    "p0_scale": {
+      "class_type": "ImageScaleToTotalPixels",
+      "inputs": {
+        "image": [
+          "p0_load",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "megapixels": 1.0,
+        "resolution_steps": 1
+      }
+    },
+    "p0_size": {
+      "class_type": "GetImageSize",
+      "inputs": {
+        "image": [
+          "p0_scale",
+          0
+        ]
+      }
+    },
+    "p0_lat": {
+      "class_type": "EmptyFlux2LatentImage",
+      "inputs": {
+        "width": [
+          "p0_size",
+          0
+        ],
+        "height": [
+          "p0_size",
+          1
+        ],
+        "batch_size": 1
+      }
+    },
+    "p0_sig": {
+      "class_type": "Flux2Scheduler",
+      "inputs": {
+        "steps": 4,
+        "width": [
+          "p0_size",
+          0
+        ],
+        "height": [
+          "p0_size",
+          1
+        ]
+      }
+    },
+    "p0_enc": {
+      "class_type": "VAEEncode",
+      "inputs": {
+        "pixels": [
+          "p0_scale",
+          0
+        ],
+        "vae": [
+          "v",
+          0
+        ]
+      }
+    },
+    "p0_pos": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "Apply the pose from image 1 to the character from image 2, keeping the character's identity, clothing and proportions exactly. standing straight, arms relaxed. Solid green background.",
+        "clip": [
+          "c",
+          0
+        ]
+      }
+    },
+    "p0_neg": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "",
+        "clip": [
+          "c",
+          0
+        ]
+      }
+    },
+    "p0_pr0": {
+      "class_type": "ReferenceLatent",
+      "inputs": {
+        "conditioning": [
+          "p0_pos",
+          0
+        ],
+        "latent": [
+          "p0_enc",
+          0
+        ]
+      }
+    },
+    "p0_nr0": {
+      "class_type": "ReferenceLatent",
+      "inputs": {
+        "conditioning": [
+          "p0_neg",
+          0
+        ],
+        "latent": [
+          "p0_enc",
+          0
+        ]
+      }
+    },
+    "p0_pr1": {
+      "class_type": "ReferenceLatent",
+      "inputs": {
+        "conditioning": [
+          "p0_pr0",
+          0
+        ],
+        "latent": [
+          "id0_enc",
+          0
+        ]
+      }
+    },
+    "p0_nr1": {
+      "class_type": "ReferenceLatent",
+      "inputs": {
+        "conditioning": [
+          "p0_nr0",
+          0
+        ],
+        "latent": [
+          "id0_enc",
+          0
+        ]
+      }
+    },
+    "p0_gd": {
+      "class_type": "CFGGuider",
+      "inputs": {
+        "model": [
+          "lora",
+          0
+        ],
+        "positive": [
+          "p0_pr1",
+          0
+        ],
+        "negative": [
+          "p0_nr1",
+          0
+        ],
+        "cfg": 1.0
+      }
+    },
+    "p0_ns": {
+      "class_type": "RandomNoise",
+      "inputs": {
+        "noise_seed": 1
+      }
+    },
+    "p0_sm": {
+      "class_type": "KSamplerSelect",
+      "inputs": {
+        "sampler_name": "euler"
+      }
+    },
+    "p0_sc": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": [
+          "p0_ns",
+          0
+        ],
+        "guider": [
+          "p0_gd",
+          0
+        ],
+        "sampler": [
+          "p0_sm",
+          0
+        ],
+        "sigmas": [
+          "p0_sig",
+          0
+        ],
+        "latent_image": [
+          "p0_lat",
+          0
+        ]
+      }
+    },
+    "p0_dec": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "p0_sc",
+          0
+        ],
+        "vae": [
+          "v",
+          0
+        ]
+      }
+    },
+    "save": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "images": [
+          "p0_dec",
+          0
+        ],
+        "filename_prefix": "rbmn_vnccs/klein"
+      }
+    }
+  }
+}

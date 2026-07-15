@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { FolderOpen, Settings, Activity, Users } from 'lucide-react';
+import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone } from 'lucide-react';
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -81,6 +81,44 @@ export default function HomePage() {
                 <h2 className="text-2xl font-bold mb-2">Character Studio</h2>
                 <p className="text-gray-400">
                   Create reusable characters, organize them by story, and build LoRA training datasets
+                </p>
+              </div>
+            </div>
+
+            {/* Tools Card */}
+            <div
+              onClick={() => navigate('/tools')}
+              className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden hover:border-teal-600 hover:shadow-lg transition-all cursor-pointer group"
+            >
+              <div className="h-32 bg-gradient-to-br from-teal-900/20 to-gray-900 flex items-center justify-center">
+                <Wrench
+                  size={48}
+                  className="text-teal-400 group-hover:text-teal-300 transition-colors"
+                />
+              </div>
+              <div className="p-8">
+                <h2 className="text-2xl font-bold mb-2">Tools</h2>
+                <p className="text-gray-400">
+                  Pose &amp; Expression libraries — organize, tag, and build reusable pose/expression packs
+                </p>
+              </div>
+            </div>
+
+            {/* Mobile Mode Card */}
+            <div
+              onClick={() => navigate('/mobile')}
+              className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden hover:border-indigo-600 hover:shadow-lg transition-all cursor-pointer group"
+            >
+              <div className="h-32 bg-gradient-to-br from-indigo-900/20 to-gray-900 flex items-center justify-center">
+                <Smartphone
+                  size={48}
+                  className="text-indigo-400 group-hover:text-indigo-300 transition-colors"
+                />
+              </div>
+              <div className="p-8">
+                <h2 className="text-2xl font-bold mb-2">Mobile Mode</h2>
+                <p className="text-gray-400">
+                  Touch-optimized view for phone &amp; tablet — work on scenes, cast, and batch status over your network
                 </p>
               </div>
             </div>

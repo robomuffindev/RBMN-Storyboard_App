@@ -222,7 +222,7 @@ async def _maybe_resync_scene_boundaries(
     proj = await session.get(Project, project_id)
     if not proj:
         return {"resynced": False, "reason": "project_not_found"}
-    if getattr(proj, "mode", None) not in ("narration_video", "narration_images"):
+    if getattr(proj, "mode", None) not in ("narration_video", "narration_images", "talkie"):
         return {"resynced": False, "reason": "mode_not_narration"}
 
     # ── AAF-authoritative gate ────────────────────────────────────────
@@ -706,7 +706,7 @@ async def analyze_audio(
         _proj_for_mode = await session.get(Project, project_id)
         _skip_demucs = (
             _proj_for_mode is not None
-            and _proj_for_mode.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO)
+            and _proj_for_mode.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO, ProjectMode.TALKIE)
         )
 
         # ── SRT-only narration mode ────────────────────────────────────
@@ -3755,7 +3755,7 @@ async def suggest_timeline(
     # Long pauses between phrases are used as natural break points.
 
     from backend.database.models import ProjectMode
-    is_narration = project.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO)
+    is_narration = project.mode in (ProjectMode.NARRATION_IMAGES, ProjectMode.NARRATION_VIDEO, ProjectMode.TALKIE)
 
     if is_narration and word_timestamps and phrase_groups:
         logger.info(

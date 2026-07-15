@@ -13,6 +13,7 @@ models can't use them — describe by appearance).
 |---|---|---|---|---|
 | **Z-Image Turbo** (Tongyi) | `Z_IMAGE_SYSTEM_PROMPT` | structured camera-direction prose, literal | ~70–160w | none (pure T2I) |
 | **Krea 2 / FLUX Krea** | `KREA2_IMAGE_SYSTEM_PROMPT` | natural prose, **fewest** modifiers | ~30–110w | none |
+| **Anima** (anime base) | `ANIMA_IMAGE_SYSTEM_PROMPT` | quality tags + danbooru tags + natural prose | tags + 2–4 sentences | none (pure T2I) |
 | **FLUX.2 Klein / FLUX.1** | `IMAGE_SYSTEM_PROMPT` | concise prose, edit-aware | ~30–90w | `image 1/2`, edit-style |
 | **Qwen-Image-Edit** | `QWEN_EDIT_SYSTEM_PROMPT` | imperative edit instruction | 1–3 sentences | `image 1/2/3` roles |
 | **Two-pass base (Z-Image)** | `TWO_PASS_BASE_SYSTEM_PROMPT` | scene-only, no characters | ~60–140w | none |
@@ -59,3 +60,24 @@ LTX 2.3's image-to-video guidance: the source (first frame) image defines the ST
 - **First frame (animated scenes only — music_video / narration_video):** depict the OPENING moment / calm starting state — key subject(s), setting, lighting as the shot opens, before the action. Don't pack in every action/element the video will reveal (the video step generates those from its own prompt). Frame as the shot opens (the model won't reframe); keep lighting clean (it propagates). This is injected as a "VIDEO STARTING FRAME" context block in `_build_auto_enhance_context` (auto) and `buildEnhanceContext` (manual), and reinforced in `IMAGE_SYSTEM_PROMPT` / `Z_IMAGE_SYSTEM_PROMPT` / `KREA2_IMAGE_SYSTEM_PROMPT`.
 - **Standalone stills (narration_images):** NOT gated — the image is the final deliverable, so it still depicts the full scene.
 - **Last frame:** it's the END keyframe the video interpolates to — one clean endpoint, not a packed montage; the video prompt carries the motion between the two keyframes (`LAST_FRAME_IMAGE_SYSTEM_PROMPT`).
+
+## Anima (anime base)
+
+`ANIMA_IMAGE_SYSTEM_PROMPT` implements the Anima base formula: **quality tags first**
+(`masterpiece, best quality, score_7, safe, highres, official art`), then subject-count
+tags (`1girl, solo`), optional `@artist` tag only when requested, useful anime/danbooru
+tags (lowercase, spaces not underscores except `score_7`), then **2–4 natural-language
+sentences** describing subject, outfit, pose, composition, background, lighting, mood.
+Multiple characters are separated explicitly ("On the left side of the image…").
+This is the ONE model family where quality-booster tags are correct — the cross-cutting
+no-booster rule above does not apply to Anima.
+
+The **negative prompt is NOT LLM-generated**: the standard Anima negative
+(`worst quality, low quality, score_1, score_2, score_3, artist name, bad anatomy, …`)
+is applied at dispatch as `ANIMA_DEFAULT_NEGATIVE` in
+`backend/services/comfyui/workflow.py` whenever the scene has no explicit negative.
+
+Routing: the Anima prompt is used for no-reference first-pass generation when the
+single-image generator is `anima` (settings default or per-job override). Known scope
+limit: in narration/talkie project modes the narration system prompt takes precedence
+over the Anima formula (`generation.py` narration gate).

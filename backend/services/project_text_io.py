@@ -73,11 +73,13 @@ _ADVANCED_SCENE_PARAM_KEYS = (
 
 
 def _project_is_narration(mode: str) -> bool:
-    return mode in ("narration_video", "narration_images")
+    return mode in ("narration_video", "narration_images", "talkie")
 
 
 def _project_renders_video(mode: str) -> bool:
-    return mode in ("music_video", "narration_video")
+    # talkie renders video too (per-scene lip-sync clips; lipsync_ltx consumes
+    # the scene video prompt) — excluding it dropped video_* fields on text round-trip
+    return mode in ("music_video", "narration_video", "talkie")
 
 
 def _extract_scene_text(start_s: float, end_s: float, words: list[dict]) -> str:

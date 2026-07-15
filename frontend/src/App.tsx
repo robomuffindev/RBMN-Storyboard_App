@@ -10,6 +10,15 @@ import BatchesDashboard from '@/components/BatchMode/BatchesDashboard';
 import BatchRunDetail from '@/components/BatchMode/BatchRunDetail';
 import ShortcodeRedirect from '@/components/Chapters/ShortcodeRedirect';
 import CharacterStudioPage from './components/CharacterStudio/CharacterStudioPage';
+import ToolsPage from './components/Tools/ToolsPage';
+import VNCCSNativePage from './components/VNCCSNative/VNCCSNativePage';
+import StoryboardPage from './components/Storyboard/StoryboardPage';
+import MobileProjects from './components/Mobile/MobileProjects';
+import MobileProject from './components/Mobile/MobileProject';
+import MobileScenes from './components/Mobile/MobileScenes';
+import MobileCharacters from './components/Mobile/MobileCharacters';
+import MobileQueue from './components/Mobile/MobileQueue';
+import MobileBatchDetail from './components/Mobile/MobileBatchDetail';
 
 function App() {
   useJobEvents();
@@ -21,11 +30,21 @@ function App() {
         <Route path="/projects" element={<ProjectList />} />
         <Route path="/project/:id" element={<AppLayout />} />
         <Route path="/project/:id/c/:chapterShortCode" element={<AppLayout />} />
+        <Route path="/project/:id/storyboard" element={<StoryboardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/studio" element={<CharacterStudioPage />} />
+        <Route path="/studio/vnccs" element={<VNCCSNativePage />} />
+        <Route path="/studio/vnccs-klein" element={<VNCCSNativePage variant="klein" />} />
+        <Route path="/tools" element={<ToolsPage />} />
         <Route path="/batches" element={<BatchesDashboard />} />
         <Route path="/batches/:batchRunId" element={<BatchRunDetail />} />
         <Route path="/s/:code" element={<ShortcodeRedirect />} />
+        <Route path="/mobile" element={<MobileProjects />} />
+        <Route path="/mobile/p/:id" element={<MobileProject />} />
+        <Route path="/mobile/p/:id/scenes" element={<MobileScenes />} />
+        <Route path="/mobile/p/:id/characters" element={<MobileCharacters />} />
+        <Route path="/mobile/p/:id/queue" element={<MobileQueue />} />
+        <Route path="/mobile/batch/:batchRunId" element={<MobileBatchDetail />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <BatchPreviewPIP />

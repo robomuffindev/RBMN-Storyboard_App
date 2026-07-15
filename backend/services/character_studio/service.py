@@ -83,7 +83,18 @@ def _subject_tokens(style_key: str, sex: str) -> str:
 
 
 # ── Base render prompt ────────────────────────────────────────────────────
-def build_base_prompt(info: dict, kind: str = "character", extra: str = "", style: str = "") -> str:
+def clothing_phrase(sex: str, nsfw: bool) -> str:
+    """VNCCS's base-render clothing default: SFW = underwear, NSFW = nude.
+    Both produce a clothing-READY base to layer costumes over (matches
+    vnccs/nodes/character_creator.py). Kept verbatim for parity."""
+    male = (sex or "").lower().startswith("m")
+    if nsfw:
+        return "(naked, nude, penis)" if male else "(naked, nude, vagina, nipples)"
+    return "(bare chest, wear white boxers)" if male else "(wear white bra and panties)"
+
+
+def build_base_prompt(info: dict, kind: str = "character", extra: str = "", style: str = "",
+                      nsfw=None) -> str:
     """Compose the base render prompt from the VNCCS-style tag sheet.
 
     Written for our first-pass generators (Z-Image / Krea2): concrete prose-ish
@@ -116,8 +127,9 @@ def build_base_prompt(info: dict, kind: str = "character", extra: str = "", styl
             parts.append(f"{v}{suffix}")
     if info.get("additional_details"):
         parts.append(str(info["additional_details"]))
+    _nsfw = bool(info.get("nsfw")) if nsfw is None else bool(nsfw)
     outfit = (info.get("outfit") or "").strip()
-    parts.append(outfit if outfit else "simple casual clothes")
+    parts.append(outfit if outfit else clothing_phrase(sex, _nsfw))
     parts.extend([
         "standing straight, arms relaxed at sides, neutral expression",
         "front view, full body from head to feet",
@@ -142,7 +154,7 @@ def default_shot_plan(info: dict, kind: str = "character") -> list[dict]:
     against Image 1 (the base render).  Klein refs use positional "Image 1"
     language — never character names.
     """
-    kf = "Using the character in Image 1, render the exact same character with the same face, hair, outfit and art style"
+    kf = "Using the character in Image 1, render the exact same character with the same face, hair, outfit and art style, both eyes the SAME color, identical facial features"
     if kind == "item":
         ki = "Using the object in Image 1, render the exact same object with identical shape, materials and details"
         return [

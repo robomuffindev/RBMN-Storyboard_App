@@ -11,7 +11,7 @@
  * wizard button is built here (omitted rather than inventing an endpoint).
  */
 import { useEffect, useState } from 'react';
-import { Plus, Pencil, Trash2, X, Shirt } from 'lucide-react';
+import { Plus, Pencil, Trash2, X, Shirt, Upload } from 'lucide-react';
 import { CostumeFieldsT, CostumeT, EngineT, OutfitCatalogEntryT, p2Api } from './characterStudioP2Api';
 import { Spinner, ErrorText, StatusChip, assetUrl, ImageLightbox } from './p2Shared';
 
@@ -25,11 +25,13 @@ const COSTUME_FIELD_KEYS: { key: keyof CostumeFieldsT; label: string }[] = [
 
 function CostumeForm({
   characterId,
+  studioProjectId,
   existing,
   onDone,
   onCancel,
 }: {
   characterId: string;
+  studioProjectId: string | null | undefined;
   existing: CostumeT | null;
   onDone: () => void;
   onCancel: () => void;
@@ -37,6 +39,8 @@ function CostumeForm({
   const [name, setName] = useState(existing?.name || '');
   const [fields, setFields] = useState<CostumeFieldsT>(existing?.fields || {});
   const [prompt, setPrompt] = useState(existing?.prompt || '');
+  const [refAssetId, setRefAssetId] = useState<string>(existing?.reference_asset_id || '');
+  const [uploadingRef, setUploadingRef] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outfits, setOutfits] = useState<OutfitCatalogEntryT[]>([]);
@@ -65,15 +69,37 @@ function CostumeForm({
     setError(null);
     try {
       if (existing) {
-        await p2Api.updateCostume(characterId, existing.id, { name: name.trim(), fields, prompt: prompt.trim() });
+        await p2Api.updateCostume(characterId, existing.id, { name: name.trim(), fields, prompt: prompt.trim(), reference_asset_id: refAssetId || '' });
       } else {
-        await p2Api.createCostume(characterId, { name: name.trim(), fields, prompt: prompt.trim() || undefined });
+        await p2Api.createCostume(characterId, { name: name.trim(), fields, prompt: prompt.trim() || undefined, reference_asset_id: refAssetId || undefined });
       }
       onDone();
     } catch (e: any) {
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const uploadRef = async (file: File) => {
+    if (!studioProjectId) {
+      setError('Studio not ready — try again.');
+      return;
+    }
+    setUploadingRef(true);
+    setError(null);
+    try {
+      const fd = new FormData();
+      fd.append('asset_type', 'clothing');
+      fd.append('file', file);
+      const res = await fetch(`/api/projects/${studioProjectId}/assets/upload`, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+      const a = await res.json();
+      setRefAssetId(a.id);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setUploadingRef(false);
     }
   };
 
@@ -140,6 +166,28 @@ function CostumeForm({
           className="bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-gray-100 focus:outline-none focus:border-purple-600 resize-y"
         />
       </label>
+
+      <div className="flex flex-col gap-2 border border-gray-800 rounded-md p-3 bg-gray-800/30">
+        <span className="text-sm text-gray-300">Clothing reference image (optional)</span>
+        <span className="text-xs text-gray-500">
+          Dress the character in a garment from a reference image via the edit model — reuse one outfit
+          across characters, or swap in clothing generated elsewhere. When set, generation uses the
+          reference instead of the text fields.
+        </span>
+        <div className="flex items-center gap-3">
+          <label className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-md text-sm flex items-center gap-2 cursor-pointer w-fit">
+            {uploadingRef ? <Spinner size={13} /> : <Upload size={13} />}
+            {refAssetId ? 'Replace' : 'Upload'} reference
+            <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadRef(f); e.target.value = ''; }} />
+          </label>
+          {refAssetId && (
+            <>
+              <img src={assetUrl(studioProjectId, refAssetId) || ''} alt="clothing ref" className="w-16 h-16 object-cover rounded border border-gray-700" />
+              <button onClick={() => setRefAssetId('')} className="text-xs text-red-400 hover:text-red-300">Remove</button>
+            </>
+          )}
+        </div>
+      </div>
 
       <ErrorText msg={error} />
 
@@ -305,6 +353,7 @@ export function CostumesTab({
       {showForm && (
         <CostumeForm
           characterId={characterId}
+          studioProjectId={studioProjectId}
           existing={editing}
           onCancel={() => {
             setShowForm(false);

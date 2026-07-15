@@ -25,6 +25,7 @@ export interface PosePresetT {
   id: string;
   name: string;
   custom?: boolean;
+  category?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +91,7 @@ export interface CostumeT {
   name: string;
   fields?: CostumeFieldsT;
   prompt?: string;
+  reference_asset_id?: string;
   sprites?: Record<string, CostumeSpriteT>;
 }
 
@@ -215,6 +217,8 @@ export interface WizardCharacterInfoT {
   hair?: string;
   eyes?: string;
   additional_details?: string;
+  aesthetics?: string;
+  nsfw?: boolean;
   [key: string]: any;
 }
 
@@ -297,11 +301,45 @@ export const p2Api = {
     }),
   deleteCustomPosePreset: (presetId: string) =>
     apiFetch<void>(`/pose-presets/custom/${presetId}`, { method: 'DELETE' }),
+  importPoses: (payload: { poseset?: any; poses?: any[]; category?: string }) =>
+    apiFetch<{ imported: number; ids: string[] }>('/pose-presets/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  importOpenpose: async (file: File, category: string): Promise<{ imported: number; category: string }> => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('category', category);
+    const res = await fetch(`${BASE}/pose-presets/import-openpose`, { method: 'POST', body: fd });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        detail = (await res.json()).detail || detail;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail || `Import failed (${res.status})`);
+    }
+    return res.json();
+  },
+
+  importPoseImages: async (file: File, category: string): Promise<{ imported: number }> => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('category', category);
+    const res = await fetch(`${BASE}/pose-presets/import-images`, { method: 'POST', body: fd });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch { /* ignore */ }
+      throw new Error(detail || `Import failed (${res.status})`);
+    }
+    return res.json();
+  },
 
   // Costumes
   createCostume: (
     characterId: string,
-    data: { name: string; fields: CostumeFieldsT; prompt?: string }
+    data: { name: string; fields: CostumeFieldsT; prompt?: string; reference_asset_id?: string | null }
   ) =>
     apiFetch<CostumeCreateResponseT>(`/characters/${characterId}/costumes`, {
       method: 'POST',
@@ -310,7 +348,7 @@ export const p2Api = {
   updateCostume: (
     characterId: string,
     costumeId: string,
-    data: { name?: string; fields?: CostumeFieldsT; prompt?: string }
+    data: { name?: string; fields?: CostumeFieldsT; prompt?: string; reference_asset_id?: string | null }
   ) =>
     apiFetch<CostumeCreateResponseT>(`/characters/${characterId}/costumes/${costumeId}`, {
       method: 'PATCH',
@@ -329,7 +367,7 @@ export const p2Api = {
     apiFetch<{ emotions?: EmotionsCatalogT | EmotionCatalogEntryT[]; outfits?: OutfitCatalogEntryT[] }>('/catalogs'),
   generateEmotions: (
     characterId: string,
-    data: { emotions: string[]; costume_id?: string | null; source?: string; engine: EngineT }
+    data: { emotions?: string[]; custom_expressions?: { name: string; natural_prompt: string }[]; costume_id?: string | null; source?: string; engine: EngineT }
   ) =>
     apiFetch<EmotionsGenerateResponseT>(`/characters/${characterId}/emotions/generate`, {
       method: 'POST',

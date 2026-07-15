@@ -153,7 +153,7 @@ function BatchItemCard({ item, index, onUpdate, onRemove, isRunning, itemStatus 
           ) : (
             <div className="flex flex-wrap gap-2">
               <span className="px-2 py-0.5 bg-gray-800 rounded text-xs text-gray-400">
-                {item.render_type === 'music_video' ? 'Music Video' : 'Narration'}
+                {item.render_type === 'music_video' ? 'Music Video' : item.render_type === 'talkie' ? 'Talkie' : 'Narration'}
               </span>
               <span className="px-2 py-0.5 bg-gray-800 rounded text-xs text-gray-400 uppercase">
                 {item.video_mode}

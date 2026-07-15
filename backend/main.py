@@ -444,8 +444,12 @@ app.include_router(debug_router)
 # Global character library — reusable characters across projects
 from backend.api.global_characters import router as global_characters_router
 from backend.api.character_studio import router as character_studio_router
+from backend.api.tools import router as tools_router
+from backend.api.vnccs_native import router as vnccs_native_router
 app.include_router(global_characters_router)
 app.include_router(character_studio_router)
+app.include_router(vnccs_native_router)
+app.include_router(tools_router)
 
 # Log registered routes for debugging
 _gen_routes = []
@@ -470,10 +474,28 @@ if frontend_dist.exists():
     # Catch-all for SPA routing
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        """Serve SPA index.html for all non-API routes."""
+        """Serve real build files, else SPA index.html (non-API routes only)."""
         # Don't serve index.html for API routes
         if full_path.startswith("api/"):
             return {"detail": "Not Found"}
+
+        # Serve actual files from the build first — e.g. /vnccs-pose/*.js ES
+        # modules + workers, favicons. Previously everything outside /assets got
+        # index.html, so the Pose Studio's dynamic import received HTML and died
+        # with "Failed to fetch dynamically imported module".
+        if full_path:
+            try:
+                candidate = (frontend_dist / full_path).resolve()
+                candidate.relative_to(frontend_dist.resolve())  # traversal guard
+                if candidate.is_file():
+                    media_type = None
+                    if candidate.suffix in (".js", ".mjs"):
+                        # Windows registries sometimes map .js to text/plain,
+                        # which browsers reject for ES modules — pin it.
+                        media_type = "text/javascript"
+                    return FileResponse(candidate, media_type=media_type)
+            except (ValueError, OSError):
+                pass
 
         index_path = frontend_dist / "index.html"
         if index_path.exists():

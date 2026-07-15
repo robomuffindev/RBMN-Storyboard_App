@@ -83,6 +83,91 @@ def _update_power_lora_distilled(workflow: dict, distilled_lora_name: str) -> No
     logger.debug("No PowerLoraLoader node found — distilled LoRA not updated")
 
 
+ANIMA_DEFAULT_NEGATIVE = (
+    "worst quality, low quality, score_1, score_2, score_3, artist name, "
+    "bad anatomy, bad hands, missing fingers, extra fingers, extra arms, "
+    "extra legs, duplicate, twins, text, watermark, signature, simple background"
+)
+
+
+def prepare_anima_workflow(
+    workflow_path: str,
+    prompt: str,
+    width: int,
+    height: int,
+    seed: int,
+    negative: str = "",
+    image: Optional[str] = None,
+    denoise: Optional[float] = None,
+    lllite_name: Optional[str] = None,
+    lllite_strength: Optional[float] = None,
+) -> dict:
+    """Prepare an Anima workflow (T2I / I2I / Inpaint). Anima is a Qwen-VAE +
+    Qwen-0.6B-CLIP anime base model with turbo sampling (er_sde/simple/12/cfg1).
+
+    Mutates by node title (present-node-only):
+    - "CLIP Text Encode (Positive Prompt)" → text
+    - "CLIP Text Encode (Negative Prompt)" → text (if negative given)
+    - "Empty Latent Image" → width/height (T2I only)
+    - "KSampler" → seed (+ denoise for I2I/Inpaint)
+    - "Load Image" → image (I2I/Inpaint; an uploaded worker filename)
+    """
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    set_node_input(workflow, "CLIP Text Encode (Positive Prompt)", "text", prompt)
+    _neg = negative or ANIMA_DEFAULT_NEGATIVE
+    try:
+        set_node_input(workflow, "CLIP Text Encode (Negative Prompt)", "text", _neg)
+    except ValueError:
+        pass
+    for dim, val in (("width", int(width)), ("height", int(height))):
+        try:
+            set_node_input(workflow, "Empty Latent Image", dim, val)
+        except ValueError:
+            pass
+    # ULTRA graphs feed dims from INTConstant WIDTH/HEIGHT nodes (also driving
+    # the SolidMask/SEGS body detailer + i2i resize). Set those too, else at any
+    # non-1920x1080 target the SEGS mask mismatches the latent / i2i is forced to
+    # 1080p. (present-node-only; harmless where absent.)
+    for _tt, _vv in (("WIDTH", int(width)), ("HEIGHT", int(height))):
+        try:
+            set_node_input(workflow, _tt, "value", _vv)
+        except ValueError:
+            pass
+    try:
+        set_node_input(workflow, "KSampler", "seed", int(seed))
+    except ValueError:
+        pass
+    if denoise is not None:
+        try:
+            set_node_input(workflow, "KSampler", "denoise", float(denoise))
+        except ValueError:
+            pass
+    if image:
+        try:
+            set_node_input(workflow, "Load Image", "image", image)
+        except ValueError:
+            pass
+    # Also set the seed on a ttN "SEED" node if the graph uses one.
+    try:
+        set_node_input(workflow, "SEED", "seed", int(seed))
+    except ValueError:
+        pass
+    if lllite_name:
+        try:
+            set_node_input(workflow, "Apply Anima ControlNet-LLLite", "lllite_name", lllite_name)
+        except ValueError:
+            pass
+    if lllite_strength is not None:
+        try:
+            set_node_input(workflow, "Apply Anima ControlNet-LLLite", "strength", float(lllite_strength))
+        except ValueError:
+            pass
+    logger.info(f"Anima workflow prepared from {workflow_path}")
+    return workflow
+
+
 def prepare_klein_workflow(
     workflow_path: str,
     prompt: str,
@@ -90,6 +175,8 @@ def prepare_klein_workflow(
     height: int,
     seed: int,
     ref_images: Optional[List[str]] = None,
+    pose_lora: str = "",
+    pose_lora_strength: float = 0.9,
 ) -> dict:
     """
     Load and prepare a Klein image generation workflow.
@@ -157,6 +244,33 @@ def prepare_klein_workflow(
 
         if len(ref_images) >= 5:
             set_node_input(workflow, "Reference 5", "image", ref_images[4])
+
+    # Character Studio pose transfer: enable the RefControl Pose LoRA in the
+    # rgthree Power Lora Loader (lora_1 slot). The node is already in the Klein
+    # graphs (off by default); we flip it on with the requested filename.
+    if pose_lora:
+        _enabled = False
+        for _node in workflow.values():
+            if not isinstance(_node, dict):
+                continue
+            _ct = _node.get("class_type", "")
+            if "Power Lora Loader" in _ct or "PowerLoraLoader" in _ct:
+                _inp = _node.get("inputs", {})
+                _slot = _inp.get("lora_1")
+                if isinstance(_slot, dict):
+                    _slot["on"] = True
+                    _slot["lora"] = pose_lora
+                    _slot["strength"] = pose_lora_strength
+                    _enabled = True
+                    logger.info(
+                        f"Klein pose LoRA enabled: {pose_lora} @ {pose_lora_strength}"
+                    )
+                    break
+        if not _enabled:
+            logger.warning(
+                f"Klein pose LoRA requested ({pose_lora}) but no Power Lora Loader "
+                f"node found in {workflow_path} — pose transfer will be weak."
+            )
 
     logger.info("Klein workflow prepared")
     return workflow
@@ -2114,8 +2228,90 @@ def prepare_studio_facedetailer_workflow(
 
     _try("STUDIO FD INPUT", "image", image_path)
     _try("STUDIO FD POSITIVE", "text", prompt or "")
+    _try("STUDIO FACEDETAILER", "wildcard", prompt or "")  # VNCCS sets the FD wildcard too
     _try("STUDIO FACEDETAILER", "seed", int(seed))
     _try("STUDIO FACEDETAILER", "denoise", float(denoise))
     if qie_model_gguf:
         _try("STUDIO FD UNET", "unet_name", qie_model_gguf)
+    return workflow
+
+
+def prepare_lipsync_workflow(
+    workflow_path: str,
+    image: str,
+    audio_path: str,
+    width: int = 512,
+    height: int = 512,
+    seed: int = 0,
+    duration: Optional[float] = None,
+    framerate: int = 25,
+) -> dict:
+    """Prepare a dedicated talking-head lip-sync workflow (LatentSync / MuseTalk /
+    Sonic) from a single source portrait + a narration audio clip.
+
+    These packages vary in node naming, so this setter is DEFENSIVE and
+    title-based (present-node-only): it tries a list of conventional node
+    titles for each role and silently skips any that aren't in the graph.
+    Export your tested ComfyUI graph to ``workflows/LIPSYNC_<ENGINE>.json`` and
+    give the load nodes conventional titles (e.g. "Load Image", "Load Audio",
+    "WIDTH"/"HEIGHT") and this will wire the portrait, audio, size, and seed for
+    every render. Anything the setter can't find is left at the JSON's value.
+
+    Mutates by title (first match wins per role):
+    - portrait image  → "Load Image" / "LOAD IMAGE" / "LoadImage" / "Source Image" / "Portrait"
+    - narration audio → "Load Audio" / "LOAD AUDIO" / "LoadAudio" / "Audio"
+    - width/height    → "WIDTH"/"HEIGHT" or "Width"/"Height" (.value)
+    - seed            → "RandomNoise"/"KSampler"/"Seed"/"Sampler" (.noise_seed or .seed)
+    - duration        → "Duration"/"Audio - Video Duration"/"Video Length" (.value)
+    """
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+
+    def try_set(title: str, inp: str, val) -> bool:
+        try:
+            set_node_input(workflow, title, inp, val)
+            return True
+        except Exception:
+            return False
+
+    # Source portrait
+    _img_ok = False
+    for t in ("Load Image", "LOAD IMAGE", "LoadImage", "Load Portrait",
+              "Source Image", "Portrait", "Reference Image"):
+        if try_set(t, "image", image):
+            _img_ok = True
+            break
+    # Narration audio
+    _aud_ok = False
+    for t in ("Load Audio", "LOAD AUDIO", "LoadAudio", "Audio", "Input Audio"):
+        if try_set(t, "audio", audio_path):
+            _aud_ok = True
+            break
+    if not image or not _img_ok:
+        logger.warning(f"Lip-sync workflow {workflow_path}: portrait NOT wired "
+                       f"(image={bool(image)}, node_matched={_img_ok}). Give the source-image "
+                       f"node a conventional title like 'Load Image'.")
+    if not audio_path or not _aud_ok:
+        logger.warning(f"Lip-sync workflow {workflow_path}: audio NOT wired "
+                       f"(audio={bool(audio_path)}, node_matched={_aud_ok}). Give the audio "
+                       f"node a conventional title like 'Load Audio'.")
+    # Dimensions
+    for t in ("WIDTH", "Width"):
+        try_set(t, "value", int(width))
+    for t in ("HEIGHT", "Height"):
+        try_set(t, "value", int(height))
+    # Seed (try both common input names on common sampler/seed nodes)
+    for t in ("RandomNoise", "KSampler", "Seed", "Sampler", "SonicSampler",
+              "MuseTalk Sampler", "LatentSync"):
+        for inp in ("noise_seed", "seed"):
+            try_set(t, inp, int(seed))
+    # Duration / clip length (seconds and frame-count variants)
+    if duration:
+        try_set("Duration", "value", float(duration))
+        try_set("Audio - Video Duration", "value", int(math.ceil(duration)))
+        try_set("Video Length", "value", int(math.ceil(duration * max(1, framerate))))
+        try_set("Framerate", "value", int(framerate))
+
+    logger.info(f"Prepared lip-sync workflow from {workflow_path} "
+                f"(image={bool(image)}, audio={bool(audio_path)}, {width}x{height})")
     return workflow

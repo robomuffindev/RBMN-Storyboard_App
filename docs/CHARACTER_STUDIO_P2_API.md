@@ -432,3 +432,48 @@ otherwise-successful batch.
 - `/process` refs additionally accept `costume:<id>` and `emotion:<key>` prefixed forms.
 - Emotion entries now include `face_crop_asset_id` (thumbnail-able via the assets file route).
 - Audit fixes contract note: characters pushed to projects create Asset rows for all copied images.
+
+## Addendum — v1.30.1 → v1.33.0 additions (supersedes conflicts above)
+
+**Identity / style**
+- `GET /styles` → `{ default, styles:[{value,label}] }` — canonical art-style presets. Custom
+  free-text style values are accepted everywhere (used verbatim as the descriptor).
+- `character_info.style` holds the art style; it threads into the base prompt, wizard system prompt,
+  and caption subject. `POST /wizards/character` and `POST /wizards/clone` now accept optional `style`.
+- Story `POST /stories` / `PATCH /stories/{id}` accept `default_style`; `GET /stories` returns it.
+  New characters inherit the story's `default_style` when `character_info.style` is unset.
+- **`PATCH /characters/{id}` now returns the full character object** (was `{ok:true}` — that wiped
+  the edit form; fixed 1.31.1).
+
+**Base render**
+- `POST /characters/{id}/generate-base` accepts `model` (first-pass override: `z_image_turbo` /
+  `krea2_turbo` / `flux2_klein_dev_9b`; empty = Settings default via `single_image_generator`).
+- `POST /characters/{id}/set-base { asset_id }` — use an uploaded/existing image AS the base render
+  (points the studio scene's `chosen_image_path` at it; NVCCS import style). Upload the file first
+  via `POST /api/projects/{studio_project_id}/assets/upload`.
+- Extended `/status`: `base` now includes `status` (`idle`/`pending`/`running`/`done`/`failed`) and
+  `error`, so the UI shows real progress / failure instead of an endless spinner.
+
+**Poses**
+- `GET /pose-presets` entries now include `category` (built-ins = "Basic").
+- `POST /pose-presets/import { poseset? , poses? , category }` — bulk-import a VNCCS poseset JSON
+  or a flat pose list as categorized custom presets.
+- `POST /pose-presets/import-openpose` (multipart: `file` = `.json`/array/`.zip`, `category`) —
+  ingest raw **OpenPose keypoint** files (BODY_25 / COCO-18 auto-detected) → VNCCS 18-joint presets
+  scaled to 512×1536.
+- Pose CONTROL images now render as the colored **OpenPose skeleton on black**; the mannequin
+  schematic is thumbnail-only.
+- **Klein pose transfer** uses the RefControl Pose LoRA when `app_settings.cs_klein_pose_lora` is set
+  (default `refcontrol_v2_poses.safetensors`): image 1 = skeleton, image 2 = identity, trigger
+  `apply pose from image 1 with reference from image 2`. Empty setting → weak 2-ref fallback.
+
+**Preflight / engines**
+- `GET /characters/{id}/preflight` now also returns `klein_online`, `qwen_online`, `impact_online`
+  (plus the existing `seedvr2_online`, `gan_upscale_online`, `facedetailer_online`). The detail
+  header renders explicit Klein / Qwen (VNCCS) / FaceDetailer chips.
+
+**Emotions**
+- Klein emotions no longer hard-fail when no face is detected (anime/stylized): a heuristic
+  upper-center face region is used for the `klein_inpaint` mask. Qwen still recommended.
+- Emotions-from-costume resolves the source via the sprite's `asset_id` first (then `image_rel`),
+  so a rendered costume is reliably found.

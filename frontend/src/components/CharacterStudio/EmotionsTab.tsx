@@ -14,7 +14,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Smile } from 'lucide-react';
 import { CostumeT, EmotionCatalogEntryT, EmotionEntryT, EmotionsCatalogT, EngineT, p2Api } from './characterStudioP2Api';
-import { Spinner, ErrorText, StatusChip, assetUrl } from './p2Shared';
+import { Spinner, ErrorText, StatusChip, assetUrl, ImageLightbox } from './p2Shared';
+import StudioLibraryPicker from './StudioLibraryPicker';
 
 function normalizeCatalog(raw: EmotionsCatalogT | EmotionCatalogEntryT[] | undefined): {
   key: string;
@@ -53,10 +54,12 @@ export function EmotionsTab({
   // 'facedetailer' = VNCCS's face-crop re-render (needs Impact-Pack on the
   // VNCCS worker) — best for small faces in full-body sprites.
   const [emotionEngine, setEmotionEngine] = useState<'' | 'qwen' | 'klein' | 'facedetailer'>('');
+  const [libOpen, setLibOpen] = useState(false);
   const [costumeId, setCostumeId] = useState<string>('');
   const [busy, setBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [lastErrors, setLastErrors] = useState<string[]>([]);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadCatalog = useCallback(async () => {
     setLoading(true);
@@ -117,6 +120,14 @@ export function EmotionsTab({
       {!hasBase && (
         <div className="text-sm text-amber-300 bg-amber-950/20 border border-amber-900/40 rounded-md px-3 py-2">
           Generate a base render first (Sheet tab) — emotion generation requires it.
+        </div>
+      )}
+
+      {(emotionEngine || engine) === 'klein' && (
+        <div className="text-xs text-amber-300 bg-amber-950/20 border border-amber-900/40 rounded-md px-3 py-2">
+          Klein emotions inpaint a detected face region and can drift on stylized/anime characters (face
+          detection may also miss the face). For the most reliable results use the <strong>Qwen (VNCCS)</strong>
+          engine — it edits in place with the Emotion LoRA and needs no face detection.
         </div>
       )}
 
@@ -181,6 +192,14 @@ export function EmotionsTab({
           {busy && <Spinner size={13} />}
           <Smile size={14} />
           Generate Emotions ({selected.size})
+        </button>
+        <button
+          onClick={() => setLibOpen(true)}
+          disabled={!hasBase}
+          title="Generate expressions from your Tools → Expression Library"
+          className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 disabled:opacity-50 rounded-md text-sm font-medium flex items-center gap-2"
+        >
+          <Smile size={14} /> Expression Library
         </button>
       </div>
 
@@ -248,14 +267,26 @@ export function EmotionsTab({
                   <div className="flex gap-1.5">
                     <div className="flex-1 aspect-square bg-gray-800 border border-gray-700 rounded overflow-hidden flex items-center justify-center">
                       {fullUrl ? (
-                        <img src={fullUrl} alt={key} className="w-full h-full object-cover" />
+                        <img
+                          src={fullUrl}
+                          alt={key}
+                          onClick={() => setLightboxUrl(fullUrl)}
+                          title="Click to enlarge"
+                          className="w-full h-full object-cover cursor-pointer"
+                        />
                       ) : (
                         <Smile size={20} className="text-gray-600" />
                       )}
                     </div>
                     {faceUrl && (
                       <div className="w-1/3 aspect-square bg-gray-800 border border-gray-700 rounded overflow-hidden flex items-center justify-center shrink-0">
-                        <img src={faceUrl} alt={`${key} face`} className="w-full h-full object-cover" />
+                        <img
+                          src={faceUrl}
+                          alt={`${key} face`}
+                          onClick={() => setLightboxUrl(faceUrl)}
+                          title="Click to enlarge"
+                          className="w-full h-full object-cover cursor-pointer"
+                        />
                       </div>
                     )}
                   </div>
@@ -273,6 +304,26 @@ export function EmotionsTab({
           </div>
         )}
       </div>
+
+      {libOpen && (
+        <StudioLibraryPicker
+          kind="expression"
+          onClose={() => setLibOpen(false)}
+          onConfirm={async ({ expressions }) => {
+            if (expressions && expressions.length) {
+              const res = await p2Api.generateEmotions(characterId, {
+                custom_expressions: expressions,
+                costume_id: source === 'costume' ? costumeId : null,
+                source: 'base',
+                engine: (emotionEngine || engine) as EngineT,
+              });
+              if (res?.errors?.length) setLastErrors(res.errors);
+              onGenerated();
+            }
+          }}
+        />
+      )}
+      {lightboxUrl && <ImageLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </div>
   );
 }

@@ -226,7 +226,7 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
   };
 
   // Determine label based on project mode
-  const isNarration = projectMode === 'narration_images' || projectMode === 'narration_video';
+  const isNarration = projectMode === 'narration_images' || projectMode === 'narration_video' || projectMode === 'talkie';
   const textLabel = isNarration ? 'Script' : 'Lyrics';
   const textPlaceholder = isNarration
     ? 'Paste your narration script here (optional). This helps WhisperX produce more accurate transcription...'

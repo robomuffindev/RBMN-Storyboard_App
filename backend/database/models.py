@@ -23,6 +23,7 @@ class ProjectMode(StrEnum):
     MUSIC_VIDEO = "music_video"
     NARRATION_IMAGES = "narration_images"
     NARRATION_VIDEO = "narration_video"
+    TALKIE = "talkie"
 
 
 class AssetType(StrEnum):
@@ -327,6 +328,11 @@ class AppSettings(SQLModel, table=True):
     )
     # Per-server capability overrides: {url: {image: bool, video: bool}}
     comfyui_server_caps: Optional[dict] = Field(default=None, sa_column=Column(MutableDict.as_mutable(JSON)))
+    # VNCCS Native mode: pin the ComfyUI host that runs the VNCCS nodes /
+    # holds the character store (empty = auto-pick first vnccs-capable worker).
+    studio_vnccs_host: Optional[str] = Field(default=None)
+    # Per-mode Control Center settings (model/clip/vae/lora/sampler) as JSON.
+    studio_vnccs_settings: Optional[dict] = Field(default=None, sa_column=Column(MutableDict.as_mutable(JSON)))
     whisper_mode: str = Field(default="local")  # "local", "remote", "comfyui"
     whisper_remote_url: Optional[str] = None
     whisper_comfyui_url: Optional[str] = None  # ComfyUI server URL for Whisper workflow
@@ -344,6 +350,16 @@ class AppSettings(SQLModel, table=True):
     # Krea 2 Turbo first-pass model file (overrides UNETLoader in the Krea2
     # workflow). fp8 = RTX 40xx/30xx/older, mxfp8 = RTX 50xx Blackwell.
     krea2_model_name: str = Field(default="krea2_turbo_fp8.safetensors")
+    # Character Studio: Klein pose-transfer LoRA (RefControl). Empty = disabled
+    # (Klein falls back to plain 2-ref, which can't truly transfer pose).
+    cs_klein_pose_lora: str = Field(default="refcontrol_v2_poses.safetensors")
+    # Character Studio VNCCS/Qwen task LoRAs (PoseStudio/ClothesCore/EmotionCore)
+    # live in a subfolder of models/loras on the worker; ComfyUI lists them WITH
+    # that prefix. Prepended to the task-LoRA filename at dispatch. Empty = bare
+    # filenames (root of models/loras). Use the exact prefix your ComfyUI shows
+    # (forward slashes, e.g. "qwen/VNCCS/").
+    cs_qie_lora_subdir: str = Field(default="qwen/VNCCS/")
+    anima_ultra: bool = Field(default=True)  # Anima: use ultra (FaceDetailer+upscale) workflows
     # Krea 2 SFW mode. True = SFW workflow (model safety checker active). False =
     # NSFW workflow (Krea2T-Enhancer node bypasses the safety checker). Picks
     # which Krea2 workflow file the dispatcher loads.
@@ -719,3 +735,63 @@ class StudioDataset(SQLModel, table=True):
     error: str = Field(default="")
     zip_path: str = Field(default="")
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class PoseLibrary(SQLModel, table=True):
+    """Tools → Pose Library: a reusable pose stored canonically as VNCCS
+    18-joint keypoints (re-renderable to any control format), plus tags,
+    category, a thumbnail, and optional source/sample images + provenance."""
+
+    __tablename__ = "pose_library"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(default="")
+    category: str = Field(default="Uncategorized", index=True)
+    tags: list = Field(default_factory=list, sa_column=Column(MutableList.as_mutable(JSON)))
+    joints: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    # keypoints | openpose_img | dwpose | depth | mannequin | photo | sample
+    source_type: str = Field(default="keypoints")
+    thumbnail_rel: str = Field(default="")
+    sample_rel: str = Field(default="")
+    source_image_rel: str = Field(default="")
+    dedup_hash: str = Field(default="", index=True)
+    provenance: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    meta: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ExpressionLibrary(SQLModel, table=True):
+    """Tools → Expression Library: a reusable facial expression stored as a
+    name + natural-language prompt (+ optional reference face crop), the way
+    the emotion engines consume it. Same tag/category/thumbnail machinery."""
+
+    __tablename__ = "expression_library"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(default="")
+    category: str = Field(default="Uncategorized", index=True)
+    tags: list = Field(default_factory=list, sa_column=Column(MutableList.as_mutable(JSON)))
+    natural_prompt: str = Field(default="")
+    reference_image_rel: str = Field(default="")
+    thumbnail_rel: str = Field(default="")
+    source_type: str = Field(default="manual")  # manual | image | catalog
+    dedup_hash: str = Field(default="", index=True)
+    provenance: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    meta: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class LibraryScan(SQLModel, table=True):
+    """Tools organizer scan session: holds the reviewed candidates before the
+    user commits selected ones into a library."""
+
+    __tablename__ = "library_scans"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tool: str = Field(default="pose")  # pose | expression
+    source: str = Field(default="")    # folder path or uploaded zip name
+    status: str = Field(default="scanning")  # scanning | ready | committed | failed
+    candidates: list = Field(default_factory=list, sa_column=Column(MutableList.as_mutable(JSON)))
+    summary: dict = Field(default_factory=dict, sa_column=Column(MutableDict.as_mutable(JSON)))
+    error: str = Field(default="")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
