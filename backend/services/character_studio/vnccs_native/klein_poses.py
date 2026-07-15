@@ -1287,6 +1287,7 @@ def build_klein_refbase_graph(
     steps: int = KLEIN_POSE_STEPS,
     reflatentplus: Optional[Dict[str, Any]] = None,
     strength: float = 1.15,
+    body_ref_end: float = 1.0,
     face_file: Optional[str] = None,
     pulid: Optional[Dict[str, Any]] = None,
     rmbg: Optional[Dict[str, Any]] = None,
@@ -1335,7 +1336,10 @@ def build_klein_refbase_graph(
         id_encs.append("face_enc")
 
     if pulid:
-        pulid_src = body_files[0] if body_files else face_file
+        # PuLID/InsightFace needs a DETECTABLE face; a whole-body ref is too small
+        # (worker logged "face=0" = no-op). Feed the dedicated face crop when we have
+        # one so PuLID actually engages; fall back to the body ref otherwise.
+        pulid_src = face_file or (body_files[0] if body_files else None)
         if pulid_src:
             model_ref = _inject_pulid(api, model_ref, pulid_src, pulid)
 
@@ -1351,7 +1355,8 @@ def build_klein_refbase_graph(
     # reference build drives the base.  ReferenceLatentPlus when present (mask +
     # strength), else stock ReferenceLatent on each body ref.
     if reflatentplus:
-        _rcfg = {"strength": float(max(0.05, min(3.0, strength))), "start": 0.0, "end": 1.0,
+        _rcfg = {"strength": float(max(0.05, min(3.0, strength))), "start": 0.0,
+                 "end": float(max(0.5, min(1.0, body_ref_end))),
                  "masks": {"face": True, "hair": True, "body": True,
                            "clothes": True, "background": False}}
         pos_cur = _inject_reflatentplus(api, [pos_cur, 0], body_load_ids, _rcfg, "rbp")[0]

@@ -2498,6 +2498,15 @@ async def generate_preview(body: PreviewIn, request: Request,
                     _rb_strength = float(saved.get("klein_body_match_strength") or 1.15)
                 except Exception:  # noqa: BLE001
                     _rb_strength = 1.15
+                # release the body reference over the final steps so the tail of the
+                # render can wipe residual on-skin accessories (wrist/neck jewelry) the
+                # prompt asks to remove -- body shape is already locked by then. 1.0 =
+                # hold full (old behavior); lower strips harder. Setting klein_refbase_ref_end.
+                try:
+                    _rb_end = float(saved.get("klein_refbase_ref_end") or 0.85)
+                except Exception:  # noqa: BLE001
+                    _rb_end = 0.85
+                _rb_end = max(0.5, min(1.0, _rb_end))
                 imgs_b64 = []
                 for _i, (_vlabel, _rot, _vp) in enumerate(_views):
                     _vprompt = klein_poses.klein_refbase_prompt(
@@ -2506,7 +2515,7 @@ async def generate_preview(body: PreviewIn, request: Request,
                     _g, _t = klein_poses.build_klein_refbase_graph(
                         prompt=_vprompt, seed=seed_v + _i, models=models,
                         body_files=pv_body_files, reflatentplus=reflatentplus,
-                        strength=_rb_strength, face_file=face_file, pulid=pulid,
+                        strength=_rb_strength, body_ref_end=_rb_end, face_file=face_file, pulid=pulid,
                         rmbg=rmbg_cfg, cfg=klein_cfg, negative_prompt=neg_text, steps=_ksteps,
                         filename_prefix=f"rbmn_vnccs/{safe}/klein_refbase")
                     _r = client.submit_prompt(_g, timeout=120)

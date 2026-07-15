@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.116.0] - 2026-07-15
+### Changed -- Refbase base: PuLID now engages + late reference release for residual jewelry
+- PuLID was fed the full-body reference, where the face is too small for InsightFace
+  to detect (worker logged `face=0` = no-op, so PuLID contributed nothing). It now
+  uses the dedicated face crop as its source, so it actually engages and tightens
+  likeness. If faces stiffen, lower klein_pulid_strength (1.4 -> 1.0-1.2).
+- Leftover on-skin accessories (wrist/neck jewelry) survived because the clothed
+  reference is held for the full render. The body reference now RELEASES over the
+  final steps (default end 0.85) so the tail of the render can wipe residual
+  jewelry the strip prompt asks to remove -- body shape is already locked by then,
+  so the body match is preserved. Tunable via klein_refbase_ref_end (0.5-1.0; 1.0 =
+  old hold-full behavior, lower = strips harder). Applies to the refbase base preview.
+
 ## [1.115.0] - 2026-07-15
 ### Fixed -- Leftover clothing & jewelry on the reference-driven base
 - The base build now matches the reference body well, but partial shirt pieces and
