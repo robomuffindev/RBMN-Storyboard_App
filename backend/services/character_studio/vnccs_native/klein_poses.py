@@ -347,11 +347,7 @@ def resolve_klein_models(oi: dict, settings: Optional[dict] = None,
             f"Klein pose LoRA '{KLEIN_POSE_LORA_BASENAME}' is not on this worker. "
             f"Download the VNCCS pose pack repository '{KLEIN_POSE_REPO}' with the "
             f"VNCCS Model Manager (vnccs-utils) on that worker, then retry.")
-    out: Dict[str, Any] = {"unet": unet, "clip": clip, "vae": vae, "lora": lora or ""}
-    _realism = _resolve_realism_lora(oi, st)
-    if _realism:
-        out["realism_lora"] = _realism
-    return out
+    return {"unet": unet, "clip": clip, "vae": vae, "lora": lora or ""}
 
 
 def _resolve_realism_lora(oi: dict, settings: Optional[dict]) -> Optional[Dict[str, Any]]:
@@ -1017,7 +1013,6 @@ def build_klein_pose_graph(
             body_load_ids.append(bid)
 
     model_ref = ["lora", 0]
-    model_ref = _apply_realism_lora(api, models, model_ref)
     if pulid:
         # PuLID's InsightFace does its OWN face detection+alignment, so feed it the
         # FULL identity image (a real photo where it can find the face), NOT our
@@ -1315,6 +1310,7 @@ def build_klein_restyle_graph(
         model_ref: list = ["lora", 0]
     else:
         model_ref = ["u", 0]
+    model_ref = _apply_realism_lora(api, models, model_ref)
     # base image -> 1MP -> size + encode
     api["base_load"] = {"class_type": "LoadImage", "inputs": {"image": base_file}}
     api["base_scale"] = {"class_type": "ImageScaleToTotalPixels",
@@ -1412,6 +1408,7 @@ def build_klein_refbase_graph(
     strength: float = 1.15,
     body_ref_end: float = 1.0,
     face_file: Optional[str] = None,
+    pulid_image: Optional[str] = None,
     pulid: Optional[Dict[str, Any]] = None,
     face_refine: Optional[Dict[str, Any]] = None,
     sam_cleanup: Optional[Dict[str, Any]] = None,
@@ -1423,7 +1420,9 @@ def build_klein_refbase_graph(
     """Reference-DRIVEN base: the body comes from the reference PHOTOS (ridden as
     strong whole-person reference latents), posed neutrally by ``prompt`` from an
     empty latent — NO pose mannequin, so the mannequin's build can't override the
-    references.  Face crop + PuLID carry the face; RMBG strips the background."""
+    references.  The face crop drives the face-detail reference latent; PuLID is fed
+    the FULL face image (``pulid_image``) so InsightFace can detect+align it; RMBG
+    strips the background."""
     if not body_files:
         raise ValueError("refbase graph needs at least one body reference")
     body_files = body_files[:4]
@@ -1442,7 +1441,6 @@ def build_klein_refbase_graph(
         model_ref: list = ["lora", 0]
     else:
         model_ref = ["u", 0]
-    model_ref = _apply_realism_lora(api, models, model_ref)
 
     body_load_ids: List[str] = []
     for k, bf in enumerate(body_files):
@@ -1462,10 +1460,14 @@ def build_klein_refbase_graph(
         id_encs.append("face_enc")
 
     if pulid:
-        # PuLID/InsightFace needs a DETECTABLE face; a whole-body ref is too small
-        # (worker logged "face=0" = no-op). Feed the dedicated face crop when we have
-        # one so PuLID actually engages; fall back to the body ref otherwise.
-        pulid_src = face_file or (body_files[0] if body_files else None)
+        # PuLID's InsightFace runs its OWN face detection + alignment, so feed it the
+        # FULL face-role reference image (``pulid_image``) -- NOT our app-side crop.
+        # A heuristic crop (when YuNet/Haar miss) can chop the face or rescale a
+        # fragment, and InsightFace then finds nothing ("face=0"/AUCUN VISAGE) -> the
+        # adapter no-ops.  This matches build_klein_pose_graph, which feeds the full
+        # identity image for the same reason.  Fall back to the crop, then a body ref,
+        # only if no full face image was supplied.
+        pulid_src = pulid_image or face_file or (body_files[0] if body_files else None)
         if pulid_src:
             model_ref = _inject_pulid(api, model_ref, pulid_src, pulid)
 

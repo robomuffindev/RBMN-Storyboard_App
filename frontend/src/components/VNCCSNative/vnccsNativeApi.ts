@@ -419,6 +419,7 @@ export const enhanceBase = (body: {
 export const restyleBase = (body: {
   character_name: string; style?: string; style_custom?: string;
   style_ref?: { name: string; subfolder: string; type: string } | null; strength?: number;
+  use_realism_lora?: boolean;
 }) =>
   fetch(`${BASE}/base/restyle`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -236,3 +236,12 @@ authoritative. Summary:
   variant labels + routing (`manifest.vnccs.variant`), thumbnails + ★ hero
   picker (`POST /catalog/{id}/hero`), ⚙ Settings "Klein face consistency"
   section, `GET /klein-status` readiness report.
+
+- **1.114-1.125 refbase "base from references" wave** -- the Klein Hybrid clone base
+  preview now builds the body from the reference photos (whole-person ReferenceLatentPlus
+  channel, no mannequin), with a tunable **Strip release**, a **FaceDetailer refine on
+  the base**, an optional **SAM3 article cleanup** (segment leftover jewelry/clothing by
+  name -> inpaint to skin; article list auto-fills from clone-analyze), and a post-hoc
+  **photoreal Switch Style** that stacks the anime2real-semi LoRA off the rendered active
+  base (realism kept OUT of generation for predictability). Full addendum in
+  docs/KLEIN_MODE_PLAN.md. UNTESTED-until-live.

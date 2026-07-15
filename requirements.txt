@@ -47,3 +47,4 @@ aiofiles>=23.2
 
 # Cloud GPU (optional)
 runpod>=1.7
+opencv-python

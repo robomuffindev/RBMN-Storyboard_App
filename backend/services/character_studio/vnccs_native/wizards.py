@@ -54,7 +54,7 @@ SKIN_COLOR_OPTIONS: List[str] = [
 CHARACTER_FIELD_KEYS = (
     "race", "skin_color", "hair", "eyes", "face", "body", "additional_details",
 )
-CLONE_EXTRA_KEYS = ("aesthetics", "height")
+CLONE_EXTRA_KEYS = ("aesthetics", "height", "worn_articles")
 CLOTHES_KEYS = ("top", "bottom", "shoes", "head", "face")
 
 
@@ -267,6 +267,10 @@ def build_clone_synthesis_prompt(described: "List[tuple]") -> str:
         "- additional_details (clothing / accessory tags)\n"
         "- aesthetics (quality/style tags, e.g. \"masterpiece, best quality\")\n"
         "- height (stature descriptor, e.g. \"tall\", \"average height\", or \"\")\n"
+        "- worn_articles (comma list of the specific JEWELRY and CLOTHING items the "
+        "character is WEARING that a strip / cleanup pass should REMOVE -- e.g. "
+        "\"necklace, bracelet, earrings, watch, shirt, jacket, jeans, shoes\"; list only "
+        "items actually visible; \"\" if none or nude)\n"
         "- nsfw (boolean)\n"
         "Output the raw JSON object only.")
 

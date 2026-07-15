@@ -122,3 +122,6 @@ anima/
 
 # Scratch verification files parked for deletion
 /_to_delete*
+
+# One-time self-applying patch scripts (scratch, not for the repo)
+/apply_*.py

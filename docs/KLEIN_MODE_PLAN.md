@@ -97,3 +97,42 @@ treatment (below) or a store-writer.
 - Reference order matters in the Klein graph: pose = reference 1, identity =
   reference 2; both the positive AND negative conditioning carry the reference
   chain (node parity).
+
+
+---
+
+## Refbase "base from references" wave (1.114 -> 1.125, 2026-07-15) -- UNTESTED-until-live
+
+The Klein Hybrid clone base preview was reworked to build the body from the reference
+PHOTOS instead of a pose mannequin, plus a full de-clothing + face + realism toolchain.
+All in `klein_poses.py` (graphs/resolvers), `vnccs_native.py` (clone-preview refbase
+branch `_run_klein_clone_preview` + `/base/restyle`), `wizards.py`, and
+`VNCCSNativePage.tsx` (base-preview controls; all auto-save).
+
+- **1.114 refbase base** -- `build_klein_refbase_graph`: whole-person ReferenceLatentPlus
+  channel (clothes mask ON = lock torso/chest/hip shape) from up to 4 body/full refs,
+  empty init latent, neutral pose from prompt, face crop + RMBG. NO mannequin.
+- **1.115** expanded `KLEIN_STRIP_NEGATIVE` with garment words.
+- **1.116/1.117** PuLID source -> face crop; late-step body-ref release
+  `klein_refbase_ref_end` (default 0.85) = "Strip release" control (Hold..0.65). Lower
+  strips harder but carries less likeness.
+- **1.118** FaceDetailer refine on the base (`face_refine` param + `_face_refine_node`,
+  decode->refine->rmbg). base-local `klein_base_face_refine` + denoise/steps overrides,
+  falling back to the gear globals `klein_face_refine_denoise/_steps`.
+- **1.120** SAM3 article cleanup (`resolve_sam3_cleanup` + `_inject_sam3_cleanup`):
+  `easy sam3ImageSegmentation` masks articles by TEXT -> GrowMaskWithBlur -> Flux2
+  inpaint (SetLatentNoiseMask + SamplerCustomAdvanced) -> ImageCompositeMasked (only
+  masked regions change). `klein_sam_cleanup` / `_prompt` / `_threshold`.
+- **1.121** base "Global" buttons show the live value; global Refine steps in the gear panel.
+- **1.122** `_options` reads BOTH object_info shapes -- classic `[[opt],cfg]` AND newer
+  `["COMBO",{"options":[...]}]` (SAM3 loader uses the latter; model is `sam3-fp16.safetensors`).
+- **1.123/1.124** anime2real-semi realism LoRA REMOVED from generation (kept the base
+  render predictable) -> stacked in `build_klein_restyle_graph` (photoreal Switch Style,
+  off the rendered active base -> new active base). "Use realism LoRA" checkbox
+  (`use_realism_lora`) for realistic targets.
+- **1.125** clone-analyze synthesis emits `worn_articles`; the frontend prefills the SAM
+  "Articles to remove" box after analyze (works whether SAM cleanup is on or off).
+
+**Reality checks:** PuLID is a NO-OP for Lorenzo's refs (`AUCUN VISAGE`) -- FaceDetailer
+(ultralytics) is the base-face path. Body match confirmed good; strip / jewelry / face
+still being tuned live. The whole wave is UNTESTED-until-Lorenzo-runs.

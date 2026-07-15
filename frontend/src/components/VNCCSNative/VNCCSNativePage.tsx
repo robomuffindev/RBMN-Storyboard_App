@@ -391,8 +391,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [baseFr, setBaseFr] = useState<boolean>(true);
   const [baseFrDenoise, setBaseFrDenoise] = useState<string>('');
   const [baseFrSteps, setBaseFrSteps] = useState<string>('');
-  const [realLora, setRealLora] = useState<boolean>(false);
-  const [realLoraStr, setRealLoraStr] = useState<string>('1');
   const [samClean, setSamClean] = useState<boolean>(false);
   const [samPrompt, setSamPrompt] = useState<string>('');
   const [samThresh, setSamThresh] = useState<string>('');
@@ -527,6 +525,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [switchStyle, setSwitchStyle] = useState('photorealistic');
   const [switchStyleCustom, setSwitchStyleCustom] = useState('');
   const [switchStyleStrength, setSwitchStyleStrength] = useState('balanced'); // subtle|balanced|strong
+  const [switchStyleRealism, setSwitchStyleRealism] = useState(true);
   const [switchStyleRef, setSwitchStyleRef] = useState<api.UploadRefT | null>(null);
   const [switchStyleBusy, setSwitchStyleBusy] = useState(false);
   const [switchStyleMsg, setSwitchStyleMsg] = useState('');
@@ -599,8 +598,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setBaseFr(!['off', 'false', '0', 'no'].includes(String(st.klein_base_face_refine ?? 'on').toLowerCase()));
       setBaseFrDenoise(st.klein_base_face_refine_denoise !== undefined ? String(st.klein_base_face_refine_denoise) : '');
       setBaseFrSteps(st.klein_base_face_refine_steps !== undefined ? String(st.klein_base_face_refine_steps) : '');
-      setRealLora(['on', 'true', '1', 'yes'].includes(String(st.klein_realism_lora ?? 'off').toLowerCase()));
-      setRealLoraStr(st.klein_realism_lora_strength !== undefined ? String(st.klein_realism_lora_strength) : '1');
       setSamClean(['on', 'true', '1', 'yes'].includes(String(st.klein_sam_cleanup ?? 'off').toLowerCase()));
       setSamPrompt(st.klein_sam_cleanup_prompt !== undefined ? String(st.klein_sam_cleanup_prompt) : '');
       setSamThresh(st.klein_sam_cleanup_threshold !== undefined ? String(st.klein_sam_cleanup_threshold) : '');
@@ -618,6 +615,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setBaseEnhanceMaxSide(parseInt(String(st.base_enhance_max_side ?? '2048'), 10) || 2048);
       setSwitchStyleOn(['on', 'true', '1', 'yes'].includes(String(st.klein_switch_style_on ?? 'off').toLowerCase()));
       setSwitchStyle(String(st.klein_switch_style ?? 'photorealistic'));
+      setSwitchStyleRealism(!['off', 'false', '0', 'no'].includes(String(st.klein_switch_style_realism ?? 'on').toLowerCase()));
       setSwitchStyleCustom(String(st.klein_switch_style_custom ?? ''));
       setSwitchStyleStrength(String(st.klein_switch_style_strength ?? 'balanced'));
       const cc = (h.settings?.control_center as Record<string, unknown>) || {};
@@ -833,8 +831,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     else delete settings.klein_base_face_refine_denoise;
     if (baseFrSteps.trim() !== '') settings.klein_base_face_refine_steps = baseFrSteps;
     else delete settings.klein_base_face_refine_steps;
-    settings.klein_realism_lora = realLora ? 'on' : 'off';
-    settings.klein_realism_lora_strength = realLoraStr || '1';
     settings.klein_sam_cleanup = samClean ? 'on' : 'off';
     if (samPrompt.trim() !== '') settings.klein_sam_cleanup_prompt = samPrompt;
     else delete settings.klein_sam_cleanup_prompt;
@@ -856,6 +852,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_switch_style = switchStyle;
     settings.klein_switch_style_custom = switchStyleCustom;
     settings.klein_switch_style_strength = switchStyleStrength;
+    settings.klein_switch_style_realism = switchStyleRealism ? 'on' : 'off';
     return settings;
   };
 
@@ -892,10 +889,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, frSteps, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd, baseFr, baseFrDenoise, baseFrSteps, realLora, realLoraStr, samClean, samPrompt, samThresh,
+      kpMode, kpStrength, frMode, frDenoise, frSteps, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
-      switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength]);
+      switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength, switchStyleRealism]);
 
   const resetSettings = () => {
     setEditModel(''); setGenMode(''); setGenModel(''); setGenSteps(''); setGenCfg('');
@@ -906,7 +903,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setBaseSet(false);
     setCleanup('gentle'); setKSteps(6); setRbEnd('0.85');
     setBaseFr(true); setBaseFrDenoise(''); setBaseFrSteps('');
-    setRealLora(false); setRealLoraStr('1');
     setSamClean(false); setSamPrompt(''); setSamThresh('');
     // the debounced auto-save effect persists these defaults
   };
@@ -1517,6 +1513,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       const allRefs = cloneRefs as unknown as Array<Record<string, unknown>>;
       const r = await api.wizardCloneAnalyze(allRefs[0], 'auto', allRefs);
       setCloneInfo(r.fields as VNCCSCharacterInfoT);
+      // prefill the SAM "articles to remove" field from what the vision model saw
+      const _arts = (r.fields as Record<string, unknown>).worn_articles;
+      if (typeof _arts === 'string' && _arts.trim()) setSamPrompt(_arts.trim());
       // store each image's Vision Scan Data on its reference (viewable via the 🔍 icon)
       if (r.vision && r.vision.length) {
         const vmap: Record<string, string> = {};
@@ -1812,6 +1811,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         style_ref: switchStyleRef
           ? { name: switchStyleRef.name, subfolder: switchStyleRef.subfolder, type: switchStyleRef.type } : null,
         strength: strengthMap[switchStyleStrength] ?? 0.7,
+        use_realism_lora: switchStyleRealism,
       });
       if (editingCharId) {
         try {
@@ -2171,20 +2171,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           <label style={label}>Refine steps (base) — more = cleaner face, slower (Global = use the ⚙ Settings value)</label>
           {segRow([{ v: '', label: `Global (${frSteps.trim() || '6'})` }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }],
                   baseFrSteps, setBaseFrSteps)}
-        </div>
-      )}
-      {variant === 'klein' && (
-        <div>
-          <label style={label}>Realism LoRA (anime2real-semi) — stacks a photoreal LoRA on Klein for the base + poses (must be on the worker)</label>
-          {segRow([{ v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
-                  realLora ? 'on' : 'off', (v) => setRealLora(v === 'on'))}
-        </div>
-      )}
-      {variant === 'klein' && realLora && (
-        <div>
-          <label style={label}>Realism strength — 1.00 is usually best; lower it if the look gets over-processed</label>
-          {segRow([{ v: '1', label: '1.00' }, { v: '0.9', label: '0.90' }, { v: '0.8', label: '0.80' }, { v: '0.7', label: '0.70' }, { v: '0.6', label: '0.60' }, { v: '0.5', label: '0.50' }, { v: '0.4', label: '0.40' }],
-                  realLoraStr, setRealLoraStr)}
         </div>
       )}
       {variant === 'klein' && (
@@ -3408,6 +3394,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                             <option value="strong">Strong (full redraw)</option>
                           </select></div>
                       </div>
+                      {['photorealistic', 'semi-realistic'].includes(switchStyle) && (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#cbd2dc' }}>
+                          <input type="checkbox" checked={switchStyleRealism}
+                                 onChange={(e) => setSwitchStyleRealism(e.target.checked)} />
+                          Use realism LoRA (anime2real-semi) — stronger photoreal conversion (needs the LoRA on the worker)
+                        </label>
+                      )}
                       {switchStyle === 'custom' && (
                         <input style={input} value={switchStyleCustom} onChange={(e) => setSwitchStyleCustom(e.target.value)}
                                placeholder="Describe the target style, e.g. gritty film-noir black & white" />

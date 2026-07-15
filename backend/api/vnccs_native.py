@@ -1475,6 +1475,7 @@ class BaseRestyleIn(BaseModel):
     style_custom: Optional[str] = None         # free text when style == 'custom'
     style_ref: Optional[dict] = None           # {name,subfolder,type} style image on the host
     strength: float = 0.7                      # 0..1 content preservation (higher = keep more)
+    use_realism_lora: bool = True              # stack anime2real-semi for realistic targets
 
 
 @router.post("/base/restyle")
@@ -1551,6 +1552,12 @@ async def base_restyle(body: BaseRestyleIn, request: Request,
     rmbg_cfg = klein_poses.resolve_rmbg(oi, saved)
     steps = klein_poses.resolve_klein_steps(saved)
     style = str(body.style or "photorealistic").strip().lower()
+    # photoreal restyle uses the anime->real LoRA on the ALREADY-rendered base (NOT
+    # during base generation, which stays clean). Only for realistic target styles.
+    _realism = klein_poses._resolve_realism_lora(oi, {**saved, "klein_realism_lora": "on"})
+    if (_realism and body.use_realism_lora
+            and style in ("photorealistic", "semi-realistic", "realistic", "photoreal", "real")):
+        models["realism_lora"] = _realism
     style_custom = str(body.style_custom or "").strip()
     has_ref = bool(body.style_ref and (body.style_ref or {}).get("name"))
     prompt = klein_poses.klein_restyle_prompt(style, style_custom, has_style_ref=has_ref)
@@ -2534,7 +2541,8 @@ async def generate_preview(body: PreviewIn, request: Request,
                     _g, _t = klein_poses.build_klein_refbase_graph(
                         prompt=_vprompt, seed=seed_v + _i, models=models,
                         body_files=pv_body_files, reflatentplus=reflatentplus,
-                        strength=_rb_strength, body_ref_end=_rb_end, face_file=face_file, pulid=pulid,
+                        strength=_rb_strength, body_ref_end=_rb_end, face_file=face_file,
+                        pulid_image=_face_name, pulid=pulid,
                         face_refine=_base_face_refine, sam_cleanup=_sam_cleanup,
                         rmbg=rmbg_cfg, cfg=klein_cfg, negative_prompt=neg_text, steps=_ksteps,
                         filename_prefix=f"rbmn_vnccs/{safe}/klein_refbase")

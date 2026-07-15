@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.126.0] - 2026-07-15
+### Fixed -- refbase base preview: feed PuLID the FULL face image (identity fix)
+- `build_klein_refbase_graph` previously fed PuLID/InsightFace the app-side face
+  CROP (`face_file`). When YuNet/Haar detection is unavailable on the app host,
+  that crop is a blind heuristic upper-center box; InsightFace then detects no
+  face ("face=0" / AUCUN VISAGE) and the identity adapter no-ops -> weak face
+  likeness on the reference-driven base.
+- Now the graph takes a new `pulid_image` arg and feeds PuLID the FULL face-role
+  reference image (InsightFace runs its own detect+align), matching the working
+  `build_klein_pose_graph` path. The crop still drives the face-detail reference
+  latent. Call site passes `pulid_image=_face_name` (the full face/full-role ref,
+  which is the upscaled version when Enhance is on).
+- NOTE (Option C, separate): if opencv (`cv2`) is not installed in the app-host
+  venv, ALL identity crops fall back to the heuristic box (faces.py `_HAVE_CV2`
+  gate). Verify with `python -c "import cv2"`; install `opencv-python` if missing
+  so the face-detail latent also gets a real detected crop.
+
+## [1.125.0] - 2026-07-15
+### Added -- Analyze references auto-fills the SAM 'Articles to remove' field
+- The clone-analyze vision synthesis now also emits worn_articles: the specific
+  jewelry + clothing items the character is wearing that a strip/cleanup pass should
+  remove (added to CLONE_EXTRA_KEYS so it flows through normalize; clone-analyze only).
+- After 'Analyze all references', the detected items prefill the SAM 'Articles to
+  remove' box automatically -- regardless of whether SAM cleanup is on -- so it's
+  ready when you enable it. The vision LLM does a strong job spotting worn items; the
+  list is editable as always. Host-wizard path simply yields none (no prefill).
+
+## [1.124.0] - 2026-07-15
+### Added -- Switch Style: 'Use realism LoRA' toggle for realistic targets
+- When the Switch Style target is Photorealistic or Semi-realistic (the styles that
+  stack anime2real-semi), a 'Use realism LoRA' checkbox now appears (default on) so
+  you can run the photoreal restyle with or without the LoRA. BaseRestyleIn gains
+  use_realism_lora (default true); base_restyle only stacks the LoRA when it's on.
+  Persists as klein_switch_style_realism.
+
+## [1.123.0] - 2026-07-15
+### Changed -- Realism LoRA moved OUT of generation into the photoreal Switch Style
+- Stacking anime2real-semi during base/pose generation was the wrong place -- it made
+  the (already delicate) base render less predictable. Removed from resolve_klein_models
+  and both the base + pose graphs. Generation is clean again.
+- The realism LoRA now stacks in build_klein_restyle_graph instead, so the existing
+  Switch Style (under the base image, defaults to Photorealistic) runs the anime->real
+  LoRA on the ALREADY-rendered active base and saves the result as a NEW active base --
+  a post-hoc photoreal pass that never touches the base-generation process. Applied
+  only for realistic target styles; base_restyle forces the LoRA on for those.
+- Removed the now-defunct base-preview 'Realism LoRA' On/Off + strength controls.
+- (No functional change to auto-save: all base-preview controls already persist on
+  change via the debounced settings auto-save.)
+
 ## [1.122.0] - 2026-07-15
 ### Fixed -- SAM3 model not found (COMBO object_info format)
 - SAM3 cleanup failed validation: `model: 'sam3.pt' not in ['sam3-fp16.safetensors']`.
