@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.115.0] - 2026-07-15
+### Fixed -- Leftover clothing & jewelry on the reference-driven base
+- The base build now matches the reference body well, but partial shirt pieces and
+  jewelry survived the strip. Root cause: the strip "Cleanup" negative listed shoes
+  and every jewelry type but NO garment words, so the negative had nothing to push
+  against for the shirt/top, and the whole-person reference (clothes mask ON, which
+  we keep because it locks the torso/chest/hip shape) kept dragging the garment back.
+- Expanded KLEIN_STRIP_NEGATIVE with specific outer/leg garments and trim
+  (shirt, t-shirt, blouse, sweater, jacket, dress, skirt, pants, shorts, collar,
+  sleeves, buttons, zipper, necktie, scarf, ...), deliberately EXCLUDING bra/panties/
+  underwear so the target white underwear from _base_body_state is never suppressed.
+  Applies to the refbase base preview and every strip run (honored via the existing
+  klein_strip_negative_text override).
+- No graph change: for stubborn leftovers set the Cleanup control to Strong (cfg 1.5)
+  -- the negative now bites on garments, not just jewelry/footwear.
+
 ## [1.114.0] - 2026-07-15
 ### Added -- Base body now comes from the reference photos (no mannequin)
 - The mannequin used for base generation imposed its own generic body, so the

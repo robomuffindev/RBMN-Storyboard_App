@@ -47,6 +47,12 @@ KLEIN_POSE_CFG = 1.0          # CFGGuider cfg in the reference workflow
 # bases): a real negative prompt + a modest cfg so (positive - negative) pushes
 # those items out.  Never applies in KEEP/clone-outfit mode.
 KLEIN_STRIP_NEGATIVE = (
+    # garments (the leftover-shirt / partial-clothing bits): specific outer /
+    # leg garments only -- deliberately NOT "bra", "panties" or "underwear", so
+    # the target white bra + panties from _base_body_state are never suppressed.
+    "shirt, t-shirt, blouse, sweater, hoodie, jacket, coat, cardigan, vest, "
+    "dress, gown, robe, skirt, pants, jeans, trousers, shorts, leggings, "
+    "collar, lapel, sleeves, cuffs, buttons, zipper, pocket, necktie, tie, scarf, "
     "shoes, boots, sandals, high heels, loafers, footwear, socks, shoe soles, "
     "slippers, sneakers, earrings, necklace, chain, bracelet, wristband, anklet, "
     "ring, watch, jewelry, piercing, glasses, hat, headwear")
