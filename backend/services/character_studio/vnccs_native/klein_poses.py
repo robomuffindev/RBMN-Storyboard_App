@@ -520,10 +520,18 @@ def resolve_face_refine(oi: dict, settings: Optional[dict] = None) -> Optional[D
             fd_inputs |= set((oi["FaceDetailer"]["input"].get(section) or {}).keys())
         except Exception:  # noqa: BLE001
             continue
+    # Refine GUIDE size: the face crop is enlarged so the detected bbox reaches
+    # this many pixels, regenerated, then shrunk BACK into place.  The bigger the
+    # round-trip ratio, the worse the shrink-back aliasing on dense skin texture
+    # (freckles -> horizontal "VCR scan lines"; pose faces are smaller so their
+    # ratio -- and the striping -- is worse).  Default dropped 1536 -> 768: about
+    # half the enlargement, kills most of the moire while keeping the eye/face
+    # cleanup.  Raise it only if faces look under-detailed; lower to 512 if any
+    # striping survives.  Studio setting klein_face_refine_guide (384-2048).
     try:
-        guide = int(st.get("klein_face_refine_guide") or 1536)
+        guide = int(st.get("klein_face_refine_guide") or 768)
     except Exception:  # noqa: BLE001
-        guide = 1536
+        guide = 768
     guide = max(384, min(2048, guide))
     return {"detector": detector, "denoise": denoise, "steps": max(2, min(32, steps)),
             "guide_size": guide, "max_size": guide, "fd_inputs": fd_inputs}

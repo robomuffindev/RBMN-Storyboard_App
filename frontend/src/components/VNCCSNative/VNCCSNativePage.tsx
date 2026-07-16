@@ -416,6 +416,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [frMode, setFrMode] = useState<string>('auto');
   const [frDenoise, setFrDenoise] = useState<string>('');
   const [frSteps, setFrSteps] = useState<string>('');
+  const [frGuide, setFrGuide] = useState<string>('');
   const [baseClothing, setBaseClothing] = useState<string>('strip');
   const [runBaseClothing, setRunBaseClothing] = useState<string>('');
   const [faceKind, setFaceKind] = useState<string>('auto');
@@ -639,6 +640,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setFrMode(String(st.klein_face_refine ?? 'auto'));
       setFrDenoise(st.klein_face_refine_denoise !== undefined ? String(st.klein_face_refine_denoise) : '');
       setFrSteps(st.klein_face_refine_steps !== undefined ? String(st.klein_face_refine_steps) : '');
+      setFrGuide(st.klein_face_refine_guide !== undefined ? String(st.klein_face_refine_guide) : '');
       setBaseClothing(String(st.klein_base_clothing ?? 'strip'));
       // 'realistic' was the old value for the photoreal style — map it forward
       setFaceKind((s => (s === 'realistic' ? 'photorealistic' : s))(String(st.klein_face_kind ?? 'auto')));
@@ -877,6 +879,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     else delete settings.klein_face_refine_denoise;
     if (frSteps.trim() !== '') settings.klein_face_refine_steps = parseInt(frSteps, 10) || 6;
     else delete settings.klein_face_refine_steps;
+    if (frGuide.trim() !== '') settings.klein_face_refine_guide = parseInt(frGuide, 10) || 768;
+    else delete settings.klein_face_refine_guide;
     settings.klein_base_clothing = baseClothing || 'strip';
     settings.klein_face_kind = faceKind || 'auto';
     settings.klein_style_custom = styleCustom;
@@ -954,7 +958,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, frSteps, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, poseSteps, poseCleanup, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
+      kpMode, kpStrength, frMode, frDenoise, frSteps, frGuide, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, poseSteps, poseCleanup, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength, switchStyleRealism]);
@@ -2824,10 +2828,23 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
               <div><label style={label}>Refine steps (def 6)</label>
                 <input style={input} type="number" step="1" min="2" max="32" value={frSteps}
                        placeholder="6" onChange={(e) => setFrSteps(e.target.value)} /></div>
+              <div><label style={label}>Refine guide size (def 768)</label>
+                <select style={input} value={frGuide} onChange={(e) => setFrGuide(e.target.value)}>
+                  <option value="">Default (768)</option>
+                  <option value="512">512 (min striping)</option>
+                  <option value="640">640</option>
+                  <option value="768">768</option>
+                  <option value="1024">1024</option>
+                  <option value="1280">1280</option>
+                  <option value="1536">1536 (old default)</option>
+                </select></div>
             </div>
             <p style={{ fontSize: 11, color: '#6b7280', margin: '4px 0 0' }}>
               Klein-mode runs only. Raise refine denoise if eyes still look off; lower it (or PuLID strength)
-              if the likeness drifts. Persisted with “Save host”.
+              if the likeness drifts. Guide size = how big the face crop is blown up before refining — the
+              shrink-back from big values stamps horizontal “scan lines” into freckled/textured skin
+              (worst on small pose faces); 512–768 kills the striping, 1536 is the old detail-max.
+              Persisted with “Save host”.
             </p>
           </div>
           <div style={{ marginTop: 12 }}>

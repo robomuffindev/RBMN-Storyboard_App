@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.145.0] - 2026-07-16
+### Fixed -- Face-refine "VCR scan lines" on textured skin (FaceDetailer round-trip)
+- Root cause CONFIRMED by A/B (refine off = clean): FaceDetailer enlarges the
+  detected face so the bbox reaches the GUIDE size (was 1536px -- a 10x+ blow-up
+  for a pose-sized face), regenerates it, then shrinks it back into place. That
+  shrink-back aliases dense high-frequency skin texture (freckles worst-case)
+  into uniform horizontal striping. Steps/denoise never fixed it because the
+  sampling was fine -- the resize was the artifact.
+- Default guide size dropped 1536 -> 768 (about half the round-trip ratio) in
+  `_face_refine_settings`; applies to BOTH the base preview and pose runs (same
+  resolver).
+- New "Refine guide size" select in ⚙ Settings (Default 768 / 512 / 640 / 768 /
+  1024 / 1280 / 1536): 512 = minimum striping, 1536 = the old max-detail
+  behaviour if a character's faces look under-detailed and their skin is smooth
+  enough to take it. Setting key: `klein_face_refine_guide` (already honored
+  backend-side since 1.118; it was just never exposed).
+
 ## [1.144.0] - 2026-07-16
 ### Changed -- Higher step ceilings (scan-line grain on complex skin) + lock-base visibility
 - Raised the Klein sampler-step ceiling 16 -> 32 (`resolve_klein_steps`); the base
