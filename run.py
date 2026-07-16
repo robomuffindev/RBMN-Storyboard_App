@@ -23,7 +23,12 @@ def start_backend(host: str, port: int, log_level: str):
         port=port,
         log_level=log_level.lower(),
         reload=False,
-        timeout_keep_alive=300,  # 5 min keep-alive for long-running requests (Demucs)
+        # Keep-alive must outlive the SLOWEST synchronous request the UI makes.
+        # Klein clone/base previews run the full identity chain (PuLID + FaceDetailer
+        # + SAM3) per view and can take 6+ min each (a 4-view set 25+ min); at the
+        # old 300s the connection was dropped mid-preview, so the finished image
+        # never got back to the app and the version count never moved.  30 min.
+        timeout_keep_alive=1800,
     )
 
 

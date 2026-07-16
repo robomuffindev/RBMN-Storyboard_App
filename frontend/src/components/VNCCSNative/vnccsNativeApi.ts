@@ -154,7 +154,7 @@ export const wizardCloneAnalyze = (
 // ---------------------------------------------------------------------------
 // Preview / pose defaults / character save (Create-tab staged flow)
 // ---------------------------------------------------------------------------
-export interface BaseVersionT { id: string; asset_id: string; url: string; created_at: string; views?: { view: string; asset_id: string; url: string }[]; }
+export interface BaseVersionT { id: string; asset_id: string; url: string; created_at: string; views?: { view: string; asset_id: string; url: string }[]; gen_meta?: Record<string, string | number | boolean>; }
 
 export const generatePreview = (body: {
   character_name: string; character_info: VNCCSCharacterInfoT;
@@ -168,6 +168,8 @@ export const generatePreview = (body: {
   base_set?: boolean;   // false = front view only (default); true = 4-view set
   cleanup?: string;
   klein_steps?: number;
+  canvas_w?: number;    // per-character base canvas (wins over global default)
+  canvas_h?: number;
 }) =>
   fetch(`${BASE}/preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -182,6 +184,20 @@ export const generateCostumePreview = (body: {
   fetch(`${BASE}/costume-preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(j<{ image: string; host: string;
+              version?: { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null }>);
+
+// Klein clothing preview: DRESS the character's active base render (description
+// slots and/or a garment reference image) instead of a VNCCS pose sprite.
+export const generateKleinClothesPreview = (body: {
+  character_name: string; costume_name: string; costume_info: Record<string, string>;
+  garment_ref?: { name: string; subfolder?: string; type?: string } | null;
+  background?: string; strength?: number; base_version_id?: string; view?: string;
+  face_refine?: boolean; host?: string;
+}) =>
+  fetch(`${BASE}/clothes/klein-preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ image: string; host: string; engine: string;
+              views?: Array<{ view: string; image: string }>;
               version?: { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null }>);
 
 export const saveCostumeInfo = (body: { character_name: string; costume: string; costume_info: Record<string, string> }) =>
@@ -213,6 +229,7 @@ export const saveCharacter = (body: {
   gen_settings?: Record<string, unknown> | null; story_id?: string | null;
   create_mode?: 'new' | 'clone'; clone_refs?: UploadRefT[];
   variant?: 'native' | 'klein';
+  canvas_w?: number | null;   // per-character Klein canvas width (persisted)
 }) =>
   fetch(`${BASE}/character/save`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -291,6 +308,12 @@ export interface GenerateBody {
   lock_base?: boolean;
   cleanup?: string;       // 'off' | 'gentle' | 'strong'
   klein_steps?: number;   // sampler steps (default 6)
+  // per-character output canvas (Klein base + poses) — wins over the global
+  // klein_canvas_width so a round/wide character can use a wider frame
+  canvas_w?: number;
+  canvas_h?: number;
+  // consistent skin/lighting across a pose set (shared seed + colour-lock prompt)
+  consistent_skin?: boolean;
 }
 
 export const generate = (step: VNCCSStepT, body: GenerateBody) =>
@@ -414,6 +437,18 @@ export const enhanceBase = (body: {
     body: JSON.stringify(body),
   }).then(j<{ version: BaseVersionT | null; method?: string; views?: number }>);
 
+// Upscale one or more cataloged POSE sprites (whole set if many ids). Saves each
+// as a new upscaled asset that preserves the original; always sources the
+// original so repeated runs never stack upscale-on-upscale.
+export const enhancePoses = (body: {
+  character_name: string; asset_ids: string[];
+  method?: string; model?: string; sharpen?: string; max_side?: number;
+}) =>
+  fetch(`${BASE}/poses/enhance`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(j<{ results: Array<{ src: string; original: string; asset_id: string; url: string; label: string; method: string; replaced?: number }>; count: number; failed: number }>);
+
 // Switch Style: restyle the ACTIVE base render into a new art style (Klein
 // reference-edit) and save it as a new active base version.
 export const restyleBase = (body: {
@@ -439,7 +474,7 @@ export interface CatalogItemT {
   hero_asset_id: string | null;
   outputs: Record<string, number>;
   updated_at: string | null;
-  form?: { character_info?: Record<string, unknown>; gen_settings?: Record<string, unknown> | null } | null;
+  form?: { character_info?: Record<string, unknown>; gen_settings?: Record<string, unknown> | null; canvas_w?: number | null } | null;
   hosts?: string[];
 }
 export const getCatalog = () => fetch(`${BASE}/catalog`).then(j<CatalogItemT[]>);
@@ -453,9 +488,9 @@ export const setHeroImage = (characterId: string, assetId: string) =>
 
 export interface CharacterImagesT {
   character_id: string; name: string;
-  form?: { character_info?: Record<string, unknown>; gen_settings?: Record<string, unknown> | null } | null;
+  form?: { character_info?: Record<string, unknown>; gen_settings?: Record<string, unknown> | null; canvas_w?: number | null } | null;
   hosts: string[];
-  outputs: Array<{ label: string; images: Array<{ asset_id: string; url: string; base_version?: string | null; costume?: string | null }> }>;
+  outputs: Array<{ label: string; images: Array<{ asset_id: string; url: string; base_version?: string | null; costume?: string | null; pose_name?: string | null; upscaled?: boolean; upscale_source?: string | null }> }>;
   base_versions?: BaseVersionT[];
   active_base?: string | null;
   costumes?: Record<string, { versions?: CostumeVersionT[]; active?: string; costume_info?: Record<string, string> }>;

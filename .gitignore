@@ -125,3 +125,6 @@ anima/
 
 # One-time self-applying patch scripts (scratch, not for the repo)
 /apply_*.py
+
+# Diagnostic scratch: PuLID face probe + third-party node copies (workers only)
+/pulid_*.py

@@ -301,6 +301,28 @@ class GenerateIn(BaseModel):
     # Klein render tuning (per-run overrides of studio settings):
     cleanup: Optional[str] = None            # 'off' | 'gentle' | 'strong'
     klein_steps: Optional[int] = None        # sampler steps (default 6)
+    # Per-character output canvas (Klein base + pose sprites).  When set these
+    # win over the global klein_canvas_width / _height so a round/wide character
+    # can use a wider frame without changing everyone's default.  Clamped
+    # 512..1536 (multiple of 16) backend-side.
+    canvas_w: Optional[int] = None
+    canvas_h: Optional[int] = None
+    # Consistent skin/lighting across a pose SET: share ONE seed for every pose
+    # (kills the per-pose colour/exposure drift) + a colour-lock prompt clause.
+    # None = fall back to studio setting klein_consistent_skin (default off).
+    consistent_skin: Optional[bool] = None
+
+
+def _resolve_consistent_skin(settings: dict, body: "GenerateIn") -> bool:
+    """Consistent-skin policy: body flag wins, else studio setting
+    ``klein_consistent_skin`` (default OFF).  When on, every pose in a set shares
+    one seed and the prompt pins skin tone / colour grading, so the set doesn't
+    drift in complexion or exposure from pose to pose."""
+    b = getattr(body, "consistent_skin", None)
+    if b is not None:
+        return bool(b)
+    return str((settings or {}).get("klein_consistent_skin") or "off").strip().lower() \
+        in ("on", "true", "1", "yes", "enabled")
 
 
 def _resolve_lock_base(settings: dict, body: "GenerateIn") -> bool:
@@ -351,13 +373,18 @@ async def _enrich_character_info(session, body) -> None:
 
 
 async def _klein_identity_bytes(session, body: GenerateIn, pinned: str,
-                                lock_base: bool = False) -> list:
+                                lock_base: bool = False,
+                                costume: Optional[str] = None) -> list:
     """Identity image(s) for a Klein pose run.
 
     Clone runs: up to 4 uploaded references, fed DIRECTLY as Klein reference
     latents (native multi-ref — replaces the Qwen source-grid trick).
     Create runs: the ACTIVE base version, else the newest cataloged final
-    sprite.  Returns a non-empty list of PNG bytes or raises 409."""
+    sprite.  Returns a non-empty list of PNG bytes or raises 409.
+
+    ``costume`` (clothed pose SETS): use the active version of that costume — the
+    DRESSED base render — as the single lock-base reference, so every pose
+    reproduces the approved outfit (paired with base_clothing='keep')."""
     from pathlib import Path as _Path
     from uuid import UUID as _UUID
     from sqlmodel import select as _select
@@ -393,8 +420,42 @@ async def _klein_identity_bytes(session, body: GenerateIn, pinned: str,
             if isinstance(bv, dict) and bv.get("id") == active and bv.get("asset_id"):
                 data = await _asset_bytes(bv["asset_id"])
                 if data:
+                    _gm = bv.get("gen_meta") or {}
+                    logger.info("klein identity: active base version %s%s resolved as reference",
+                                active, " (UPSCALED copy)" if _gm.get("upscaled") else " (original render)")
                     return data
         return None
+
+    async def _active_costume_bytes(cname: str) -> Optional[bytes]:
+        """The active version's dressed image for costume ``cname`` (clothed poses)."""
+        if char is None or not cname:
+            return None
+        v = (char.manifest or {}).get("vnccs") or {}
+        entry = (v.get("costumes") or {}).get(cname) or {}
+        active = entry.get("active")
+        for cv in (entry.get("versions") or []):
+            if isinstance(cv, dict) and cv.get("id") == active and cv.get("asset_id"):
+                data = await _asset_bytes(cv["asset_id"])
+                if data:
+                    return data
+        # fall back to whatever version has an asset if 'active' is stale
+        for cv in reversed(entry.get("versions") or []):
+            if isinstance(cv, dict) and cv.get("asset_id"):
+                data = await _asset_bytes(cv["asset_id"])
+                if data:
+                    return data
+        return None
+
+    # CLOTHED POSE SET: dress every pose from the approved costume version (the
+    # dressed base) — reference it as the single lock-base image; base_clothing=
+    # 'keep' then reproduces the outfit on each pose.
+    if costume:
+        dressed = await _active_costume_bytes(costume)
+        if dressed:
+            logger.info("klein identity: CLOTHED SET -> dressed costume %r version is the reference", costume)
+            return [dressed]
+        logger.info("klein identity: clothed set requested but no saved version for costume %r "
+                    "-> falling back to base/references", costume)
 
     # LOCK-BASE: use the approved base render as the SINGLE body/identity
     # reference so every pose inherits one consistent, correctly-proportioned
@@ -551,6 +612,55 @@ def _context_crop_box(bbox: dict, img_w: int, img_h: int,
     return {"x": x0, "y": y0, "w": cw, "h": ch}
 
 
+def _klein_canvas(settings: Optional[dict],
+                  override_w=None, override_h=None) -> tuple:
+    """Shared base + pose output canvas (width, height) so wide characters get
+    consistent room and the base image matches the pose sprites in size.  Wider
+    than the old 832x1216 default.  Multiples of 16 (Flux2), clamped 512..1536.
+    Global default: klein_canvas_width / klein_canvas_height.  ``override_w`` /
+    ``override_h`` (per-character, carried on the generation body) win when set,
+    so a round character can use a wider canvas without changing the global."""
+    s = settings or {}
+
+    def _px(override, key: str, default: int) -> int:
+        raw = override if (override not in (None, "", 0)) else s.get(key)
+        try:
+            v = int(raw or default)
+        except Exception:  # noqa: BLE001
+            v = default
+        return (max(512, min(1536, v)) // 16) * 16
+
+    return (_px(override_w, "klein_canvas_width", 1024),
+            _px(override_h, "klein_canvas_height", 1216))
+
+
+def _klein_gen_meta(saved: Optional[dict], *, seed=None,
+                    extra: Optional[dict] = None,
+                    canvas_w=None, canvas_h=None) -> dict:
+    """Snapshot of the Klein tunables that produced an image, stored per base /
+    costume VERSION so switching back to a previous image shows exactly what made
+    it (revert to what was working).  None values are dropped for a clean display."""
+    s = saved or {}
+    cw, ch = _klein_canvas(s, canvas_w, canvas_h)
+    meta = {
+        "seed": seed,
+        "canvas": f"{cw}x{ch}",
+        "body_adherence": s.get("klein_body_match_strength"),
+        "strip_release": s.get("klein_refbase_ref_end"),
+        "cleanup": s.get("klein_cleanup"),
+        "steps": s.get("klein_steps"),
+        "face_refine": s.get("klein_base_face_refine"),
+        "face_refine_denoise": s.get("klein_base_face_refine_denoise"),
+        "face_refine_steps": s.get("klein_base_face_refine_steps"),
+        "pulid": s.get("klein_pulid"),
+        "sam_cleanup": s.get("klein_sam_cleanup"),
+        "lock_base": s.get("klein_lock_base"),
+    }
+    if extra:
+        meta.update(extra)
+    return {k: v for k, v in meta.items() if v is not None and v != ""}
+
+
 def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
                   pose_subset: list, identity_bytes: list, seed: int):
     """Render pose captures app-side, upload them + the identity image to the
@@ -568,6 +678,14 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # reference (which Klein reproduces as the body) matches the intended shape.
     pd["mesh"] = {**(pd.get("mesh") or {}),
                   **klein_poses.body_mesh_params(body.character_info or {})}
+    # Shared base+pose CANVAS: render the pose capture at the same (wider) frame the
+    # base image uses, so wide characters get consistent room and base/poses match
+    # in size.  The pose-render clamps a wide figure to fit width, so a wider frame
+    # stops plump/muscular/arms-out bodies from shrinking. Tunable via
+    # klein_canvas_width / klein_canvas_height.
+    _cw, _ch = _klein_canvas(st_settings, getattr(body, "canvas_w", None),
+                             getattr(body, "canvas_h", None))
+    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch}
     captures = pose_render.render_pose_captures(pd, False)
     if not captures or len(captures) != len(pd["poses"]):
         raise VNCCSError("app-side pose renderer unavailable (CharacterData missing?) — "
@@ -639,7 +757,17 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     if pulid:
         logger.info("klein: PuLID-Flux2 active (%s, strength %.2f)",
                     pulid["file"], pulid["strength"])
-    face_refine = klein_poses.resolve_face_refine(oi, st_settings)
+    # Use the SAME face-refine settings the BASE PREVIEW uses, so pose-set faces
+    # match the base's face quality (klein_base_face_refine_denoise/steps override
+    # the globals, exactly like the refbase preview builds them).
+    _fr_eff = dict(st_settings or {})
+    _bfd = str((st_settings or {}).get("klein_base_face_refine_denoise") or "").strip()
+    if _bfd:
+        _fr_eff["klein_face_refine_denoise"] = _bfd
+    _bfs = str((st_settings or {}).get("klein_base_face_refine_steps") or "").strip()
+    if _bfs:
+        _fr_eff["klein_face_refine_steps"] = _bfs
+    face_refine = klein_poses.resolve_face_refine(oi, _fr_eff)
     if face_refine:
         logger.info("klein: face refine active (FaceDetailer %s, denoise %.2f)",
                     face_refine["detector"], face_refine["denoise"])
@@ -689,6 +817,7 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
             face_index = None
     appearance_txt = (klein_poses.klein_body_text(body.character_info or {})
                       if not _keep else None)
+    _consistent_skin = _resolve_consistent_skin(st_settings, body)
     logger.info("klein base-outfit: mode=%s keep=%s face_kind=%s real_face=%s "
                 "strip_body_refs=%s pulid=%s face_ref=%s", base_clothing, _keep,
                 face_kind, real_face, strip_body_refs, bool(pulid), face_as_reference)
@@ -703,7 +832,8 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
             face_image_index=face_index, details=details_txt,
             base_clothing=base_clothing, nsfw=kposes_nsfw, appearance=appearance_txt,
             style_kind=face_kind, sex=str((body.character_info or {}).get("sex") or ""),
-            body_ref_active=body_ref_active, style_custom=style_custom))
+            body_ref_active=body_ref_active, style_custom=style_custom,
+            consistent_skin=_consistent_skin))
 
     # honor the UI's upscaler control: any non-off mode = GAN tail (SeedVR has
     # no simple graph form; the label maps to GAN here)
@@ -727,6 +857,7 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     if getattr(body, "klein_steps", None):
         _eff["klein_steps"] = body.klein_steps
     neg_text, klein_cfg = klein_poses.resolve_strip_negative(_eff, _keep)
+    neg_text = klein_poses.with_anatomy_negative(neg_text)  # suppress extra/duplicated limbs
     ksteps = klein_poses.resolve_klein_steps(_eff)
     logger.info("klein cleanup: cfg=%.2f steps=%d neg=%s", klein_cfg, ksteps, bool(neg_text))
     rmbg = klein_poses.resolve_rmbg(oi, st_settings)
@@ -745,6 +876,7 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
         strip_body_refs=strip_body_refs, face_as_reference=face_as_reference,
         negative_prompt=neg_text, cfg=klein_cfg, rmbg=rmbg,
         body_files=body_files, reflatentplus=reflatentplus,
+        out_width=_cw, out_height=_ch,
         filename_prefix=f"rbmn_vnccs/{safe}/klein_sprites")
     res = client.submit_prompt(api, timeout=120)
     extras = {"face_ref": bool(face_file),
@@ -1402,11 +1534,21 @@ async def base_enhance(body: BaseEnhanceIn, request: Request,
         raise HTTPException(status_code=404, detail=f"character {name!r} not found")
     v = (char.manifest or {}).get("vnccs") or {}
     active = v.get("active_base")
-    bv = next((b for b in (v.get("base_versions") or [])
-               if isinstance(b, dict) and b.get("id") == active), None)
+    _versions = [b for b in (v.get("base_versions") or []) if isinstance(b, dict)]
+    bv = next((b for b in _versions if b.get("id") == active), None)
     if not bv:
         raise HTTPException(status_code=409,
                             detail="No active base version to upscale — generate a base preview first.")
+    # ALWAYS upscale the ORIGINAL render, never an already-upscaled version, so
+    # repeated Enhance clicks don't stack upscale-on-upscale (soft, blown-up
+    # results).  If the active version is itself an upscale, resolve back to its
+    # source original and upscale THAT.
+    _src_id = ((bv.get("gen_meta") or {}).get("upscale_source"))
+    if _src_id:
+        _orig = next((b for b in _versions if b.get("id") == _src_id), None)
+        if _orig:
+            bv = _orig
+    _base_src_id = bv.get("id")
 
     async def _abytes(aid) -> Optional[bytes]:
         try:
@@ -1459,14 +1601,129 @@ async def base_enhance(body: BaseEnhanceIn, request: Request,
         raise HTTPException(status_code=500, detail=f"base enhance failed: {e}")
 
     used_method = outs[0][2] if outs else "?"
+    # tag the new version as an upscale of the ORIGINAL so a later Enhance resolves
+    # back to this same source instead of upscaling the upscale
+    _up_meta = {"upscaled": True, "upscale_source": _base_src_id,
+                "upscale_method": used_method, "max_side": body.max_side}
     if len(outs) > 1:
         version = await save_base_preview(
             session, character_name=name,
-            views=[{"view": vl, "image_b64": b} for vl, b, _u in outs], variant="klein")
+            views=[{"view": vl, "image_b64": b} for vl, b, _u in outs],
+            variant="klein", gen_meta=_up_meta)
     else:
         version = await save_base_preview(
-            session, character_name=name, image_b64=outs[0][1], variant="klein")
+            session, character_name=name, image_b64=outs[0][1],
+            variant="klein", gen_meta=_up_meta)
     return {"version": version, "method": used_method, "views": len(outs)}
+
+
+class PoseEnhanceIn(BaseModel):
+    character_name: str
+    asset_ids: list                            # pose sprite asset ids to upscale (1..N = whole set)
+    method: Optional[str] = "gan"              # 'gan' | 'seedvr2'
+    model: Optional[str] = None                # GAN model or '' / 'auto'
+    sharpen: Optional[str] = "off"
+    max_side: int = 2048
+
+
+@router.post("/poses/enhance")
+async def poses_enhance(body: PoseEnhanceIn, request: Request,
+                        session: AsyncSession = Depends(get_session)):
+    """AI-upscale one or more cataloged POSE sprites (same GAN/SeedVR2 path as the
+    base Enhance) and save each as a NEW upscaled asset that PRESERVES the
+    original.  Pass many ``asset_ids`` to upscale a whole set at once.
+
+    Sourcing is always the ORIGINAL: if an id points at an already-upscaled
+    sprite, it resolves back to the source original before upscaling, so repeated
+    runs never stack upscale-on-upscale.  Any earlier upscale of the same pose is
+    replaced, so the gallery keeps one upscale per pose.  Returns
+    ``{results: [{src, asset_id, url, label, method}], count, failed}``."""
+    import base64 as _b64  # noqa: F401  (parity with siblings; not required here)
+    from uuid import UUID as _UUID
+    from pathlib import Path as _Path
+    from backend.config import settings as _cfg
+    from backend.database.models import Asset, StudioCharacter
+    from backend.services.character_studio.vnccs_native.ingest import save_pose_upscale
+
+    host = await _need_host(request, session)
+    name = body.character_name.strip()
+    char = (await session.execute(
+        select(StudioCharacter).where(StudioCharacter.name == name))).scalars().first()
+    if char is None:
+        raise HTTPException(status_code=404, detail=f"character {name!r} not found")
+    ids = [str(x).strip() for x in (body.asset_ids or []) if str(x).strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="No pose asset ids to upscale.")
+
+    async def _asset(aid):
+        try:
+            return await session.get(Asset, _UUID(str(aid)))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _read(a) -> Optional[bytes]:
+        if a is None:
+            return None
+        rel = str(a.rel_path).replace("\\", "/")
+        pid = str(a.project_id)
+        p = (_Path(_cfg.project_dir) / rel if rel.startswith(pid + "/")
+             else _Path(_cfg.project_dir) / pid / rel)
+        try:
+            return p.read_bytes() if p.exists() else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    # resolve every requested id to its ORIGINAL sprite + read the source bytes
+    jobs = []  # (requested_id, original_id, label, src_meta_vnccs, bytes)
+    for aid in ids:
+        a = await _asset(aid)
+        if a is None:
+            continue
+        mv = (a.meta or {}).get("vnccs") or {}
+        if mv.get("upscaled") and mv.get("upscale_source"):
+            orig = await _asset(mv.get("upscale_source"))
+            if orig is not None:
+                a, mv = orig, (orig.meta or {}).get("vnccs") or {}
+        st, lb = mv.get("step"), mv.get("label")
+        if not st or not lb:
+            continue  # not a pose sprite (base/costume previews live elsewhere)
+        data = _read(a)
+        if not data:
+            continue
+        jobs.append((aid, str(a.id), f"{st}/{lb}", mv, data))
+    if not jobs:
+        raise HTTPException(status_code=409,
+                            detail="No readable pose sprites among the selected images.")
+
+    try:
+        oi = await asyncio.to_thread(_object_info, host)
+    except VNCCSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    def _run(data: bytes):
+        return _enhance_image_bytes(host, oi, data, method=body.method,
+                                    model=body.model, sharpen=body.sharpen,
+                                    max_side=body.max_side)
+
+    results, failed = [], 0
+    for req_id, orig_id, label, mv, data in jobs:
+        try:
+            out, used = await asyncio.to_thread(_run, data)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("pose enhance failed for %s: %s", orig_id, e)
+            failed += 1
+            continue
+        try:
+            saved = await save_pose_upscale(
+                session, character_name=name, label=label, image_bytes=out,
+                src_asset_id=orig_id, src_meta=mv, upscale_method=used)
+            results.append({"src": req_id, "original": orig_id, **saved, "method": used})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("pose upscale save failed for %s: %s", orig_id, e)
+            failed += 1
+    if not results:
+        raise HTTPException(status_code=502, detail="Pose upscale produced no images.")
+    return {"results": results, "count": len(results), "failed": failed}
 
 
 class BaseRestyleIn(BaseModel):
@@ -1614,13 +1871,18 @@ async def base_restyle(body: BaseRestyleIn, request: Request,
     if not outs:
         raise HTTPException(status_code=502, detail="Restyle produced no image.")
     label = style_custom if (style == "custom" and style_custom) else style
+    _gm = _klein_gen_meta(saved, seed=seed,
+                          extra={"engine": "klein-restyle", "style": label,
+                                 "restyle_strength": strength})
     if len(outs) > 1:
         version = await save_base_preview(
             session, character_name=name,
-            views=[{"view": vl, "image_b64": b} for vl, b in outs], variant="klein")
+            views=[{"view": vl, "image_b64": b} for vl, b in outs],
+            variant="klein", gen_meta=_gm)
     else:
         version = await save_base_preview(
-            session, character_name=name, image_b64=outs[0][1], variant="klein")
+            session, character_name=name, image_b64=outs[0][1],
+            variant="klein", gen_meta=_gm)
     return {"version": version, "style": label, "views": len(outs), "host": host}
 
 
@@ -1979,10 +2241,15 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
     gen_settings = _roll_seed(saved.get("gen_settings"), body.gen_settings)
 
     # eligible hosts per sharding rules
-    if step in ("clothes", "emotions"):
+    _is_klein = (body.engine or "").lower() == "klein"
+    if step in ("clothes", "emotions") and not _is_klein:
+        # native clothes/emotions FaceDetail the sprites that live on each worker's
+        # own disk, so they must run on the recorded shard hosts.
         recorded = await _character_hosts(session, body.character_name.strip())
         eligible = [h for h in recorded if h in all_hosts] or [pinned]
     else:
+        # Klein (incl. clothed sets) uploads the identity/dressed reference to each
+        # worker, so it can fan out across ALL hosts like a creator run.
         eligible = list(all_hosts)
     if body.max_hosts and body.max_hosts > 0:
         eligible = eligible[:body.max_hosts]
@@ -2015,16 +2282,22 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
         return await _klein_emotions_parallel(session, body, saved, eligible, pinned, gen_settings)
 
     if (body.engine or "").lower() == "klein":
-        if step not in ("creator", "cloner"):
+        if step not in ("creator", "cloner", "clothes"):
             raise HTTPException(status_code=400,
-                                detail="Klein engine currently covers pose generation and emotions")
+                                detail="Klein engine currently covers pose generation, clothed sets and emotions")
         kposes = [p for p in (body.pose_set or []) if isinstance(p, dict)]
         if not kposes:
             raise HTTPException(status_code=400, detail="Select at least one pose for a Klein run")
         knames = [str(x) for x in (body.pose_names or [])]
         knames_ok = len(knames) == len(kposes)
+        # CLOTHED POSE SET (step 'clothes'): reference the approved DRESSED costume
+        # version and reproduce its outfit on every pose (base_clothing='keep').
+        _kcostume = str(getattr(body, "costume_name", None) or "").strip() if step == "clothes" else None
+        if _kcostume:
+            body.base_clothing = "keep"      # force keep so the outfit is reproduced
         identity = await _klein_identity_bytes(session, body, pinned,
-                                               _resolve_lock_base(saved, body))
+                                               _resolve_lock_base(saved, body) or bool(_kcostume),
+                                               costume=_kcostume)
         try:
             per_job = int(saved.get("klein_poses_per_job") or 1)
         except Exception:  # noqa: BLE001
@@ -2038,9 +2311,12 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
         kbatches = [kposes[i:i + per_job] for i in range(0, len(kposes), per_job)]
         nbatches = ([knames[i:i + per_job] for i in range(0, len(knames), per_job)]
                     if knames_ok else [None] * len(kbatches))
+        # consistent skin/lighting: share ONE seed across all batches so the set
+        # doesn't drift in complexion/exposure (else each batch offsets its seed).
+        _consistent = _resolve_consistent_skin(saved, body)
         kchunks = [(eligible[bi % len(eligible)], b,
                     (nbatches[bi] if bi < len(nbatches) else None),
-                    kseed + bi * per_job)
+                    (kseed if _consistent else kseed + bi * per_job))
                    for bi, b in enumerate(kbatches)]
         out = []
         errors = []
@@ -2248,9 +2524,12 @@ async def generate_queue(step: str, body: ParallelGenerateIn, request: Request,
                     if knames_ok else [None] * len(kbatches))
         recipe = {"postprocess": "chroma", "engine": "klein",
                   "pose_set": body.pose_set, "pose_names": knames if knames_ok else None}
+        # consistent skin/lighting: one shared seed for the whole set (no offset)
+        _consistent = _resolve_consistent_skin(saved, body)
         for bi, subset in enumerate(kbatches):
             _mk_job({"workflow_type": "studio_pose", "step": step, "engine": "klein",
-                     "chunk_index": bi, "seed": base_seed + bi * per_job,
+                     "chunk_index": bi,
+                     "seed": (base_seed if _consistent else base_seed + bi * per_job),
                      "pose_subset": subset,
                      "pose_names": nbatches[bi] if bi < len(nbatches) else None,
                      "ingest_recipe": recipe})
@@ -2345,6 +2624,9 @@ class PreviewIn(BaseModel):
     base_set: Optional[bool] = None
     cleanup: Optional[str] = None            # 'off' | 'gentle' | 'strong'
     klein_steps: Optional[int] = None        # sampler steps (default 6)
+    # Per-character base canvas (wins over global klein_canvas_width / _height).
+    canvas_w: Optional[int] = None
+    canvas_h: Optional[int] = None
 
 
 @router.post("/preview")
@@ -2368,6 +2650,16 @@ async def generate_preview(body: PreviewIn, request: Request,
         _merge_gen_settings(gs, {})
     ci = map_character_info(body.character_info or {}, name=body.character_name.strip(),
                             nsfw=body.nsfw, background=body.background)
+    # Values the gen_meta snapshot in the version-save block below needs.  They
+    # MUST live in the OUTER scope: the nested runners each compute their own local
+    # copies, so without these the save block NameError'd (on seed_v / bc /
+    # face_kind / style_custom) and — caught silently — never wrote the base
+    # version to the DB, so the preview count never moved and new previews never
+    # joined the list.  The nested runners shadow these locally; harmless.
+    seed_v = int(gs.get("seed") or 0) or 1
+    face_kind = str(getattr(body, "face_kind", None) or "auto").strip().lower()
+    style_custom = str(getattr(body, "style_custom", None) or "").strip()
+    bc = str(getattr(body, "base_clothing", None) or saved.get("klein_base_clothing") or "strip")
     if (body.engine or "").lower() == "klein":
         # Klein-mode base preview: plain Klein 9B T2I from the tag sheet — the
         # identity source for every downstream Klein pose run.
@@ -2489,6 +2781,7 @@ async def generate_preview(body: PreviewIn, request: Request,
             if getattr(body, "klein_steps", None):
                 _eff["klein_steps"] = body.klein_steps
             neg_text, klein_cfg = klein_poses.resolve_strip_negative(_eff, keep_c)
+            neg_text = klein_poses.with_anatomy_negative(neg_text)
             _ksteps = klein_poses.resolve_klein_steps(_eff)
             rmbg_cfg = klein_poses.resolve_rmbg(oi, saved)
 
@@ -2502,9 +2795,11 @@ async def generate_preview(body: PreviewIn, request: Request,
                             "%d body ref(s) — no mannequin", len(pv_body_files))
                 import base64 as _b64r
                 try:
-                    _rb_strength = float(saved.get("klein_body_match_strength") or 1.15)
+                    # match the POSE path's default (resolve_reflatentplus uses 1.6) so
+                    # an unset value gives the base + poses the SAME body strength
+                    _rb_strength = float(saved.get("klein_body_match_strength") or 1.6)
                 except Exception:  # noqa: BLE001
-                    _rb_strength = 1.15
+                    _rb_strength = 1.6
                 # release the body reference over the final steps so the tail of the
                 # render can wipe residual on-skin accessories (wrist/neck jewelry) the
                 # prompt asks to remove -- body shape is already locked by then. 1.0 =
@@ -2533,6 +2828,10 @@ async def generate_preview(body: PreviewIn, request: Request,
                 # SAM3 article cleanup: segment leftover clothing/jewelry by text and
                 # inpaint it to skin, so Strip release can stay high for max likeness.
                 _sam_cleanup = klein_poses.resolve_sam3_cleanup(oi, saved)
+                _cw, _ch = _klein_canvas(saved, body.canvas_w, body.canvas_h)  # per-char / shared canvas
+                logger.info("klein refbase preview: rendering base at canvas %dx%d "
+                            "(klein_canvas_width=%s, body.canvas_w=%s)", _cw, _ch,
+                            saved.get("klein_canvas_width"), body.canvas_w)
                 imgs_b64 = []
                 for _i, (_vlabel, _rot, _vp) in enumerate(_views):
                     _vprompt = klein_poses.klein_refbase_prompt(
@@ -2540,6 +2839,7 @@ async def generate_preview(body: PreviewIn, request: Request,
                         view_desc=_vp, style_kind=face_kind, style_custom=style_custom, sex=_sex)
                     _g, _t = klein_poses.build_klein_refbase_graph(
                         prompt=_vprompt, seed=seed_v + _i, models=models,
+                        width=_cw, height=_ch,
                         body_files=pv_body_files, reflatentplus=reflatentplus,
                         strength=_rb_strength, body_ref_end=_rb_end, face_file=face_file,
                         pulid_image=_face_name, pulid=pulid,
@@ -2653,10 +2953,17 @@ async def generate_preview(body: PreviewIn, request: Request,
     version = None
     try:
         from backend.services.character_studio.vnccs_native.ingest import save_base_preview
+        _is_klein = (body.engine or "").lower() == "klein"
+        _gm = _klein_gen_meta(
+            saved, seed=seed_v, canvas_w=body.canvas_w, canvas_h=body.canvas_h,
+            extra={"engine": "klein-refbase" if _is_klein else "vnccs",
+                   "base_clothing": bc,
+                   "style": (face_kind if (face_kind and face_kind != "auto")
+                             else (style_custom or "auto"))}) if _is_klein else None
         version = await save_base_preview(
             session, character_name=body.character_name.strip(),
             image_b64=payload.get("image"), views=payload.get("views"),
-            variant=("klein" if (body.engine or "").lower() == "klein" else None))
+            variant=("klein" if _is_klein else None), gen_meta=_gm)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"vnccs preview: base-version save failed: {e}")
     return {"image": payload.get("image"), "views": payload.get("views"), "version": version}
@@ -2696,6 +3003,7 @@ class CharacterSaveIn(BaseModel):
     create_mode: Optional[str] = None        # 'new' | 'clone' — clone takes precedence
     clone_refs: Optional[list] = None        # uploaded reference images ({name,subfolder,type})
     variant: Optional[str] = None            # 'native' | 'klein' — which studio mode
+    canvas_w: Optional[int] = None           # per-character base+pose canvas width (Klein)
 
 
 @router.post("/character/save")
@@ -2721,6 +3029,11 @@ async def character_save(body: CharacterSaveIn, session: AsyncSession = Depends(
         "character_info": body.character_info or {},
         "gen_settings": body.gen_settings,
         "saved_at": datetime.utcnow().isoformat(),
+        # per-character canvas width (Klein) — reloaded into the Canvas control so
+        # a wide character keeps its wider frame across sessions.  None = follow
+        # the global default. Carry forward a previously saved value if omitted.
+        "canvas_w": (int(body.canvas_w) if body.canvas_w
+                     else (vnccs.get("form") or {}).get("canvas_w")),
     }
     # remember HOW this character is made. Clone wins: once a character has
     # been cloned, later tweaks from the New form must not flip it back.
@@ -2847,6 +3160,170 @@ async def costume_preview(body: CostumePreviewIn, request: Request,
     except Exception as e:  # noqa: BLE001
         logger.warning(f"vnccs costume-preview: version save failed: {e}")
     return {"image": payload["image"], "version": version, "host": host}
+
+
+class KleinClotheIn(BaseModel):
+    character_name: str
+    costume_name: str
+    costume_info: dict = {}                   # top/bottom/head/face/shoes free text
+    garment_ref: Optional[dict] = None        # {name,subfolder,type} outfit image on a host
+    background: Optional[str] = "Green"
+    strength: float = 1.0                     # identity/pose preservation (higher = keep more)
+    base_version_id: Optional[str] = None     # base version to dress (default: active)
+    view: Optional[str] = None                # single view label to dress (default: all views)
+    face_refine: Optional[bool] = None        # keep the face crisp after redress (default on)
+    host: Optional[str] = None
+
+
+@router.post("/clothes/klein-preview")
+async def clothes_klein_preview(body: KleinClotheIn, request: Request,
+                                session: AsyncSession = Depends(get_session)):
+    """Klein clothing PREVIEW: DRESS the character's ACTIVE base render in the
+    costume (description slots and/or a garment reference image) via
+    ``build_klein_clothes_graph``, and save the result as a costume VERSION.  The
+    base rides as a person-minus-clothes reference latent, so identity + body +
+    pose are preserved and only the outfit is redrawn.  Base versions untouched."""
+    import base64 as _b64
+    import io as _io
+    import random as _random
+    import uuid as _uuid
+    from uuid import UUID as _UUID
+    from pathlib import Path as _Path
+    from PIL import Image as _Image
+    from sqlmodel import select as _select
+    from backend.config import settings as _cfg
+    from backend.database.models import Asset, StudioCharacter
+    from backend.services.character_studio.vnccs_native import klein_poses
+
+    host = await _need_host(request, session)
+    st = await _settings(session)
+    saved = (st.studio_vnccs_settings if st else None) or {}
+    name = body.character_name.strip()
+    costume = body.costume_name.strip()
+    if not name or not costume:
+        raise HTTPException(status_code=400, detail="character and costume name required")
+    char = (await session.execute(
+        _select(StudioCharacter).where(StudioCharacter.name == name))).scalars().first()
+    if char is None:
+        raise HTTPException(status_code=404, detail=f"character {name!r} not found")
+    v = (char.manifest or {}).get("vnccs") or {}
+    target_id = body.base_version_id or v.get("active_base")
+    bv = next((b for b in (v.get("base_versions") or [])
+               if isinstance(b, dict) and b.get("id") == target_id), None)
+    if not bv:
+        raise HTTPException(status_code=409,
+                            detail="No base version to dress — generate a base preview first.")
+
+    async def _abytes(aid) -> Optional[bytes]:
+        try:
+            a = await session.get(Asset, _UUID(str(aid)))
+        except Exception:  # noqa: BLE001
+            return None
+        if a is None:
+            return None
+        rel = str(a.rel_path).replace("\\", "/")
+        pid = str(a.project_id)
+        p = (_Path(_cfg.project_dir) / rel if rel.startswith(pid + "/")
+             else _Path(_cfg.project_dir) / pid / rel)
+        try:
+            return p.read_bytes() if p.exists() else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    want_view = str(body.view or "").strip().lower()
+    view_items: list = []  # (view_label, bytes)
+    for vw in (bv.get("views") or []):
+        vl = str(vw.get("view") or "front")
+        if want_view and vl.lower() != want_view:
+            continue
+        data = await _abytes(vw.get("asset_id"))
+        if data:
+            view_items.append((vl, data))
+    if not view_items and not want_view:
+        data = await _abytes(bv.get("asset_id"))
+        if data:
+            view_items.append(("front", data))
+    if not view_items:
+        raise HTTPException(status_code=409, detail="Base version has no readable image asset.")
+
+    try:
+        oi = await asyncio.to_thread(_object_info, host)
+        models = klein_poses.resolve_klein_models(oi, saved, require_lora=False)
+    except VNCCSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    reflatentplus = klein_poses.resolve_reflatentplus(oi, saved)
+    rmbg_cfg = klein_poses.resolve_rmbg(oi, saved)
+    steps = klein_poses.resolve_klein_steps(saved)
+    _use_fr = body.face_refine if body.face_refine is not None else True
+    face_refine = klein_poses.resolve_face_refine(oi, saved) if _use_fr else None
+    has_garment = bool(body.garment_ref and (body.garment_ref or {}).get("name"))
+    prompt = klein_poses.klein_clothes_prompt(
+        body.costume_info or {}, body.background or "Green",
+        has_garment_ref=has_garment, style_kind="auto")
+    strength = max(0.05, min(2.0, float(body.strength or 1.0)))
+    seed = _random.randint(1, 2_000_000_000)
+    safe = "".join(ch for ch in name if ch.isalnum())[:24] or "char"
+
+    def _clean_png(data: bytes) -> bytes:
+        im = _Image.open(_io.BytesIO(data))
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGB")
+        buf = _io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _run():
+        client = _client(host, timeout=120)
+        token = _uuid.uuid4().hex[:8]
+        garment_name = None
+        if has_garment:
+            gr = body.garment_ref or {}
+            try:
+                raw = client.view_image(gr.get("name", ""), gr.get("subfolder", "") or "",
+                                        gr.get("type", "input") or "input", 120)
+                gn = f"rbmn_klein_{safe}_{token}_garment.png"
+                client.upload_image(gn, _clean_png(raw), "", True, 120)
+                garment_name = gn
+            except VNCCSError:
+                garment_name = None
+        outs = []  # (view, b64)
+        for i, (vlabel, data) in enumerate(view_items):
+            in_name = f"rbmn_klein_{safe}_{token}_clin{i}.png"
+            client.upload_image(in_name, _clean_png(data), "", True, 120)
+            graph, _tap = klein_poses.build_klein_clothes_graph(
+                base_file=in_name, prompt=prompt, seed=seed, models=models, steps=steps,
+                garment_ref_file=garment_name, strength=strength,
+                reflatentplus=reflatentplus, face_refine=face_refine, rmbg=rmbg_cfg,
+                filename_prefix=f"rbmn_vnccs/{safe}/klein_clothes")
+            res = client.submit_prompt(graph, timeout=120)
+            raw = _wait_first_image_bytes(client, res.get("prompt_id"), 1800)
+            outs.append((vlabel, _b64.b64encode(raw).decode("ascii")))
+        return outs
+
+    try:
+        outs = await asyncio.to_thread(_run)
+    except VNCCSError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("klein clothes preview failed")
+        raise HTTPException(status_code=500, detail=f"klein clothes preview failed: {e}")
+    if not outs:
+        raise HTTPException(status_code=502, detail="Clothing preview produced no image.")
+    version = None
+    try:
+        from backend.services.character_studio.vnccs_native.ingest import save_costume_preview
+        _front = next((b for vl, b in outs if vl == "front"), outs[0][1])
+        _gm = _klein_gen_meta(saved, seed=seed,
+                              extra={"engine": "klein-clothes", "clothing_strength": strength,
+                                     "garment_ref": bool(has_garment)})
+        version = await save_costume_preview(
+            session, character_name=name, costume=costume,
+            image_b64=_front, costume_info=body.costume_info or {}, gen_meta=_gm)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"klein clothes preview: version save failed: {e}")
+    return {"image": outs[0][1],
+            "views": [{"view": vl, "image": b} for vl, b in outs],
+            "version": version, "host": host, "engine": "klein"}
 
 
 class CostumeInfoIn(BaseModel):
@@ -3324,7 +3801,10 @@ async def catalog_images(character_id: str, session: AsyncSession = Depends(get_
             mv = (a.meta or {}).get("vnccs") or {}
             imgs.append({"asset_id": str(a.id), "url": f"/api/files/{a.project_id}/{rel}",
                          "base_version": mv.get("base_version"),
-                         "costume": mv.get("costume")})
+                         "costume": mv.get("costume"),
+                         "pose_name": mv.get("pose_name"),
+                         "upscaled": bool(mv.get("upscaled")),
+                         "upscale_source": mv.get("upscale_source")})
         if imgs:
             out.append({"label": label, "images": imgs})
     return {"character_id": str(c.id), "name": c.name, "form": v.get("form"),

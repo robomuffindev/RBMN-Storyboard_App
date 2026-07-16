@@ -1,5 +1,297 @@
 # Changelog
 
+## [1.144.0] - 2026-07-16
+### Changed -- Higher step ceilings (scan-line grain on complex skin) + lock-base visibility
+- Raised the Klein sampler-step ceiling 16 -> 32 (`resolve_klein_steps`); the base
+  preview Steps control now goes to 24 (was 14) and the pose "Steps" control to
+  24 (was 14). Complicated skin tones can show a scan-line / interference grain
+  that only fully resolves at higher step counts, and poses (self-occlusion,
+  hands) need more headroom than the clean single base. Time scales ~linearly
+  with steps; the preview wait budget already scales with the step count.
+- Face refine: backend clamp raised 20 -> 32, the global ⚙ "Refine steps" input
+  now accepts up to 32, and the base-local Refine-steps row gained 12 / 16 / 20.
+- Lock-base sourcing VERIFIED correct as-built: pose runs resolve whatever base
+  version is ACTIVE -- Enhance saves the upscale as a new version that becomes
+  active automatically, and the manual set-active button updates `active_base` --
+  so an upscaled base set active IS the reference. Added a log line stating the
+  resolved version id and whether it's the UPSCALED copy or the original render,
+  so `tools/rbmn.py logs` shows exactly which image each pose run referenced.
+  (Note: identity references are downscaled to ~1MP on the worker before
+  encoding, so the reference image is not the source of pose distortion.)
+
+## [1.143.0] - 2026-07-16
+### Added -- Pose-specific render settings (separate from the base preview)
+- New "Pose render settings" group next to the pose-set Generate button: **Steps**
+  (default 8, was a shared 6) and **Cleanup**, applied to pose-SET runs
+  (creator/cloner/clothed sets/per-pose regen) independently of the base preview,
+  which keeps its own Klein-steps control.
+- Why: poses add mannequin-driven self-occlusion the single clean base never has,
+  so at 6 steps the model draws hard DARK lines where skin overlaps skin (hands
+  worst-case). Raising pose steps resolves the overlap smoothly. The base preview
+  stays fast at its own step count.
+- Persisted as `klein_pose_steps` / `klein_pose_cleanup`; sent per-run as the
+  existing `klein_steps` / `cleanup` body fields (no backend change needed).
+- Also nudged the anatomy negative with dark-outline terms (harsh black outlines,
+  ink/lineart, hard edges where skin overlaps) as a secondary lever.
+
+## [1.142.0] - 2026-07-16
+### Fixed -- Klein previews never saved (NameError swallowed) -- THE real bug
+- The `/preview` version-save block referenced `seed_v`, `bc`, `face_kind` and
+  `style_custom`, but those are all defined ONLY inside the nested runner
+  functions (`_run_klein_preview` / `_run_klein_clone_preview`), never in the
+  outer `generate_preview` scope. So for EVERY Klein preview the save block threw
+  `NameError` on the first line, which the surrounding `except Exception` caught
+  silently -> `save_base_preview` was never called -> nothing hit the database,
+  no base version was created, the preview count never moved, and (when a prior
+  version existed) the new image didn't even display because the viewer shows the
+  active version's URL over the fresh preview. Introduced in 1.133 with the
+  gen_meta snapshot; it's why previews "did nothing" no matter what you changed.
+- Fix: compute `seed_v` / `face_kind` / `style_custom` / `bc` in the outer scope
+  so the snapshot builds and the version actually saves. (The keep-alive bump in
+  1.141 was unrelated to this symptom, but still good for genuinely long runs.)
+
+## [1.141.0] - 2026-07-16
+### Fixed -- Long previews dropped mid-render (server keep-alive too short)
+- `run.py` raised `timeout_keep_alive` 300s -> 1800s. Klein clone/base previews run
+  the full identity chain (PuLID + FaceDetailer + SAM3) per view and can take 6+
+  min each (a 4-view set 25+ min). At the old 5-min cap the connection was dropped
+  mid-preview: the finished image never returned to the app and the version count
+  never moved, while the worker kept churning (a backlog of prompts). Now the app
+  waits long enough to receive the result.
+- Practical tip (also in-app): for a fast clone preview use Base preview = Front
+  only, Klein steps = 6, Cleanup = Off -- that renders in ~1-2 min instead of 25.
+
+## [1.140.0] - 2026-07-16
+### Fixed -- Stuck "reconnected" run could freeze previews/generation (regression)
+- The resume-after-refresh feature (1.138) could re-attach to a run whose jobs
+  were already gone (e.g. after a `run.bat` restart's startup cleanup, or a
+  completed run). The poll loop then spun without ever finishing, pinning
+  `phase='polling'` -> `busy=true`, which DISABLES the preview / generate buttons
+  (`canPreview` requires `!busy`). Result: clicking Generate did nothing and the
+  image never updated -- looking like settings changes had no effect.
+- On restore, the queue path now PRE-CHECKS job status and only re-attaches when a
+  job is actually pending/running; if nothing is live it just clears the saved
+  descriptor and refreshes the library (no busy-lock).
+- `watchQueueRun` now marks a job terminal after a few consecutive 404s (vanished/
+  purged job) instead of spinning to the 2h safety deadline.
+- Added a "✕ Reset status view" button on the run panel (non-destructive; any real
+  run keeps going on the workers) as a manual escape if a run ever looks stuck.
+- If you're stuck right now: rebuild + hard-refresh (the new restore self-clears),
+  or run `localStorage.removeItem('rbmn_vnccs_active_run')` in the browser console.
+
+## [1.139.0] - 2026-07-16
+### Added -- Original / Upscaled indicator on the base preview
+- The base-image viewer now shows a pill next to "Base image": "Original" for a
+  plain render, or "⬆ Upscaled" (with the method on hover) when the current base
+  version is an upscale -- driven by the version's gen_meta. Flip through versions
+  and each one tells you which it is.
+- Pose sprites already carry this: upscaled poses show the green "HD" badge and
+  originals are unbadged (with the ⬆ upscale button), so the gallery denotes the
+  same original-vs-upscaled state per pose.
+
+## [1.138.0] - 2026-07-16
+### Added -- Generation runs survive refresh / navigation (resume live status)
+- Starting any generation now persists a compact run descriptor, so you can
+  leave the VNCCS page or refresh the browser and come back to the LIVE status
+  instead of a blank slate. On re-mount the page reconnects to the run and
+  resumes polling to completion.
+- Queue runs (creator/cloner pose sets, native): restored from the durable Job
+  queue -- the backend keeps running + ingesting server-side regardless, so a
+  refresh never loses work; the UI just re-attaches (Stop still works).
+- Direct runs (Klein clothes/emotions): restored from the saved chunk list and
+  re-polled on their workers; per-chunk "already filed" tracking means a resume
+  never double-ingests. Descriptors older than 3h are dropped.
+- Internals: the two poll loops were extracted into resumable `watchQueueRun` /
+  `watchDirectRun` cores shared by a fresh run and a restore; the run descriptor
+  lives in browser localStorage (per browser). No backend change.
+
+## [1.137.0] - 2026-07-16
+### Added -- Klein clothed pose-SET generation [#34]
+- The Clothes tab's generate action now works on Klein bases: "Generate clothed
+  set" renders every selected pose WEARING the costume you dialed in on the
+  preview. It references the approved DRESSED costume version (the clothing
+  preview you made) as the lock-base and forces base_clothing='keep', so each
+  pose reproduces that exact outfit on the character's locked body -- reusing the
+  proven Klein pose graph rather than a separate path.
+- Backend: `generate-parallel` now accepts the Klein `clothes` step; identity
+  resolves to the active costume version's dressed image (`_klein_identity_bytes`
+  gained a `costume` arg); Klein clothed sets fan out across ALL workers (they
+  upload the reference per host) instead of being pinned to recorded shard hosts.
+  Sprites ingest as `clothes/<costume>` with the same chroma cutout + defringe as
+  base poses. Consistent-skin + per-character canvas apply here too.
+- Flow: dial in the costume on the base preview (Clothes tab, Klein), pick poses,
+  then "Generate clothed set". If no costume version is saved yet it falls back to
+  the plain base so you always get output.
+
+## [1.136.0] - 2026-07-16
+### Added -- Gallery pose upscale (post-hoc, whole-set, original-sourced) [#30]
+- Each cataloged pose sprite has a "⬆" button (same GAN/SeedVR2 path + the same
+  method/model/sharpen/size as "Enhance base") that saves a sharper UPSCALED copy
+  and PRESERVES the original (badged "HD" in the gallery). An "⬆ Upscale all
+  poses (N)" button in the base-poses header does the whole set at once.
+- CRITICAL sourcing: every upscale runs on the ORIGINAL, never on an already-
+  upscaled image -- pose ids resolve back through `upscale_source`, and the BASE
+  Enhance now resolves the active version to its original too, so repeated runs
+  never stack upscale-on-upscale. Re-upscaling replaces the prior upscale (one
+  HD copy per pose, originals kept). New endpoint `POST /poses/enhance`.
+### Added -- Reference masking control (person-minus-clothes) [#31]
+- Exposed the previously backend-only `klein_body_match_keep` as a "Reference
+  masking" control: Person (drop clothes, default) / Person + clothes / Full
+  image / Body only. Lets you choose whether the reference photo's OUTFIT is
+  dropped (so it can't leak into a strip base) or kept.
+### Added -- Consistent skin/lighting across a pose set [#32]
+- New toggle: shares ONE seed across every pose in a set (instead of a per-pose
+  seed offset) and adds a colour-lock prompt clause, so a set stops drifting in
+  skin tone / exposure pose-to-pose. Off = per-pose seeds for more variety.
+  Backend `klein_consistent_skin` + per-run `consistent_skin` body flag.
+### Fixed -- Pose sprites' dark/green edge halo (base vs pose parity) [#33]
+- Pose sprites now get a despill + 1px alpha-erode pass on ingest, killing the
+  dark/green matte halo that rembg/RMBG2 leave on the cut-out edge (the base
+  never showed it because its preview stays on a clean field). Sprite edges now
+  read as cleanly as the base.
+- Aligned the base's body-match strength fallback (1.15 -> 1.6) with the pose
+  path so an unset value gives base + poses the SAME body strength.
+- Note: base and pose runs still use different graphs by design -- poses add a
+  3D pose-mannequin reference (image 1) the base never sees, which is the source
+  of the extra "interference" and slight body drift; lock-base + body adherence
+  + consistent-skin are the levers. SAM article-cleanup still runs on the base
+  only (pose-graph parity is a larger change, deferred).
+
+## [1.135.0] - 2026-07-16
+### Added -- Per-character canvas width (wide frame for round characters)
+- The Klein "Canvas width" control is now PER CHARACTER. The width you set is
+  sent on every base preview + pose run for the character you're working on, so
+  a round/plump character can use a wider frame (e.g. 1152/1280) while others
+  stay at the default -- no more toggling one global value back and forth.
+- The value is remembered per character: it saves with the character (Save /
+  auto-save on clone) and reloads into the control when you reopen the character
+  from the Library. The current value also seeds the default for NEW characters.
+- Backend: `GenerateIn` / `PreviewIn` gained `canvas_w` / `canvas_h`; `_klein_canvas`
+  now takes per-body overrides that win over the global `klein_canvas_width` /
+  `klein_canvas_height`; `character/save` persists `canvas_w` under the character's
+  form; the per-image settings snapshot records the effective (per-character) canvas.
+- Height stays at the shared default (~1216); only width is exposed, matching the
+  existing control. Anything unset falls back to the global default, so existing
+  characters are unaffected until you set a width and Save.
+
+## [1.134.0] - 2026-07-16
+### Added -- Per-pose regenerate button (re-roll one pose on a fresh seed)
+- Each base-pose sprite in the Create/Clone gallery now has a "↻" button (top-left)
+  that re-generates JUST that pose on a fresh random seed, using the exact same
+  settings the rest of the set was made with (engine, face kind, style, cleanup,
+  Klein steps, base clothing, background, upscaler, and the saved gen settings).
+  For when a single pose came out wrong and just needs another roll.
+- The button spins while that pose is re-rolling and disables the other poses'
+  buttons for the duration; the freshly generated pose replaces the old one by
+  pose name (ingest already de-dupes by `pose_name`), so the gallery updates in
+  place rather than stacking a duplicate.
+- Only shows on sprites that carry a `pose_name` tag (poses generated since the
+  pose-name tagging landed). If the pose is no longer in the current selection,
+  the button explains you need to reselect the poses below before regenerating.
+- Backend: `catalog_images` now returns `pose_name` per image so the UI knows
+  which sprite maps to which pose; `runGenerateQueued` honors a body-supplied
+  `pose_names` so a single-pose regen submits only that pose.
+
+## [1.133.0] - 2026-07-16
+### Added -- Base image pixel-dimension readout + canvas log (diagnostic)
+- The base-image viewer now shows the ACTUAL pixel dimensions (e.g. 1152x1216px)
+  of the displayed base file next to the "Base image" label -- confirms the render
+  is coming out at the Canvas width you set (the UI only fits it to the column via
+  CSS; it was never a downscaled preview).
+- Backend logs the refbase canvas per preview ("rendering base at canvas WxH") so
+  the requested size is visible in the worker/app console.
+### Added -- Per-image settings snapshot (recall what produced each version)
+- Every Klein base version (refbase preview + Switch Style restyle) and costume
+  version now stores a `gen_meta` snapshot: seed, canvas, body adherence, strip
+  release, cleanup, steps, face-refine, PuLID, SAM cleanup, lock-base, style,
+  base clothing (+ restyle/clothing strength). `save_base_preview` /
+  `save_costume_preview` (ingest.py) gained a `gen_meta` param; `_klein_gen_meta`
+  builds it from the effective settings.
+- The base-image viewer shows a collapsible "⚙ Settings that made this image"
+  panel per version, so flipping through versions reveals exactly what produced
+  each one -- easy to revert to what was working. (New renders only; older
+  versions predate the snapshot.)
+
+## [1.131.0] - 2026-07-16
+### Changed -- Body adherence default 1.25 -> 1.6
+- `klein_body_match_strength` default is now 1.6 (was 1.25). Live testing confirmed
+  1.6 firmly holds plump/curvy bodies to the source where 1.0-1.25 drifted. The
+  Body adherence control marks 1.60 as the default and adds a 2.0 option.
+
+## [1.130.0] - 2026-07-16
+### Changed -- Unified, wider base+pose canvas (same size everywhere)
+- Base image AND pose sprites now render at ONE shared canvas (default 1024x1216,
+  wider than the old 832x1216), so wide characters get consistent room and the base
+  matches the pose sprites in size. Tunable via `klein_canvas_width` /
+  `klein_canvas_height` + a new **Canvas width** control in the base settings.
+- `build_klein_pose_graph` gained `out_width`/`out_height`: poses render at the fixed
+  shared canvas instead of the pose-capture-derived size. The pose CAPTURE is rendered
+  at the same aspect so the pose reference matches the frame.
+- Supersedes the v1.129 landscape pose-view (`klein_pose_view_*`): base + poses are now
+  the same wider portrait, per request (characters aren't all narrow).
+
+## [1.129.0] - 2026-07-16
+### Fixed -- Pose-set quality batch 1 (body drift, faces, canvas, extra limbs)
+- **Wider pose canvas**: pose captures defaulted to 512x512 square; the renderer
+  scales the figure to 90% of HEIGHT then clamps to 48% of WIDTH, so wide (plump /
+  muscular / arms-out) bodies hit the width clamp and shrank, losing height. Now
+  the pose-render canvas is 640x512 by default (tunable: `klein_pose_view_width`
+  / `klein_pose_view_height`), giving wide bodies room while height stays consistent.
+- **Body adherence**: `klein_body_match_strength` default raised 1.0 -> 1.25 so the
+  correct body (base/photos) out-votes the pose mannequin's generic build (less
+  body-shape drift, esp. lock-base). Exposed as a **Body adherence** slider in the
+  base controls.
+- **Consistent face quality**: pose-set face refine now uses the SAME settings as
+  the base preview (`klein_base_face_refine_denoise/steps`), instead of only the
+  globals -- so pose faces match the base's quality.
+- **Extra-limb guard**: an anatomy negative (extra/duplicated/fused limbs, mutated
+  hands, bad anatomy) now rides in the pose + refbase negative (bites in strip/
+  cleanup mode) to cut the ~1/12 extra-limb rate from pose-vs-reference conflict.
+
+### Held for follow-up (tracked)
+- Per-pose regenerate button (fresh seed); post-hoc gallery upscale (+ keep during-gen);
+  Use-References body-masking; skin-color consistency option; OpenPose pose-only rework;
+  Klein clothed pose-SET generation; deferred BGR PuLID node patch.
+
+## [1.128.0] - 2026-07-16
+### Added -- Klein clothing path (dress YOUR base; description or reference image)
+- `build_klein_clothes_graph` + `klein_clothes_prompt` (klein_poses.py): a Klein
+  reference-EDIT that DRESSES the base render. The base rides as a
+  'person-minus-clothes' ReferenceLatentPlus latent (keeps face + hair + body +
+  POSE, drops the current garment) so a full Flux.2 generation redraws ONLY the
+  clothing. Optional GARMENT REFERENCE IMAGE rides as a 2nd reference latent to
+  reproduce a specific outfit; optional FaceDetailer keeps the face; RMBG strips bg.
+- `POST /clothes/klein-preview` (vnccs_native.py): dresses the character's ACTIVE
+  base version (all views) from the costume slots and/or a garment image, saves the
+  result as a costume VERSION. Base versions untouched. Mirrors `/base/restyle`.
+- Frontend Clothes tab (VNCCSNative): when variant=klein, the ✨ costume preview now
+  dresses YOUR base (not a VNCCS mannequin sprite); added an optional outfit
+  reference-image upload. The legacy qwen 'Generate costume' SET button is hidden for
+  Klein (it can't see Klein bases) with a note — Klein clothed-SET-across-poses is the
+  next step (same graph, batched over the pose sprites).
+- WHY: the old clothes step was VNCCS/qwen-only and dressed worker-store pose sprites,
+  which Klein runs don't populate — so Klein Hybrid bases couldn't be clothed. This
+  wires clothing into the Klein pipeline the same way refbase/restyle work.
+
+## [1.127.0] - 2026-07-16
+### Docs -- PuLID identity path verified + captured; handoff sync
+- Added `docs/PULID_NOTES.md`: PuLID is WORKING (Option A got it detecting). The worker
+  log's `face=0` is the face INDEX used, NOT a zero count -- the real no-face line is
+  `AUCUN VISAGE`. Documents the cv2/opencv-python requirement, that upscaled refs are used
+  when Enhance is on, and a DEFERRED RGB->BGR embedding tweak for the ComfyUI-PuLID-Flux2
+  node (exact patch preserved; not deployed -- optional, not update-safe, node lives on the
+  workers). Verified with `pulid_face_probe.py` (antelopev2 detects MA5 at det_score ~0.82).
+- Dependency fix: `cv2` was MISSING from the app venv (`import cv2` -> ModuleNotFoundError),
+  so every identity crop was a heuristic box. Root cause: `pyproject.toml` declared
+  `opencv-python-headless` but the venv predated it / never installed it. Installed the full
+  `opencv-python`, added it to `requirements.txt`, and switched the `pyproject.toml`
+  declaration from `-headless` to `opencv-python` so all three agree (do NOT install both
+  variants -- they both provide `cv2` and conflict).
+- HANDOVER/README updated: PuLID reality (corrected the stale "PuLID is a NO-OP" note),
+  the large-file delivery lesson (deliver .zip + native extract; bridge writes truncate),
+  and the cv2 dependency.
+- No app code change in this version (docs + requirements only).
+
 ## [1.126.0] - 2026-07-15
 ### Fixed -- refbase base preview: feed PuLID the FULL face image (identity fix)
 - `build_klein_refbase_graph` previously fed PuLID/InsightFace the app-side face

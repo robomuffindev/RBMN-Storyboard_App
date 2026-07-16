@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rbmn-storyboard"
-version = "1.122.0"
+version = "1.144.0"
 description = "AI Music Video & Narration Video Storyboard Application"
 requires-python = ">=3.10,<3.13"
 dependencies = [
@@ -51,7 +51,11 @@ dependencies = [
     # Video processing
     "numpy>=1.26",
     "Pillow>=10.2",
-    "opencv-python-headless>=4.9",
+    # cv2 for Character Studio face detection (faces.py) AND video processing.
+    # Full opencv-python (not -headless): matches what's installed on the app host
+    # and requirements.txt. Do NOT also install -headless — both provide `cv2` and
+    # co-installing them causes import conflicts.
+    "opencv-python>=4.9",
 
     # Utilities
     "pydantic>=2.9",

@@ -44,6 +44,43 @@ interface ChunkState {
   note?: string;
 }
 
+// ---- Resumable runs ------------------------------------------------------
+// A generation is tracked ONLY in React state, so a browser refresh / route
+// change would lose the live status even though the work keeps running (queue
+// jobs are durable + ingest server-side; direct chunks finish on the workers).
+// We persist a compact descriptor of the in-flight run to localStorage so the
+// page can restore the status view and resume polling when it re-mounts.
+const ACTIVE_RUN_KEY = 'rbmn_vnccs_active_run';
+type ActiveRunDesc =
+  | { kind: 'queue'; runId: string; jobIds: string[]; step: VNCCSStepT; charName: string; started: number }
+  | { kind: 'direct'; step: VNCCSStepT; charName: string; engine?: string;
+      ingestExtra?: { costume?: string; emotions?: string[]; costumes?: string[] } | null;
+      runSeed?: number | null; poseNamesAll?: string[] | null;
+      poseSet?: Array<Record<string, unknown>> | null;
+      chunks: Array<{ host: string; prompt_id: string; tap_map: Record<string, string>;
+                      label: string; pose_names?: string[] | null }>;
+      ingested: number[]; started: number };
+
+function saveActiveRun(d: ActiveRunDesc): void {
+  try { window.localStorage.setItem(ACTIVE_RUN_KEY, JSON.stringify(d)); } catch { /* storage disabled */ }
+}
+function loadActiveRun(): ActiveRunDesc | null {
+  try {
+    const s = window.localStorage.getItem(ACTIVE_RUN_KEY);
+    if (!s) return null;
+    const d = JSON.parse(s) as ActiveRunDesc & { started?: number };
+    // drop stale descriptors (>3h) so a long-dead run never re-arms the UI
+    if (!d || typeof d !== 'object' || (Date.now() - (d.started || 0)) > 3 * 60 * 60 * 1000) {
+      window.localStorage.removeItem(ACTIVE_RUN_KEY);
+      return null;
+    }
+    return d;
+  } catch { return null; }
+}
+function clearActiveRun(): void {
+  try { window.localStorage.removeItem(ACTIVE_RUN_KEY); } catch { /* ignore */ }
+}
+
 const shortHost = (h: string) => h.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
 // Final-output node ids for a chunk. Verified against the generator source:
@@ -387,7 +424,16 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [baseSet, setBaseSet] = useState<boolean>(false);
   const [cleanup, setCleanup] = useState<string>('gentle');
   const [kSteps, setKSteps] = useState<number>(6);
+  // Pose-SET render overrides (separate from the base preview): poses add
+  // mannequin-driven overlap the base never has, so they need more steps to avoid
+  // dark occlusion lines where skin meets skin (hands worst-case).
+  const [poseSteps, setPoseSteps] = useState<number>(8);
+  const [poseCleanup, setPoseCleanup] = useState<string>('gentle');
   const [rbEnd, setRbEnd] = useState<string>('0.85');
+  const [bodyMatch, setBodyMatch] = useState<string>('1.6');
+  const [bodyKeep, setBodyKeep] = useState<string>('person');  // reference masking: what the body-ref carries
+  const [consistentSkin, setConsistentSkin] = useState(false);  // share one seed + colour-lock across a pose set
+  const [canvasW, setCanvasW] = useState<string>('1024');
   const [baseFr, setBaseFr] = useState<boolean>(true);
   const [baseFrDenoise, setBaseFrDenoise] = useState<string>('');
   const [baseFrSteps, setBaseFrSteps] = useState<string>('');
@@ -419,6 +465,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearInterval(id);
   }, [previewBusy]);
   const [baseVersions, setBaseVersions] = useState<api.BaseVersionT[]>([]);
+  const [baseImgDims, setBaseImgDims] = useState<{ w: number; h: number } | null>(null);
+  const [regenPose, setRegenPose] = useState('');  // pose_name currently being re-rolled
+  const [poseUpBusy, setPoseUpBusy] = useState<Set<string>>(new Set());  // asset_ids currently upscaling
+  const [poseUpMsg, setPoseUpMsg] = useState('');
   const [activeBase, setActiveBase] = useState<string>('');
   const [verIdx, setVerIdx] = useState(0);
   const [baseViewIdx, setBaseViewIdx] = useState(0);
@@ -451,6 +501,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [clothesChar, setClothesChar] = useState('');
   const [costumeName, setCostumeName] = useState('');
   const [costume, setCostume] = useState<CostumeInfo>({ top: '', bottom: '', head: '', face: '', shoes: '' });
+  // Klein clothing: optional reference-image of the target outfit (uploaded ref).
+  const [garmentRef, setGarmentRef] = useState<api.UploadRefT | null>(null);
+  const [garmentBusy, setGarmentBusy] = useState(false);
   const [cloMannequin, setCloMannequin] = useState<{ host: string; index: number } | null>(null);
   const [createSub, setCreateSub] = useState<'new' | 'clone'>('new');
   const [cloneSelIdx, setCloneSelIdx] = useState(0);
@@ -594,7 +647,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setBaseSet(['on', 'true', '1', 'yes', 'set'].includes(String(st.klein_base_set ?? 'off').toLowerCase()));
       setCleanup(String(st.klein_cleanup ?? 'gentle'));
       setKSteps(parseInt(String(st.klein_steps ?? '6'), 10) || 6);
+      setPoseSteps(parseInt(String(st.klein_pose_steps ?? '8'), 10) || 8);
+      setPoseCleanup(String(st.klein_pose_cleanup ?? st.klein_cleanup ?? 'gentle'));
       setRbEnd(st.klein_refbase_ref_end !== undefined ? String(st.klein_refbase_ref_end) : '0.85');
+      setBodyMatch(st.klein_body_match_strength !== undefined ? String(st.klein_body_match_strength) : '1.6');
+      setBodyKeep(st.klein_body_match_keep !== undefined ? String(st.klein_body_match_keep) : 'person');
+      setConsistentSkin(['on', 'true', '1', 'yes'].includes(String(st.klein_consistent_skin ?? 'off').toLowerCase()));
+      setCanvasW(st.klein_canvas_width !== undefined ? String(st.klein_canvas_width) : '1024');
       setBaseFr(!['off', 'false', '0', 'no'].includes(String(st.klein_base_face_refine ?? 'on').toLowerCase()));
       setBaseFrDenoise(st.klein_base_face_refine_denoise !== undefined ? String(st.klein_base_face_refine_denoise) : '');
       setBaseFrSteps(st.klein_base_face_refine_steps !== undefined ? String(st.klein_base_face_refine_steps) : '');
@@ -825,7 +884,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_base_set = baseSet ? 'on' : 'off';
     settings.klein_cleanup = cleanup || 'gentle';
     settings.klein_steps = kSteps || 6;
+    settings.klein_pose_steps = poseSteps || 8;
+    settings.klein_pose_cleanup = poseCleanup || 'gentle';
     settings.klein_refbase_ref_end = rbEnd || '0.85';
+    settings.klein_body_match_strength = bodyMatch || '1.6';
+    settings.klein_body_match_keep = bodyKeep || 'person';
+    settings.klein_consistent_skin = consistentSkin ? 'on' : 'off';
+    settings.klein_canvas_width = canvasW || '1024';
     settings.klein_base_face_refine = baseFr ? 'on' : 'off';
     if (baseFrDenoise.trim() !== '') settings.klein_base_face_refine_denoise = baseFrDenoise;
     else delete settings.klein_base_face_refine_denoise;
@@ -889,7 +954,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, frSteps, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, rbEnd, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
+      kpMode, kpStrength, frMode, frDenoise, frSteps, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, poseSteps, poseCleanup, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength, switchStyleRealism]);
@@ -901,7 +966,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setBaseClothing('strip'); setFaceKind('auto'); setRunBaseClothing('');
     setLockBase(true);
     setBaseSet(false);
-    setCleanup('gentle'); setKSteps(6); setRbEnd('0.85');
+    setCleanup('gentle'); setKSteps(6); setPoseSteps(8); setPoseCleanup('gentle'); setRbEnd('0.85');
     setBaseFr(true); setBaseFrDenoise(''); setBaseFrSteps('');
     setSamClean(false); setSamPrompt(''); setSamThresh('');
     // the debounced auto-save effect persists these defaults
@@ -946,6 +1011,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     }
     return undefined; // backend default: fresh random seed per run
   };
+  // Per-character canvas: send the live Canvas-width value on every Klein base +
+  // pose generation so this character's frame wins over the global default
+  // (persisted per-character on Save; reloaded when the character is opened).
+  const kleinCanvasBody = (): { canvas_w?: number } => {
+    const n = parseInt(canvasW, 10);
+    return (variant === 'klein' && Number.isFinite(n) && n > 0) ? { canvas_w: n } : {};
+  };
   const seedRow = (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
       <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#cbd2dc' }}>
@@ -981,24 +1053,115 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // watch each job's status.  The backend selects a worker, submits, monitors
   // and INGESTS each chunk (so we do NOT call api.ingest here).  Cancellable
   // via the Stop button (api.cancelRun -> interrupts the workers).
+  // Watch a queued run's chunk jobs to completion.  This is the RESUMABLE core:
+  // both a fresh enqueue and a restore-after-refresh call it.  The backend
+  // ingests each chunk server-side, so we only track status + refresh the grid.
+  const watchQueueRun = async (rid: string, jobIds: string[], step: VNCCSStepT,
+                               charName: string, started: number) => {
+    let cid = '';
+    const refreshLib = async () => {
+      if (!cid) {
+        try {
+          const cat = await api.getCatalog();
+          const hit = cat.find((c) => c.name === charName);
+          if (hit) cid = hit.character_id;
+        } catch { /* best-effort */ }
+        if (!cid) cid = editingCharId;
+      }
+      if (!cid) return;
+      try {
+        const r = await api.getCharacterImages(cid);
+        setExistingOutputs(r.outputs || []);
+        setCloOutputs(r.outputs || []);
+        setEmoOutputs(r.outputs || []);
+        setEmoRuns(r.emotion_runs || []);
+        setPoseRuns(r.pose_runs || []);
+        setEmoCharId(cid);
+        setCostumesMap(r.costumes || {});
+        if (!editingCharId) setEditingCharId(cid);
+      } catch { /* library refresh is best-effort */ }
+    };
+    const idxOf = new Map(jobIds.map((id, i) => [id, i] as const));
+    const terminal = new Set<string>();
+    let anyDone = false;
+    let anyError = false;
+    const missCount = new Map<string, number>();  // consecutive poll failures per job
+    const deadline = Date.now() + 2 * 60 * 60 * 1000; // 2h safety net
+    while (terminal.size < jobIds.length) {
+      let newDone = false;
+      await Promise.all(jobIds.filter((id) => !terminal.has(id)).map(async (id) => {
+        try {
+          const jr = await api.getJob(id);
+          missCount.set(id, 0);
+          const idx = idxOf.get(id);
+          if (idx === undefined) return;
+          const s = (jr.status || '').toLowerCase();
+          const wk = jr.worker_url || '';
+          const rc = jr.result ? (jr.result as Record<string, unknown>)['image_count'] : undefined;
+          const cnt = typeof rc === 'number' ? rc : 0;
+          if (s === 'done') {
+            terminal.add(id); anyDone = true; newDone = true;
+            patchChunk(idx, {
+              status: 'done', host: wk,
+              note: cnt ? `${cnt} image${cnt === 1 ? '' : 's'} filed` : 'filed',
+            });
+          } else if (s === 'failed' || s === 'cancelled') {
+            terminal.add(id); anyError = true;
+            patchChunk(idx, { status: 'error', host: wk, note: jr.error || s });
+          } else {
+            patchChunk(idx, { status: 'running', host: wk });
+          }
+        } catch {
+          // job vanished (deleted / purged / never existed after a restart): after
+          // a few misses, mark it terminal so the loop can finish + clear instead
+          // of spinning to the 2h deadline (which would keep the UI busy).
+          const n = (missCount.get(id) || 0) + 1;
+          missCount.set(id, n);
+          if (n >= 4) {
+            const idx = idxOf.get(id);
+            terminal.add(id); anyError = true;
+            if (idx !== undefined) patchChunk(idx, { status: 'error', note: 'job no longer on the queue' });
+          }
+        }
+      }));
+      if (newDone) await refreshLib();
+      if (terminal.size >= jobIds.length) break;
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 4000));
+    }
+
+    await refreshLib();
+
+    const mins = Math.max(1, Math.round((Date.now() - started) / 60000));
+    if (anyDone) {
+      setIngestMsg(`Pose run filed into “${charName}” (${step}) — ${jobIds.length} chunk${jobIds.length === 1 ? '' : 's'} via the queue in ~${mins} min${anyError ? ' (some chunks failed)' : ''}.`);
+    }
+    setPhase(anyError && !anyDone ? 'error' : 'done');
+    if (anyError && !anyDone) setErrMsg('All queued chunks failed — check the Generation Queue / worker consoles.');
+    setStatusText('');
+    setRunId('');
+    clearActiveRun();
+  };
+
   const runGenerateQueued = async (step: VNCCSStepT, charName: string,
                                    body: Partial<api.GenerateBody>) => {
     setErrMsg(''); setIngestMsg(''); setChunks([]); setRunId('');
     setPhase('submitting'); setStatusText('Enqueuing pose run to the Generation Queue…');
-    const started = Date.now();
     try {
       const control_center = editModel
         ? { ...((host?.settings?.control_center as Record<string, unknown>) || {}), selected_model: editModel }
         : undefined;
       const g = await api.enqueueParallel(step, {
         character_name: charName, character_info: {}, control_center, ...body,
-        pose_names: (body.pose_set && body.pose_set.length) ? selectedPoseNames : undefined,
+        // a single-pose regen passes its own pose_names; otherwise use the full selection
+        pose_names: (body as { pose_names?: string[] }).pose_names
+          ?? ((body.pose_set && body.pose_set.length) ? selectedPoseNames : undefined),
         max_hosts: parallelOn ? 0 : 1,
       } as api.GenerateBody & { max_hosts?: number });
       if (g.seed && seedMode === 'fixed' && !seedVal) setSeedVal(String(g.seed));
       setRunId(g.run_id);
       const jobIds = g.job_ids || [];
-      if (!jobIds.length) { setPhase('error'); setErrMsg('No chunks were queued.'); setStatusText(''); return; }
+      if (!jobIds.length) { setPhase('error'); setErrMsg('No chunks were queued.'); setStatusText(''); clearActiveRun(); return; }
       const initial: ChunkState[] = jobIds.map((jid, i) => ({
         host: '', prompt_id: jid, tap_map: {},
         label: `chunk ${i + 1}`, status: 'running', images: [],
@@ -1007,81 +1170,11 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setChunks(initial);
       setPhase('polling');
       setStatusText(`Queued ${jobIds.length} chunk${jobIds.length === 1 ? '' : 's'} — running through the Generation Queue…`);
-
-      // Resolve the run's character + a helper to refresh the library grid.
-      // In queue mode the backend ingests each chunk, so finished poses show
-      // up in the library — NOT in the live run gallery (no per-image
-      // filenames client-side), so we never fake chunk images.
-      let cid = '';
-      const refreshLib = async () => {
-        if (!cid) {
-          try {
-            const cat = await api.getCatalog();
-            const hit = cat.find((c) => c.name === charName);
-            if (hit) cid = hit.character_id;
-          } catch { /* best-effort */ }
-          if (!cid) cid = editingCharId;
-        }
-        if (!cid) return;
-        try {
-          const r = await api.getCharacterImages(cid);
-          setExistingOutputs(r.outputs || []);
-          setCloOutputs(r.outputs || []);
-          setEmoOutputs(r.outputs || []);
-          setEmoRuns(r.emotion_runs || []);
-          setPoseRuns(r.pose_runs || []);
-          setEmoCharId(cid);
-          setCostumesMap(r.costumes || {});
-          if (!editingCharId) setEditingCharId(cid);
-        } catch { /* library refresh is best-effort */ }
-      };
-      const idxOf = new Map(jobIds.map((id, i) => [id, i] as const));
-      const terminal = new Set<string>();
-      let anyDone = false;
-      let anyError = false;
-      const deadline = Date.now() + 2 * 60 * 60 * 1000; // 2h safety net
-      while (terminal.size < jobIds.length) {
-        let newDone = false;
-        await Promise.all(jobIds.filter((id) => !terminal.has(id)).map(async (id) => {
-          try {
-            const jr = await api.getJob(id);
-            const idx = idxOf.get(id);
-            if (idx === undefined) return;
-            const s = (jr.status || '').toLowerCase();
-            const wk = jr.worker_url || '';
-            const rc = jr.result ? (jr.result as Record<string, unknown>)['image_count'] : undefined;
-            const cnt = typeof rc === 'number' ? rc : 0;
-            if (s === 'done') {
-              terminal.add(id); anyDone = true; newDone = true;
-              patchChunk(idx, {
-                status: 'done', host: wk,
-                note: cnt ? `${cnt} image${cnt === 1 ? '' : 's'} filed` : 'filed',
-              });
-            } else if (s === 'failed' || s === 'cancelled') {
-              terminal.add(id); anyError = true;
-              patchChunk(idx, { status: 'error', host: wk, note: jr.error || s });
-            } else {
-              patchChunk(idx, { status: 'running', host: wk });
-            }
-          } catch { /* transient poll error — retry next tick */ }
-        }));
-        if (newDone) await refreshLib();
-        if (terminal.size >= jobIds.length) break;
-        if (Date.now() > deadline) break;
-        await new Promise((r) => setTimeout(r, 4000));
-      }
-
-      await refreshLib();
-
-      const mins = Math.max(1, Math.round((Date.now() - started) / 60000));
-      if (anyDone) {
-        setIngestMsg(`Pose run filed into “${charName}” (${step}) — ${jobIds.length} chunk${jobIds.length === 1 ? '' : 's'} via the queue in ~${mins} min${anyError ? ' (some chunks failed)' : ''}.`);
-      }
-      setPhase(anyError && !anyDone ? 'error' : 'done');
-      if (anyError && !anyDone) setErrMsg('All queued chunks failed — check the Generation Queue / worker consoles.');
-      setStatusText('');
-      setRunId('');
+      // persist so a refresh / navigation can restore this run and resume polling
+      saveActiveRun({ kind: 'queue', runId: g.run_id, jobIds, step, charName, started: Date.now() });
+      await watchQueueRun(g.run_id, jobIds, step, charName, Date.now());
     } catch (e) {
+      clearActiveRun();
       setPhase('error');
       setErrMsg((e as Error).message);
       setStatusText('');
@@ -1104,6 +1197,93 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     }
   };
 
+  // Direct (non-queue) Klein clothes/emotions run: poll each chunk's prompt_id on
+  // its worker, then ingest client-side.  RESUMABLE core shared by a fresh run and
+  // a restore-after-refresh: the ctx carries everything ingest needs (captured at
+  // run time, NOT read from current React state), and ``alreadyIngested`` skips
+  // chunks that already filed so a resume never double-ingests.
+  type DirectCtx = {
+    step: VNCCSStepT; charName: string; engine?: string;
+    ingestExtra?: { costume?: string; emotions?: string[]; costumes?: string[] } | null;
+    runSeed?: number | null; poseNamesAll?: string[] | null;
+    poseSet?: Array<Record<string, unknown>> | null;
+  };
+  const watchDirectRun = async (initial: ChunkState[], ctx: DirectCtx,
+                                started: number, alreadyIngested: Set<number>) => {
+    const ingested: string[] = [];
+    const filed = new Set<number>(alreadyIngested);
+    let lastCharId = '';
+    let totalOut = 0;
+    let anyError = false;
+    const persist = () => saveActiveRun({
+      kind: 'direct', step: ctx.step, charName: ctx.charName, engine: ctx.engine,
+      ingestExtra: ctx.ingestExtra ?? null, runSeed: ctx.runSeed ?? null,
+      poseNamesAll: ctx.poseNamesAll ?? null, poseSet: ctx.poseSet ?? null,
+      chunks: initial.map((c) => ({ host: c.host, prompt_id: c.prompt_id, tap_map: c.tap_map,
+                                    label: c.label, pose_names: c.pose_names || null })),
+      ingested: Array.from(filed), started,
+    });
+    await Promise.all(initial.map(async (c, idx) => {
+      if (filed.has(idx)) { patchChunk(idx, { status: 'done', note: 'filed' }); return; }
+      try {
+        const res = await api.pollUntilDone(c.prompt_id, {
+          host: c.host,
+          onTick: (r) => patchChunk(idx, { images: r.images }),
+        });
+        patchChunk(idx, { images: res.images });
+        if (res.status === 'error') {
+          anyError = true;
+          patchChunk(idx, { status: 'error', note: 'job errored on the worker' });
+          return;
+        }
+        patchChunk(idx, { status: 'ingesting' });
+        const ing = await api.ingest({
+          prompt_id: c.prompt_id, host: c.host, character_name: ctx.charName, step: ctx.step, tap_map: c.tap_map,
+          costume: ctx.ingestExtra?.costume || null,
+          emotions: ctx.ingestExtra?.emotions || null,
+          costumes: ctx.ingestExtra?.costumes || null,
+          seed: ctx.runSeed ?? null,
+          pose_names: (ctx.poseSet && ctx.poseSet.length) ? (ctx.poseNamesAll || null) : null,
+          pose_set: ctx.poseSet || null,
+          postprocess: ctx.engine === 'klein' ? 'chroma' : null,
+          chunk_pose_names: c.pose_names || null,
+          engine: ctx.engine || null,
+        });
+        totalOut += Object.values(ing.outputs || {}).reduce((a, v) => a + v.length, 0);
+        if (!ingested.includes(ing.ref)) ingested.push(ing.ref);
+        lastCharId = ing.character_id;
+        filed.add(idx); persist();      // mark filed so a later resume skips it
+        patchChunk(idx, { status: 'done' });
+      } catch (e) {
+        anyError = true;
+        patchChunk(idx, { status: 'error', note: (e as Error).message });
+      }
+    }));
+
+    const mins = Math.max(1, Math.round((Date.now() - started) / 60000));
+    if (totalOut > 0) {
+      setIngestMsg(`Cataloged “${ingested.join('”, “') || ctx.charName}” (${ctx.step}) — ${totalOut} images from ${initial.length} worker${initial.length === 1 ? '' : 's'} in ~${mins} min${ctx.runSeed ? ` · seed ${ctx.runSeed}` : ''}.`);
+      const cid = lastCharId || editingCharId;
+      if (cid) {
+        try {
+          const r = await api.getCharacterImages(cid);
+          setExistingOutputs(r.outputs || []);
+          setCloOutputs(r.outputs || []);
+          setEmoOutputs(r.outputs || []);
+          setEmoRuns(r.emotion_runs || []);
+          setPoseRuns(r.pose_runs || []);
+          setEmoCharId(cid);
+          setCostumesMap(r.costumes || {});
+          if (!editingCharId) setEditingCharId(cid);
+        } catch { /* library refresh is best-effort */ }
+      }
+    }
+    setPhase(anyError && totalOut === 0 ? 'error' : 'done');
+    if (anyError && totalOut === 0) setErrMsg('All chunks failed — check the worker consoles.');
+    setStatusText('');
+    clearActiveRun();
+  };
+
   const runGenerate = async (step: VNCCSStepT, charName: string, body: Partial<api.GenerateBody>,
                              ingestExtra?: { costume?: string; emotions?: string[]; costumes?: string[] }) => {
     // Character-Studio runs now go through the central Job queue (queue-managed
@@ -1115,7 +1295,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     }
     setErrMsg(''); setIngestMsg(''); setChunks([]);
     setPhase('submitting'); setStatusText('Assembling VNCCS graph(s) and submitting…');
-    const started = Date.now();
     try {
       const control_center = editModel
         ? { ...((host?.settings?.control_center as Record<string, unknown>) || {}), selected_model: editModel }
@@ -1136,69 +1315,22 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       if (g.errors?.length) setErrMsg(`⚠ ${g.errors.length} worker(s) failed to accept a chunk (running on the rest).`);
       setPhase('polling');
       setStatusText(`Generating on ${initial.length} worker${initial.length === 1 ? '' : 's'}…`);
-
-      const ingested: string[] = [];
-      let lastCharId = '';
-      let totalOut = 0;
-      let anyError = false;
-      await Promise.all(initial.map(async (c, idx) => {
-        try {
-          const res = await api.pollUntilDone(c.prompt_id, {
-            host: c.host,
-            onTick: (r) => patchChunk(idx, { images: r.images }),
-          });
-          patchChunk(idx, { images: res.images });
-          if (res.status === 'error') {
-            anyError = true;
-            patchChunk(idx, { status: 'error', note: 'job errored on the worker' });
-            return;
-          }
-          patchChunk(idx, { status: 'ingesting' });
-          const ing = await api.ingest({
-            prompt_id: c.prompt_id, host: c.host, character_name: charName, step, tap_map: c.tap_map,
-            costume: ingestExtra?.costume || null,
-            emotions: ingestExtra?.emotions || null,
-            costumes: ingestExtra?.costumes || null,
-            seed: runSeed ?? null,
-            pose_names: (body.pose_set && body.pose_set.length) ? selectedPoseNames : null,
-            pose_set: (body.pose_set as Array<Record<string, unknown>> | undefined) || null,
-            postprocess: (body as { engine?: string }).engine === 'klein' ? 'chroma' : null,
-            chunk_pose_names: c.pose_names || null,
-            engine: (body as { engine?: string }).engine || null,
-          });
-          totalOut += Object.values(ing.outputs || {}).reduce((a, v) => a + v.length, 0);
-          if (!ingested.includes(ing.ref)) ingested.push(ing.ref);
-          lastCharId = ing.character_id;
-          patchChunk(idx, { status: 'done' });
-        } catch (e) {
-          anyError = true;
-          patchChunk(idx, { status: 'error', note: (e as Error).message });
-        }
-      }));
-
-      const mins = Math.max(1, Math.round((Date.now() - started) / 60000));
-      if (totalOut > 0) {
-        setIngestMsg(`Cataloged “${ingested.join('”, “') || charName}” (${step}) — ${totalOut} images from ${initial.length} worker${initial.length === 1 ? '' : 's'} in ~${mins} min${runSeed ? ` · seed ${runSeed}` : ''}.`);
-        // refresh the library grid so the new poses appear alongside the old ones
-        const cid = lastCharId || editingCharId;
-        if (cid) {
-          try {
-            const r = await api.getCharacterImages(cid);
-            setExistingOutputs(r.outputs || []);
-            setCloOutputs(r.outputs || []);
-            setEmoOutputs(r.outputs || []);
-            setEmoRuns(r.emotion_runs || []);
-            setPoseRuns(r.pose_runs || []);
-            setEmoCharId(cid);
-            setCostumesMap(r.costumes || {});
-            if (!editingCharId) setEditingCharId(cid);
-          } catch { /* library refresh is best-effort */ }
-        }
-      }
-      setPhase(anyError && totalOut === 0 ? 'error' : 'done');
-      if (anyError && totalOut === 0) setErrMsg('All chunks failed — check the worker consoles.');
-      setStatusText('');
+      const ctx: DirectCtx = {
+        step, charName, engine: _eng, ingestExtra: ingestExtra || null, runSeed: runSeed ?? null,
+        poseNamesAll: (body.pose_set && body.pose_set.length) ? selectedPoseNames : null,
+        poseSet: (body.pose_set as Array<Record<string, unknown>> | undefined) || null,
+      };
+      // persist so a refresh / navigation can restore this run and resume polling
+      saveActiveRun({
+        kind: 'direct', step, charName, engine: _eng, ingestExtra: ingestExtra || null,
+        runSeed: runSeed ?? null, poseNamesAll: ctx.poseNamesAll, poseSet: ctx.poseSet,
+        chunks: initial.map((c) => ({ host: c.host, prompt_id: c.prompt_id, tap_map: c.tap_map,
+                                      label: c.label, pose_names: c.pose_names || null })),
+        ingested: [], started: Date.now(),
+      });
+      await watchDirectRun(initial, ctx, Date.now(), new Set());
     } catch (e) {
+      clearActiveRun();
       setPhase('error');
       const msg = (e as Error).message;
       setErrMsg(msg.includes('Timed out')
@@ -1208,6 +1340,83 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     }
   };
 
+  // Resume an in-flight run after a browser refresh / route change: if a run
+  // descriptor was persisted, restore the status view and re-attach the poll
+  // loop (queue jobs keep running + ingesting server-side; direct chunks finish
+  // on the workers).  Runs once on mount.
+  // Manually clear the run view (non-destructive: any real server-side work keeps
+  // going).  Escape hatch if a restored run ever looks stuck.
+  const dismissRun = () => {
+    clearActiveRun();
+    setPhase('idle'); setChunks([]); setRunId(''); setStatusText('');
+  };
+
+  const restoredRunRef = useRef(false);
+  useEffect(() => {
+    if (restoredRunRef.current) return;
+    restoredRunRef.current = true;
+    const d = loadActiveRun();
+    if (!d) return;
+    void (async () => {
+      const refreshFor = async (charName: string) => {
+        try {
+          const cat = await api.getCatalog();
+          const hit = cat.find((c) => c.name === charName);
+          const cid = hit?.character_id || editingCharId;
+          if (!cid) return;
+          const r = await api.getCharacterImages(cid);
+          setExistingOutputs(r.outputs || []);
+          setPoseRuns(r.pose_runs || []);
+          setCostumesMap(r.costumes || {});
+        } catch { /* best-effort */ }
+      };
+      if (d.kind === 'queue') {
+        if (!d.jobIds?.length) { clearActiveRun(); return; }
+        // Only re-attach if a job is ACTUALLY still pending/running.  A restart of
+        // run.bat (startup cleanup), a completed run, or purged jobs leave them
+        // done/cancelled/missing — restoring 'polling' then would pin busy=true and
+        // block previews/generation.  If nothing is live, clear + refresh instead.
+        let anyLive = false;
+        await Promise.all(d.jobIds.map(async (id) => {
+          try {
+            const jr = await api.getJob(id);
+            const s = (jr.status || '').toLowerCase();
+            if (s === 'pending' || s === 'running' || s === 'queued') anyLive = true;
+          } catch { /* 404 / gone -> not live */ }
+        }));
+        if (!anyLive) { clearActiveRun(); await refreshFor(d.charName); return; }
+        setRunId(d.runId);
+        setChunks(d.jobIds.map((jid, i) => ({
+          host: '', prompt_id: jid, tap_map: {}, label: `chunk ${i + 1}`,
+          status: 'running', images: [], pose_names: null,
+        })));
+        setPhase('polling');
+        setStatusText('Reconnected to a running queue job — resuming live status…');
+        void watchQueueRun(d.runId, d.jobIds, d.step, d.charName, d.started);
+      } else if (d.kind === 'direct') {
+        // completed-but-not-cleared (every chunk already filed) -> just clear.
+        if (!d.chunks?.length || (d.ingested?.length || 0) >= d.chunks.length) {
+          clearActiveRun(); await refreshFor(d.charName); return;
+        }
+        const done = new Set(d.ingested || []);
+        const initial: ChunkState[] = d.chunks.map((c, i) => ({
+          host: c.host, prompt_id: c.prompt_id, tap_map: c.tap_map,
+          label: c.label || `chunk ${i + 1}`, status: done.has(i) ? 'done' : 'running',
+          images: [], pose_names: c.pose_names || null,
+        }));
+        setChunks(initial);
+        setPhase('polling');
+        setStatusText('Reconnected to a running generation — resuming live status…');
+        const ctx: DirectCtx = {
+          step: d.step, charName: d.charName, engine: d.engine, ingestExtra: d.ingestExtra ?? null,
+          runSeed: d.runSeed ?? null, poseNamesAll: d.poseNamesAll ?? null, poseSet: d.poseSet ?? null,
+        };
+        void watchDirectRun(initial, ctx, d.started, done);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // --- Create-tab actions -------------------------------------------------
   const doPreview = async () => {
     if (!name.trim() || !host?.online) return;
@@ -1216,6 +1425,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       const r = await api.generatePreview({
         character_name: name.trim(), character_info: info, nsfw: !!info.nsfw, background,
         ...(variant === 'klein' ? { engine: 'klein', face_kind: faceKind, style_custom: styleCustom } : {}),
+        ...kleinCanvasBody(),
       });
       setPreviewImg(`data:image/png;base64,${r.image}`);
       if (r.version) {
@@ -1252,6 +1462,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         ...(variant === 'klein' ? { engine: 'klein', face_kind: faceKind, style_custom: styleCustom, base_set: baseSet,
               cleanup, klein_steps: kSteps,
               ...(runBaseClothing ? { base_clothing: runBaseClothing } : {}) } : {}),
+        ...kleinCanvasBody(),
       });
       setPreviewImg(`data:image/png;base64,${r.image}`);
       if (r.version) {
@@ -1276,7 +1487,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     try {
       const gs = (host?.settings?.gen_settings as Record<string, unknown>) || undefined;
       const r = await api.saveCharacter({ name: name.trim(), character_info: info, gen_settings: gs || null,
-                                          create_mode: 'new', variant });
+                                          create_mode: 'new', variant,
+                                          ...(variant === 'klein' ? { canvas_w: parseInt(canvasW, 10) || null } : {}) });
       setSaveMsg(`✓ Saved “${r.name}” to your library — reload it any time from the Library tab.`);
     } catch (e) {
       setSaveMsg(`⚠ Save failed: ${(e as Error).message}`);
@@ -1291,7 +1503,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     ...(variant === 'klein' && runBaseClothing ? { base_clothing: runBaseClothing } : {}),
     ...(variant === 'klein' ? { face_kind: faceKind, style_custom: styleCustom } : {}),
     ...(variant === 'klein' ? { lock_base: lockBase } : {}),
-    ...(variant === 'klein' ? { cleanup, klein_steps: kSteps } : {}),
+    ...(variant === 'klein' ? { cleanup: poseCleanup, klein_steps: poseSteps, consistent_skin: consistentSkin } : {}),
+    ...kleinCanvasBody(),
     pose_set: selectedPoseSet as Array<Record<string, unknown>>,
     generator_overrides: buildGeneratorOverrides(upscaler),
   });
@@ -1304,6 +1517,12 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       costume_name: costumeName.trim(), costume_info: costume, background, gen_settings: seedGenSettings(),
       pose_set: selectedPoseSet.length ? selectedPoseSet as Array<Record<string, unknown>> : undefined,
       generator_overrides: buildGeneratorOverrides(upscaler),
+      // Klein clothed pose SET: reference the approved DRESSED costume version and
+      // reproduce its outfit on every pose (backend forces base_clothing='keep').
+      ...(variant === 'klein'
+        ? { engine: 'klein', face_kind: faceKind, style_custom: styleCustom, cleanup: poseCleanup, klein_steps: poseSteps,
+            lock_base: true, consistent_skin: consistentSkin, ...kleinCanvasBody() }
+        : {}),
     }, { costume: costumeName.trim() });
   };
 
@@ -1410,11 +1629,101 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     ...(variant === 'klein' && runBaseClothing ? { base_clothing: runBaseClothing } : {}),
     ...(variant === 'klein' ? { face_kind: faceKind, style_custom: styleCustom } : {}),
     ...(variant === 'klein' ? { lock_base: lockBase } : {}),
-    ...(variant === 'klein' ? { cleanup, klein_steps: kSteps } : {}),
+    ...(variant === 'klein' ? { cleanup: poseCleanup, klein_steps: poseSteps, consistent_skin: consistentSkin } : {}),
+    ...kleinCanvasBody(),
     pose_set: selectedPoseSet.length ? selectedPoseSet as Array<Record<string, unknown>> : undefined,
     generator_overrides: buildGeneratorOverrides(upscaler),
     });
   };
+  // Re-roll a SINGLE pose on a fresh seed with the same settings, replacing it in
+  // place (the ingest replaces the sprite by pose name). Uses the poses currently
+  // selected below, matched by name — the practical fix for the ~1/12 bad pose.
+  const regeneratePose = async (poseName: string) => {
+    if (!poseName || busy || regenPose) return;
+    const idx = selectedPoseNames.indexOf(poseName);
+    if (idx < 0) {
+      setErrMsg(`Pose "${poseName}" isn't in the current pose selection — reselect the poses below, then regenerate.`);
+      return;
+    }
+    const pose = selectedPoseSet[idx];
+    const isClone = createSub === 'clone';
+    const step: VNCCSStepT = isClone ? 'cloner' : 'creator';
+    const charName = isClone ? cloneName.trim() : name.trim();
+    if (!charName) return;
+    const freshSeed = Math.floor(Math.random() * 2_000_000_000) + 1;
+    const kleinExtras = variant === 'klein'
+      ? { engine: 'klein', face_kind: faceKind, style_custom: styleCustom, lock_base: lockBase, cleanup: poseCleanup, klein_steps: poseSteps,
+          consistent_skin: consistentSkin,
+          ...kleinCanvasBody(),
+          ...(runBaseClothing ? { base_clothing: runBaseClothing } : {}) }
+      : {};
+    const common: Partial<api.GenerateBody> = isClone
+      ? { character_info: (cloneInfo || {}) as VNCCSCharacterInfoT,
+          cloner_images: cloneRefsForGen() as unknown as Array<Record<string, unknown>>,
+          nsfw: !!cloneInfo?.nsfw, background, ...kleinExtras }
+      : { character_info: info, nsfw: !!info.nsfw, background, ...kleinExtras };
+    setRegenPose(poseName);
+    try {
+      await runGenerate(step, charName, {
+        ...common,
+        gen_settings: { ...(seedGenSettings() || {}), seed: freshSeed },
+        pose_set: [pose] as Array<Record<string, unknown>>,
+        pose_names: [poseName],
+        generator_overrides: buildGeneratorOverrides(upscaler),
+      } as Partial<api.GenerateBody>);
+    } catch (e) {
+      setErrMsg(`Regenerate "${poseName}" failed: ${(e as Error).message}`);
+    } finally {
+      setRegenPose('');
+    }
+  };
+
+  // Post-hoc AI-upscale of cataloged pose sprites (same GAN/SeedVR2 path + the
+  // same method/model/sharpen/size controls as "Enhance base").  Sources the
+  // ORIGINAL every time (backend resolves upscaled ids back to their source), so
+  // repeated runs never stack.  Pass many ids to upscale a whole set at once.
+  const upscalePoses = async (assetIds: string[]) => {
+    const nm = (createSub === 'clone' ? cloneName : name).trim();
+    if (!nm || !host?.online || !assetIds.length) return;
+    if (assetIds.some((id) => poseUpBusy.has(id))) return;
+    setPoseUpBusy((prev) => { const n = new Set(prev); assetIds.forEach((id) => n.add(id)); return n; });
+    setPoseUpMsg(`Upscaling ${assetIds.length} pose${assetIds.length === 1 ? '' : 's'}…`);
+    try {
+      const r = await api.enhancePoses({
+        character_name: nm, asset_ids: assetIds,
+        method: baseEnhanceMethod,
+        model: baseEnhanceMethod === 'gan' ? (baseEnhanceModel || undefined) : undefined,
+        sharpen: baseEnhanceSharpen, max_side: baseEnhanceMaxSide,
+      });
+      if (editingCharId) {
+        const img = await api.getCharacterImages(editingCharId);
+        setExistingOutputs(img.outputs || []);
+      }
+      setPoseUpMsg(`✓ Upscaled ${r.count} pose${r.count === 1 ? '' : 's'}${r.failed ? ` · ${r.failed} failed` : ''} (${r.results[0]?.method || 'done'}).`);
+    } catch (e) {
+      setPoseUpMsg('');
+      setErrMsg(`Pose upscale failed: ${(e as Error).message}`);
+    } finally {
+      setPoseUpBusy((prev) => { const n = new Set(prev); assetIds.forEach((id) => n.delete(id)); return n; });
+    }
+  };
+  // All ORIGINAL (non-upscaled) base-pose sprite ids currently shown, for the
+  // "Upscale all poses" whole-set action (respects the version filter).
+  const collectBasePoseOriginalIds = (): string[] => {
+    const ids: string[] = [];
+    for (const o of existingOutputs) {
+      if (!isFinalLabel(o.label) || o.label.startsWith('clothes/')
+          || o.label.startsWith('emotions/') || o.label.endsWith('naked_sprites')) continue;
+      for (const im of o.images) {
+        if (!im.pose_name || im.upscaled) continue;
+        if (!showAllVersions && baseVersions.length && curVersion
+            && im.base_version && im.base_version !== curVersion.id) continue;
+        ids.push(im.asset_id);
+      }
+    }
+    return Array.from(new Set(ids));
+  };
+
   const canCloner = !!host?.online && !!cloneName.trim() && cloneRefs.length > 0 && !busy;
   const canClonePreview = !!host?.online && !!cloneName.trim() && cloneRefs.length > 0 && !previewBusy && !busy;
   // Stable signature of the current reference set (name + role), used to auto-save
@@ -1430,6 +1739,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       const r = await api.saveCharacter({
         name: cloneName.trim(), character_info: (cloneInfo || {}) as VNCCSCharacterInfoT,
         create_mode: 'clone', clone_refs: cloneRefs, variant,
+        ...(variant === 'klein' ? { canvas_w: parseInt(canvasW, 10) || null } : {}),
       });
       const _nm = cloneName.trim();
       if (r.character_id) setEditingCharId(r.character_id);  // so ref auto-save can persist edits
@@ -1654,6 +1964,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       if (vers.length) setPreviewImg(vers[ai >= 0 ? ai : vers.length - 1].url);
       const fci = (r.form?.character_info || {}) as VNCCSCharacterInfoT;
       if (Object.keys(fci).length) setInfo((prev) => ({ ...prev, ...fci }));
+      // per-character canvas: restore this character's saved frame (falls back to
+      // the global default the control already holds when none was saved)
+      if (r.form?.canvas_w) setCanvasW(String(r.form.canvas_w));
       if (r.create_mode === 'clone') {
         // clone takes precedence: reopen straight into the Clone screen with
         // the saved reference images + analyzed fields ready to tweak
@@ -1796,6 +2109,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setErrMsg('');
     try { setSwitchStyleRef(await api.uploadReference(files[0])); }
     catch (e) { setErrMsg(`Style image upload failed: ${(e as Error).message}`); }
+  };
+  const onUploadGarment = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    setGarmentBusy(true); setErrMsg('');
+    try { setGarmentRef(await api.uploadReference(files[0])); }
+    catch (e) { setErrMsg(`Garment image upload failed: ${(e as Error).message}`); }
+    finally { setGarmentBusy(false); }
   };
   const doRestyleBase = async () => {
     const nm = createSub === 'clone' ? cloneName.trim() : name.trim();
@@ -1956,11 +2276,23 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     if (!canCostumePreview) return;
     setCostPrevBusy(true); setErrMsg('');
     try {
-      const r = await api.generateCostumePreview({
-        character_name: clothesChar.trim(), costume_name: costumeName.trim(),
-        costume_info: costume, background, sprite_index: cloMannequin?.index ?? 0,
-        host: cloMannequin?.host || cloPreviewHost || undefined,
-      });
+      // Klein Hybrid: dress the character's ACTIVE BASE render (identity/body/pose
+      // preserved, outfit redrawn) from description slots and/or a garment image.
+      // Legacy (qwen) path: dress a VNCCS pose sprite via the clothes designer.
+      const r = variant === 'klein'
+        ? await api.generateKleinClothesPreview({
+            character_name: clothesChar.trim(), costume_name: costumeName.trim(),
+            costume_info: costume, background,
+            garment_ref: garmentRef
+              ? { name: garmentRef.name, subfolder: garmentRef.subfolder, type: garmentRef.type }
+              : null,
+            host: cloPreviewHost || undefined,
+          })
+        : await api.generateCostumePreview({
+            character_name: clothesChar.trim(), costume_name: costumeName.trim(),
+            costume_info: costume, background, sprite_index: cloMannequin?.index ?? 0,
+            host: cloMannequin?.host || cloPreviewHost || undefined,
+          });
       setCostPrevImg(`data:image/png;base64,${r.image}`);
       if (r.version) {
         setCloCharId(r.version.character_id);
@@ -2147,8 +2479,37 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       )}
       {variant === 'klein' && (
         <div>
-          <label style={label}>Steps — sampler steps (higher = cleaner, slower)</label>
-          {segRow([{ v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }, { v: '14', label: '14' }],
+          <label style={label}>Body adherence — how strongly poses lock to your source body vs. the pose mannequin's generic build (higher = truer body, less drift; too high can over-reference). Applies to base + pose sets.</label>
+          {segRow([{ v: '1', label: '1.0' }, { v: '1.25', label: '1.25' }, { v: '1.4', label: '1.40' }, { v: '1.6', label: '1.60 (def)' }, { v: '1.8', label: '1.80' }, { v: '2', label: '2.0' }],
+                  bodyMatch, setBodyMatch)}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Reference masking — what the body reference carries from your source photos. Person (default) keeps face + build but drops the outfit so it can't leak; Person + clothes keeps the whole clothed silhouette; Full image references everything unmasked; Body only is skin-build without the head (legacy — can swap a wrong face).</label>
+          {segRow([{ v: 'person', label: 'Person (drop clothes)' }, { v: 'person+clothes', label: 'Person + clothes' }, { v: 'full', label: 'Full image' }, { v: 'body', label: 'Body only' }],
+                  bodyKeep, setBodyKeep)}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#cbd2dc', cursor: 'pointer' }}>
+            <input type="checkbox" checked={consistentSkin} onChange={(e) => setConsistentSkin(e.target.checked)} />
+            Consistent skin/lighting across the set — shares one seed for every pose and pins skin tone + even lighting, so a set doesn't drift in complexion or exposure pose-to-pose (off = each pose gets its own seed for more variety).
+          </label>
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Canvas width (per character) — the shared frame width for BOTH the base and pose images (height ~1216). Wider = more room for plump/muscular/wide characters, base and poses stay the same size (higher = more VRAM/time). Saved with this character (via Save) so a round character keeps its wider frame; the current value here also seeds the default for new characters.</label>
+          {segRow([{ v: '832', label: '832 (old)' }, { v: '896', label: '896' }, { v: '960', label: '960' }, { v: '1024', label: '1024 (def)' }, { v: '1152', label: '1152' }, { v: '1280', label: '1280' }],
+                  canvasW, setCanvasW)}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Steps — sampler steps (higher = cleaner skin, fixes scan-line grain on complex skin tones; slower)</label>
+          {segRow([{ v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }, { v: '14', label: '14' }, { v: '16', label: '16' }, { v: '20', label: '20' }, { v: '24', label: '24' }],
                   String(kSteps), (v) => setKSteps(parseInt(v, 10) || 6))}
         </div>
       )}
@@ -2169,7 +2530,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       {variant === 'klein' && baseFr && (
         <div>
           <label style={label}>Refine steps (base) — more = cleaner face, slower (Global = use the ⚙ Settings value)</label>
-          {segRow([{ v: '', label: `Global (${frSteps.trim() || '6'})` }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }],
+          {segRow([{ v: '', label: `Global (${frSteps.trim() || '6'})` }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }, { v: '16', label: '16' }, { v: '20', label: '20' }],
                   baseFrSteps, setBaseFrSteps)}
         </div>
       )}
@@ -2294,6 +2655,23 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         </label>
       )}
       {seedRow}
+      {variant === 'klein' && (
+        <div style={{ ...sectionBox, marginTop: 10, padding: 8 }}>
+          <label style={{ ...label, marginBottom: 4, color: '#cbd2dc', fontWeight: 600 }}>
+            Pose render settings — separate from the base preview
+          </label>
+          <p style={{ fontSize: 11, color: '#9aa4b2', margin: '0 0 6px' }}>
+            Poses add mannequin-driven overlap the single clean base never has, so they usually need MORE than the base.
+            Raise steps if you see dark lines where skin meets skin (hands are the worst case).
+          </p>
+          <div style={{ fontSize: 11, color: '#9aa4b2', marginBottom: 3 }}>Steps (higher = cleaner overlaps/hands, slower)</div>
+          {segRow([{ v: '6', label: '6 (fast)' }, { v: '8', label: '8 (def)' }, { v: '10', label: '10' }, { v: '12', label: '12' }, { v: '14', label: '14' }, { v: '16', label: '16' }, { v: '20', label: '20' }, { v: '24', label: '24 (max)' }],
+                  String(poseSteps), (v) => setPoseSteps(parseInt(v, 10) || 8))}
+          <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Cleanup — strips leftover shoes/jewelry (higher raises guidance; too high hardens edges / adds the rainbow fringe)</div>
+          {segRow([{ v: 'off', label: 'Off' }, { v: 'gentle', label: 'Gentle' }, { v: 'strong', label: 'Strong' }],
+                  poseCleanup, setPoseCleanup)}
+        </div>
+      )}
       {variant === 'klein' && tab === 'create' && (
         <p style={{ fontSize: 11, color: '#c4b5fd', margin: '8px 0 0' }}>
           🧪 Klein 9B pose engine — poses render via the VNCCS PoseStudio Klein LoRA
@@ -2444,7 +2822,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                 <input style={input} type="number" step="0.05" min="0.1" max="0.8" value={frDenoise}
                        placeholder="0.55" onChange={(e) => setFrDenoise(e.target.value)} /></div>
               <div><label style={label}>Refine steps (def 6)</label>
-                <input style={input} type="number" step="1" min="2" max="20" value={frSteps}
+                <input style={input} type="number" step="1" min="2" max="32" value={frSteps}
                        placeholder="6" onChange={(e) => setFrSteps(e.target.value)} /></div>
             </div>
             <p style={{ fontSize: 11, color: '#6b7280', margin: '4px 0 0' }}>
@@ -2742,6 +3120,22 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                            onChange={(e) => setCostume({ ...costume, [slot]: e.target.value })}
                            placeholder={`describe the ${slot}`} /></div>
                 ))}
+                {variant === 'klein' && (
+                  <div style={{ border: '1px solid #2a2f3a', borderRadius: 6, padding: 8, background: '#0e1116', display: 'grid', gap: 6 }}>
+                    <label style={{ ...label, marginBottom: 0 }}>Outfit reference image — optional (dress from a photo; combine with or instead of the text slots above)</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <input type="file" accept="image/*" disabled={garmentBusy}
+                             onChange={(e) => onUploadGarment(e.target.files)} style={{ fontSize: 12, color: '#cbd2dc' }} />
+                      {garmentBusy && <span style={{ fontSize: 12, color: '#9aa4b2' }}>uploading…</span>}
+                      {garmentRef && !garmentBusy && (
+                        <>
+                          <span style={{ fontSize: 12, color: '#5ee08a' }}>✓ {garmentRef.name}</span>
+                          <button style={{ ...btnGhost, padding: '4px 8px', fontSize: 12 }} onClick={() => setGarmentRef(null)}>✕ clear</button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <button style={{ ...btnGhost, padding: '6px 12px', fontSize: 12 }} onClick={() => saveOutfitPrompts()}>💾 Save outfit prompts</button>
                   {costSaveMsg && <span style={{ fontSize: 12, color: costSaveMsg.startsWith('⚠') ? '#ff8a8a' : '#5ee08a' }}>{costSaveMsg}</span>}
@@ -2754,11 +3148,21 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                   {costPrevBusy ? 'Rendering costume preview…' : '✨ Generate costume preview'}
                 </button>
                 <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>
-                  Dresses the chosen mannequin pose in this outfit on the selected background (the preview
-                  supports Green/Blue — White/Alpha fall back to Green). Happy with it? Pick poses below and generate the full set.
+                  {variant === 'klein'
+                    ? 'Dresses your active BASE render in this outfit — identity, body and pose are preserved, only the clothing changes — from the text slots and/or the reference image above. Happy with it? Pick poses below and generate the full set.'
+                    : 'Dresses the chosen mannequin pose in this outfit on the selected background (the preview supports Green/Blue — White/Alpha fall back to Green). Happy with it? Pick poses below and generate the full set.'}
                 </p>
               </div>
-              {poseSection('Generate costume', doClothes, canClothes && selectedPoseSet.length > 0, false)}
+              {variant === 'klein' ? (
+                <>
+                  <p style={{ fontSize: 11, color: '#8a94a6', margin: '4px 0 0', padding: 8, border: '1px dashed #2a2f3a', borderRadius: 6 }}>
+                    🧵 Clothed <b>pose set</b>: generates every selected pose wearing the costume you dialed in above. It references the approved DRESSED costume version (the preview you just made), so make a costume preview you're happy with first — each pose then reproduces that exact outfit on your locked body.
+                  </p>
+                  {poseSection('Generate clothed set', doClothes, canClothes && selectedPoseSet.length > 0, false)}
+                </>
+              ) : (
+                poseSection('Generate costume', doClothes, canClothes && selectedPoseSet.length > 0, false)
+              )}
             </>
           )}
 
@@ -3274,6 +3678,27 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
             <div style={{ marginBottom: 12 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                 <label style={{ ...label, marginBottom: 0 }}>Base image</label>
+                {baseImgDims && (
+                  <span style={{ fontSize: 11, color: '#7f8896', fontFamily: 'monospace' }}
+                        title="Actual pixel dimensions of this base file">
+                    {baseImgDims.w}×{baseImgDims.h}px
+                  </span>
+                )}
+                {curVersion && (
+                  curVersion.gen_meta && curVersion.gen_meta.upscaled ? (
+                    <span title={`Upscaled render${curVersion.gen_meta.upscale_method ? ` · ${curVersion.gen_meta.upscale_method}` : ''} — the original render is kept as an earlier version`}
+                          style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 8,
+                                   border: '1px solid #2a4a3a', background: 'rgba(10,22,16,0.9)', color: '#7ee0b0' }}>
+                      ⬆ Upscaled
+                    </span>
+                  ) : (
+                    <span title="Original render (not upscaled)"
+                          style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 8,
+                                   border: '1px solid #34405a', background: 'rgba(14,17,22,0.9)', color: '#8ab4ff' }}>
+                      Original
+                    </span>
+                  )
+                )}
                 {baseVersions.length > 0 && (
                   <>
                     <button style={{ ...btnGhost, padding: '1px 9px', fontSize: 12 }} onClick={() => stepVersion(-1)}>‹</button>
@@ -3289,10 +3714,23 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
               </div>
               {mainBaseSrc && (
                 <img src={mainBaseSrc} alt="character base"
+                     onLoad={(e) => setBaseImgDims({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
                      onClick={() => { setLightboxMode('base'); setLightboxSrc(mainBaseSrc); }}
                      style={{ display: 'block', width: '100%', height: 'auto', margin: '0 auto', borderRadius: 8,
                               border: `2px solid ${curVersion && curVersion.id === activeBase ? '#166534' : '#2a2f3a'}`,
                               background: '#0e1116', cursor: 'zoom-in' }} />
+              )}
+              {curVersion?.gen_meta && Object.keys(curVersion.gen_meta).length > 0 && (
+                <details style={{ marginTop: 6, fontSize: 11, color: '#9aa4b2' }}>
+                  <summary style={{ cursor: 'pointer', color: '#8ab4ff' }}>⚙ Settings that made this image (v{verIdx + 1})</summary>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {Object.entries(curVersion.gen_meta).map(([k, v]) => (
+                      <span key={k} style={{ padding: '2px 6px', borderRadius: 4, background: '#12161d', border: '1px solid #2a2f3a' }}>
+                        <b style={{ color: '#cbd2dc' }}>{k.replace(/_/g, ' ')}</b>: {String(v)}
+                      </span>
+                    ))}
+                  </div>
+                </details>
               )}
               {curViews.length > 1 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
@@ -3460,13 +3898,21 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                   </>
                 );
               })()}
-              {runId && busy && (
-                <div style={{ marginTop: 8 }}>
-                  <button onClick={stopRun} disabled={stopping}
-                    style={{ background: stopping ? '#7f1d1d' : '#b91c1c', color: '#fff', border: '1px solid #ef4444',
-                             borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 600,
-                             cursor: stopping ? 'default' : 'pointer' }}>
-                    {stopping ? 'Stopping…' : '■ Stop run'}
+              {(busy || phase === 'error') && (
+                <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  {runId && busy && (
+                    <button onClick={stopRun} disabled={stopping}
+                      style={{ background: stopping ? '#7f1d1d' : '#b91c1c', color: '#fff', border: '1px solid #ef4444',
+                               borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 600,
+                               cursor: stopping ? 'default' : 'pointer' }}>
+                      {stopping ? 'Stopping…' : '■ Stop run'}
+                    </button>
+                  )}
+                  <button onClick={dismissRun}
+                    title="Clear this status view. Non-destructive — any real run keeps going on the workers. Use this if a reconnected run looks stuck and is blocking new previews/generations."
+                    style={{ background: 'transparent', color: '#9aa4b2', border: '1px solid #3a3f4a',
+                             borderRadius: 6, padding: '5px 10px', fontSize: 11, cursor: 'pointer' }}>
+                    ✕ Reset status view
                   </button>
                 </div>
               )}
@@ -3517,6 +3963,18 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                   <input type="checkbox" checked={showAllLibOutputs} onChange={(e) => setShowAllLibOutputs(e.target.checked)} />
                   show pipeline intermediates (faces / pre-BG / undressed base)
                 </label>
+                {(() => { const n = collectBasePoseOriginalIds().length; return n > 0 ? (
+                  <button title={`AI-upscale all ${n} pose${n === 1 ? '' : 's'} in this set (${baseEnhanceMethod.toUpperCase()}, ${baseEnhanceMaxSide}px). Keeps originals; each upscales from its original so re-runs don't stack. Uses the same method/model/size as Enhance base.`}
+                          disabled={poseUpBusy.size > 0 || !host?.online}
+                          onClick={() => upscalePoses(collectBasePoseOriginalIds())}
+                          style={{ fontSize: 11, padding: '3px 9px', borderRadius: 7,
+                                   border: '1px solid #2a4a3a', background: 'rgba(10,22,16,0.85)',
+                                   color: '#7ee0b0', cursor: (poseUpBusy.size > 0 || !host?.online) ? 'default' : 'pointer',
+                                   opacity: (poseUpBusy.size > 0 || !host?.online) ? 0.5 : 1 }}>
+                    {poseUpBusy.size > 0 ? 'Upscaling…' : `⬆ Upscale all poses (${n})`}
+                  </button>
+                ) : null; })()}
+                {poseUpMsg && <span style={{ fontSize: 11, color: poseUpMsg.startsWith('✓') ? '#5ee08a' : '#9aa4b2' }}>{poseUpMsg}</span>}
               </div>
               {(showAllLibOutputs ? existingOutputs
                 : existingOutputs.filter((o) => isFinalLabel(o.label)
@@ -3571,6 +4029,48 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                                            color: '#ffd76a', fontSize: 11, lineHeight: '18px', padding: 0, cursor: 'pointer' }}>
                             ★
                           </button>
+                          {im.pose_name && !im.upscaled && (
+                            <button title={regenPose === im.pose_name
+                                     ? `Re-rolling “${im.pose_name}” on a fresh seed…`
+                                     : `Regenerate just this pose (“${im.pose_name}”) on a fresh seed, same settings as the rest of the set`}
+                                    disabled={busy || !!regenPose}
+                                    onClick={(e) => { e.stopPropagation(); regeneratePose(im.pose_name as string); }}
+                                    style={{ position: 'absolute', top: 4, left: 4, width: 20, height: 20,
+                                             borderRadius: 10, border: '1px solid #2a3a4a',
+                                             background: regenPose === im.pose_name ? 'rgba(94,224,138,0.9)' : 'rgba(10,16,22,0.85)',
+                                             color: regenPose === im.pose_name ? '#0e1116' : '#7ec8ff',
+                                             fontSize: 12, lineHeight: '18px', padding: 0,
+                                             cursor: (busy || regenPose) ? 'default' : 'pointer',
+                                             opacity: (busy || regenPose) && regenPose !== im.pose_name ? 0.4 : 1,
+                                             animation: regenPose === im.pose_name ? 'rbmnSpin 0.9s linear infinite' : 'none' }}>
+                              <style>{'@keyframes rbmnSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>
+                              ↻
+                            </button>
+                          )}
+                          {im.pose_name && !im.upscaled && (
+                            <button title={poseUpBusy.has(im.asset_id)
+                                     ? `Upscaling “${im.pose_name}”…`
+                                     : `Upscale this pose (${baseEnhanceMethod.toUpperCase()}, ${baseEnhanceMaxSide}px) — saves a sharper copy from the original, keeps this one`}
+                                    disabled={poseUpBusy.has(im.asset_id) || !host?.online}
+                                    onClick={(e) => { e.stopPropagation(); upscalePoses([im.asset_id]); }}
+                                    style={{ position: 'absolute', bottom: 4, left: 4, width: 20, height: 20,
+                                             borderRadius: 10, border: '1px solid #2a4a3a',
+                                             background: poseUpBusy.has(im.asset_id) ? 'rgba(94,224,138,0.9)' : 'rgba(10,22,16,0.85)',
+                                             color: poseUpBusy.has(im.asset_id) ? '#0e1116' : '#7ee0b0',
+                                             fontSize: 12, lineHeight: '18px', padding: 0,
+                                             cursor: (poseUpBusy.has(im.asset_id) || !host?.online) ? 'default' : 'pointer',
+                                             animation: poseUpBusy.has(im.asset_id) ? 'rbmnSpin 0.9s linear infinite' : 'none' }}>
+                              <style>{'@keyframes rbmnSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>
+                              ⬆
+                            </button>
+                          )}
+                          {im.upscaled && (
+                            <span title="Upscaled copy — the original is preserved in this set"
+                                  style={{ position: 'absolute', bottom: 4, left: 4, padding: '1px 5px',
+                                           borderRadius: 8, border: '1px solid #2a4a3a',
+                                           background: 'rgba(10,22,16,0.9)', color: '#7ee0b0',
+                                           fontSize: 9, fontWeight: 700, lineHeight: '14px' }}>HD</span>
+                          )}
                         </div>
                       ))}
                     </div>

@@ -94,15 +94,40 @@ def resolve_strip_negative(settings, keep_clothing):
     return neg, cfg
 
 
+# Always-on anatomy guard for POSE runs: the requested pose vs. the reference
+# image's own pose can fight and spawn extra/duplicated limbs (~1 in 12). These
+# terms ride in the pose negative to suppress that (only bites when cfg > 1.0,
+# i.e. STRIP/cleanup mode — which is the underwear-base case where it happens).
+KLEIN_ANATOMY_NEGATIVE = (
+    "extra limbs, extra arms, extra legs, extra hands, extra feet, duplicated "
+    "limbs, fused limbs, malformed limbs, mutated hands, extra fingers, missing "
+    "fingers, deformed, disfigured, bad anatomy, "
+    # dark ink-like separation lines where skin overlaps skin (fingers/hands, arm
+    # against torso) at low step counts -- raising Pose steps is the main fix, this
+    # nudges the model away from hard black occlusion contours
+    "harsh black outlines, dark contour lines between fingers, ink outline, "
+    "hard black edges where skin overlaps, lineart, cel shading")
+
+
+def with_anatomy_negative(neg: str) -> str:
+    """Append the anatomy guard to a pose negative (dedup-safe, handles empty)."""
+    n = (neg or "").strip().rstrip(",").strip()
+    if "extra limbs" in n:
+        return n
+    return f"{n}, {KLEIN_ANATOMY_NEGATIVE}" if n else KLEIN_ANATOMY_NEGATIVE
+
+
 def resolve_klein_steps(settings) -> int:
     """Sampler steps for Klein runs.  Default 6 (the reference workflow uses 4;
     6 noticeably cleans up flat-area grain/interference at a small time cost).
-    studio setting klein_steps, clamped 2-16."""
+    studio setting klein_steps, clamped 2-32 (was 16 -- complicated skin tones
+    can show scan-line grain that only fully resolves at higher step counts,
+    and poses need more headroom than the base; time scales ~linearly)."""
     try:
         n = int((settings or {}).get("klein_steps") or 6)
     except Exception:  # noqa: BLE001
         n = 6
-    return max(2, min(16, n))
+    return max(2, min(32, n))
 
 # PuLID-Flux2 (iFayens/ComfyUI-PuLID-Flux2) -- the only identity adapter that
 # exists for FLUX.2 as of 2026-07; Klein 4B/9B are its best-supported targets.
@@ -227,9 +252,13 @@ def resolve_reflatentplus(oi: dict, settings: Optional[dict] = None) -> Optional
     if REFLATENTPLUS_CLASS not in (oi or {}):
         return None
     try:
-        strength = float(st.get("klein_body_match_strength") or 1.0)
+        # 1.6 default (was 1.0): a STRONG body reference so the correct build
+        # (base/photos) firmly out-votes the pose MANNEQUIN's generic body --
+        # confirmed by testing that 1.6 holds plump/curvy bodies well where 1.0-1.25
+        # drifted.  Tunable via klein_body_match_strength.
+        strength = float(st.get("klein_body_match_strength") or 1.6)
     except Exception:  # noqa: BLE001
-        strength = 1.0
+        strength = 1.6
     strength = max(-5.0, min(50.0, strength))
     try:
         end = float(st.get("klein_body_match_end") or 1.0)
@@ -496,7 +525,7 @@ def resolve_face_refine(oi: dict, settings: Optional[dict] = None) -> Optional[D
     except Exception:  # noqa: BLE001
         guide = 1536
     guide = max(384, min(2048, guide))
-    return {"detector": detector, "denoise": denoise, "steps": max(2, min(20, steps)),
+    return {"detector": detector, "denoise": denoise, "steps": max(2, min(32, steps)),
             "guide_size": guide, "max_size": guide, "fd_inputs": fd_inputs}
 
 
@@ -634,7 +663,8 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
                       base_clothing: str = "strip", nsfw: bool = False,
                       appearance: Optional[str] = None,
                       style_kind: Optional[str] = None, sex: str = "",
-                      body_ref_active: bool = False, style_custom: str = "") -> str:
+                      body_ref_active: bool = False, style_custom: str = "",
+                      consistent_skin: bool = False) -> str:
     """Klein-style instruction: image 1 = pose reference, images 2..N = identity,
     optionally image ``face_image_index`` = a close-up crop of the SAME face.
 
@@ -697,6 +727,13 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
                          "the reference.")
         parts.append("Use natural, anatomically-correct human proportions -- the head "
                      "must be sized PROPORTIONALLY to the body, not oversized.")
+    if consistent_skin:
+        parts.append(
+            "Keep the skin tone, complexion and overall colour grading IDENTICAL to "
+            "the reference across every image in this set -- the exact same skin "
+            "colour and undertone, the same even neutral lighting and white balance, "
+            "with NO colour tint, warmth/coolness shift or exposure change from one "
+            "pose to the next.")
     style = _style_directive(style_kind, style_custom)
     if style:
         parts.append(style)
@@ -938,6 +975,8 @@ def build_klein_pose_graph(
     face_refine_first_only: bool = False,
     body_files: Optional[List[str]] = None,
     reflatentplus: Optional[Dict[str, Any]] = None,
+    out_width: Optional[int] = None,
+    out_height: Optional[int] = None,
 ) -> Tuple[Dict[str, dict], Dict[str, str]]:
     """API-format graph: one Klein9b-Encoder chain per pose, batched into a
     single SaveImage tap.  Returns (api_graph, tap_map={'sprites': save_id}).
@@ -1033,12 +1072,22 @@ def build_klein_pose_graph(
                                         "upscale_method": "lanczos", "megapixels": 1.0,
                                           "resolution_steps": 1}}
         api[f"{p}_size"] = {"class_type": "GetImageSize", "inputs": {"image": [f"{p}_scale", 0]}}
-        api[f"{p}_lat"] = {"class_type": "EmptyFlux2LatentImage",
-                           "inputs": {"width": [f"{p}_size", 0], "height": [f"{p}_size", 1],
-                                      "batch_size": 1}}
-        api[f"{p}_sig"] = {"class_type": "Flux2Scheduler",
-                           "inputs": {"steps": int(steps), "width": [f"{p}_size", 0],
-                                      "height": [f"{p}_size", 1]}}
+        # Explicit output dims (out_width/out_height) make every pose render at a
+        # FIXED canvas that matches the base image, so wide characters get the same
+        # room everywhere.  Falls back to the pose-capture size when unset.
+        if out_width and out_height:
+            _ow, _oh = int(out_width), int(out_height)
+            api[f"{p}_lat"] = {"class_type": "EmptyFlux2LatentImage",
+                               "inputs": {"width": _ow, "height": _oh, "batch_size": 1}}
+            api[f"{p}_sig"] = {"class_type": "Flux2Scheduler",
+                               "inputs": {"steps": int(steps), "width": _ow, "height": _oh}}
+        else:
+            api[f"{p}_lat"] = {"class_type": "EmptyFlux2LatentImage",
+                               "inputs": {"width": [f"{p}_size", 0], "height": [f"{p}_size", 1],
+                                          "batch_size": 1}}
+            api[f"{p}_sig"] = {"class_type": "Flux2Scheduler",
+                               "inputs": {"steps": int(steps), "width": [f"{p}_size", 0],
+                                          "height": [f"{p}_size", 1]}}
         api[f"{p}_enc"] = {"class_type": "VAEEncode",
                            "inputs": {"pixels": [f"{p}_scale", 0], "vae": ["v", 0]}}
         api[f"{p}_pos"] = {"class_type": "CLIPTextEncode",
@@ -1368,6 +1417,150 @@ def build_klein_restyle_graph(
     api["save"] = {"class_type": "SaveImage",
                    "inputs": {"images": [_cur, 0], "filename_prefix": filename_prefix}}
     return api, {"restyle": "save"}
+
+
+def build_klein_clothes_graph(
+    *,
+    base_file: str,
+    prompt: str,
+    seed: int,
+    models: Dict[str, str],
+    steps: int = KLEIN_POSE_STEPS,
+    garment_ref_file: Optional[str] = None,
+    strength: float = 1.0,
+    reflatentplus: Optional[Dict[str, Any]] = None,
+    face_refine: Optional[Dict[str, Any]] = None,
+    cfg: Optional[float] = None,
+    rmbg: Optional[Dict[str, Any]] = None,
+    filename_prefix: str = "rbmn_vnccs/klein_clothes",
+) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """Klein reference-EDIT that DRESSES ``base_file`` in a new outfit.  The base
+    rides as a MASKED reference latent that keeps FACE + HAIR + BODY + POSE but
+    DROPS the current garment (the 'person minus clothes' mask), so a full Flux.2
+    generation following ``prompt`` redraws ONLY the clothing.  ``garment_ref_file``
+    optionally adds the target-outfit image as a second reference latent so the
+    model reproduces that specific garment.  ``strength`` trades identity/pose
+    preservation vs redraw freedom.  Optional FaceDetailer keeps the face crisp;
+    RMBG strips the background."""
+    if not base_file:
+        raise ValueError("clothes graph needs a base image")
+    _cfg = float(cfg) if cfg else KLEIN_POSE_CFG
+    api: Dict[str, dict] = {
+        "u": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": models["unet"], "weight_dtype": "default"}},
+        "c": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": models["clip"], "type": "flux2", "device": "default"}},
+        "v": {"class_type": "VAELoader", "inputs": {"vae_name": models["vae"]}},
+    }
+    if models.get("lora"):
+        api["lora"] = {"class_type": "LoraLoaderModelOnly",
+                       "inputs": {"model": ["u", 0], "lora_name": models["lora"],
+                                  "strength_model": 1.0}}
+        model_ref: list = ["lora", 0]
+    else:
+        model_ref = ["u", 0]
+    # base image -> 1MP -> size (+ encode for the stock-reference fallback)
+    api["base_load"] = {"class_type": "LoadImage", "inputs": {"image": base_file}}
+    api["base_scale"] = {"class_type": "ImageScaleToTotalPixels",
+                         "inputs": {"image": ["base_load", 0], "upscale_method": "lanczos",
+                                    "megapixels": 1.0, "resolution_steps": 1}}
+    api["base_size"] = {"class_type": "GetImageSize", "inputs": {"image": ["base_scale", 0]}}
+    api["lat"] = {"class_type": "EmptyFlux2LatentImage",
+                  "inputs": {"width": ["base_size", 0], "height": ["base_size", 1],
+                             "batch_size": 1}}
+    api["sig"] = {"class_type": "Flux2Scheduler",
+                  "inputs": {"steps": int(steps), "width": ["base_size", 0],
+                             "height": ["base_size", 1]}}
+    api["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["c", 0]}}
+    api["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["c", 0]}}
+    pos_cur, neg_cur = "pos", "neg"
+    # base as content reference — KEEP face+hair+body+pose, DROP the garment so the
+    # prompt redraws the outfit.  ReferenceLatentPlus 'person minus clothes' mask
+    # when the node is present, else stock ReferenceLatent (whole base) as fallback.
+    if reflatentplus:
+        _rcfg = {"strength": float(max(0.05, min(2.0, strength))), "start": 0.0, "end": 1.0,
+                 "masks": {"face": True, "hair": True, "body": True,
+                           "clothes": False, "background": False}}
+        pos_cur = _inject_reflatentplus(api, [pos_cur, 0], ["base_load"], _rcfg, "cl_pos")[0]
+        neg_cur = _inject_reflatentplus(api, [neg_cur, 0], ["base_load"], _rcfg, "cl_neg")[0]
+    else:
+        api["base_enc"] = {"class_type": "VAEEncode",
+                           "inputs": {"pixels": ["base_scale", 0], "vae": ["v", 0]}}
+        api["base_pr"] = {"class_type": "ReferenceLatent",
+                          "inputs": {"conditioning": [pos_cur, 0], "latent": ["base_enc", 0]}}
+        api["base_nr"] = {"class_type": "ReferenceLatent",
+                          "inputs": {"conditioning": [neg_cur, 0], "latent": ["base_enc", 0]}}
+        pos_cur, neg_cur = "base_pr", "base_nr"
+    # optional garment reference image (image 2) as an extra reference latent
+    if garment_ref_file:
+        api["garment_load"] = {"class_type": "LoadImage", "inputs": {"image": garment_ref_file}}
+        api["garment_scale"] = {"class_type": "ImageScaleToTotalPixels",
+                                "inputs": {"image": ["garment_load", 0], "upscale_method": "lanczos",
+                                           "megapixels": 1.0, "resolution_steps": 1}}
+        api["garment_enc"] = {"class_type": "VAEEncode",
+                              "inputs": {"pixels": ["garment_scale", 0], "vae": ["v", 0]}}
+        api["garment_pr"] = {"class_type": "ReferenceLatent",
+                             "inputs": {"conditioning": [pos_cur, 0], "latent": ["garment_enc", 0]}}
+        api["garment_nr"] = {"class_type": "ReferenceLatent",
+                             "inputs": {"conditioning": [neg_cur, 0], "latent": ["garment_enc", 0]}}
+        pos_cur, neg_cur = "garment_pr", "garment_nr"
+    api["gd"] = {"class_type": "CFGGuider",
+                 "inputs": {"model": list(model_ref), "positive": [pos_cur, 0],
+                            "negative": [neg_cur, 0], "cfg": _cfg}}
+    api["ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
+    api["sm"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+    api["sc"] = {"class_type": "SamplerCustomAdvanced",
+                 "inputs": {"noise": ["ns", 0], "guider": ["gd", 0], "sampler": ["sm", 0],
+                            "sigmas": ["sig", 0], "latent_image": ["lat", 0]}}
+    api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sc", 0], "vae": ["v", 0]}}
+    _cur = "dec"
+    if face_refine:
+        _cur = _face_refine_node(api, "cl_fd", [_cur, 0], list(model_ref),
+                                 [pos_cur, 0], [neg_cur, 0], int(seed), face_refine)
+    _cur = _inject_rmbg(api, _cur, rmbg)
+    api["save"] = {"class_type": "SaveImage",
+                   "inputs": {"images": [_cur, 0], "filename_prefix": filename_prefix}}
+    return api, {"clothes": "save"}
+
+
+def klein_clothes_prompt(costume_info: dict, background: str,
+                         has_garment_ref: bool = False,
+                         style_kind: Optional[str] = None, style_custom: str = "") -> str:
+    """Prompt that DRESSES the referenced base body in a specific outfit while
+    keeping the SAME person, body, face, hair and POSE -- change ONLY the
+    clothing.  Reads the costume slots (top/bottom/head/face/shoes) as free text
+    and/or points at the garment reference image."""
+    ci = costume_info or {}
+    slot_labels = (("head", "on the head"), ("face", "on the face / eyewear"),
+                   ("top", "upper body"), ("bottom", "lower body"),
+                   ("shoes", "footwear"))
+    slots = []
+    for key, label in slot_labels:
+        val = str(ci.get(key) or "").strip()
+        if val:
+            slots.append(f"{label}: {val}")
+    parts = ["The SAME person in the SAME pose, body and framing as the reference, "
+             "with the same face, hair, skin tone and proportions -- change ONLY the "
+             "clothing they are wearing."]
+    if has_garment_ref:
+        parts.append("Dress them in the exact outfit shown in the garment reference "
+                     "image: faithfully reproduce its garments, colors, patterns, "
+                     "materials and cut, fitted naturally to this body and pose.")
+    if slots:
+        parts.append("The character is now fully dressed -- " + "; ".join(slots) + ".")
+    elif not has_garment_ref:
+        parts.append("The character is now fully dressed in a complete, well-fitted "
+                     "everyday outfit.")
+    parts.append("The clothing fits and drapes naturally on the body in this exact "
+                 "pose, full body visible head to toe, no floating or detached garments.")
+    directive = _style_directive(style_kind, style_custom)
+    if directive:
+        parts.append(directive)
+    bg = str(background or "Green").strip() or "Green"
+    parts.append(f"Solid flat {bg.lower()} background, evenly lit with flat ambient "
+                 "light, no shadows, no cast shadow, no floor or ground plane, so the "
+                 "background can be keyed out cleanly.")
+    return " ".join(parts)
 
 
 def klein_refbase_prompt(character_info: dict, background: str, nsfw: bool = False,

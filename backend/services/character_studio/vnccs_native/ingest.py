@@ -67,6 +67,47 @@ def _has_transparency(path) -> bool:
     except Exception:
         return False
 
+
+def _defringe_sprite(path) -> bool:
+    """Kill the dark/green matte halo on a cut-out pose sprite's edge so its
+    silhouette reads as cleanly as the base.
+
+    Pose sprites are rendered on a flat GREEN field then matted to transparency;
+    rembg/RMBG2 leave an antialiased rim that still carries green spill (reads as
+    a dark/green outline) -- the base never shows this because its preview stays
+    on a clean field.  We (1) despill: on the semi-transparent rim clamp the green
+    channel down to max(red, blue) wherever green dominates (pure green-spill
+    removal; never touches red/blue subject edges), and (2) erode the alpha by 1px
+    (min-filter) so the outermost fringe ring is dropped -- imperceptible on the
+    figure.  Best-effort: leaves the file untouched on any failure."""
+    try:
+        import numpy as np
+        from PIL import Image, ImageFilter
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        with Image.open(path) as _im:
+            im = _im.convert("RGBA")
+        arr = np.asarray(im).astype(np.float32)
+        if arr.ndim != 3 or arr.shape[-1] < 4:
+            return False
+        a = arr[..., 3]
+        edge = (a > 8) & (a < 248)                 # antialiased / semi-transparent rim
+        if bool(edge.any()):
+            rgb = arr[..., :3]
+            other_max = np.maximum(rgb[..., 0], rgb[..., 2])   # max(red, blue)
+            spill = edge & (rgb[..., 1] > other_max)
+            rgb[..., 1] = np.where(spill, other_max, rgb[..., 1])
+            arr[..., :3] = rgb
+        out = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGBA")
+        alpha = out.getchannel("A").filter(ImageFilter.MinFilter(3))  # erode 1px
+        out.putalpha(alpha)
+        out.save(path, "PNG")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 logger = logging.getLogger(__name__)
 
 # Which tap label is the "hero" (thumbnail) per step, best first.
@@ -144,7 +185,8 @@ async def save_base_preview(session, *, character_name: str,
                             image_b64: Optional[str] = None,
                             views: Optional[List[Dict[str, Any]]] = None,
                             story_id: Optional[UUID] = None,
-                            variant: Optional[str] = None) -> Dict[str, Any]:
+                            variant: Optional[str] = None,
+                            gen_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Persist a "Generate Character" preview as a BASE-IMAGE VERSION.
 
     A base version is now a SET of views (front/left/right/back) when ``views``
@@ -196,7 +238,8 @@ async def save_base_preview(session, *, character_name: str,
     v = dict(manifest.get("vnccs") or {})
     versions = list(v.get("base_versions") or [])
     entry = {"id": ver_id, "asset_id": primary["asset_id"], "url": primary["url"],
-             "views": view_entries, "created_at": datetime.utcnow().isoformat()}
+             "views": view_entries, "created_at": datetime.utcnow().isoformat(),
+             "gen_meta": dict(gen_meta or {})}
     versions.append(entry)
     v["base_versions"] = versions
     v["active_base"] = ver_id                # latest version = default active
@@ -210,9 +253,89 @@ async def save_base_preview(session, *, character_name: str,
             "count": len(versions), "active": ver_id}
 
 
+async def save_pose_upscale(session, *, character_name: str, label: str,
+                            image_bytes: bytes, src_asset_id: str,
+                            src_meta: Optional[Dict[str, Any]] = None,
+                            upscale_method: Optional[str] = None,
+                            story_id: Optional[UUID] = None) -> Dict[str, Any]:
+    """Persist an UPSCALED copy of a pose sprite as a NEW asset that PRESERVES the
+    original.  The new asset carries the original's vnccs tags (step/label/
+    pose_name/base_version/costume) plus ``upscaled: True`` and
+    ``upscale_source`` = the ORIGINAL asset id, so re-upscaling always resolves
+    back to the original (no upscale-on-upscale stacking).  Any earlier upscale of
+    the SAME original is replaced (removed from ``outputs`` and its file/row
+    deleted best-effort), so the gallery keeps at most one upscale per pose.
+
+    Returns ``{asset_id, url, label, replaced}``.  ``label`` is the same
+    step-namespaced key the pose lives under (e.g. ``creator/sprites``) so the
+    upscale shows in the same gallery row.
+    """
+    from uuid import uuid4
+    proj = await _studio_project(session)
+    char = await _find_or_create_character(session, character_name, story_id)
+    sm = dict(src_meta or {})
+    uid = uuid4().hex[:12]
+    rel = (Path("assets") / "vnccs" / _safe(character_name) / "upscaled"
+           / f"up_{uid}.png")
+    abs_dest = Path(cfg.project_dir) / str(proj.id) / rel
+    abs_dest.parent.mkdir(parents=True, exist_ok=True)
+    abs_dest.write_bytes(image_bytes)
+    meta_v = {k: sm.get(k) for k in ("step", "label", "pose_name",
+                                     "base_version", "costume")
+              if sm.get(k) is not None}
+    meta_v.update({"character": character_name, "upscaled": True,
+                   "upscale_source": str(src_asset_id),
+                   "upscale_method": upscale_method or "?"})
+    asset = await _create_asset_row(
+        session, proj, rel, AssetType.CHARACTER, meta={"vnccs": meta_v})
+    url = f"/api/files/{proj.id}/" + str(rel).replace("\\", "/")
+
+    manifest = dict(char.manifest or {})
+    v = dict(manifest.get("vnccs") or {})
+    outputs = dict(v.get("outputs") or {})
+    lst = list(outputs.get(label) or [])
+    # replace any prior upscale of the SAME original (keep one upscale per pose)
+    replaced = 0
+    stale: List[str] = []
+    for aid in lst:
+        try:
+            a = await session.get(Asset, UUID(str(aid)))
+        except Exception:  # noqa: BLE001
+            a = None
+        amv = ((a.meta or {}).get("vnccs") or {}) if a is not None else {}
+        if amv.get("upscaled") and str(amv.get("upscale_source")) == str(src_asset_id):
+            stale.append(str(aid))
+    for aid in stale:
+        if aid in lst:
+            lst.remove(aid)
+        try:
+            a = await session.get(Asset, UUID(str(aid)))
+            if a is not None:
+                ap = Path(cfg.project_dir) / str(a.project_id) / str(a.rel_path).replace("\\", "/")
+                try:
+                    if ap.exists():
+                        ap.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+                await session.delete(a)
+                replaced += 1
+        except Exception:  # noqa: BLE001
+            pass
+    lst.append(str(asset.id))
+    outputs[label] = lst
+    v["outputs"] = outputs
+    v.setdefault("ref", character_name)
+    manifest["vnccs"] = v
+    char.manifest = manifest
+    await session.commit()
+    return {"asset_id": str(asset.id), "url": url, "label": label,
+            "replaced": replaced}
+
+
 async def save_costume_preview(session, *, character_name: str, costume: str,
                                image_b64: str, costume_info: Optional[Dict[str, Any]] = None,
-                               story_id: Optional[UUID] = None) -> Dict[str, Any]:
+                               story_id: Optional[UUID] = None,
+                               gen_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Persist a costume preview as a COSTUME VERSION (per character+costume).
 
     Each version snapshots the costume_info prompts that produced it, so
@@ -241,7 +364,8 @@ async def save_costume_preview(session, *, character_name: str, costume: str,
     versions = list(entry_map.get("versions") or [])
     entry = {"id": ver_id, "asset_id": str(asset.id), "url": url,
              "created_at": datetime.utcnow().isoformat(),
-             "costume_info": dict(costume_info or {})}
+             "costume_info": dict(costume_info or {}),
+             "gen_meta": dict(gen_meta or {})}
     versions.append(entry)
     entry_map["versions"] = versions
     entry_map["active"] = ver_id
@@ -399,6 +523,10 @@ async def ingest_result(
                             logger.warning("ingest: cutout failed for %s: %s", fn, note)
                         elif note:
                             logger.info("ingest: cutout note for %s: %s", fn, note)
+                    # despill + 1px alpha erode so the sprite edge loses the dark/green
+                    # matte halo (rembg/RMBG2 leave one; the base never shows it) -- runs
+                    # on BOTH the worker-RMBG2 path and the app-side cutout path
+                    await asyncio.to_thread(_defringe_sprite, abs_dest)
                 except Exception:  # noqa: BLE001 — cutout is best-effort
                     logger.exception("ingest: chroma cutout crashed for %s", fn)
             # when this chunk's pose names align 1:1 with the tap's images,
