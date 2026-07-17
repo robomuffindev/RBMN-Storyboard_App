@@ -1,5 +1,228 @@
 # Changelog
 
+## [1.156.0] - 2026-07-17
+### Added -- Klein settings PRESETS (snapshot / restore every dial)
+- New "🎛 Presets" bar at the top of the Klein controls (above Canvas width):
+  a dropdown of saved presets + Apply / Update / Delete, and a name field +
+  "Save as" to snapshot the CURRENT dials under a new name.
+- A preset captures EVERY `klein_*` setting the page auto-saves (base preview
+  AND pose-set dials -- steps, cleanup, PuLID + pose PuLID, face refine global/
+  base/pose, guide sizes, strip release, body match/masking, consistent skin,
+  canvas, pose input/ref release, pose LoRA + strength, consistency stack, SAM
+  cleanup, ...). Future dials are captured automatically because the snapshot
+  filters the auto-save payload rather than a hardcoded list.
+- Applying a preset sets all the dials, and the existing debounced auto-save
+  persists them -- so "set as default" is simply: apply (or dial in) what you
+  want and it IS the default; presets are named copies you can come back to.
+- **First-run migration:** if no presets exist yet, the CURRENT tuned settings
+  are cloned as a preset named "Realistic" automatically -- Lorenzo's dialed-in
+  configuration (VNCCS + reduced LoRA strength + consistency stack + pose
+  refine 0.45 + steps 14 etc.) is preserved verbatim without transcribing it.
+- Stored under `klein_presets` in the studio settings JSON.
+
+## [1.155.0] - 2026-07-17
+### Added -- Pose-local PuLID override; Consistent-skin moved to Pose render settings
+- **PuLID (pose sets)** rows in the Pose render settings box: Global / On / Off
+  plus a pose-only strength row (0.8-1.4). Pose runs can now tweak or disable
+  PuLID without touching the global ⚙ PuLID setting (same pattern as the
+  pose-local face refine). Settings: `klein_pose_pulid`,
+  `klein_pose_pulid_strength`; logged per run ("klein pose PuLID override ...").
+- **Consistent skin/lighting moved into Pose render settings** -- it only
+  affects pose SET runs (shared per-set seed + colour-lock clause ride in the
+  pose graph), but it lived up near Canvas width, which is why it kept getting
+  missed during pose tuning (it was OFF through all the colour-drift testing).
+  Same setting key (`klein_consistent_skin`) -- saved values carry over.
+- NOTE: this build also REPLAYS 1.144-1.154 onto a clean base after a cloud
+  workspace rollback -- all features re-verified (compile + AST + esbuild);
+  comment wording may differ trivially from the originally delivered files.
+
+## [1.154.0] - 2026-07-17
+### Added -- Pose-LoRA research wave: MatchingPose option + Consistency stack
+- Researched the candidate LoRAs (see chat/sources). Verdicts:
+  * **MatchingPose** (nhathoangfoto/Flux.2-Klein-9B-MatchingPose,
+    `Maching_Pose_9B_Rank256.safetensors`, 1.33GB) -- a PHOTOREAL twin of the
+    VNCCS paradigm: mannequin-driven pose transfer (its companion Mannequin
+    LoRA even outputs GREEN mannequins), trigger `matchingpose9b`, strength
+    0.9-1.1, distilled-ready (4+ steps, guidance 1-4). The most promising
+    VNCCS replacement for realistic characters -- our pipeline already feeds
+    exactly the input it wants. Added to the Pose LoRA picker; the trigger is
+    prepended automatically; use Pose input = Mannequin.
+  * **dx8152 Flux2-Klein-9B-Consistency** -- NOT a pose LoRA; a triggerless
+    i2i identity/colour-coherence booster (38k downloads/mo, v2 fixed colour
+    cast). New "Stack the Consistency LoRA" checkbox layers it on top of any
+    pose LoRA (`klein_consistency_lora` on/off, `_strength` def 0.7, `_name`
+    optional; auto-finds a worker LoRA containing "consistency"; skips with a
+    log if absent).
+  * **RefControl** -- already integrated (1.150/1.151); skeleton input.
+  * **fal virtual try-on LoRA** (flux-klein-tryon-comfy.safetensors) -- PARKED
+    for the Clothes step: trigger "TRYON ...", image order person/top/bottom,
+    steps 28 + guidance 2.5 (non-distilled settings; needs its own graph).
+- Files to drop on the workers' models/loras when testing: MatchingPose and/or
+  Consistency (neither ships with VNCCS).
+
+## [1.153.0] - 2026-07-17
+### Added -- Pose LoRA strength + "None" (the black lines ARE the VNCCS LoRA)
+- Verdict from the full A/B matrix + research: the black skin-contact lines
+  track the VNCCS PoseStudio LoRA (RefControl never draws them; VNCCS draws
+  them even on skeleton input), and the VNCCS ecosystem's own guides treat
+  skin degradation as a known LoRA cost (patched post-hoc with detailers) while
+  warning that REMOVING the LoRA loosens background/pose adherence. The
+  standard remedy nobody could try -- the strength was hardcoded 1.0 -- is
+  running it REDUCED.
+- New "Pose LoRA strength" row (0.5 / 0.6 / 0.7 / 0.8 / 0.9 / 1.0 def, shown
+  unless LoRA=None): `klein_pose_lora_strength`, clamped 0.1-1.5, applied to
+  the pose graph's LoraLoaderModelOnly. Start at 0.7: pose adherence mostly
+  survives, the style stamp (contact lines) weakens first.
+- Pose LoRA picker gained "None (Klein native)": `klein_pose_lora='none'`
+  skips the LoRA node entirely (model_ref falls back to the raw UNET) -- pure
+  Klein multi-ref pose transfer from the reference + prompt. Expect looser
+  pose/background behavior; the prompt's flat-background clause does the work.
+- Per-run log: "klein pose LoRA: <file|NONE> @ <strength>".
+
+## [1.152.0] - 2026-07-16
+### Fixed -- Pose faces drift from the reference (lock-base crops the render)
+- Lorenzo's 5-combo A/B (1.150/1.151) ranked Mannequin + VNCCS PoseStudio as
+  the keeper (consistent body, no black lines with the 1.148-1.150 guards) with
+  ONE remaining gap: pose faces don't fully match the character. Root cause: in
+  lock-base mode the pose run's face-crop reference was cut from the RENDERED
+  base (identity_bytes[0]) -- a soft ~200px second-generation face -- while the
+  base preview crops the character's REAL photo references, which is why the
+  base nails the likeness and poses don't.
+- The pose face crop now prefers the ORIGINAL photo reference carried in the
+  request (cloner_images): a 'face'-role ref first, then 'full', then the first
+  available; falls back to the identity image only when the character has no
+  stored photos. Logged per run ("klein face crop: sourced from ORIGINAL photo
+  reference ..." / "... cropping the identity image").
+- A/B verdicts recorded from the matrix: RefControl LoRA = perfect skin/tone
+  but weaker identity + occasional extra limbs; VNCCS LoRA draws the black
+  contact lines UNLESS paired with the mannequin input + the 1.149 prompt
+  guards + 1.148 release (skeleton input is out-of-distribution for it).
+  Optional next lever if faces still drift: PuLID ON at strength 1.0 (not 1.4)
+  now that the face crop is a real photo.
+
+## [1.151.0] - 2026-07-16
+### Added -- Pose LoRA picker (VNCCS PoseStudio / RefControl)
+- The workers already ship `refcontrol_v2_poses.safetensors` alongside the VNCCS
+  PoseStudio LoRA, and the backend has honored a `klein_pose_lora` override
+  since the workflow-resolution rework -- it just had no UI. New "Pose LoRA"
+  row in Pose render settings: VNCCS PoseStudio (default) / RefControl
+  (skeleton). Pick RefControl together with Pose input = Skeleton; the
+  RefControl trigger phrase is prepended automatically (1.150) and the DWPose
+  skeleton it was trained on becomes reference image 1.
+
+## [1.150.0] - 2026-07-16
+### Added -- Skeleton pose input (DWPose) + reference style-guard (researched)
+- Research findings (RefControl Klein-9B pose LoRA; the Flux.2 guide's
+  documented "style blending" failure mode): Klein reference latents transfer
+  STYLE from every reference image, and the community-standard pose input for
+  Klein pose transfer is a DWPose SKELETON on black -- pure pose geometry with
+  literally nothing to leak -- not a shaded CGI mannequin. The documented
+  mitigation for style blending is to state explicitly which reference
+  contributes style.
+- **Pose input control** (Pose render settings): Mannequin (old behavior) /
+  Skeleton (DWPose). Skeleton mode converts each mannequin capture to a DWPose
+  stick figure IN-GRAPH on the worker (DWPreprocessor from controlnet_aux --
+  already installed; auto-falls back to mannequin with a log line if missing).
+  Setting `klein_pose_input`.
+- **Style guard** in every pose prompt: image 1 is now explicitly described
+  ("a plain 3D computer mannequin" / "a stick-figure pose skeleton diagram"),
+  to be used ONLY for body position and framing, with a direct instruction not
+  to copy its rendering style/material/outlines and to match the photographic
+  style of the character reference instead.
+- **RefControl LoRA support**: if `klein_pose_lora` is set to the RefControl
+  Klein-9B pose LoRA (huggingface thedeoxen/refcontrol-FLUX.2-klein-9B-
+  reference-pose-lora, drop into models/loras) and Pose input = Skeleton, the
+  prompt leads with its trained trigger ("apply pose from image 1 with
+  reference from image 2") -- a purpose-trained alternative to the VNCCS pose
+  LoRA for photoreal characters.
+
+## [1.149.0] - 2026-07-16
+### Fixed -- Black lines where skin presses against skin (the prompt caused them)
+- Root cause found in the POSE PROMPT itself: the v1.80 background-keying clause
+  demanded "absolutely NO shadows of any kind ... do NOT reproduce any lighting,
+  shading or shadows", which forbade the soft CONTACT SHADING a body needs where
+  a hand rests on the chest or an arm presses the torso. Denied shading, the
+  model separates touching skin with its only other tool -- a drawn dark line.
+  Meanwhile the v1.143 anatomy-negative counter ("no dark contour lines") sits
+  in the NEGATIVE prompt, which is IGNORED at CFG 1.0 -- i.e. whenever Cleanup
+  is Off. So the positive prompt was causing the lines and the negative fix was
+  dead in exactly the configuration being tested.
+- Fixes (both in `klein_pose_prompt`):
+  1. The shadow ban is now scoped to the BACKGROUND/floor only (that is all
+     keying needs); the body explicitly keeps natural soft photographic form
+     shading and soft contact shadows where limbs touch.
+  2. New always-on positive clause: blend skin-on-skin contact with soft
+     shading, "absolutely NO dark outlines / black contour lines / drawn
+     ink-like edges between touching skin surfaces" -- positive-prompt wording
+     works at any CFG, including 1.0.
+- Tip: Cleanup Gentle (CFG 1.2) additionally activates the anatomy negative if
+  a stubborn pose still draws contact lines; and lowering "Pose ref release"
+  (1.148) to 0.70 releases the mannequin's own hard occlusion boundaries sooner.
+
+## [1.148.0] - 2026-07-16
+### Fixed -- Etched/plastic skin in RAW pose renders (mannequin texture leak)
+- Elimination complete: with pose face-refine OFF, upscaler OFF, cleanup OFF,
+  PuLID OFF and the ORIGINAL base as reference, pose renders still showed
+  etched contour lines / waxy skin at any step count -- so it's in the raw
+  render. The one structural difference vs the (clean) base preview: poses feed
+  the flat-shaded CGI MANNEQUIN capture as reference image 1 for the ENTIRE
+  sampling run, and Klein reference latents transfer TEXTURE character, not
+  just pose. The base graph references real photos, hence photographic skin.
+- Fix -- POSE-REF RELEASE, the same technique the refbase base preview already
+  uses for its references: the with-mannequin conditioning drives sampling only
+  up to a release point (default 0.85), after which a mannequin-free
+  conditioning (identity/body refs only) drives the texture-forming late steps.
+  ConditioningSetTimestepRange + ConditioningCombine (core nodes, both chains).
+  `build_klein_pose_graph(pose_ref_end=...)`; setting `klein_pose_ref_end`
+  (default 0.85, '1'/off = old behavior); logged per run ("klein pose-ref
+  release: ...").
+- New "Pose ref release" row in Pose render settings: Off / 0.90 / 0.85 (def) /
+  0.80 / 0.70 / 0.60. Lower = released sooner = more natural skin at a slight
+  cost in pose tightness. If skin still looks CGI at 0.85, step down to 0.70.
+- Note: PuLID (strength 1.4) was ALSO stamping texture -- confirmed by A/B; the
+  scan-line component vanished with PuLID off. Recommend leaving PuLID off for
+  lock-base pose sets (identity comes from the base reference) or 1.0-1.1 max.
+
+## [1.147.0] - 2026-07-16
+### Added -- Pose-local face refine + GAN-tail diagnosis (body-wide "etched skin")
+- CONFIRMED by Lorenzo's full-body screenshot: the remaining pose striping/
+  distortion is EVERYWHERE on the body, not just the face -- so it's NOT the
+  face refiner (which only touches the face region). It's the IN-GRAPH GAN
+  upscaler: the pose tail maps the "SeedVR" UI label to a GAN model (SeedVR2
+  has no in-graph form), and RealESRGAN-family GANs stamp waxy/etched texture
+  into realistic skin. The base looks great because its Enhance button runs
+  TRUE SeedVR2 as a post-step. Recommended pose workflow for realistic/
+  textured characters: pose Upscaler = OFF (clean native render), then gallery
+  "⬆ Upscale all poses" with SeedVR2 -- the exact path that made the base look
+  incredible. The worker console + rbmn log now record which GAN model the
+  pose tail resolves ("klein pose tail: upscaler mode=... -> GAN model ...").
+- New "Face refine (pose sets)" controls in the Pose render settings box --
+  Global/On/Off + pose-local Refine denoise / steps / guide size -- so pose
+  faces are tuned INDEPENDENTLY of the base (which generates fine and keeps
+  its own base-local overrides). Settings: `klein_pose_face_refine`,
+  `klein_pose_face_refine_denoise` / `_steps` / `_guide`. Pose runs NO LONGER
+  inherit the base-local denoise/steps (decoupled by request); unset values
+  fall back to the ⚙ globals.
+
+## [1.146.0] - 2026-07-16
+### Fixed -- Pose sets: scan lines survived + skin tone drifted pose-to-pose
+- **Consistent skin was half-implemented.** The v1.136 toggle shared one seed
+  BETWEEN parallel batches, but inside the graph every pose still sampled from
+  `seed + i` -- so complexion/exposure kept drifting pose-to-pose no matter what
+  the checkbox said. `build_klein_pose_graph` now takes `consistent_seed`; when
+  the Consistent-skin toggle is ON every pose (and its face-refine pass) uses the
+  SAME seed. Turn the checkbox ON to lock skin tone across a set.
+- **Face refine now runs AFTER the GAN upscale** (when the upscaler is active):
+  previously the refine hit the raw ~1MP render where a pose face is ~100-150px,
+  so the guide round-trip was a 5-7x blow-up-and-shrink -- exactly the aliasing
+  that stamps "VCR scan lines" into textured skin (v1.145 root cause) -- and the
+  GAN then AMPLIFIED the striping. On the 2-4x upscaled image the face is big
+  enough that the round-trip is ~1.5-2x, the regime where the base preview is
+  already confirmed clean; the final megapixels downscale stays whole-image
+  lanczos (antialiased). With the upscaler OFF the old order is unchanged --
+  if striping shows there, run poses with the upscaler ON or drop the ⚙ Refine
+  guide size to 512.
+
 ## [1.145.0] - 2026-07-16
 ### Fixed -- Face-refine "VCR scan lines" on textured skin (FaceDetailer round-trip)
 - Root cause CONFIRMED by A/B (refine off = clean): FaceDetailer enlarges the

@@ -362,8 +362,18 @@ def resolve_klein_models(oi: dict, settings: Optional[dict] = None,
                          str(st.get("klein_clip") or DEFAULT_KLEIN_CLIP))
     vae = _resolve_name(_options(oi, "VAELoader", "vae_name"),
                         str(st.get("klein_vae") or DEFAULT_KLEIN_VAE))
-    lora = _resolve_name(_options(oi, "LoraLoaderModelOnly", "lora_name"),
-                         str(st.get("klein_pose_lora") or KLEIN_POSE_LORA_BASENAME))
+    _want_lora = str(st.get("klein_pose_lora") or "").strip()
+    if _want_lora.lower() in ("none", "off", "disabled", "0"):
+        # v1.153: run WITHOUT a pose LoRA -- native Klein multi-ref pose transfer.
+        # The A/B matrix showed the VNCCS LoRA draws black contact lines at full
+        # strength; 'none' lets the base model handle the pose purely from the
+        # reference + prompt (background/pose adherence may loosen).
+        lora = ""
+        require_lora = False
+        logger.info("klein models: pose LoRA DISABLED (klein_pose_lora=none)")
+    else:
+        lora = _resolve_name(_options(oi, "LoraLoaderModelOnly", "lora_name"),
+                             _want_lora or KLEIN_POSE_LORA_BASENAME)
     missing = [label for label, v in (
         (f"unet ({st.get('klein_unet') or DEFAULT_KLEIN_UNET})", unet),
         (f"clip ({st.get('klein_clip') or DEFAULT_KLEIN_CLIP})", clip),
@@ -672,7 +682,8 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
                       appearance: Optional[str] = None,
                       style_kind: Optional[str] = None, sex: str = "",
                       body_ref_active: bool = False, style_custom: str = "",
-                      consistent_skin: bool = False) -> str:
+                      consistent_skin: bool = False,
+                      pose_input: str = "mannequin") -> str:
     """Klein-style instruction: image 1 = pose reference, images 2..N = identity,
     optionally image ``face_image_index`` = a close-up crop of the SAME face.
 
@@ -691,8 +702,24 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
     who = ("the character" if n_identity <= 0
            else "the character from image 2" if n_identity == 1
            else f"the character shown in images 2-{n_identity + 1}")
+    # STYLE GUARD (v1.150): Klein reference latents transfer STYLE from every
+    # reference (documented Flux.2 "style blending"), so say explicitly what
+    # image 1 is and that ONLY its pose may be taken -- otherwise the CGI
+    # mannequin's plastic material and drawn outlines bleed into the skin.
+    if str(pose_input or "").lower() == "skeleton":
+        guard = ("Image 1 is a stick-figure pose skeleton diagram on a black "
+                 "background: use it ONLY to read the body position and camera "
+                 "framing. Nothing of image 1's appearance may show in the "
+                 "output. ")
+    else:
+        guard = ("Image 1 is a plain 3D computer mannequin: use it ONLY to read "
+                 "the body position and camera framing. Do NOT copy image 1's "
+                 "rendering style, gray plastic material, CGI shading or drawn "
+                 "outlines -- the output must look like a real photograph of the "
+                 "character, matching the photographic style of the character "
+                 "reference image(s). ")
     if _keep_clothing(base_clothing):
-        parts = [f"Apply the pose from image 1 to {who}, keeping the character's "
+        parts = [guard + f"Apply the pose from image 1 to {who}, keeping the character's "
                  "identity, proportions and ENTIRE outfit exactly. Reproduce every "
                  "clothing item, footwear, stockings, straps and accessory exactly "
                  "as shown in the reference -- same garments, same colors, same "
@@ -704,7 +731,7 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
                  "that is not clearly visible in the reference."]
     else:
         app = str(appearance or "").strip()
-        parts = [f"Apply the pose from image 1 to {who}. Keep the character's FACE, "
+        parts = [guard + f"Apply the pose from image 1 to {who}. Keep the character's FACE, "
                  "hair, skin tone, eye colour and facial identity EXACTLY from the "
                  "reference images -- it is the SAME person. Change ONLY the clothing: "
                  + _base_body_state(nsfw, sex) + "."]
@@ -735,6 +762,12 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
                          "the reference.")
         parts.append("Use natural, anatomically-correct human proportions -- the head "
                      "must be sized PROPORTIONALLY to the body, not oversized.")
+    parts.append(
+        "Where the pose makes skin touch or overlap other skin -- a hand resting "
+        "on the body, an arm pressed against the torso, crossed legs -- blend the "
+        "contact naturally with soft shading and a subtle soft contact shadow, "
+        "exactly like a photograph. Absolutely NO dark outlines, NO black contour "
+        "lines and NO drawn ink-like edges between touching skin surfaces.")
     if consistent_skin:
         parts.append(
             "Keep the skin tone, complexion and overall colour grading IDENTICAL to "
@@ -760,12 +793,19 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
     if det and _keep_clothing(base_clothing):
         parts.append(f"Reference outfit details to match (do not invent beyond these): {det}.")
     bg = str(background or "Green").strip() or "Green"
-    parts.append(f"Solid flat {bg.lower()} background, evenly and uniformly lit with "
-                 "flat ambient light. Absolutely NO shadows of any kind: no cast "
-                 "shadow, no drop shadow, no contact or ground shadow beneath or around "
-                 "the feet, and no shadow falling on the background. No ground or floor "
-                 "plane, so the background can be keyed out cleanly. Do NOT reproduce any "
-                 "lighting, shading or shadows present in the reference images.")
+    # The shadow ban is scoped to the BACKGROUND only (v1.149).  The old wording
+    # ("absolutely no shadows of any kind ... do not reproduce any shading")
+    # forbade the soft contact shading a body needs where skin presses against
+    # skin -- so the model separated touching limbs with hard BLACK LINES
+    # instead.  Keying only needs the background/floor clean.
+    parts.append(f"Solid flat {bg.lower()} background, evenly and uniformly lit. "
+                 "The BACKGROUND must stay perfectly clean for keying: no cast "
+                 "shadow, drop shadow or ground shadow falling ON THE BACKGROUND "
+                 "or beneath the feet, and no ground or floor plane. The BODY "
+                 "itself keeps natural soft photographic form shading and soft "
+                 "contact shadows where limbs touch -- it must NOT look flat or "
+                 "cel-shaded. Use even, neutral studio lighting; do not copy any "
+                 "dramatic lighting from the reference images.")
     return " ".join(parts)
 
 
@@ -985,6 +1025,11 @@ def build_klein_pose_graph(
     reflatentplus: Optional[Dict[str, Any]] = None,
     out_width: Optional[int] = None,
     out_height: Optional[int] = None,
+    consistent_seed: bool = False,
+    pose_ref_end: Optional[float] = None,
+    dwpose: Optional[Dict[str, Any]] = None,
+    pose_lora_strength: float = 1.0,
+    consistency_lora: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, dict], Dict[str, str]]:
     """API-format graph: one Klein9b-Encoder chain per pose, batched into a
     single SaveImage tap.  Returns (api_graph, tap_map={'sprites': save_id}).
@@ -998,7 +1043,23 @@ def build_klein_pose_graph(
     ``pulid`` (from resolve_pulid) additionally patches the model with
     PuLID-Flux2 identity guidance using ``face_file`` (or the first identity).
     ``upscale_model`` bolts an ImageUpscaleWithModel (+ downscale to
-    ``upscale_megapixels``) onto each pose's tail before saving."""
+    ``upscale_megapixels``) onto each pose's tail before saving.
+
+    ``consistent_seed`` (the Consistent-skin toggle): every pose in the graph
+    samples from the SAME noise seed instead of seed+i, so the set can't drift
+    in complexion/exposure pose-to-pose.  (v1.136 only synced seeds BETWEEN
+    parallel batches; within a graph each pose still rolled seed+i -- this is
+    the missing half.)
+
+    ``pose_ref_end`` (0-1, None/1.0 = off): RELEASE the pose-mannequin reference
+    at this fraction of sampling.  The mannequin is a flat-shaded CGI render;
+    held as a reference for the WHOLE run its plastic, contour-lined texture
+    bleeds into the final skin (etched/waxy look on realistic characters -- the
+    base preview never shows it because its references are real photos).  The
+    pose/composition locks in the EARLY steps, so releasing at ~0.85 keeps the
+    pose while the late texture-forming steps see only the identity refs.
+    Implemented with ConditioningSetTimestepRange + ConditioningCombine (core
+    nodes): with-pose conditioning covers 0..end, without-pose covers end..1."""
     if not pose_files:
         raise ValueError("Klein pose graph needs at least one pose image")
     if len(prompts) != len(pose_files):
@@ -1016,10 +1077,15 @@ def build_klein_pose_graph(
         "c": {"class_type": "CLIPLoader",
               "inputs": {"clip_name": models["clip"], "type": "flux2", "device": "default"}},
         "v": {"class_type": "VAELoader", "inputs": {"vae_name": models["vae"]}},
-        "lora": {"class_type": "LoraLoaderModelOnly",
-                 "inputs": {"model": ["u", 0], "lora_name": models["lora"],
-                            "strength_model": 1.0}},
     }
+    if models.get("lora"):
+        api["lora"] = {"class_type": "LoraLoaderModelOnly",
+                       "inputs": {"model": ["u", 0], "lora_name": models["lora"],
+                                  # v1.153: tunable -- at 1.0 the VNCCS pose LoRA
+                                  # imposes its trained style hard enough to draw
+                                  # black contact lines on realistic skin; 0.6-0.8
+                                  # keeps the pose while weakening the style stamp.
+                                  "strength_model": float(pose_lora_strength or 1.0)}}
     id_encs: List[str] = []
     # STRIP base mode withholds the full-body (clothed) reference latents so the
     # reference's outfit (e.g. a strappy dress) can't leak onto the underwear/
@@ -1059,7 +1125,14 @@ def build_klein_pose_graph(
             api[bid] = {"class_type": "LoadImage", "inputs": {"image": bf}}
             body_load_ids.append(bid)
 
-    model_ref = ["lora", 0]
+    model_ref = ["lora", 0] if models.get("lora") else ["u", 0]
+    if consistency_lora:
+        # dx8152 Consistency LoRA stacked AFTER the pose LoRA (triggerless).
+        api["clora"] = {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": list(model_ref),
+                                   "lora_name": consistency_lora["file"],
+                                   "strength_model": float(consistency_lora["strength"])}}
+        model_ref = ["clora", 0]
     if pulid:
         # PuLID's InsightFace does its OWN face detection+alignment, so feed it the
         # FULL identity image (a real photo where it can find the face), NOT our
@@ -1075,8 +1148,22 @@ def build_klein_pose_graph(
     for i, pf in enumerate(pose_files):
         p = f"p{i}"
         api[f"{p}_load"] = {"class_type": "LoadImage", "inputs": {"image": pf}}
+        _pose_src = f"{p}_load"
+        if dwpose:
+            # SKELETON pose input: convert the mannequin capture to a DWPose
+            # skeleton on black IN-GRAPH -- pure pose geometry, zero CGI
+            # material/shading for the reference latents to leak into the skin.
+            api[f"{p}_dw"] = {"class_type": DWPOSE_CLASS,
+                              "inputs": {"image": [f"{p}_load", 0],
+                                         "detect_hand": "enable",
+                                         "detect_body": "enable",
+                                         "detect_face": "disable",
+                                         "resolution": 1024,
+                                         "bbox_detector": dwpose["bbox_detector"],
+                                         "pose_estimator": dwpose["pose_estimator"]}}
+            _pose_src = f"{p}_dw"
         api[f"{p}_scale"] = {"class_type": "ImageScaleToTotalPixels",
-                             "inputs": {"image": [f"{p}_load", 0],
+                             "inputs": {"image": [_pose_src, 0],
                                         "upscale_method": "lanczos", "megapixels": 1.0,
                                           "resolution_steps": 1}}
         api[f"{p}_size"] = {"class_type": "GetImageSize", "inputs": {"image": [f"{p}_scale", 0]}}
@@ -1103,28 +1190,60 @@ def build_klein_pose_graph(
         api[f"{p}_neg"] = {"class_type": "CLIPTextEncode",
                            "inputs": {"text": negative_prompt, "clip": ["c", 0]}}
         # reference order (node parity): pose first, identities after — both chains
-        pos_cur, neg_cur = f"{p}_pos", f"{p}_neg"
-        api[f"{p}_pr0"] = {"class_type": "ReferenceLatent",
-                           "inputs": {"conditioning": [pos_cur, 0], "latent": [f"{p}_enc", 0]}}
-        api[f"{p}_nr0"] = {"class_type": "ReferenceLatent",
-                           "inputs": {"conditioning": [neg_cur, 0], "latent": [f"{p}_enc", 0]}}
-        pos_cur, neg_cur = f"{p}_pr0", f"{p}_nr0"
-        # BODY channel: masked body reference latents (garment excluded) ride
-        # right after the pose ref, before the identity/face refs.
-        if _rlp_active and body_load_ids:
-            _pr = _inject_reflatentplus(api, [pos_cur, 0], body_load_ids, reflatentplus, f"{p}_pos")
-            _nr = _inject_reflatentplus(api, [neg_cur, 0], body_load_ids, reflatentplus, f"{p}_neg")
-            pos_cur, neg_cur = _pr[0], _nr[0]
-        for k, ide in enumerate(id_encs):
-            api[f"{p}_pr{k + 1}"] = {"class_type": "ReferenceLatent",
-                                     "inputs": {"conditioning": [pos_cur, 0], "latent": [ide, 0]}}
-            api[f"{p}_nr{k + 1}"] = {"class_type": "ReferenceLatent",
-                                     "inputs": {"conditioning": [neg_cur, 0], "latent": [ide, 0]}}
-            pos_cur, neg_cur = f"{p}_pr{k + 1}", f"{p}_nr{k + 1}"
+        def _cond_chain(tag: str, include_pose: bool):
+            """One pos/neg conditioning chain from the text encodes:
+            [pose ref?] -> body channel -> identity refs.  ``tag`` keeps node
+            ids unique per branch."""
+            pc, nc = f"{p}_pos", f"{p}_neg"
+            if include_pose:
+                api[f"{p}_pr0{tag}"] = {"class_type": "ReferenceLatent",
+                                        "inputs": {"conditioning": [pc, 0], "latent": [f"{p}_enc", 0]}}
+                api[f"{p}_nr0{tag}"] = {"class_type": "ReferenceLatent",
+                                        "inputs": {"conditioning": [nc, 0], "latent": [f"{p}_enc", 0]}}
+                pc, nc = f"{p}_pr0{tag}", f"{p}_nr0{tag}"
+            # BODY channel: masked body reference latents (garment excluded) ride
+            # right after the pose ref, before the identity/face refs.
+            if _rlp_active and body_load_ids:
+                _pr = _inject_reflatentplus(api, [pc, 0], body_load_ids, reflatentplus, f"{p}_pos{tag}")
+                _nr = _inject_reflatentplus(api, [nc, 0], body_load_ids, reflatentplus, f"{p}_neg{tag}")
+                pc, nc = _pr[0], _nr[0]
+            for k, ide in enumerate(id_encs):
+                api[f"{p}_pr{k + 1}{tag}"] = {"class_type": "ReferenceLatent",
+                                              "inputs": {"conditioning": [pc, 0], "latent": [ide, 0]}}
+                api[f"{p}_nr{k + 1}{tag}"] = {"class_type": "ReferenceLatent",
+                                              "inputs": {"conditioning": [nc, 0], "latent": [ide, 0]}}
+                pc, nc = f"{p}_pr{k + 1}{tag}", f"{p}_nr{k + 1}{tag}"
+            return pc, nc
+
+        _rel = float(pose_ref_end) if pose_ref_end else 1.0
+        if 0.0 < _rel < 0.999:
+            # POSE-REF RELEASE: with-pose conditioning drives 0..rel (locks the
+            # pose), pose-free conditioning drives rel..1 (texture forms from
+            # the identity refs only -- the CGI mannequin can't stamp the skin).
+            _pa, _na = _cond_chain("", True)
+            _pb, _nb = _cond_chain("b", False)
+            api[f"{p}_tsA"] = {"class_type": "ConditioningSetTimestepRange",
+                               "inputs": {"conditioning": [_pa, 0], "start": 0.0, "end": _rel}}
+            api[f"{p}_tsB"] = {"class_type": "ConditioningSetTimestepRange",
+                               "inputs": {"conditioning": [_pb, 0], "start": _rel, "end": 1.0}}
+            api[f"{p}_cmb"] = {"class_type": "ConditioningCombine",
+                               "inputs": {"conditioning_1": [f"{p}_tsA", 0],
+                                          "conditioning_2": [f"{p}_tsB", 0]}}
+            api[f"{p}_tsAn"] = {"class_type": "ConditioningSetTimestepRange",
+                                "inputs": {"conditioning": [_na, 0], "start": 0.0, "end": _rel}}
+            api[f"{p}_tsBn"] = {"class_type": "ConditioningSetTimestepRange",
+                                "inputs": {"conditioning": [_nb, 0], "start": _rel, "end": 1.0}}
+            api[f"{p}_cmbn"] = {"class_type": "ConditioningCombine",
+                                "inputs": {"conditioning_1": [f"{p}_tsAn", 0],
+                                           "conditioning_2": [f"{p}_tsBn", 0]}}
+            pos_cur, neg_cur = f"{p}_cmb", f"{p}_cmbn"
+        else:
+            pos_cur, neg_cur = _cond_chain("", True)
         api[f"{p}_gd"] = {"class_type": "CFGGuider",
                           "inputs": {"model": list(model_ref), "positive": [pos_cur, 0],
                                      "negative": [neg_cur, 0], "cfg": _cfg}}
-        api[f"{p}_ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed) + i}}
+        _pseed = int(seed) if consistent_seed else int(seed) + i
+        api[f"{p}_ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": _pseed}}
         api[f"{p}_sm"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
         api[f"{p}_sc"] = {"class_type": "SamplerCustomAdvanced",
                           "inputs": {"noise": [f"{p}_ns", 0], "guider": [f"{p}_gd", 0],
@@ -1133,27 +1252,35 @@ def build_klein_pose_graph(
         api[f"{p}_dec"] = {"class_type": "VAEDecode",
                            "inputs": {"samples": [f"{p}_sc", 0], "vae": ["v", 0]}}
         tail = f"{p}_dec"
-        if face_refine and (not face_refine_first_only or i == 0):
-            # low-denoise FaceDetailer pass: sharpens the face/eyes at ~1024px
-            # guide size while the low denoise preserves the likeness.  For the
-            # base SET we only refine the front view (the identity anchor) -- a
-            # FaceDetailer pass on all four views is 4x the cost and blew the
-            # preview past its wait timeout.
-            tail = _face_refine_node(api, f"{p}_fd", [tail, 0], list(model_ref),
-                                     [pos_cur, 0], [neg_cur, 0],
-                                     int(seed) + i, face_refine)
+        # GAN upscale FIRST (when active), THEN face refine on the upscaled
+        # image, THEN the megapixels downscale.  On the raw ~1MP render a pose
+        # face is ~100-150px, so FaceDetailer's guide round-trip is a 5-7x
+        # blow-up-and-shrink that aliases textured skin into horizontal "scan
+        # lines" (v1.145 root cause) -- and the GAN then AMPLIFIES the striping.
+        # On the 2-4x upscaled image the face is big enough that the round-trip
+        # is ~1.5-2x (the same regime where the base preview is clean), and the
+        # final whole-image lanczos downscale is antialiased.
         if upscale_model:
             api.setdefault("up_model", {"class_type": "UpscaleModelLoader",
                                         "inputs": {"model_name": upscale_model}})
             api[f"{p}_up"] = {"class_type": "ImageUpscaleWithModel",
                               "inputs": {"upscale_model": ["up_model", 0], "image": [tail, 0]}}
             tail = f"{p}_up"
-            if upscale_megapixels and upscale_megapixels > 0:
-                api[f"{p}_upsc"] = {"class_type": "ImageScaleToTotalPixels",
-                                    "inputs": {"image": [tail, 0], "upscale_method": "lanczos",
-                                               "megapixels": float(upscale_megapixels),
-                                               "resolution_steps": 1}}
-                tail = f"{p}_upsc"
+        if face_refine and (not face_refine_first_only or i == 0):
+            # low-denoise FaceDetailer pass: sharpens the face/eyes while the
+            # low denoise preserves the likeness.  For the base SET we only
+            # refine the front view (the identity anchor) -- a FaceDetailer pass
+            # on all four views is 4x the cost and blew the preview past its
+            # wait timeout.
+            tail = _face_refine_node(api, f"{p}_fd", [tail, 0], list(model_ref),
+                                     [pos_cur, 0], [neg_cur, 0],
+                                     _pseed, face_refine)
+        if upscale_model and upscale_megapixels and upscale_megapixels > 0:
+            api[f"{p}_upsc"] = {"class_type": "ImageScaleToTotalPixels",
+                                "inputs": {"image": [tail, 0], "upscale_method": "lanczos",
+                                           "megapixels": float(upscale_megapixels),
+                                           "resolution_steps": 1}}
+            tail = f"{p}_upsc"
         decoded.append(tail)
 
     cur = decoded[0]
@@ -1207,6 +1334,57 @@ def resolve_upscale_model(oi: dict, settings: Optional[dict] = None) -> Optional
         return (0 if is4x else 1, 1 if heavy else 0, 0 if realistic else 1, lo)
 
     return sorted(opts, key=_rank)[0]
+
+
+DWPOSE_CLASS = "DWPreprocessor"
+
+
+def resolve_dwpose(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """Skeleton pose-input config, or None for the classic mannequin reference.
+
+    Community finding (RefControl Klein-9B pose LoRA + the Flux.2 style-blending
+    guidance): a DWPose SKELETON on black carries pure pose geometry with zero
+    material/shading to leak into the output, unlike a shaded CGI mannequin --
+    Klein reference latents transfer STYLE from every reference.  When studio
+    setting ``klein_pose_input`` = 'skeleton' and comfyui_controlnet_aux's
+    DWPreprocessor is on the worker, the mannequin capture is converted to a
+    skeleton in-graph and THAT becomes reference image 1."""
+    st = settings or {}
+    mode = str(st.get("klein_pose_input") or "mannequin").strip().lower()
+    if mode not in ("skeleton", "dwpose", "bones"):
+        return None
+    if DWPOSE_CLASS not in (oi or {}):
+        logger.info("klein pose input: skeleton requested but DWPreprocessor is not "
+                    "on this worker (comfyui_controlnet_aux) -> using mannequin")
+        return None
+    bbox = _options(oi, DWPOSE_CLASS, "bbox_detector")
+    est = _options(oi, DWPOSE_CLASS, "pose_estimator")
+    return {"bbox_detector": next((o for o in bbox if "yolox_l" in o.lower()), bbox[0]) if bbox else "yolox_l.onnx",
+            "pose_estimator": next((o for o in est if "dw-ll" in o.lower()), est[0]) if est else "dw-ll_ucoco_384_bs5.torchscript.pt"}
+
+
+def resolve_consistency_lora(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """Optional dx8152 Flux2-Klein-9B-Consistency LoRA, STACKED on the pose
+    chain (no trigger words; improves i2i identity/colour coherence -- 38k+
+    downloads/mo).  Gated by klein_consistency_lora='on'; resolves
+    klein_consistency_lora_name, else the first worker LoRA containing
+    'consistency'.  Strength klein_consistency_lora_strength (default 0.7)."""
+    st = settings or {}
+    mode = str(st.get("klein_consistency_lora") or "off").strip().lower()
+    if mode not in ("on", "true", "1", "yes"):
+        return None
+    opts = _options(oi, "LoraLoaderModelOnly", "lora_name")
+    want = str(st.get("klein_consistency_lora_name") or "").strip()
+    hit = _resolve_name(opts, want) if want else next(
+        (o for o in opts if "consistency" in o.lower()), None)
+    if not hit:
+        logger.info("klein: consistency LoRA enabled but no matching file on this worker")
+        return None
+    try:
+        strength = float(st.get("klein_consistency_lora_strength") or 0.7)
+    except Exception:  # noqa: BLE001
+        strength = 0.7
+    return {"file": hit, "strength": max(0.1, min(1.2, strength))}
 
 
 RMBG_NODE_CLASS = "VNCCS_RMBG2"

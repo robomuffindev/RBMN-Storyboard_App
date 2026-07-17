@@ -120,6 +120,7 @@ function friendlyLabel(label: string, costume?: string | null): string {
 
 const box: React.CSSProperties = { background: '#161a22', border: '1px solid #2a2f3a', borderRadius: 10, padding: 16 };
 const label: React.CSSProperties = { fontSize: 12, color: '#9aa4b2', marginBottom: 4, display: 'block' };
+const pbtn: React.CSSProperties = { padding: '6px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #2a2f3a', background: '#1c2230', color: '#dbe2ea', cursor: 'pointer' };
 const input: React.CSSProperties = {
   width: '100%', background: '#0e1116', border: '1px solid #2a2f3a', borderRadius: 6,
   color: '#e6e9ee', padding: '8px 10px', fontSize: 13,
@@ -429,6 +430,23 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // mannequin-driven overlap the base never has, so they need more steps to avoid
   // dark occlusion lines where skin meets skin (hands worst-case).
   const [poseSteps, setPoseSteps] = useState<number>(8);
+  const [poseFr, setPoseFr] = useState<string>('');            // '' global | 'on' | 'off'
+  const [poseFrDenoise, setPoseFrDenoise] = useState<string>('');
+  const [poseFrSteps, setPoseFrSteps] = useState<string>('');
+  const [poseFrGuide, setPoseFrGuide] = useState<string>('');
+  const [poseRefEnd, setPoseRefEnd] = useState<string>('');    // '' = default 0.85; '1' = off
+  const [poseInput, setPoseInput] = useState<string>('');     // '' = mannequin; 'skeleton' = DWPose
+  const [poseLora, setPoseLora] = useState<string>('');       // '' = VNCCS PoseStudio; filename = override
+  const [poseLoraStr, setPoseLoraStr] = useState<string>(''); // '' = 1.0
+  const [consLora, setConsLora] = useState<boolean>(false);
+  const [consLoraStr, setConsLoraStr] = useState<string>(''); // '' = 0.7
+  const [posePu, setPosePu] = useState<string>('');           // '' = follow global PuLID; 'on' | 'off'
+  const [posePuStr, setPosePuStr] = useState<string>('');     // '' = global strength
+  // Presets (v1.156): named snapshots of EVERY klein_* dial (base + pose)
+  const [presets, setPresets] = useState<Record<string, Record<string, unknown>>>({});
+  const [presetSel, setPresetSel] = useState('');
+  const [presetName, setPresetName] = useState('');
+  const [presetMsg, setPresetMsg] = useState('');
   const [poseCleanup, setPoseCleanup] = useState<string>('gentle');
   const [rbEnd, setRbEnd] = useState<string>('0.85');
   const [bodyMatch, setBodyMatch] = useState<string>('1.6');
@@ -630,39 +648,102 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [ingestMsg, setIngestMsg] = useState('');
   const [errMsg, setErrMsg] = useState('');
 
+  // Apply every klein_* dial from a settings-shaped object (used by the initial
+  // load AND by Presets).  Missing keys fall back to the loader's defaults.
+  const applyKleinSettings = (st: Record<string, unknown>) => {
+    setKpMode(String(st.klein_pulid ?? 'off'));
+    setKpStrength(st.klein_pulid_strength !== undefined ? String(st.klein_pulid_strength) : '');
+    setFrMode(String(st.klein_face_refine ?? 'auto'));
+    setFrDenoise(st.klein_face_refine_denoise !== undefined ? String(st.klein_face_refine_denoise) : '');
+    setFrSteps(st.klein_face_refine_steps !== undefined ? String(st.klein_face_refine_steps) : '');
+    setFrGuide(st.klein_face_refine_guide !== undefined ? String(st.klein_face_refine_guide) : '');
+    setBaseClothing(String(st.klein_base_clothing ?? 'strip'));
+    // 'realistic' was the old value for the photoreal style — map it forward
+    setFaceKind((s => (s === 'realistic' ? 'photorealistic' : s))(String(st.klein_face_kind ?? 'auto')));
+    setStyleCustom(String(st.klein_style_custom ?? ''));
+    setLockBase(!['off', 'false', '0', 'no'].includes(String(st.klein_lock_base ?? 'on').toLowerCase()));
+    setBaseSet(['on', 'true', '1', 'yes', 'set'].includes(String(st.klein_base_set ?? 'off').toLowerCase()));
+    setCleanup(String(st.klein_cleanup ?? 'gentle'));
+    setKSteps(parseInt(String(st.klein_steps ?? '6'), 10) || 6);
+    setPoseSteps(parseInt(String(st.klein_pose_steps ?? '8'), 10) || 8);
+    setPoseCleanup(String(st.klein_pose_cleanup ?? st.klein_cleanup ?? 'gentle'));
+    setPoseFr(st.klein_pose_face_refine !== undefined ? String(st.klein_pose_face_refine) : '');
+    setPoseFrDenoise(st.klein_pose_face_refine_denoise !== undefined ? String(st.klein_pose_face_refine_denoise) : '');
+    setPoseFrSteps(st.klein_pose_face_refine_steps !== undefined ? String(st.klein_pose_face_refine_steps) : '');
+    setPoseFrGuide(st.klein_pose_face_refine_guide !== undefined ? String(st.klein_pose_face_refine_guide) : '');
+    setPoseRefEnd(st.klein_pose_ref_end !== undefined ? String(st.klein_pose_ref_end) : '');
+    setPoseInput(st.klein_pose_input !== undefined ? String(st.klein_pose_input) : '');
+    setPoseLora(st.klein_pose_lora !== undefined ? String(st.klein_pose_lora) : '');
+    setPoseLoraStr(st.klein_pose_lora_strength !== undefined ? String(st.klein_pose_lora_strength) : '');
+    setConsLora(['on', 'true', '1', 'yes'].includes(String(st.klein_consistency_lora ?? 'off').toLowerCase()));
+    setConsLoraStr(st.klein_consistency_lora_strength !== undefined ? String(st.klein_consistency_lora_strength) : '');
+    setPosePu(st.klein_pose_pulid !== undefined ? String(st.klein_pose_pulid) : '');
+    setPosePuStr(st.klein_pose_pulid_strength !== undefined ? String(st.klein_pose_pulid_strength) : '');
+    setRbEnd(st.klein_refbase_ref_end !== undefined ? String(st.klein_refbase_ref_end) : '0.85');
+    setBodyMatch(st.klein_body_match_strength !== undefined ? String(st.klein_body_match_strength) : '1.6');
+    setBodyKeep(st.klein_body_match_keep !== undefined ? String(st.klein_body_match_keep) : 'person');
+    setConsistentSkin(['on', 'true', '1', 'yes'].includes(String(st.klein_consistent_skin ?? 'off').toLowerCase()));
+    setCanvasW(st.klein_canvas_width !== undefined ? String(st.klein_canvas_width) : '1024');
+    setBaseFr(!['off', 'false', '0', 'no'].includes(String(st.klein_base_face_refine ?? 'on').toLowerCase()));
+    setBaseFrDenoise(st.klein_base_face_refine_denoise !== undefined ? String(st.klein_base_face_refine_denoise) : '');
+    setBaseFrSteps(st.klein_base_face_refine_steps !== undefined ? String(st.klein_base_face_refine_steps) : '');
+    setSamClean(['on', 'true', '1', 'yes'].includes(String(st.klein_sam_cleanup ?? 'off').toLowerCase()));
+    setSamPrompt(st.klein_sam_cleanup_prompt !== undefined ? String(st.klein_sam_cleanup_prompt) : '');
+    setSamThresh(st.klein_sam_cleanup_threshold !== undefined ? String(st.klein_sam_cleanup_threshold) : '');
+    setRunBaseClothing(String(st.klein_run_base_clothing ?? ''));
+  };
+
+  // Presets: a snapshot is every klein_* key the auto-save writes (future dials
+  // are captured automatically); applying merges the preset over the current
+  // dials, and the auto-save effect then persists it as the working defaults.
+  const snapshotPreset = (): Record<string, unknown> => {
+    const all = buildSettings();
+    const snap: Record<string, unknown> = {};
+    Object.entries(all).forEach(([k, v]) => {
+      if (k.startsWith('klein_') && k !== 'klein_presets' && v !== undefined) snap[k] = v;
+    });
+    return snap;
+  };
+  const savePreset = (name: string) => {
+    const n = name.trim();
+    if (!n) { setPresetMsg('Give the preset a name first.'); return; }
+    setPresets((p) => ({ ...p, [n]: snapshotPreset() }));
+    setPresetSel(n); setPresetName('');
+    setPresetMsg(`Saved “${n}” from the current dials.`);
+  };
+  const applyPreset = (name: string) => {
+    const pz = presets[name];
+    if (!pz) return;
+    applyKleinSettings({ ...buildSettings(), ...pz });
+    setPresetMsg(`Applied “${name}” — the dials update and auto-save as the new working defaults.`);
+  };
+  const deletePreset = (name: string) => {
+    setPresets((p) => { const q = { ...p }; delete q[name]; return q; });
+    if (presetSel === name) setPresetSel('');
+    setPresetMsg(`Deleted “${name}”.`);
+  };
+
   const loadHost = useCallback(async () => {
     try {
       const h = await api.getHost();
       setHostInfo(h);
       const st = (h.settings || {}) as Record<string, unknown>;
-      setKpMode(String(st.klein_pulid ?? 'off'));
-      setKpStrength(st.klein_pulid_strength !== undefined ? String(st.klein_pulid_strength) : '');
-      setFrMode(String(st.klein_face_refine ?? 'auto'));
-      setFrDenoise(st.klein_face_refine_denoise !== undefined ? String(st.klein_face_refine_denoise) : '');
-      setFrSteps(st.klein_face_refine_steps !== undefined ? String(st.klein_face_refine_steps) : '');
-      setFrGuide(st.klein_face_refine_guide !== undefined ? String(st.klein_face_refine_guide) : '');
-      setBaseClothing(String(st.klein_base_clothing ?? 'strip'));
-      // 'realistic' was the old value for the photoreal style — map it forward
-      setFaceKind((s => (s === 'realistic' ? 'photorealistic' : s))(String(st.klein_face_kind ?? 'auto')));
-      setStyleCustom(String(st.klein_style_custom ?? ''));
-      setLockBase(!['off', 'false', '0', 'no'].includes(String(st.klein_lock_base ?? 'on').toLowerCase()));
-      setBaseSet(['on', 'true', '1', 'yes', 'set'].includes(String(st.klein_base_set ?? 'off').toLowerCase()));
-      setCleanup(String(st.klein_cleanup ?? 'gentle'));
-      setKSteps(parseInt(String(st.klein_steps ?? '6'), 10) || 6);
-      setPoseSteps(parseInt(String(st.klein_pose_steps ?? '8'), 10) || 8);
-      setPoseCleanup(String(st.klein_pose_cleanup ?? st.klein_cleanup ?? 'gentle'));
-      setRbEnd(st.klein_refbase_ref_end !== undefined ? String(st.klein_refbase_ref_end) : '0.85');
-      setBodyMatch(st.klein_body_match_strength !== undefined ? String(st.klein_body_match_strength) : '1.6');
-      setBodyKeep(st.klein_body_match_keep !== undefined ? String(st.klein_body_match_keep) : 'person');
-      setConsistentSkin(['on', 'true', '1', 'yes'].includes(String(st.klein_consistent_skin ?? 'off').toLowerCase()));
-      setCanvasW(st.klein_canvas_width !== undefined ? String(st.klein_canvas_width) : '1024');
-      setBaseFr(!['off', 'false', '0', 'no'].includes(String(st.klein_base_face_refine ?? 'on').toLowerCase()));
-      setBaseFrDenoise(st.klein_base_face_refine_denoise !== undefined ? String(st.klein_base_face_refine_denoise) : '');
-      setBaseFrSteps(st.klein_base_face_refine_steps !== undefined ? String(st.klein_base_face_refine_steps) : '');
-      setSamClean(['on', 'true', '1', 'yes'].includes(String(st.klein_sam_cleanup ?? 'off').toLowerCase()));
-      setSamPrompt(st.klein_sam_cleanup_prompt !== undefined ? String(st.klein_sam_cleanup_prompt) : '');
-      setSamThresh(st.klein_sam_cleanup_threshold !== undefined ? String(st.klein_sam_cleanup_threshold) : '');
-      setRunBaseClothing(String(st.klein_run_base_clothing ?? ''));
+      applyKleinSettings(st);
+      {
+        // Presets: load saved ones; on the FIRST run after this update, clone the
+        // CURRENT tuned settings as the "Realistic" preset (per Lorenzo's ask).
+        let pr: Record<string, Record<string, unknown>> = {};
+        const raw = st.klein_presets;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) pr = { ...(raw as Record<string, Record<string, unknown>>) };
+        if (!Object.keys(pr).length) {
+          const seed: Record<string, unknown> = {};
+          Object.entries(st).forEach(([k, v]) => {
+            if (k.startsWith('klein_') && k !== 'klein_presets' && v !== undefined && v !== null) seed[k] = v;
+          });
+          if (Object.keys(seed).length) pr = { Realistic: seed };
+        }
+        setPresets(pr);
+      }
       setEnhanceOn(['on', 'true', '1', 'yes'].includes(String(st.enhance_on ?? 'off').toLowerCase()));
       setEnhanceMethod(String(st.enhance_method ?? 'gan') === 'seedvr2' ? 'seedvr2' : 'gan');
       setEnhanceModel(String(st.enhance_model ?? ''));
@@ -890,6 +971,31 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_steps = kSteps || 6;
     settings.klein_pose_steps = poseSteps || 8;
     settings.klein_pose_cleanup = poseCleanup || 'gentle';
+    if (poseFr.trim() !== '') settings.klein_pose_face_refine = poseFr;
+    else delete settings.klein_pose_face_refine;
+    if (poseFrDenoise.trim() !== '') settings.klein_pose_face_refine_denoise = poseFrDenoise;
+    else delete settings.klein_pose_face_refine_denoise;
+    if (poseFrSteps.trim() !== '') settings.klein_pose_face_refine_steps = poseFrSteps;
+    else delete settings.klein_pose_face_refine_steps;
+    if (poseFrGuide.trim() !== '') settings.klein_pose_face_refine_guide = poseFrGuide;
+    else delete settings.klein_pose_face_refine_guide;
+    if (poseRefEnd.trim() !== '') settings.klein_pose_ref_end = poseRefEnd;
+    else delete settings.klein_pose_ref_end;
+    if (poseInput.trim() !== '') settings.klein_pose_input = poseInput;
+    else delete settings.klein_pose_input;
+    if (poseLora.trim() !== '') settings.klein_pose_lora = poseLora;
+    else delete settings.klein_pose_lora;
+    if (poseLoraStr.trim() !== '') settings.klein_pose_lora_strength = poseLoraStr;
+    else delete settings.klein_pose_lora_strength;
+    settings.klein_consistency_lora = consLora ? 'on' : 'off';
+    if (consLoraStr.trim() !== '') settings.klein_consistency_lora_strength = consLoraStr;
+    else delete settings.klein_consistency_lora_strength;
+    if (posePu.trim() !== '') settings.klein_pose_pulid = posePu;
+    else delete settings.klein_pose_pulid;
+    if (posePuStr.trim() !== '') settings.klein_pose_pulid_strength = posePuStr;
+    else delete settings.klein_pose_pulid_strength;
+    if (Object.keys(presets).length) settings.klein_presets = presets;
+    else delete settings.klein_presets;
     settings.klein_refbase_ref_end = rbEnd || '0.85';
     settings.klein_body_match_strength = bodyMatch || '1.6';
     settings.klein_body_match_keep = bodyKeep || 'person';
@@ -958,7 +1064,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, frSteps, frGuide, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, poseSteps, poseCleanup, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
+      kpMode, kpStrength, frMode, frDenoise, frSteps, frGuide, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseSet, cleanup, kSteps, poseSteps, poseCleanup, poseFr, poseFrDenoise, poseFrSteps, poseFrGuide, poseRefEnd, poseInput, poseLora, poseLoraStr, consLora, consLoraStr, posePu, posePuStr, presets, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength, switchStyleRealism]);
@@ -2496,11 +2602,21 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         </div>
       )}
       {variant === 'klein' && (
-        <div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#cbd2dc', cursor: 'pointer' }}>
-            <input type="checkbox" checked={consistentSkin} onChange={(e) => setConsistentSkin(e.target.checked)} />
-            Consistent skin/lighting across the set — shares one seed for every pose and pins skin tone + even lighting, so a set doesn't drift in complexion or exposure pose-to-pose (off = each pose gets its own seed for more variety).
-          </label>
+        <div style={{ border: '1px solid #2a2f3a', borderRadius: 8, padding: 8 }}>
+          <label style={{ ...label, fontWeight: 600, color: '#cbd2dc' }}>🎛 Presets — named snapshots of EVERY Klein dial (base + pose). The live dials always auto-save as your working defaults; a preset is a copy you can come back to after experimenting</label>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select style={{ ...input, width: 180 }} value={presetSel} onChange={(e) => setPresetSel(e.target.value)}>
+              <option value="">— presets —</option>
+              {Object.keys(presets).sort().map((n) => (<option key={n} value={n}>{n}</option>))}
+            </select>
+            <button style={{ ...pbtn, opacity: presetSel ? 1 : 0.5 }} disabled={!presetSel} onClick={() => applyPreset(presetSel)}>Apply</button>
+            <button style={{ ...pbtn, opacity: presetSel ? 1 : 0.5 }} disabled={!presetSel} onClick={() => savePreset(presetSel)} title="Overwrite the selected preset with the current dials">Update</button>
+            <button style={{ ...pbtn, opacity: presetSel ? 1 : 0.5 }} disabled={!presetSel} onClick={() => deletePreset(presetSel)}>Delete</button>
+            <input style={{ ...input, width: 150 }} placeholder="new preset name" value={presetName}
+                   onChange={(e) => setPresetName(e.target.value)} />
+            <button style={pbtn} onClick={() => savePreset(presetName)}>💾 Save as</button>
+          </div>
+          {presetMsg !== '' && <p style={{ fontSize: 11, color: '#9aa4b2', margin: '6px 0 0' }}>{presetMsg}</p>}
         </div>
       )}
       {variant === 'klein' && (
@@ -2674,6 +2790,63 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Cleanup — strips leftover shoes/jewelry (higher raises guidance; too high hardens edges / adds the rainbow fringe)</div>
           {segRow([{ v: 'off', label: 'Off' }, { v: 'gentle', label: 'Gentle' }, { v: 'strong', label: 'Strong' }],
                   poseCleanup, setPoseCleanup)}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#cbd2dc', cursor: 'pointer', margin: '8px 0 0' }}>
+            <input type="checkbox" checked={consistentSkin} onChange={(e) => setConsistentSkin(e.target.checked)} />
+            Consistent skin/lighting across the set — shares ONE seed for every pose (incl. the face refine pass) and pins skin tone + even lighting, so the set doesn't drift in complexion or exposure pose-to-pose (off = each pose gets its own seed for more variety)
+          </label>
+          <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>PuLID (pose sets) — identity adapter override for pose runs only; Global follows the ⚙ Settings PuLID (strength 1.4 stamps texture into skin — 1.0 is the safe zone for poses)</div>
+          {segRow([{ v: '', label: 'Global' }, { v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  posePu, setPosePu)}
+          {posePu !== 'off' && (
+            <>
+              <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>PuLID strength (pose)</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '0.8', label: '0.8' }, { v: '0.9', label: '0.9' }, { v: '1.0', label: '1.0' }, { v: '1.1', label: '1.1' }, { v: '1.2', label: '1.2' }, { v: '1.4', label: '1.4' }],
+                      posePuStr, setPosePuStr)}
+            </>
+          )}
+          <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Pose input — what Klein sees as reference image 1. Skeleton converts the mannequin to a DWPose stick figure on the worker (needs controlnet_aux): pure pose geometry with NO CGI material/shading to leak into the skin. Mannequin = old behavior</div>
+          {segRow([{ v: '', label: 'Mannequin' }, { v: 'skeleton', label: 'Skeleton (DWPose)' }],
+                  poseInput, setPoseInput)}
+          <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Pose LoRA — which pose-control LoRA drives the render. RefControl is purpose-trained for photoreal pose transfer from a SKELETON (use with Pose input = Skeleton; its trigger phrase is added automatically). VNCCS = the PoseStudio LoRA (old behavior)</div>
+          {segRow([{ v: '', label: 'VNCCS PoseStudio' }, { v: 'refcontrol_v2_poses.safetensors', label: 'RefControl (skeleton)' }, { v: 'Maching_Pose_9B_Rank256.safetensors', label: 'MatchingPose (photoreal)' }, { v: 'none', label: 'None (Klein native)' }],
+                  poseLora, setPoseLora)}
+          {poseLora !== 'none' && (
+            <>
+              <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Pose LoRA strength — at 1.0 the VNCCS LoRA imposes its trained style hard enough to draw black lines where skin touches skin; 0.6–0.8 keeps the pose while weakening the style stamp (MatchingPose likes 0.9–1.0)</div>
+              {segRow([{ v: '0.5', label: '0.5' }, { v: '0.6', label: '0.6' }, { v: '0.7', label: '0.7' }, { v: '0.8', label: '0.8' }, { v: '0.9', label: '0.9' }, { v: '', label: '1.0 (def)' }],
+                      poseLoraStr, setPoseLoraStr)}
+            </>
+          )}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#cbd2dc', cursor: 'pointer', margin: '8px 0 0' }}>
+            <input type="checkbox" checked={consLora} onChange={(e) => setConsLora(e.target.checked)} />
+            Stack the Consistency LoRA (dx8152) — triggerless identity/colour-coherence booster layered on top of the pose LoRA; needs a LoRA with “consistency” in its filename on the worker (skipped with a log line otherwise)
+          </label>
+          {consLora && (
+            <>
+              <div style={{ fontSize: 11, color: '#9aa4b2', margin: '6px 0 3px' }}>Consistency strength</div>
+              {segRow([{ v: '0.5', label: '0.5' }, { v: '0.6', label: '0.6' }, { v: '', label: '0.7 (def)' }, { v: '0.8', label: '0.8' }, { v: '0.9', label: '0.9' }, { v: '1', label: '1.0' }],
+                      consLoraStr, setConsLoraStr)}
+            </>
+          )}
+          <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Pose ref release — stop referencing the 3D mannequin capture for the last part of the render, so its flat CGI texture can't stamp the skin (the pose itself locks in early). Lower = released sooner = more natural skin, slightly looser pose; Off = old behavior (mannequin referenced the whole run)</div>
+          {segRow([{ v: '1', label: 'Off' }, { v: '0.9', label: '0.90' }, { v: '', label: '0.85 (def)' }, { v: '0.8', label: '0.80' }, { v: '0.7', label: '0.70' }, { v: '0.6', label: '0.60' }],
+                  poseRefEnd, setPoseRefEnd)}
+          <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Face refine (pose sets) — FaceDetailer pass on each pose face, tuned separately from the base (Global = follow ⚙ Settings)</div>
+          {segRow([{ v: '', label: 'Global' }, { v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  poseFr, setPoseFr)}
+          {poseFr !== 'off' && (
+            <>
+              <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Refine denoise (pose) — lower stays truer to the render, higher rebuilds more face</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '0.3', label: '0.30' }, { v: '0.35', label: '0.35' }, { v: '0.4', label: '0.40' }, { v: '0.45', label: '0.45' }, { v: '0.5', label: '0.50' }, { v: '0.55', label: '0.55' }, { v: '0.6', label: '0.60' }],
+                      poseFrDenoise, setPoseFrDenoise)}
+              <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Refine steps (pose)</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }],
+                      poseFrSteps, setPoseFrSteps)}
+              <div style={{ fontSize: 11, color: '#9aa4b2', margin: '8px 0 3px' }}>Refine guide size (pose) — smaller = less blow-up/shrink on the face crop = least striping risk</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '512', label: '512' }, { v: '640', label: '640' }, { v: '768', label: '768' }, { v: '1024', label: '1024' }],
+                      poseFrGuide, setPoseFrGuide)}
+            </>
+          )}
         </div>
       )}
       {variant === 'klein' && tab === 'create' && (

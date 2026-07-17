@@ -733,7 +733,36 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     face_index = None
     face_kind = str(getattr(body, "face_kind", None) or "auto").strip().lower()
     style_custom = str(getattr(body, "style_custom", None) or "").strip()
-    fc = _klein_identity_crop(identity_bytes[_face_pick], expand_pct=(0.2 if not _keep else 0.6))
+    # v1.152: the face crop prefers the ORIGINAL photo reference over the
+    # identity image.  In lock-base mode identity_bytes is the (rendered) base,
+    # whose ~200px face is a soft second-generation copy -- cropping THAT is why
+    # pose faces drifted while the base preview (which crops the real photos)
+    # nailed the likeness.  The request still carries the character's stored
+    # photo refs in cloner_images, so crop the real face from those when
+    # available: prefer a 'face'-role ref, then 'full', then the first.
+    _face_src = None
+    if _ci:
+        _pick_img = None
+        for _pref in ("face", "full"):
+            _pick_img = next((img for img in _ci if isinstance(img, dict) and img.get("name")
+                              and str(img.get("role") or "").strip().lower() == _pref), None)
+            if _pick_img is not None:
+                break
+        if _pick_img is None:
+            _pick_img = next((img for img in _ci if isinstance(img, dict) and img.get("name")), None)
+        if _pick_img is not None:
+            try:
+                _face_src = client.view_image(
+                    _pick_img.get("name"), _pick_img.get("subfolder", "") or "",
+                    _pick_img.get("type", "input") or "input", 120)
+                logger.info("klein face crop: sourced from ORIGINAL photo reference %r "
+                            "(role=%s)", _pick_img.get("name"), _pick_img.get("role") or "?")
+            except Exception:  # noqa: BLE001
+                _face_src = None
+    if _face_src is None:
+        _face_src = identity_bytes[_face_pick]
+        logger.info("klein face crop: no photo reference available -> cropping the identity image")
+    fc = _klein_identity_crop(_face_src, expand_pct=(0.2 if not _keep else 0.6))
     real_face = False
     if fc:
         face_bytes, face_method = fc
@@ -753,21 +782,48 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     if klein_poses._style_is_stylized(face_kind):
         pulid = None
     else:
-        pulid = klein_poses.resolve_pulid(oi, st_settings) if face_file else None
+        # v1.155: pose-local PuLID override -- tweak strength or force on/off for
+        # pose SETS without touching the global ⚙ PuLID setting (same pattern as
+        # the pose-local face refine).  klein_pose_pulid: '' = follow global,
+        # 'on'/'off' override; klein_pose_pulid_strength overrides the strength.
+        _pu_eff = dict(st_settings or {})
+        _ppu = str((st_settings or {}).get("klein_pose_pulid") or "").strip().lower()
+        if _ppu in ("off", "false", "0", "no", "disabled", "none"):
+            _pu_eff["klein_pulid"] = "off"
+        elif _ppu in ("on", "true", "1", "yes"):
+            _pu_eff["klein_pulid"] = "on"
+        _pps = str((st_settings or {}).get("klein_pose_pulid_strength") or "").strip()
+        if _pps:
+            _pu_eff["klein_pulid_strength"] = _pps
+        if _ppu or _pps:
+            logger.info("klein pose PuLID override: mode=%s strength=%s",
+                        _ppu or "(global)", _pps or "(global)")
+        pulid = klein_poses.resolve_pulid(oi, _pu_eff) if face_file else None
     if pulid:
         logger.info("klein: PuLID-Flux2 active (%s, strength %.2f)",
                     pulid["file"], pulid["strength"])
-    # Use the SAME face-refine settings the BASE PREVIEW uses, so pose-set faces
-    # match the base's face quality (klein_base_face_refine_denoise/steps override
-    # the globals, exactly like the refbase preview builds them).
-    _fr_eff = dict(st_settings or {})
-    _bfd = str((st_settings or {}).get("klein_base_face_refine_denoise") or "").strip()
-    if _bfd:
-        _fr_eff["klein_face_refine_denoise"] = _bfd
-    _bfs = str((st_settings or {}).get("klein_base_face_refine_steps") or "").strip()
-    if _bfs:
-        _fr_eff["klein_face_refine_steps"] = _bfs
-    face_refine = klein_poses.resolve_face_refine(oi, _fr_eff)
+    # POSE-LOCAL face-refine settings (v1.147): pose SETS tune their own
+    # FaceDetailer independently of the base preview (which keeps its base-local
+    # overrides).  klein_pose_face_refine gates it ('' = follow the global
+    # klein_face_refine, 'on' forces auto, 'off' disables for poses only);
+    # denoise/steps/guide overrides fall back to the GLOBALS -- pose runs no
+    # longer inherit the BASE-local values (decoupled by request: the base
+    # generates fine, poses need their own knobs).
+    _pfr = str((st_settings or {}).get("klein_pose_face_refine") or "").strip().lower()
+    if _pfr in ("off", "false", "0", "no", "disabled", "none"):
+        face_refine = None
+        logger.info("klein pose face refine: OFF (pose-local)")
+    else:
+        _fr_eff = dict(st_settings or {})
+        if _pfr in ("on", "auto", "yes", "1", "true"):
+            _fr_eff["klein_face_refine"] = "auto"
+        for _src, _dst in (("klein_pose_face_refine_denoise", "klein_face_refine_denoise"),
+                           ("klein_pose_face_refine_steps", "klein_face_refine_steps"),
+                           ("klein_pose_face_refine_guide", "klein_face_refine_guide")):
+            _v = str((st_settings or {}).get(_src) or "").strip()
+            if _v:
+                _fr_eff[_dst] = _v
+        face_refine = klein_poses.resolve_face_refine(oi, _fr_eff)
     if face_refine:
         logger.info("klein: face refine active (FaceDetailer %s, denoise %.2f)",
                     face_refine["detector"], face_refine["denoise"])
@@ -821,6 +877,12 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     logger.info("klein base-outfit: mode=%s keep=%s face_kind=%s real_face=%s "
                 "strip_body_refs=%s pulid=%s face_ref=%s", base_clothing, _keep,
                 face_kind, real_face, strip_body_refs, bool(pulid), face_as_reference)
+    # SKELETON pose input (v1.150): convert mannequin captures to DWPose
+    # skeletons in-graph when klein_pose_input='skeleton' (needs DWPreprocessor
+    # on the worker) -- pure pose geometry, no CGI style to leak.
+    dwpose = klein_poses.resolve_dwpose(oi, st_settings)
+    _pose_input = "skeleton" if dwpose else "mannequin"
+    logger.info("klein pose input: %s", _pose_input)
     pose_files = []
     prompts = []
     for i, cap in enumerate(captures):
@@ -833,7 +895,7 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
             base_clothing=base_clothing, nsfw=kposes_nsfw, appearance=appearance_txt,
             style_kind=face_kind, sex=str((body.character_info or {}).get("sex") or ""),
             body_ref_active=body_ref_active, style_custom=style_custom,
-            consistent_skin=_consistent_skin))
+            consistent_skin=_consistent_skin, pose_input=_pose_input))
 
     # honor the UI's upscaler control: any non-off mode = GAN tail (SeedVR has
     # no simple graph form; the label maps to GAN here)
@@ -843,6 +905,9 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     up_mp = None
     if up_mode != "off":
         upscale_model = klein_poses.resolve_upscale_model(oi, st_settings)
+        logger.info("klein pose tail: upscaler mode=%s -> GAN model %r (SeedVR2 has no "
+                    "in-graph form; use the gallery Upscale-all-poses for true SeedVR2)",
+                    up_mode, upscale_model)
         try:
             res_px = int(upcfg.get("resolution") or 0)
         except Exception:  # noqa: BLE001
@@ -867,16 +932,51 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     if body_ref_active:
         logger.info("klein body-match: ReferenceLatentPlus active — %d body ref(s) "
                     "masked (garment excluded), face on crop+PuLID", len(body_files))
+    # POSE-REF RELEASE (v1.148): stop referencing the CGI mannequin capture for
+    # the last part of sampling so its flat plastic texture can't stamp the
+    # final skin.  klein_pose_ref_end (default 0.85); >=1.0 = off (old behavior).
+    try:
+        _pre = float(str((st_settings or {}).get("klein_pose_ref_end") or "0.85"))
+    except Exception:  # noqa: BLE001
+        _pre = 0.85
+    _pre = max(0.3, min(1.0, _pre))
+    _pose_ref_end = None if _pre >= 0.999 else _pre
+    logger.info("klein pose-ref release: %s", ("off" if _pose_ref_end is None else f"{_pose_ref_end:.2f}"))
+    try:
+        _pls = float(str((st_settings or {}).get("klein_pose_lora_strength") or "1.0"))
+    except Exception:  # noqa: BLE001
+        _pls = 1.0
+    _pls = max(0.1, min(1.5, _pls))
+    logger.info("klein pose LoRA: %s @ %.2f", models.get("lora") or "NONE", _pls)
+    _lora_lo = str(models.get("lora") or "").lower()
+    if _pose_input == "skeleton" and "refcontrol" in _lora_lo:
+        # thedeoxen/refcontrol-FLUX.2-klein-9B LoRA: lead with its trained trigger
+        prompts = ["apply pose from image 1 with reference from image 2. " + pr for pr in prompts]
+        logger.info("klein pose input: RefControl LoRA trigger phrase prepended")
+    if "maching_pose" in _lora_lo or "matchingpose" in _lora_lo:
+        # nhathoangfoto/Flux.2-Klein-9B-MatchingPose: photoreal mannequin->character
+        # pose transfer; its trained trigger leads the prompt (use Mannequin input)
+        prompts = ["matchingpose9b, " + pr for pr in prompts]
+        logger.info("klein pose input: MatchingPose trigger prepended")
+    _consistency = klein_poses.resolve_consistency_lora(oi, st_settings)
+    if _consistency:
+        logger.info("klein: consistency LoRA stacked (%s @ %.2f)",
+                    _consistency["file"], _consistency["strength"])
     api, tap_map = klein_poses.build_klein_pose_graph(
         pose_files=pose_files,
         identity_files=graph_identity,
         prompts=prompts, seed=seed, models=models, steps=ksteps,
+        pose_ref_end=_pose_ref_end,
+        dwpose=dwpose,
+        pose_lora_strength=_pls,
+        consistency_lora=_consistency,
         upscale_model=upscale_model, upscale_megapixels=up_mp,
         face_file=face_file, pulid=pulid, face_refine=face_refine,
         strip_body_refs=strip_body_refs, face_as_reference=face_as_reference,
         negative_prompt=neg_text, cfg=klein_cfg, rmbg=rmbg,
         body_files=body_files, reflatentplus=reflatentplus,
         out_width=_cw, out_height=_ch,
+        consistent_seed=_consistent_skin,
         filename_prefix=f"rbmn_vnccs/{safe}/klein_sprites")
     res = client.submit_prompt(api, timeout=120)
     extras = {"face_ref": bool(face_file),
