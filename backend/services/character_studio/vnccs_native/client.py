@@ -212,6 +212,19 @@ class VNCCSClient:
         except requests.RequestException as e:
             raise VNCCSError(f"/object_info failed ({self.base_url}): {e}")
 
+    def interrupt(self, timeout: Optional[int] = None) -> bool:
+        """Interrupt the worker's CURRENTLY-running prompt and clear its queue
+        (ComfyUI POST /interrupt + POST /queue {clear}). Best-effort -> bool."""
+        ok = False
+        for sub, payload in (("interrupt", None), ("queue", {"clear": True})):
+            try:
+                url = urljoin(self.base_url + "/", sub)
+                r = self.session.post(url, json=payload, timeout=timeout or 30)
+                ok = ok or (r.status_code < 400)
+            except requests.RequestException:
+                pass
+        return ok
+
     def submit_prompt(self, graph: Dict[str, Any], client_id: Optional[str] = None,
                       timeout: Optional[int] = None) -> Dict[str, Any]:
         """Queue an API-format prompt on the VNCCS host. Returns {prompt_id, number, ...}."""

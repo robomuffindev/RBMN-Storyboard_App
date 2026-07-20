@@ -4,12 +4,13 @@
  */
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, PersonStanding, Smile, FolderInput } from 'lucide-react';
+import { ChevronLeft, PersonStanding, Smile, FolderInput, Palette } from 'lucide-react';
 import { PoseLibraryView } from './PoseLibraryView';
 import { PoseOrganizerView } from './PoseOrganizerView';
 import { ExpressionLibraryView } from './ExpressionLibraryView';
+import ImageWorkshopPanel from '../ImageWorkshop/ImageWorkshopPanel';
 
-type ToolTab = 'pose-library' | 'pose-organizer' | 'expressions';
+type ToolTab = 'pose-library' | 'pose-organizer' | 'expressions' | 'image-workshop';
 
 export default function ToolsPage() {
   const navigate = useNavigate();
@@ -19,6 +20,7 @@ export default function ToolsPage() {
     { key: 'pose-library', label: 'Pose Library', icon: <PersonStanding size={16} /> },
     { key: 'pose-organizer', label: 'Pose Organizer', icon: <FolderInput size={16} /> },
     { key: 'expressions', label: 'Expression Library', icon: <Smile size={16} /> },
+    { key: 'image-workshop', label: 'Image Workshop', icon: <Palette size={16} /> },
   ];
 
   return (
@@ -32,7 +34,7 @@ export default function ToolsPage() {
           <div className="w-16" />
         </div>
 
-        <div className="flex gap-1 border-b border-gray-800">
+        <div className="flex flex-wrap gap-1 border-b border-gray-800 overflow-x-auto">
           {tabs.map((t) => (
             <button
               key={t.key}
@@ -51,6 +53,7 @@ export default function ToolsPage() {
           {tab === 'pose-library' && <PoseLibraryView />}
           {tab === 'pose-organizer' && <PoseOrganizerView onCommitted={() => setTab('pose-library')} />}
           {tab === 'expressions' && <ExpressionLibraryView />}
+          {tab === 'image-workshop' && <ImageWorkshopPanel />}
         </div>
       </div>
     </div>

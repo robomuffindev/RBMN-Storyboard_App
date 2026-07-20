@@ -45,6 +45,13 @@ _CACHE_MAX = 8
 
 # Node-side CSR guardrails (vnccs-utils pose_studio.py) — stay well inside them.
 _MAX_COUNT = 16
+# v1.199.6: reserve headroom above the head (and a small margin below the feet) so
+# HATS / headwear / tall hair have canvas to render into when Qwen dresses/poses the
+# character — the mannequin capture defines the output canvas (image1), so framing
+# the head at the very top edge left hats nowhere to go. Applied uniformly to every
+# pose in a set so the character stays a constant size. Replaces the dress-time pad.
+_TOP_HEADROOM = 0.14
+_BOTTOM_MARGIN = 0.04
 # body only: the node fallback also includes eye/teeth helper groups, but those
 # sit INSIDE the head and a painter's-algorithm renderer has no depth buffer, so
 # they z-fight through and scribble dark streaks across the face — which made the
@@ -234,7 +241,8 @@ def _apply_pose(base_verts, bones_data: Dict[str, Any], model_rotation) -> Any:
 
 
 def _render_pose(posed, width: int, height: int, bg_color, lights, cam_zoom: float,
-                 silhouette: bool = False, fixed_scale: Optional[float] = None):
+                 silhouette: bool = False, fixed_scale: Optional[float] = None,
+                 headroom: float = 0.0):
     """Port of _render_mesh/_render_flat_shaded (+ optional cam_zoom honor).
 
     ``silhouette=True`` renders solid-black-on-background figures — the look of
@@ -271,6 +279,17 @@ def _render_pose(posed, width: int, height: int, bg_color, lights, cam_zoom: flo
     vs = np.zeros((len(posed), 2))
     vs[:, 0] = (posed[:, 0] - cx) * scale + W / 2
     vs[:, 1] = H / 2 - (posed[:, 1] - cy) * scale
+
+    # v1.199.6: bias the figure DOWN so its head sits `headroom` below the top edge
+    # (space for hats), unless that would push the feet past the bottom — then
+    # bottom-align. Uniform scale keeps size constant; this only moves it vertically.
+    if headroom and headroom > 0:
+        top_y = float(vs[:, 1].min()); bot_y = float(vs[:, 1].max())
+        shift = (headroom * H) - top_y
+        max_bot = H * 0.98
+        if bot_y + shift > max_bot:
+            shift = max_bot - bot_y
+        vs[:, 1] = vs[:, 1] + shift
 
     # Lighting (same aggregation as the node)
     main_light_dir = np.array([0.5, 0.8, 1.0]); main_light_int = 0.7; ambient_int = 0.3
@@ -378,7 +397,8 @@ def render_pose_captures(pose_data: Dict[str, Any],
             pose = pose if isinstance(pose, dict) else {}
             posed_list.append(_apply_pose(base_verts, pose.get("bones", {}),
                                           pose.get("modelRotation", [0, 0, 0])))
-        uniform_scale = height * 0.90 / ref_ext_y * z
+        # reserve headroom (top) + a small margin (bottom) so hats/tall hair fit.
+        uniform_scale = height * (1.0 - _TOP_HEADROOM - _BOTTOM_MARGIN) / ref_ext_y * z
         for posed in posed_list:
             _mn = posed[:, :2].min(axis=0)
             _mx = posed[:, :2].max(axis=0)
@@ -389,7 +409,8 @@ def render_pose_captures(pose_data: Dict[str, Any],
         captures: List[str] = []
         for posed in posed_list:
             img = _render_pose(posed, width, height, bg, lights, cam_zoom,
-                               silhouette=silhouette, fixed_scale=uniform_scale)
+                               silhouette=silhouette, fixed_scale=uniform_scale,
+                               headroom=_TOP_HEADROOM)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             captures.append("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii"))

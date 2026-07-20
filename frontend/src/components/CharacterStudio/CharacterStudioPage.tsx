@@ -23,6 +23,7 @@ import {
   Upload,
   Send,
   Sparkles,
+  Copy,
 } from 'lucide-react';
 import { CharacterStatusP2T, EngineT, WizardCharacterInfoT } from './characterStudioP2Api';
 import { EngineSelector, PreflightBadges } from './EnginePreflight';
@@ -553,8 +554,9 @@ function StoriesSidebar({
 // Character grid + create card
 // ---------------------------------------------------------------------------
 
-function CharacterCard({ character, storyName, onClick, onDelete }: {
+function CharacterCard({ character, storyName, onClick, onDelete, onClone }: {
   character: CharacterT; storyName: string | null; onClick: () => void; onDelete: () => void;
+  onClone?: () => void;
 }) {
   const initials = character.name
     .split(/\s+/)
@@ -591,6 +593,15 @@ function CharacterCard({ character, storyName, onClick, onDelete }: {
         >
           <Trash2 size={13} />
         </button>
+        {onClone && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onClone(); }}
+            title="Clone character — start a new one from this character's base image"
+            className="absolute top-1.5 left-8 p-1 rounded bg-gray-950/70 text-gray-500 hover:text-purple-300 opacity-0 group-hover:opacity-100 transition-opacity"
+          >
+            <Copy size={13} />
+          </button>
+        )}
         {Boolean((character.manifest as Record<string, unknown> | undefined)?.vnccs) && (
           <span className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded bg-purple-900/80 text-purple-200 border border-purple-600/60">
             {(((character.manifest as Record<string, unknown> | undefined)?.vnccs as { variant?: string } | undefined)?.variant === 'klein')
@@ -2452,6 +2463,15 @@ export default function CharacterStudioPage() {
                           setSelectedCharacterId(c.id);
                         }
                       }}
+                      onClone={(() => {
+                        // clone = start a new character from this one's active
+                        // base image (VNCCS characters only — they carry base
+                        // versions the Klein clone screen can preload)
+                        const vn = ((c.manifest as Record<string, unknown> | undefined)?.vnccs || null) as
+                          { base_versions?: unknown[] } | null;
+                        if (!vn || !(vn.base_versions || []).length) return undefined;
+                        return () => navigate(`/studio/vnccs-klein?cloneof=${encodeURIComponent(c.name)}`);
+                      })()}
                       onDelete={async () => {
                         const isVnccs = Boolean((c.manifest as Record<string, unknown> | undefined)?.vnccs);
                         if (!window.confirm(`Delete character "${c.name}"?${isVnccs ? ' Its VNCCS library images are removed from the app.' : ' Its datasets are removed too.'}`)) return;

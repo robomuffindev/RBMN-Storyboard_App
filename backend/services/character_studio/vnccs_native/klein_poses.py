@@ -62,7 +62,18 @@ KLEIN_STRIP_NEGATIVE = (
     "collar, lapel, sleeves, cuffs, buttons, zipper, pocket, necktie, tie, scarf, "
     "shoes, boots, sandals, high heels, loafers, footwear, socks, shoe soles, "
     "slippers, sneakers, earrings, necklace, chain, bracelet, wristband, anklet, "
-    "ring, watch, jewelry, piercing, glasses, hat, headwear")
+    "ring, watch, jewelry, piercing, glasses, hat, headwear, "
+    # foot POSTURE: removing heels must not leave the feet pointed/arched as if
+    # still wearing them -- force a flat plantigrade stance.
+    "tiptoe, on tiptoes, standing on toes, tip-toe, pointed toes, pointed feet, "
+    "arched feet, high-arched feet, en pointe, ballet feet, ballet pointe, "
+    "raised heels, heels up, heel-up stance, plantar-flexed feet, invisible heels, "
+    # body IDEALIZATION: keep the reference's real weight/build; do not slim or
+    # beautify a fuller figure into a generic model body.
+    "slimmed down, slimmer than reference, made thinner, weight loss, "
+    "idealized body, beautified body, generic fashion-model figure, supermodel body, "
+    "airbrushed, over-smoothed skin, plastic skin, retouched, reduced belly, "
+    "smaller waist than reference, snatched waist, flattering slimming")
 
 
 def resolve_strip_negative(settings, keep_clothing):
@@ -183,7 +194,9 @@ def resolve_pulid(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[st
         strength = float(st.get("klein_pulid_strength") or PULID_DEFAULT_STRENGTH)
     except Exception:  # noqa: BLE001
         strength = PULID_DEFAULT_STRENGTH
-    strength = max(0.0, min(2.0, strength))
+    # v1.171.1: ceiling raised 2.0 -> 3.0 for identity dial-in experiments
+    # (>1.4 progressively stamps the embedding's texture into the skin)
+    strength = max(0.0, min(3.0, strength))
     provider = str(st.get("klein_pulid_provider") or "CPU").strip().upper()
     if provider not in ("CPU", "CUDA", "ROCM"):
         provider = "CPU"
@@ -309,6 +322,39 @@ def _inject_reflatentplus(api: Dict[str, dict], cond_ref: list, body_loads: List
         inp[f"{pfx}_grow"] = 0
         inp[f"{pfx}_start_percent"] = float(cfg.get("start", 0.0))
         inp[f"{pfx}_end_percent"] = float(cfg.get("end", 0.7))
+    nid = f"{tag}_rlp"
+    api[nid] = {"class_type": REFLATENTPLUS_CLASS, "inputs": inp}
+    return [nid, 0]
+
+
+def _inject_reflatentplus_multi(api: Dict[str, dict], cond_ref: list,
+                                entries: List[Dict[str, Any]], tag: str) -> list:
+    """v1.164: like ``_inject_reflatentplus`` but each entry carries its OWN
+    masks / strength / timestep gate, so one node can hold SPLIT-GATED
+    references (research: composition forms in the noisy-early steps, identity
+    and texture in the clean-late steps -- gate a body ref early and a
+    face+hair ref late instead of one ref doing both jobs)."""
+    inp: Dict[str, Any] = {
+        "conditioning": [cond_ref[0], cond_ref[1]],
+        "vae": ["v", 0],
+        "max_megapixels": 1.0,
+        "mask_fill_mode": "pixel_grey",
+    }
+    for i, e in enumerate(entries[:4]):
+        m = e.get("masks") or {}
+        pfx = f"image{i + 1}"
+        inp[f"image_{i + 1}"] = [e["load"], 0]
+        inp[f"{pfx}_strength"] = float(e.get("strength", 0.85))
+        inp[f"{pfx}_face"] = bool(m.get("face", False))
+        inp[f"{pfx}_hair"] = bool(m.get("hair", False))
+        inp[f"{pfx}_body"] = bool(m.get("body", False))
+        inp[f"{pfx}_clothes"] = bool(m.get("clothes", False))
+        inp[f"{pfx}_background"] = bool(m.get("background", False))
+        inp[f"{pfx}_ignore_area"] = "none"
+        inp[f"{pfx}_feather"] = 0
+        inp[f"{pfx}_grow"] = 0
+        inp[f"{pfx}_start_percent"] = float(e.get("start", 0.0))
+        inp[f"{pfx}_end_percent"] = float(e.get("end", 1.0))
     nid = f"{tag}_rlp"
     api[nid] = {"class_type": REFLATENTPLUS_CLASS, "inputs": inp}
     return [nid, 0]
@@ -597,26 +643,37 @@ def _base_body_state(nsfw: bool, sex: str = "") -> str:
     model far better than vague "plain underwear" (Klein was drifting to topless).
     NSFW = nude."""
     male = str(sex or "").strip().lower() in ("male", "man", "boy", "m", "masculine")
+    # foot posture + body-weight preservation shared by every case: after removing
+    # shoes the feet must sit FLAT (heels came off -> don't keep the arched tiptoe
+    # stance), and the reference's real weight/build must be kept, not slimmed.
+    _flat_feet = ("The feet are flat on the ground in a natural flat-footed stance -- "
+                  "soles fully flat, heels down on the floor, NOT on tiptoe, NOT on the "
+                  "balls of the feet, NOT arched as if still wearing high heels. ")
+    _keep_weight = ("Keep the character's EXACT body from the reference -- same overall "
+                    "build, body fat and weight, belly, hips, thighs and limb thickness. "
+                    "If the reference is heavy-set, plus-size or has a fuller figure, KEEP "
+                    "that exact fuller body -- do NOT slim, tone, shrink, idealize or "
+                    "beautify it into a thinner or generic model figure. ")
     if nsfw:
         return ("The character is fully NUDE -- naked, no clothing, underwear, "
-                "footwear or accessories of any kind")
+                "footwear or accessories of any kind. " + _flat_feet + _keep_weight)
     if male:
         return ("REMOVE every garment the reference is wearing. The character is "
                 "bare-chested and wears ONLY plain WHITE boxers and nothing else. The "
                 "feet are COMPLETELY BARE and barefoot -- NO shoes, sandals, socks or "
-                "shoe soles, nothing under the feet. NO jewelry of any kind -- remove "
-                "every necklace, chain, bracelet, ring, watch and piercing. No other "
-                "clothing, footwear or accessories. SFW.")
+                "shoe soles, nothing under the feet. " + _flat_feet + "NO jewelry of any "
+                "kind -- remove every necklace, chain, bracelet, ring, watch and "
+                "piercing. No other clothing, footwear or accessories. " + _keep_weight + "SFW.")
     return ("REMOVE every garment the reference is wearing. The character wears ONLY "
             "a plain WHITE STRAPLESS bra (a bandeau, NO shoulder straps) and plain "
             "WHITE panties -- simple white underwear. The strapless bra COVERS the "
             "chest and breasts (the character is NOT topless and NOT nude; only the "
             "shoulders, arms, midriff and legs are bare). The feet are COMPLETELY BARE "
             "and barefoot -- NO shoes, sandals, heels, socks, shoe soles or platforms, "
-            "nothing under the feet. NO jewelry of any kind -- remove every earring, "
-            "necklace, chain, bracelet, ring, anklet, watch and piercing. Nothing else "
-            "at all besides the white bra and panties -- no other clothing, footwear "
-            "or accessories. SFW.")
+            "nothing under the feet. " + _flat_feet + "NO jewelry of any kind -- remove "
+            "every earring, necklace, chain, bracelet, ring, anklet, watch and piercing. "
+            "Nothing else at all besides the white bra and panties -- no other clothing, "
+            "footwear or accessories. " + _keep_weight + "SFW.")
 
 
 # Destination render styles that Klein/Flux.2 handles well.  Keys are the values
@@ -1387,6 +1444,273 @@ def resolve_consistency_lora(oi: dict, settings: Optional[dict] = None) -> Optio
     return {"file": hit, "strength": max(0.1, min(1.2, strength))}
 
 
+# Common filename tokens for a Klein/Flux.2 character TURNAROUND / multi-view LoRA
+# (e.g. Zovetry's "Flux2 Klein Multi-view Character Generation", 4-view sprite-sheet
+# LoRAs, dx8152 angle LoRAs). Ordered most- to least-specific so an auto-match
+# prefers an obvious turnaround file over a generic "...view..." name.
+_TURNAROUND_LORA_TOKENS = (
+    "turnaround", "multi-view", "multiview", "multi_view", "multiangle",
+    "multi-angle", "multi_angle", "sprite", "4view", "4-view", "fourview",
+    "rotation", "rotate", "character-sheet", "character_sheet", "charsheet",
+)
+
+
+def resolve_turnaround_lora(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """Optional Klein/Flux.2 character TURNAROUND (multi-view) LoRA, STACKED on the
+    base-set DERIVED views (right/left/back + the mesh A-pose) so the model actually
+    rotates the character to a new angle instead of reproducing the front. This is
+    the trained alternative to hand-easing reference weights.
+
+    Gated by ``klein_base_turnaround_lora='on'``. Resolves the exact file from
+    ``klein_base_turnaround_lora_name`` when set, else auto-matches a worker LoRA
+    whose name contains a turnaround token. Strength ``klein_base_turnaround_lora_strength``
+    (default 1.0). Returns None (a silent no-op) until the file is present + enabled,
+    so nothing changes until the user drops the LoRA on the worker and turns it on."""
+    st = settings or {}
+    mode = str(st.get("klein_base_turnaround_lora") or "off").strip().lower()
+    if mode not in ("on", "true", "1", "yes"):
+        return None
+    opts = _options(oi, "LoraLoaderModelOnly", "lora_name")
+    want = str(st.get("klein_base_turnaround_lora_name") or "").strip()
+    if want:
+        hit = _resolve_name(opts, want)
+    else:
+        hit = next((o for o in opts
+                    if any(tok in o.lower() for tok in _TURNAROUND_LORA_TOKENS)), None)
+    if not hit:
+        logger.info("klein: turnaround LoRA enabled but no matching file on this worker "
+                    "(set klein_base_turnaround_lora_name to the exact filename)")
+        return None
+    try:
+        strength = float(st.get("klein_base_turnaround_lora_strength") or 1.0)
+    except Exception:  # noqa: BLE001
+        strength = 1.0
+    # optional activation text: many of these LoRAs need a trigger word/phrase at the
+    # START of the positive prompt (e.g. 'matchingpose9b'). Blank = triggerless LoRA.
+    trigger = str(st.get("klein_base_turnaround_lora_trigger") or "").strip()
+    return {"file": hit, "strength": max(0.1, min(1.5, strength)), "trigger": trigger}
+
+
+def resolve_matchpose_lora(oi: dict, settings: Optional[dict] = None) -> Optional[str]:
+    """Filename of the nhathoangfoto MatchingPose LoRA on this worker, for the
+    body-shape-preserving base-set turnaround (mannequin pose -> character). Prefers
+    the user's klein_pose_lora when it already points at MatchingPose, else
+    auto-matches a file named matchingpose / maching_pose. Returns None if absent."""
+    st = settings or {}
+    opts = _options(oi, "LoraLoaderModelOnly", "lora_name")
+    cur = str(st.get("klein_pose_lora") or "").strip()
+    if cur and ("matchingpose" in cur.lower() or "maching_pose" in cur.lower()):
+        hit = _resolve_name(opts, cur)
+        if hit:
+            return hit
+    return next((o for o in opts
+                 if "matchingpose" in o.lower() or "maching_pose" in o.lower()), None)
+
+
+def build_klein_inpaint_graph(
+    *,
+    image_file: str,
+    mask_file: str,
+    prompt: str,
+    seed: int,
+    models: Dict[str, str],
+    steps: int = 12,
+    guidance: float = 1.0,
+    negative_prompt: str = "",
+    ref_files: Optional[List[str]] = None,
+    grow: int = 6,
+    blur: float = 4.0,
+    width: int = 1024,
+    height: int = 1216,
+    filename_prefix: str = "rbmn_vnccs/klein_inpaint",
+) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """Masked INPAINT editor graph (v1.158, the Edit-Image feature): repaint ONLY
+    the masked region of ``image_file`` guided by the prompt and up to 3 optional
+    reference images (Klein reference latents -- "add the makeup from image 1",
+    "the tattoo design in image 2 on the selected arm", ...).  Same
+    SetLatentNoiseMask + ImageCompositeMasked pattern as the SAM3 article
+    cleanup, so everything OUTSIDE the mask stays byte-identical.  ``mask_file``
+    is a white-on-black PNG painted client-side (brush and/or selected SAM3
+    segments); GrowMaskWithBlur feathers the seam."""
+    ref_files = [r for r in (ref_files or []) if r][:3]
+    api: Dict[str, dict] = {
+        "u": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": models["unet"], "weight_dtype": "default"}},
+        "c": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": models["clip"], "type": "flux2", "device": "default"}},
+        "v": {"class_type": "VAELoader", "inputs": {"vae_name": models["vae"]}},
+        "img": {"class_type": "LoadImage", "inputs": {"image": image_file}},
+        "mimg": {"class_type": "LoadImage", "inputs": {"image": mask_file}},
+        "mask": {"class_type": "ImageToMask", "inputs": {"image": ["mimg", 0], "channel": "red"}},
+    }
+    model_ref: list = ["u", 0]
+    mask_ref: list = ["mask", 0]
+    if grow or blur:
+        api["mgrow"] = {"class_type": "GrowMaskWithBlur",
+                        "inputs": {"mask": mask_ref, "expand": int(grow),
+                                   "incremental_expandrate": 0.0, "tapered_corners": True,
+                                   "flip_input": False, "blur_radius": float(blur),
+                                   "lerp_alpha": 1.0, "decay_factor": 1.0, "fill_holes": True}}
+        mask_ref = ["mgrow", 0]
+    api["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["img", 0], "vae": ["v", 0]}}
+    api["nm"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["enc", 0], "mask": mask_ref}}
+    api["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["c", 0]}}
+    api["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": negative_prompt or "", "clip": ["c", 0]}}
+    pos_cur, neg_cur = "pos", "neg"
+    for k, rf in enumerate(ref_files):
+        api[f"r{k}_load"] = {"class_type": "LoadImage", "inputs": {"image": rf}}
+        api[f"r{k}_scale"] = {"class_type": "ImageScaleToTotalPixels",
+                              "inputs": {"image": [f"r{k}_load", 0], "upscale_method": "lanczos",
+                                         "megapixels": 1.0, "resolution_steps": 1}}
+        api[f"r{k}_enc"] = {"class_type": "VAEEncode",
+                            "inputs": {"pixels": [f"r{k}_scale", 0], "vae": ["v", 0]}}
+        api[f"r{k}_pr"] = {"class_type": "ReferenceLatent",
+                           "inputs": {"conditioning": [pos_cur, 0], "latent": [f"r{k}_enc", 0]}}
+        api[f"r{k}_nr"] = {"class_type": "ReferenceLatent",
+                           "inputs": {"conditioning": [neg_cur, 0], "latent": [f"r{k}_enc", 0]}}
+        pos_cur, neg_cur = f"r{k}_pr", f"r{k}_nr"
+    api["sig"] = {"class_type": "Flux2Scheduler",
+                  "inputs": {"steps": int(steps), "width": int(width), "height": int(height)}}
+    api["gd"] = {"class_type": "CFGGuider",
+                 "inputs": {"model": list(model_ref), "positive": [pos_cur, 0],
+                            "negative": [neg_cur, 0], "cfg": float(guidance)}}
+    api["ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
+    api["sm"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+    api["sc"] = {"class_type": "SamplerCustomAdvanced",
+                 "inputs": {"noise": ["ns", 0], "guider": ["gd", 0], "sampler": ["sm", 0],
+                            "sigmas": ["sig", 0], "latent_image": ["nm", 0]}}
+    api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sc", 0], "vae": ["v", 0]}}
+    api["comp"] = {"class_type": "ImageCompositeMasked",
+                   "inputs": {"destination": ["img", 0], "source": ["dec", 0],
+                              "mask": mask_ref, "x": 0, "y": 0, "resize_source": False}}
+    api["save"] = {"class_type": "SaveImage",
+                   "inputs": {"images": ["comp", 0], "filename_prefix": filename_prefix}}
+    return api, {"inpaint": "save"}
+
+
+def build_sam3_detect_graph(
+    *,
+    image_file: str,
+    prompt: str,
+    threshold: float,
+    sam_model: str,
+    filename_prefix: str = "rbmn_vnccs/sam_detect",
+) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """SAM3 detection graph for the Edit-Image SEGMENT mode: segment
+    ``image_file`` by TEXT and save EVERY detected mask as its own image (the
+    batch fans out to one file per mask) so the client can show a pick-list."""
+    api: Dict[str, dict] = {
+        "img": {"class_type": "LoadImage", "inputs": {"image": image_file}},
+        "sam_m": {"class_type": SAM3_LOADER_CLASS,
+                  "inputs": {"model": sam_model, "segmentor": "image",
+                             "device": "cuda", "precision": "fp16"}},
+        "sam_seg": {"class_type": SAM3_SEG_CLASS,
+                    "inputs": {"sam3_model": ["sam_m", 0], "images": ["img", 0],
+                               "prompt": prompt, "threshold": float(threshold),
+                               "keep_model_loaded": False, "add_background": "none",
+                               "detection_limit": -1}},
+        "m2i": {"class_type": "MaskToImage", "inputs": {"mask": ["sam_seg", 0]}},
+        "save": {"class_type": "SaveImage",
+                 "inputs": {"images": ["m2i", 0], "filename_prefix": filename_prefix}},
+    }
+    return api, {"masks": "save"}
+
+
+def resolve_tryon_lora(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """The fal virtual try-on LoRA (flux-klein-tryon-comfy.safetensors) if present
+    on this worker.  Trained on Klein 9B Edit with trigger "TRYON ..." and image
+    order person / top / bottom; its card recommends steps 28 + guidance 2.5
+    (NON-distilled settings).  klein_tryon_lora_name overrides the filename,
+    klein_tryon_lora_strength the strength (default 1.0)."""
+    st = settings or {}
+    opts = _options(oi, "LoraLoaderModelOnly", "lora_name")
+    want = str(st.get("klein_tryon_lora_name") or "").strip()
+    hit = _resolve_name(opts, want) if want else next(
+        (o for o in opts if "tryon" in o.lower().replace("-", "").replace("_", "")), None)
+    if not hit:
+        return None
+    try:
+        strength = float(st.get("klein_tryon_lora_strength") or 1.0)
+    except Exception:  # noqa: BLE001
+        strength = 1.0
+    return {"file": hit, "strength": max(0.1, min(1.5, strength))}
+
+
+def build_klein_tryon_graph(
+    *,
+    person_file: str,
+    garment_files: List[str],
+    prompt: str,
+    seed: int,
+    models: Dict[str, str],
+    tryon: Dict[str, Any],
+    steps: int = 28,
+    guidance: float = 2.5,
+    rmbg: Optional[Dict[str, Any]] = None,
+    filename_prefix: str = "rbmn_vnccs/klein_tryon",
+) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """Virtual try-on graph (fal flux-klein-tryon LoRA): image 1 = the PERSON
+    (a pose sprite or base render), images 2..N = garment photos (top, bottom,
+    ...).  The prompt must lead with the trained trigger "TRYON".  Unlike the
+    distilled pose graphs this runs at the LoRA's trained settings (default 28
+    steps / guidance 2.5).  Returns (api_graph, tap_map={'tryon': save_id})."""
+    if not person_file:
+        raise ValueError("try-on needs a person image")
+    garment_files = [g for g in (garment_files or []) if g][:3]
+    if not garment_files:
+        raise ValueError("try-on needs at least one garment image")
+    api: Dict[str, dict] = {
+        "u": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": models["unet"], "weight_dtype": "default"}},
+        "c": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": models["clip"], "type": "flux2", "device": "default"}},
+        "v": {"class_type": "VAELoader", "inputs": {"vae_name": models["vae"]}},
+        "tlora": {"class_type": "LoraLoaderModelOnly",
+                  "inputs": {"model": ["u", 0], "lora_name": tryon["file"],
+                             "strength_model": float(tryon.get("strength", 1.0))}},
+    }
+    model_ref = ["tlora", 0]
+    # person + garments as reference latents (person FIRST -- trained order)
+    encs: List[str] = []
+    for k, fn in enumerate([person_file] + garment_files):
+        api[f"t{k}_load"] = {"class_type": "LoadImage", "inputs": {"image": fn}}
+        api[f"t{k}_scale"] = {"class_type": "ImageScaleToTotalPixels",
+                              "inputs": {"image": [f"t{k}_load", 0],
+                                         "upscale_method": "lanczos", "megapixels": 1.0,
+                                         "resolution_steps": 1}}
+        api[f"t{k}_enc"] = {"class_type": "VAEEncode",
+                            "inputs": {"pixels": [f"t{k}_scale", 0], "vae": ["v", 0]}}
+        encs.append(f"t{k}_enc")
+    api["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["c", 0]}}
+    api["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["c", 0]}}
+    pos_cur, neg_cur = "pos", "neg"
+    for k, e in enumerate(encs):
+        api[f"pr{k}"] = {"class_type": "ReferenceLatent",
+                         "inputs": {"conditioning": [pos_cur, 0], "latent": [e, 0]}}
+        api[f"nr{k}"] = {"class_type": "ReferenceLatent",
+                         "inputs": {"conditioning": [neg_cur, 0], "latent": [e, 0]}}
+        pos_cur, neg_cur = f"pr{k}", f"nr{k}"
+    api["size"] = {"class_type": "GetImageSize", "inputs": {"image": ["t0_scale", 0]}}
+    api["lat"] = {"class_type": "EmptyFlux2LatentImage",
+                  "inputs": {"width": ["size", 0], "height": ["size", 1], "batch_size": 1}}
+    api["sig"] = {"class_type": "Flux2Scheduler",
+                  "inputs": {"steps": int(steps), "width": ["size", 0], "height": ["size", 1]}}
+    api["gd"] = {"class_type": "CFGGuider",
+                 "inputs": {"model": list(model_ref), "positive": [pos_cur, 0],
+                            "negative": [neg_cur, 0], "cfg": float(guidance)}}
+    api["ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}}
+    api["sm"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+    api["sc"] = {"class_type": "SamplerCustomAdvanced",
+                 "inputs": {"noise": ["ns", 0], "guider": ["gd", 0], "sampler": ["sm", 0],
+                            "sigmas": ["sig", 0], "latent_image": ["lat", 0]}}
+    api["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sc", 0], "vae": ["v", 0]}}
+    cur = "dec"
+    cur = _inject_rmbg(api, cur, rmbg) if rmbg else cur
+    api["save"] = {"class_type": "SaveImage",
+                   "inputs": {"images": [cur, 0], "filename_prefix": filename_prefix}}
+    return api, {"tryon": "save"}
+
+
 RMBG_NODE_CLASS = "VNCCS_RMBG2"
 
 
@@ -1618,6 +1942,10 @@ def build_klein_clothes_graph(
     face_refine: Optional[Dict[str, Any]] = None,
     cfg: Optional[float] = None,
     rmbg: Optional[Dict[str, Any]] = None,
+    ref_end: float = 1.0,
+    negative_prompt: str = "",
+    consistency_lora: Optional[Dict[str, Any]] = None,
+    identity_lock: bool = True,
     filename_prefix: str = "rbmn_vnccs/klein_clothes",
 ) -> Tuple[Dict[str, dict], Dict[str, str]]:
     """Klein reference-EDIT that DRESSES ``base_file`` in a new outfit.  The base
@@ -1645,6 +1973,14 @@ def build_klein_clothes_graph(
         model_ref: list = ["lora", 0]
     else:
         model_ref = ["u", 0]
+    if consistency_lora:
+        # v1.162: dx8152 Consistency LoRA stacked on the DRESSING chain -- an
+        # identity guard that helps hold the character's face/body/skin colour
+        # while the outfit is redrawn (same LoRA + strength as the pose stack).
+        api["clora"] = {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": model_ref, "lora_name": consistency_lora["file"],
+                                   "strength_model": float(consistency_lora["strength"])}}
+        model_ref = ["clora", 0]
     # base image -> 1MP -> size (+ encode for the stock-reference fallback)
     api["base_load"] = {"class_type": "LoadImage", "inputs": {"image": base_file}}
     api["base_scale"] = {"class_type": "ImageScaleToTotalPixels",
@@ -1658,17 +1994,37 @@ def build_klein_clothes_graph(
                   "inputs": {"steps": int(steps), "width": ["base_size", 0],
                              "height": ["base_size", 1]}}
     api["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["c", 0]}}
-    api["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["c", 0]}}
+    api["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": negative_prompt or "", "clip": ["c", 0]}}
     pos_cur, neg_cur = "pos", "neg"
     # base as content reference — KEEP face+hair+body+pose, DROP the garment so the
     # prompt redraws the outfit.  ReferenceLatentPlus 'person minus clothes' mask
     # when the node is present, else stock ReferenceLatent (whole base) as fallback.
     if reflatentplus:
-        _rcfg = {"strength": float(max(0.05, min(2.0, strength))), "start": 0.0, "end": 1.0,
-                 "masks": {"face": True, "hair": True, "body": True,
-                           "clothes": False, "background": False}}
-        pos_cur = _inject_reflatentplus(api, [pos_cur, 0], ["base_load"], _rcfg, "cl_pos")[0]
-        neg_cur = _inject_reflatentplus(api, [neg_cur, 0], ["base_load"], _rcfg, "cl_neg")[0]
+        # ref_end (v1.159): RELEASE the bare-skin body reference before the late
+        # texture-forming steps.  Held to 1.0 the model keeps seeing bare skin
+        # exactly where the garment must go, and the skin BLEEDS THROUGH the
+        # fabric (translucent / skin-toned clothing).  ~0.8 keeps identity/body/
+        # pose locked while the garments finish opaque.
+        _end = float(max(0.3, min(1.0, ref_end)))
+        _str = float(max(0.05, min(2.0, strength)))
+        entries: List[Dict[str, Any]] = [
+            # composition ref -- face+hair+body, released at ref_end so bare skin
+            # stops showing where the garment must finish opaque (v1.159)
+            {"load": "base_load", "strength": _str, "start": 0.0, "end": _end,
+             "masks": {"face": True, "hair": True, "body": True,
+                       "clothes": False, "background": False}},
+        ]
+        if identity_lock:
+            # v1.164 split-gated identity ref -- face+hair ONLY, re-asserted in
+            # the clean LATE steps where identity/texture actually forms.  The
+            # mask never covers the clothing area, so the garment stays opaque
+            # while the face and hair stop drifting after the body ref releases.
+            entries.append({"load": "base_load", "strength": 0.9,
+                            "start": max(0.4, _end - 0.3), "end": 1.0,
+                            "masks": {"face": True, "hair": True, "body": False,
+                                      "clothes": False, "background": False}})
+        pos_cur = _inject_reflatentplus_multi(api, [pos_cur, 0], entries, "cl_pos")[0]
+        neg_cur = _inject_reflatentplus_multi(api, [neg_cur, 0], entries, "cl_neg")[0]
     else:
         api["base_enc"] = {"class_type": "VAEEncode",
                            "inputs": {"pixels": ["base_scale", 0], "vae": ["v", 0]}}
@@ -1709,6 +2065,72 @@ def build_klein_clothes_graph(
     return api, {"clothes": "save"}
 
 
+GARMENT_EXTRACT_PROMPT = (
+    "Extract only the clothing from image 1 -- the COMPLETE outfit with EVERY "
+    "garment piece and accessory it includes (top, bottom, dress, shoes, belt, "
+    "gloves, headwear, jewellery) -- and present it laid flat, front view, "
+    "arranged together on a plain pure white background, product-catalogue "
+    "style. Completely remove the person, mannequin, hanger, hands and the "
+    "original background. Do not drop, merge or simplify any piece; keep every "
+    "garment's exact colors, pattern, print, fabric texture, cut, seams and "
+    "details unchanged. The clothing fills most of the frame."
+)
+
+
+def build_klein_garment_extract_graph(
+    *,
+    garment_file: str,
+    seed: int,
+    models: Dict[str, str],
+    steps: int = 10,
+    filename_prefix: str = "rbmn_vnccs/klein_garment",
+) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """v1.164 garment CLEANUP pre-pass: a quick Klein reference edit that
+    extracts the garment from a photo (model wearing it, busy background, ...)
+    onto a plain white background before the actual dressing/try-on pass.
+    Research finding: feeding a clean 'garment on white' reference measurably
+    improves garment accuracy vs telling the swap prompt to ignore the person
+    -- give Klein a simpler task per pass."""
+    if not garment_file:
+        raise ValueError("garment extract graph needs a garment image")
+    api: Dict[str, dict] = {
+        "u": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": models["unet"], "weight_dtype": "default"}},
+        "c": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": models["clip"], "type": "flux2", "device": "default"}},
+        "v": {"class_type": "VAELoader", "inputs": {"vae_name": models["vae"]}},
+        "g_load": {"class_type": "LoadImage", "inputs": {"image": garment_file}},
+        "g_scale": {"class_type": "ImageScaleToTotalPixels",
+                    "inputs": {"image": ["g_load", 0], "upscale_method": "lanczos",
+                               "megapixels": 1.0, "resolution_steps": 1}},
+        "g_size": {"class_type": "GetImageSize", "inputs": {"image": ["g_scale", 0]}},
+        "lat": {"class_type": "EmptyFlux2LatentImage",
+                "inputs": {"width": ["g_size", 0], "height": ["g_size", 1], "batch_size": 1}},
+        "sig": {"class_type": "Flux2Scheduler",
+                "inputs": {"steps": int(steps), "width": ["g_size", 0], "height": ["g_size", 1]}},
+        "pos": {"class_type": "CLIPTextEncode",
+                "inputs": {"text": GARMENT_EXTRACT_PROMPT, "clip": ["c", 0]}},
+        "neg": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["c", 0]}},
+        "g_enc": {"class_type": "VAEEncode", "inputs": {"pixels": ["g_scale", 0], "vae": ["v", 0]}},
+        "pos_r": {"class_type": "ReferenceLatent",
+                  "inputs": {"conditioning": ["pos", 0], "latent": ["g_enc", 0]}},
+        "neg_r": {"class_type": "ReferenceLatent",
+                  "inputs": {"conditioning": ["neg", 0], "latent": ["g_enc", 0]}},
+        "gd": {"class_type": "CFGGuider",
+               "inputs": {"model": ["u", 0], "positive": ["pos_r", 0],
+                          "negative": ["neg_r", 0], "cfg": KLEIN_POSE_CFG}},
+        "ns": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed)}},
+        "sm": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "sc": {"class_type": "SamplerCustomAdvanced",
+               "inputs": {"noise": ["ns", 0], "guider": ["gd", 0], "sampler": ["sm", 0],
+                          "sigmas": ["sig", 0], "latent_image": ["lat", 0]}},
+        "dec": {"class_type": "VAEDecode", "inputs": {"samples": ["sc", 0], "vae": ["v", 0]}},
+        "save": {"class_type": "SaveImage",
+                 "inputs": {"images": ["dec", 0], "filename_prefix": filename_prefix}},
+    }
+    return api, {"garment": "save"}
+
+
 def klein_clothes_prompt(costume_info: dict, background: str,
                          has_garment_ref: bool = False,
                          style_kind: Optional[str] = None, style_custom: str = "") -> str:
@@ -1729,9 +2151,15 @@ def klein_clothes_prompt(costume_info: dict, background: str,
              "with the same face, hair, skin tone and proportions -- change ONLY the "
              "clothing they are wearing."]
     if has_garment_ref:
-        parts.append("Dress them in the exact outfit shown in the garment reference "
-                     "image: faithfully reproduce its garments, colors, patterns, "
-                     "materials and cut, fitted naturally to this body and pose.")
+        # v1.164: community-converged Klein swap template -- numbered-image
+        # instruction + explicit negative-scope clause (suppresses hallucinated
+        # accessories) + the accepted identity-anchor phrase.
+        parts.append("Change only the clothing of the person to match the garments "
+                     "shown in image 2: faithfully reproduce their colors, patterns, "
+                     "materials, cut and details, fitted naturally to this body and "
+                     "pose. Do not add any accessories, jewellery, bags, hats or "
+                     "shoes that are not clearly visible in image 2. Keep the face, "
+                     "hair, pose and background unchanged.")
     if slots:
         parts.append("The character is now fully dressed -- " + "; ".join(slots) + ".")
     elif not has_garment_ref:
@@ -1739,6 +2167,13 @@ def klein_clothes_prompt(costume_info: dict, background: str,
                      "everyday outfit.")
     parts.append("The clothing fits and drapes naturally on the body in this exact "
                  "pose, full body visible head to toe, no floating or detached garments.")
+    # v1.159: the bare-skin base reference tends to bleed through garments --
+    # state OPACITY explicitly (positive wording works at guidance 1.0).
+    parts.append("Every garment is OPAQUE fabric with its OWN colour and texture: "
+                 "the clothing fully covers and hides the skin beneath it, with a "
+                 "crisp, clearly visible edge where fabric meets skin. NO skin tone "
+                 "showing through any garment -- not sheer, not translucent, not "
+                 "body paint.")
     directive = _style_directive(style_kind, style_custom)
     if directive:
         parts.append(directive)
@@ -1751,23 +2186,55 @@ def klein_clothes_prompt(costume_info: dict, background: str,
 
 def klein_refbase_prompt(character_info: dict, background: str, nsfw: bool = False,
                          view_desc: str = "", style_kind: Optional[str] = None,
-                         style_custom: str = "", sex: str = "") -> str:
+                         style_custom: str = "", sex: str = "",
+                         mesh_ready: bool = False, rotate: bool = False) -> str:
     """Prompt for a REFERENCE-DRIVEN neutral base: the character's body comes from
     the reference photos (fed as content), posed neutrally by this text — NO
-    mannequin, so nothing overrides the reference build."""
+    mannequin, so nothing overrides the reference build.
+
+    ``mesh_ready`` locks the character into a symmetric arms-clear A-pose on a
+    plain neutral-gray backdrop — the preferred input for 3D mesh generation.
+
+    ``rotate`` = SET-DERIVATION mode: the reference IS the approved front base, and
+    we want to KEEP it EXACTLY (face, hair, body, skin AND clothing/state, colours)
+    and only change the camera angle. NOT a strip — a novel-view rotation, so every
+    view of the set is the same character seen from a different side."""
+    if rotate:
+        vd = str(view_desc or "").strip() or "the same view"
+        bg = "neutral gray" if mesh_ready else (str(background or "Green").strip() or "Green")
+        stance = ("the SAME symmetric A-pose, arms held out about 30 degrees from the body"
+                  if mesh_ready else "the SAME relaxed standing pose")
+        return (
+            "Novel-view render of the EXACT SAME character shown in the reference image. "
+            "Keep EVERYTHING identical — the same face and facial identity, hair, body build "
+            "and proportions, skin tone, and the SAME clothing / state of dress and the SAME "
+            "colours and materials. Do NOT add, remove or change any clothing, accessories or "
+            "colours. Change ONLY the camera viewpoint: show this identical character from " + vd +
+            ", in " + stance + ", the whole figure visible head to toe, uniformly framed. "
+            f"Solid flat {bg.lower()} background, evenly lit with flat ambient light, no shadows, "
+            "no cast shadow, no floor or ground plane, so the background can be keyed out cleanly.")
     parts = [
         "Full-body character reference of the SAME person shown in the reference "
         "images. Reproduce their EXACT body: overall build, body fat / weight, "
         "proportions, shoulders, chest, waist, hips and height, and their face, "
         "hair, skin tone and facial identity — match the references closely."]
+
     vd = str(view_desc or "").strip() or "front view, facing the camera"
-    parts.append("Standing straight and relaxed, arms resting slightly away from the "
-                 "body, the whole figure visible head to toe, " + vd + ".")
+    if mesh_ready:
+        parts.append("Standing in a symmetric A-pose: upright and centered, both arms "
+                     "lowered and held out to the sides about 30 degrees away from the "
+                     "torso so the arms and hands are clearly separated from the body "
+                     "with a visible gap on each side, hands open with fingers apart, "
+                     "legs straight and feet about shoulder-width apart, the whole figure "
+                     "visible head to toe and uniformly framed, " + vd + ".")
+    else:
+        parts.append("Standing straight and relaxed, arms resting slightly away from the "
+                     "body, the whole figure visible head to toe, with a small margin of empty space above the head and below the feet (the figure centered, not touching the top or bottom edges), " + vd + ".")
     parts.append("Change ONLY the clothing: " + _base_body_state(nsfw, sex) + ".")
     directive = _style_directive(style_kind, style_custom)
     if directive:
         parts.append(directive)
-    bg = str(background or "Green").strip() or "Green"
+    bg = "neutral gray" if mesh_ready else (str(background or "Green").strip() or "Green")
     parts.append(f"Solid flat {bg.lower()} background, evenly lit with flat ambient "
                  "light, no shadows, no cast shadow, no floor or ground plane, so the "
                  "background can be keyed out cleanly.")
@@ -1794,6 +2261,9 @@ def build_klein_refbase_graph(
     rmbg: Optional[Dict[str, Any]] = None,
     cfg: Optional[float] = None,
     negative_prompt: str = "",
+    consistency_lora: Optional[Dict[str, Any]] = None,
+    turnaround_lora: Optional[Dict[str, Any]] = None,
+    keep_clothes_mask: bool = True,
     filename_prefix: str = "rbmn_vnccs/klein_refbase",
 ) -> Tuple[Dict[str, dict], Dict[str, str]]:
     """Reference-DRIVEN base: the body comes from the reference PHOTOS (ridden as
@@ -1820,6 +2290,24 @@ def build_klein_refbase_graph(
         model_ref: list = ["lora", 0]
     else:
         model_ref = ["u", 0]
+    if consistency_lora:
+        # dx8152 Consistency LoRA stacked AFTER the main LoRA (triggerless) --
+        # the SAME cross-image consistency the pose sets use, now on base sets so
+        # the 4 views hold a matching look. Same node the pose graph uses.
+        api["clora"] = {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": list(model_ref),
+                                   "lora_name": consistency_lora["file"],
+                                   "strength_model": float(consistency_lora["strength"])}}
+        model_ref = ["clora", 0]
+    if turnaround_lora:
+        # character TURNAROUND / multi-view LoRA stacked on top -- trained to rotate
+        # the subject to a new camera angle, so the DERIVED views (right/left/back +
+        # mesh A-pose) actually turn instead of reproducing the front reference.
+        api["tlora"] = {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": list(model_ref),
+                                   "lora_name": turnaround_lora["file"],
+                                   "strength_model": float(turnaround_lora["strength"])}}
+        model_ref = ["tlora", 0]
 
     body_load_ids: List[str] = []
     for k, bf in enumerate(body_files):
@@ -1862,10 +2350,13 @@ def build_klein_refbase_graph(
     # reference build drives the base.  ReferenceLatentPlus when present (mask +
     # strength), else stock ReferenceLatent on each body ref.
     if reflatentplus:
+        # keep_clothes_mask=False (a HARD strip): don't reference the clothing region,
+        # so the reference can't reproduce pants/shoes/footwear -- the prompt fills
+        # those areas with the underwear/nude base instead. body mask still holds shape.
         _rcfg = {"strength": float(max(0.05, min(3.0, strength))), "start": 0.0,
                  "end": float(max(0.5, min(1.0, body_ref_end))),
                  "masks": {"face": True, "hair": True, "body": True,
-                           "clothes": True, "background": False}}
+                           "clothes": bool(keep_clothes_mask), "background": False}}
         pos_cur = _inject_reflatentplus(api, [pos_cur, 0], body_load_ids, _rcfg, "rbp")[0]
         neg_cur = _inject_reflatentplus(api, [neg_cur, 0], body_load_ids, _rcfg, "rbn")[0]
     else:
@@ -1915,11 +2406,18 @@ def build_klein_refbase_graph(
 
 def klein_preview_prompt(character_info: dict, background: str,
                          nsfw: bool = False, style_kind: Optional[str] = None,
-                         style_custom: str = "") -> str:
+                         style_custom: str = "", view_desc: str = "",
+                         mesh_ready: bool = False) -> str:
     """T2I prompt from the tag-sheet fields (Klein prose style).  The base
     preview is a body-only BASE -- the character in neutral underwear (or nude
     when ``nsfw``) so the Clothes/Emotions modes dress it later, matching VNCCS
-    Native base characters."""
+    Native base characters.
+
+    ``view_desc`` overrides the default "front view" clause so the SAME
+    character can be rendered from several angles for a 4-view base set.
+    ``mesh_ready`` swaps the relaxed stance for a locked, symmetric A-pose with
+    arms held clear of the body and forces a plain neutral-gray backdrop --
+    the ideal input for 3D mesh generation (Hunyuan3D)."""
     ci = character_info or {}
     bits: List[str] = []
     sex = str(ci.get("sex") or "").strip()
@@ -1932,12 +2430,23 @@ def klein_preview_prompt(character_info: dict, background: str,
         v = str(ci.get(key) or "").strip()
         if v:
             bits.append(v)
-    bg = str(background or "Green").strip() or "Green"
+    # mesh-ready always keys out on a plain uniform gray (best for shape gen)
+    bg = "neutral gray" if mesh_ready else (str(background or "Green").strip() or "Green")
     desc = ". ".join(bits)
     style = _style_directive(style_kind, style_custom)
     style = (style + " ") if style else ""
-    return (f"{style}Full body character reference of {desc}. Standing relaxed, front view, "
-            f"whole figure visible head to toe. {_base_body_state(nsfw, str((character_info or {}).get('sex') or ''))}. "
+    vd = str(view_desc or "").strip() or "front view"
+    if mesh_ready:
+        stance = ("Standing in a symmetric A-pose: upright and centered, both arms "
+                  "lowered and held out to the sides about 30 degrees away from the torso "
+                  "so the arms and hands are clearly separated from the body with a visible "
+                  "gap on each side, hands open with fingers apart, legs straight and feet "
+                  "about shoulder-width apart, " + vd + ", the whole figure visible head to "
+                  "toe and uniformly framed with even margins")
+    else:
+        stance = "Standing relaxed, " + vd + ", whole figure visible head to toe, with a small margin of empty space above the head and below the feet (the figure centered, not touching the top or bottom edges)"
+    return (f"{style}Full body character reference of {desc}. {stance}. "
+            f"{_base_body_state(nsfw, str((character_info or {}).get('sex') or ''))}. "
             f"Solid flat {bg.lower()} background, evenly lit with flat ambient light. "
             f"Absolutely NO shadows of any kind: no cast shadow, no drop shadow, no "
             f"contact or ground shadow beneath the feet, and no shadow on the "

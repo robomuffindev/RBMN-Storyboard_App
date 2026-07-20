@@ -446,10 +446,12 @@ from backend.api.global_characters import router as global_characters_router
 from backend.api.character_studio import router as character_studio_router
 from backend.api.tools import router as tools_router
 from backend.api.vnccs_native import router as vnccs_native_router
+from backend.api.image_workshop import router as image_workshop_router
 app.include_router(global_characters_router)
 app.include_router(character_studio_router)
 app.include_router(vnccs_native_router)
 app.include_router(tools_router)
+app.include_router(image_workshop_router)
 
 # Log registered routes for debugging
 _gen_routes = []

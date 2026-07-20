@@ -176,15 +176,28 @@ def normalize_base_set(images, bg_rgb=None, pad_frac=0.06, thresh=60.0):
         return list(images)
     if not _HAVE_PIL:
         return list(images)
+    # v1.187.2: preserve transparency. When a view already has a real alpha channel
+    # (cut-out mannequin on a transparent background) we crop to the alpha bbox, scale
+    # UNIFORMLY (never distort the aspect), and pad to the common frame with TRANSPARENT
+    # space -- adding blank margin at the sides, not stretching the figure. Only the
+    # legacy solid-background path falls back to an RGB fill.
     crops = []
     for data in images:
         try:
-            im = Image.open(BytesIO(data)).convert("RGB")
-            arr = np.asarray(im).astype(np.float32)
-            bg = (np.asarray(bg_rgb, dtype=np.float32) if bg_rgb is not None
-                  else _estimate_bg_rgb(arr))
-            dist = np.sqrt(((arr - bg) ** 2).sum(-1))
-            ys, xs = np.where(dist > float(thresh))
+            src = Image.open(BytesIO(data))
+            has_alpha = ("A" in src.getbands())
+            if has_alpha:
+                im = src.convert("RGBA")
+                alpha = np.asarray(im)[:, :, 3]
+                ys, xs = np.where(alpha > 16)
+                bg = None                       # transparent-pad marker
+            else:
+                im = src.convert("RGB")
+                arr = np.asarray(im).astype(np.float32)
+                bg = (np.asarray(bg_rgb, dtype=np.float32) if bg_rgb is not None
+                      else _estimate_bg_rgb(arr))
+                dist = np.sqrt(((arr - bg) ** 2).sum(-1))
+                ys, xs = np.where(dist > float(thresh))
             if len(xs) == 0:
                 crops.append((im, bg))
                 continue
@@ -196,7 +209,7 @@ def normalize_base_set(images, bg_rgb=None, pad_frac=0.06, thresh=60.0):
             crops.append((im.crop((x0, y0, x1, y1)), bg))
         except Exception:  # noqa: BLE001
             try:
-                crops.append((Image.open(BytesIO(data)).convert("RGB"), None))
+                crops.append((Image.open(BytesIO(data)).convert("RGBA"), None))
             except Exception:  # noqa: BLE001
                 return list(images)
     if not crops:
@@ -204,15 +217,21 @@ def normalize_base_set(images, bg_rgb=None, pad_frac=0.06, thresh=60.0):
     target_h = max(c.height for c, _ in crops)
     scaled = []
     for c, bg in crops:
-        s = target_h / c.height
+        s = target_h / c.height                 # uniform scale => aspect preserved
         nw = max(1, round(c.width * s))
         scaled.append((c.resize((nw, target_h), Image.LANCZOS), bg))
     target_w = max(c.width for c, _ in scaled)
     out = []
     for c, bg in scaled:
-        fill = tuple(int(x) for x in (bg if bg is not None else (0, 177, 64)))
-        canvas = Image.new("RGB", (target_w, target_h), fill)
-        canvas.paste(c, ((target_w - c.width) // 2, 0))
+        if bg is None:
+            # transparent frame: pad the sides with blank (0,0,0,0) space
+            canvas = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+            src = c if c.mode == "RGBA" else c.convert("RGBA")
+            canvas.paste(src, ((target_w - c.width) // 2, 0), src)
+        else:
+            fill = tuple(int(x) for x in bg)
+            canvas = Image.new("RGB", (target_w, target_h), fill)
+            canvas.paste(c, ((target_w - c.width) // 2, 0))
         b = BytesIO(); canvas.save(b, "PNG"); out.append(b.getvalue())
     return out
 

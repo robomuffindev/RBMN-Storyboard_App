@@ -193,6 +193,29 @@ if %errorlevel% neq 0 (
 del "%TEMP%\rbmn_gradiocheck.py" 2>nul
 
 :: ============================================================
+:: 4b. 3D CHARACTER RIGGING (Make-It-Animatable, local)
+:: ============================================================
+echo.
+echo [4b]  3D character rigging (Make-It-Animatable^)...
+echo         Sets up a small dedicated python env + downloads ~2.2GB of
+echo         rigging models (one time^). Runs on CPU - no GPU needed.
+echo         If you skip this, the app sets it up automatically the first
+echo         time you generate a 3D character body.
+set "MIACHOICE=Y"
+set /p MIACHOICE="        Set up 3D rigging now? [Y/n] "
+if /i "!MIACHOICE!"=="n" (
+    echo         Skipped - will auto-setup on first use.
+) else (
+    python tools\setup_mia.py
+    if !errorlevel! neq 0 (
+        echo [WARN]  3D rigging setup had issues (see above^). The app will
+        echo         retry automatically on first use. To retry manually:
+        echo           venv\Scripts\activate
+        echo           python tools\setup_mia.py
+    )
+)
+
+:: ============================================================
 :: 5. INSTALL FRONTEND
 :: ============================================================
 echo.

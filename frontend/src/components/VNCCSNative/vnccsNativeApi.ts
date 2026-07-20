@@ -142,6 +142,13 @@ export const wizardClothes = (description: string, backend: string = 'auto') =>
     body: JSON.stringify({ description, backend }),
   }).then(j<WizardResultT>);
 
+// Vision-scan garment reference image(s) -> costume slot fields (v1.160)
+export const wizardGarmentAnalyze = (images: Array<{ name: string; subfolder?: string; type?: string }>) =>
+  fetch(`${BASE}/wizard/garment-analyze`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ images }),
+  }).then(j<{ source: string; fields: Record<string, unknown>;
+              vision: Array<{ name: string; description: string }> }>);
+
 export const wizardCloneAnalyze = (
   image: Record<string, unknown>, backend: string = 'auto',
   images?: Array<Record<string, unknown>>,
@@ -165,7 +172,8 @@ export const generatePreview = (body: {
   // Clone-tab preview: uploaded reference images — Klein renders the default
   // pose from these through the full identity chain instead of T2I.
   cloner_images?: Array<Record<string, unknown>> | null;
-  base_set?: boolean;   // false = front view only (default); true = 4-view set
+  base_set?: boolean;   // legacy: false = front view only; true = 4-view set
+  base_mode?: 'single' | 'set' | 'mesh';  // v1.176: single | 4-view | 🧊 mesh-ready
   cleanup?: string;
   klein_steps?: number;
   canvas_w?: number;    // per-character base canvas (wins over global default)
@@ -174,6 +182,43 @@ export const generatePreview = (body: {
   fetch(`${BASE}/preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(j<{ image: string; version?: { character_id: string; version: BaseVersionT; count: number; active: string } | null }>);
+
+// v1.180: live/parallel/cancellable base-SET generation. Front-anchored — the
+// front renders first, then right/left/back derive from it across workers.
+export interface BaseSetViewT {
+  view: string;
+  state: 'pending' | 'rendering' | 'done' | 'error' | 'skipped';
+  host?: string | null; error?: string | null; ready?: boolean;
+}
+export interface BaseSetStatusT {
+  run_id: string; status: 'running' | 'done' | 'cancelled' | 'error';
+  character: string; base_mode: string; error?: string | null;
+  version?: { character_id: string; version: BaseVersionT; count: number; active: string } | null;
+  views: BaseSetViewT[];
+}
+export const startBaseSet = (body: {
+  character_name: string; character_info: Record<string, unknown>;
+  base_mode: 'set' | 'mesh'; engine?: string;
+  cloner_images?: Array<Record<string, unknown>> | null;
+  nsfw?: boolean; background?: string; face_kind?: string; style_custom?: string;
+  base_clothing?: string; canvas_w?: number; canvas_h?: number; seed?: number;
+  use_active_base?: boolean;   // v1.181: anchor the set on the approved base image
+  derive_method?: string;      // v1.189: 'reference' (default) | 'matchpose'
+}) =>
+  fetch(`${BASE}/base-set/start`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ run_id: string; views: string[]; mode: string }>);
+export const baseSetStatus = (runId: string) =>
+  fetch(`${BASE}/base-set/status/${encodeURIComponent(runId)}`).then(j<BaseSetStatusT>);
+export const cancelBaseSet = (runId: string) =>
+  fetch(`${BASE}/base-set/cancel/${encodeURIComponent(runId)}`, { method: 'POST' }).then(j<{ ok: boolean }>);
+export const baseSetImageUrl = (runId: string, idx: number) =>
+  `${BASE}/base-set/image/${encodeURIComponent(runId)}/${idx}`;
+export const regenBaseSetView = (runId: string, idx: number) =>
+  fetch(`${BASE}/base-set/regen/${encodeURIComponent(runId)}/${idx}`, { method: 'POST' }).then(j<{ ok: boolean }>);
+export const saveBaseSet = (runId: string) =>
+  fetch(`${BASE}/base-set/save/${encodeURIComponent(runId)}`, { method: 'POST' })
+    .then(j<{ ok: boolean; version?: { character_id: string; version: BaseVersionT; count: number; active: string } | null }>);
 
 export interface CostumeVersionT extends BaseVersionT { costume_info?: Record<string, string>; }
 
@@ -186,19 +231,96 @@ export const generateCostumePreview = (body: {
   }).then(j<{ image: string; host: string;
               version?: { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null }>);
 
+// Qwen (VNCCS-replica) create previews (v1.168): the suite's exact
+// CharacterCreatorV2 t2i base render / cloner collage pipeline, app-side.
+export const generateQwenCreatePreview = (body: {
+  character_name: string; character_info: Record<string, unknown>; nsfw?: boolean;
+  background?: string; mode?: string; steps?: number; cfg?: number;
+  seed?: number; negative?: string; host?: string;
+}) =>
+  fetch(`${BASE}/create/qwen-preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ image: string; host: string; engine: string; seed: number; t2i_mode: string;
+              version?: { character_id: string; version: BaseVersionT; active: string } | null }>);
+
+export const generateQwenClonePreview = (body: {
+  character_name: string; cloner_images: Array<Record<string, unknown>>;
+  character_info?: Record<string, unknown>; background?: string;
+  base_clothing?: string; undress_prompt?: string; seed?: number;
+  target_size?: number; ref_weight?: number; host?: string;
+}) =>
+  fetch(`${BASE}/create/qwen-clone-preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ image: string; host: string; engine: string; seed: number;
+              version?: { character_id: string; version: BaseVersionT; active: string } | null }>);
+
+// Qwen (VNCCS-replica) clothing preview (v1.167): the suite's ClothesDesigner
+// Pass A rebuilt app-side -- Qwen-Image-Edit-2511 + VNCCS ClothesCore LoRA.
+export const generateQwenClothesPreview = (body: {
+  character_name: string; costume_name: string; costume_info: Record<string, string>;
+  garment_ref?: { name: string; subfolder?: string; type?: string } | null;
+  background?: string; base_version_id?: string; pose_asset_id?: string | null;
+  seed?: number; steps?: number; cfg?: number; clothes_lora_strength?: number;
+  target_size?: number; use_saved_garment?: boolean; host?: string;
+}) =>
+  fetch(`${BASE}/clothes/qwen-preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ image: string; host: string; engine: string; seed: number;
+              version?: { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null }>);
+
 // Klein clothing preview: DRESS the character's active base render (description
 // slots and/or a garment reference image) instead of a VNCCS pose sprite.
 export const generateKleinClothesPreview = (body: {
   character_name: string; costume_name: string; costume_info: Record<string, string>;
   garment_ref?: { name: string; subfolder?: string; type?: string } | null;
   background?: string; strength?: number; base_version_id?: string; view?: string;
-  face_refine?: boolean; host?: string;
+  face_refine?: boolean; host?: string; pose_asset_id?: string | null;
+  steps?: number; guidance?: number; ref_end?: number; negative?: string;
+  consistency?: boolean; identity_lock?: boolean; clean_garment?: boolean;
+  use_saved_garment?: boolean;
 }) =>
   fetch(`${BASE}/clothes/klein-preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(j<{ image: string; host: string; engine: string;
               views?: Array<{ view: string; image: string }>;
               version?: { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null }>);
+
+// Virtual try-on (v1.157): dress a person image in 1-3 garment reference photos
+// via the fal flux-klein-tryon LoRA. Chain result_ref back as person_ref to layer.
+export const kleinTryOn = (body: {
+  character_name: string; costume_name?: string | null;
+  garments: Array<{ ref: { name: string; subfolder?: string; type?: string }; desc?: string; slot?: string }>;
+  person_asset_id?: string | null;
+  person_ref?: { name: string; subfolder?: string; type?: string } | null;
+  person_desc?: string; steps?: number; guidance?: number; host?: string;
+  clean_garments?: boolean;
+}) =>
+  fetch(`${BASE}/clothes/tryon`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ image: string; result_ref: { name: string; subfolder: string; type: string };
+              version?: { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null;
+              host: string; engine: string }>);
+
+// Edit-Image (v1.158): SAM3 segment pick-list + masked Klein inpaint.
+export const baseSegment = (body: {
+  character_name: string; prompt: string; threshold?: number;
+  base_version_id?: string | null; costume_name?: string | null; host?: string;
+}) =>
+  fetch(`${BASE}/base/segment`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ segments: string[]; target_id: string; host: string }>);
+
+export const baseInpaint = (body: {
+  character_name: string; mask_b64: string; prompt: string; negative?: string;
+  steps?: number; guidance?: number; grow?: number; blur?: number;
+  refs?: Array<{ name: string; subfolder?: string; type?: string }>;
+  base_version_id?: string | null; costume_name?: string | null; host?: string;
+}) =>
+  fetch(`${BASE}/base/inpaint`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ image: string; target_id: string; host: string;
+              version?: { character_id: string; version: { id: string; url: string }; count: number; active: string }
+                | { character_id: string; costume: string; version: CostumeVersionT; count: number; active: string } | null }>);
 
 export const saveCostumeInfo = (body: { character_name: string; costume: string; costume_info: Record<string, string> }) =>
   fetch(`${BASE}/costume-info`, {
@@ -276,6 +398,7 @@ export const getPoseFromLibrary = (name: string, repository?: string, category?:
 // Generation lifecycle: generate -> poll result -> ingest
 // ---------------------------------------------------------------------------
 export interface GenerateBody {
+  settings_overrides?: Record<string, unknown>;
   character_name: string;
   character_info: VNCCSCharacterInfoT;
   gen_settings?: Record<string, unknown> | null;
@@ -414,6 +537,22 @@ export const uploadReference = async (file: File): Promise<UploadRefT> => {
   return j<UploadRefT>(res);
 };
 
+// Saved outfit reference images (v1.199.5): persist a costume's outfit photo
+// app-side so it survives reloads / worker restarts and can be re-rendered later.
+const _garmentBase = (characterId: string, costume: string) =>
+  `${BASE}/clothes/garment/${encodeURIComponent(characterId)}/${encodeURIComponent(costume)}`;
+export const saveGarmentRef = (characterId: string, costume: string,
+                               ref: { name: string; subfolder?: string; type?: string }) =>
+  fetch(`${_garmentBase(characterId, costume)}/save`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref }),
+  }).then(j<{ ok: boolean; url: string }>);
+export const garmentRefMeta = (characterId: string, costume: string) =>
+  fetch(`${_garmentBase(characterId, costume)}/meta`).then(j<{ exists: boolean; url: string | null }>);
+export const garmentRefImageUrl = (characterId: string, costume: string) =>
+  _garmentBase(characterId, costume);
+export const deleteGarmentRef = (characterId: string, costume: string) =>
+  fetch(_garmentBase(characterId, costume), { method: 'DELETE' }).then(j<{ ok: boolean }>);
+
 // Reference enhancement: list the host's GAN upscale models, and upscale +
 // sharpen ONE reference (returns a new uploaded ref to use in the clone run).
 export const getUpscaleModels = () =>
@@ -537,3 +676,60 @@ export async function pollUntilDone(
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 }
+
+// ---- v1.171 Settings Variation Test (Debug Options) ------------------------
+export type VtItemT = {
+  index: number; file: string | null; overrides: Record<string, unknown>;
+  seed: number; host: string; elapsed: number; pose_name?: string | null;
+  rating: number; error?: string | null; baseline?: boolean;
+};
+export type VtManifestT = {
+  id: string; created: string; test_type: string; character: string;
+  status: 'running' | 'done' | 'error' | 'cancelled'; error?: string | null;
+  axes: Record<string, unknown[]>; same_seed: boolean; seed?: number | null;
+  progress: { done: number; total: number }; items: VtItemT[];
+  base_settings?: Record<string, unknown>;
+};
+export const varitestStart = (body: Record<string, unknown>) =>
+  fetch(`${BASE}/varitest/start`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ id: string; total: number; variations: number }>);
+export const varitestList = () =>
+  fetch(`${BASE}/varitest/list`).then(j<{ runs: Array<{ id: string; created: string; test_type: string;
+    character: string; status: string; progress: { done: number; total: number }; rated: number }> }>);
+export const varitestGet = (id: string) =>
+  fetch(`${BASE}/varitest/${encodeURIComponent(id)}`).then(j<VtManifestT>);
+export const varitestRate = (id: string, index: number, rating: number) =>
+  fetch(`${BASE}/varitest/${encodeURIComponent(id)}/rate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ index, rating }),
+  }).then(j<{ ok: boolean; rating: number }>);
+export const varitestCancel = (id: string) =>
+  fetch(`${BASE}/varitest/${encodeURIComponent(id)}/cancel`, { method: 'POST' }).then(j<{ ok: boolean }>);
+export const varitestReport = (id: string) =>
+  fetch(`${BASE}/varitest/${encodeURIComponent(id)}/report`).then(j<{ analysis: {
+    rated: number; total: number;
+    axis_tables: Record<string, Array<{ value: unknown; rated: number; ups: number; downs: number; score: number | null }>>;
+    suggestions: Array<{ setting: string; use: unknown; avoid: unknown; confidence: string }>;
+    liked: Array<{ index: number; pose?: string | null; overrides: Record<string, unknown>; baseline: boolean }>;
+    disliked: Array<{ index: number; pose?: string | null; overrides: Record<string, unknown>; baseline: boolean }>;
+  } }>);
+export const varitestImageUrl = (id: string, idx: number) =>
+  `${BASE}/varitest/${encodeURIComponent(id)}/image/${idx}`;
+export const varitestReportMdUrl = (id: string) =>
+  `${BASE}/varitest/${encodeURIComponent(id)}/report?fmt=md`;
+
+// ---- v1.173 Tier-1 3D character body (Hunyuan3D mesh + UniRig rig) ---------
+export type Mesh3dStatusT = {
+  character: string;
+  run: { status: string; phase: string; error?: string | null; host?: string; template?: string; detail?: string } | null;
+  mesh3d: { template: string; created: string; rigged: boolean; checkpoint?: string; views?: string[]; rig_engine?: string | null; rig_error?: string | null } | null;
+};
+export const mesh3dGenerate = (body: { character_name: string; template?: string; use_views?: boolean; reuse_mesh?: boolean }) =>
+  fetch(`${BASE}/mesh3d/generate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(j<{ ok: boolean; character: string; template: string; views: string[]; checkpoint: string; rig_available?: boolean; rig_hint?: string | null }>);
+export const mesh3dStatus = (character: string) =>
+  fetch(`${BASE}/mesh3d/status/${encodeURIComponent(character)}`).then(j<Mesh3dStatusT>);
+export const mesh3dFileUrl = (character: string, kind: 'glb' | 'fbx') =>
+  `${BASE}/mesh3d/file/${encodeURIComponent(character)}/${kind}`;

@@ -21,6 +21,10 @@ and stored under `<project_dir>/_libraries/`.
 - **Expression Library** — reusable facial expressions stored as **name + natural-language prompt**
   (the form the emotion engines consume) with optional reference image, category, and tags. Seed the
   library from the bundled 157-emotion VNCCS catalog, add your own, and edit prompts inline.
+- **Image Workshop** (1.199.0+) — a free-form model playground with one shared, persistent gallery
+  (freestyle / character-gen prompts, reference images, category tags). It is the same panel exposed
+  in the Character Studio header and at `/image-workshop`; see **`docs/IMAGE_WORKSHOP.md`** for the
+  full guide.
 
 ## Generate Sample (1.44.0)
 

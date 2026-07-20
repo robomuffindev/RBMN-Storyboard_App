@@ -11,6 +11,7 @@ import BatchRunDetail from '@/components/BatchMode/BatchRunDetail';
 import ShortcodeRedirect from '@/components/Chapters/ShortcodeRedirect';
 import CharacterStudioPage from './components/CharacterStudio/CharacterStudioPage';
 import ToolsPage from './components/Tools/ToolsPage';
+import ImageWorkshopPage from './components/ImageWorkshop/ImageWorkshopPage';
 import VNCCSNativePage from './components/VNCCSNative/VNCCSNativePage';
 import StoryboardPage from './components/Storyboard/StoryboardPage';
 import MobileProjects from './components/Mobile/MobileProjects';
@@ -36,6 +37,7 @@ function App() {
         <Route path="/studio/vnccs" element={<VNCCSNativePage />} />
         <Route path="/studio/vnccs-klein" element={<VNCCSNativePage variant="klein" />} />
         <Route path="/tools" element={<ToolsPage />} />
+        <Route path="/image-workshop" element={<ImageWorkshopPage />} />
         <Route path="/batches" element={<BatchesDashboard />} />
         <Route path="/batches/:batchRunId" element={<BatchRunDetail />} />
         <Route path="/s/:code" element={<ShortcodeRedirect />} />

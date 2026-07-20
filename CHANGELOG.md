@@ -1,5 +1,1633 @@
 # Changelog
 
+## [1.199.8] - 2026-07-20
+### Fixed -- klein_poses.py regression fully recovered (base-set generation)
+Recovered the ~11.5KB of base-set work the stale-stage trap reverted in v1.199.6,
+by replaying my own edits from the session transcript onto the file (not
+hand-guessing) and verifying with a hard gate:
+- Restored `resolve_turnaround_lora`, `resolve_matchpose_lora`, and the mesh-ready
+  A-pose framing + `rotate` novel-view mode in `klein_preview_prompt` /
+  `klein_refbase_prompt`, plus `keep_clothes_mask` / `turnaround_lora` /
+  `consistency_lora` on `build_klein_refbase_graph`.
+- Caught and fixed a reconstruction bug mid-recovery (one transcript edit was a
+  partial function replace that would have truncated `klein_refbase_prompt` — its
+  tail was re-joined from the prior edit).
+- Re-applied the v1.199.6 base-framing headroom clause on top of the restored
+  prompts (New-base + Clone-base non-mesh stances).
+- **Verification:** all four backend modules `py_compile`; an AST contract-check of
+  every `klein_poses.*` reference in `vnccs_native.py` shows **0 undefined symbols
+  and 0 kwarg mismatches across 87 call sites**; internal name resolution in the
+  restored functions is clean.
+
+To prevent recurrence: no longer editing/shipping files pulled via
+`device_stage_files` (stale per-path cache) — the live device copy is read fresh
+immediately before editing.
+
+Backend change — restart `run.bat`.
+
+## [1.199.7] - 2026-07-20
+### Fixed -- REGRESSION recovery: stale-stage trap reverted qwen_clothes.py
+The v1.199.4/1.199.6 ships used a `device_stage_files` result that served a STALE
+cached copy of `qwen_clothes.py` (older, missing features), which then overwrote the
+good device file — the exact rollback trap the handover warns about. Restored from
+the session transcript + verified (compiles; every symbol the backend calls exists;
+AST contract-check of all 15 call sites shows 0 kwarg mismatches):
+- `ref_weight` support (the crash: `build_qwen_remove_clothes_graph() got an
+  unexpected keyword argument 'ref_weight'`) — restored `_clamp_ref_weight`, the
+  `_encoder_inputs` weight1/2/3 params, and `ref_weight` on `build_qwen_pose_set_graph`
+  (weight2) + `build_qwen_remove_clothes_graph` (weight1).
+- `REMOVE_CLOTHES_PROMPT_SOFT` restored to the v1.197.1 detailed bra prompt (was
+  reverted to "White underwear"); `REMOVE_UNDERWEAR_PROMPT` re-added (was missing →
+  would crash the NSFW two-pass strip).
+
+### KNOWN-BROKEN (recovery in progress) -- klein_poses.py also stale-reverted
+The same trap reverted ~11.5KB of base-set work in `klein_poses.py`
+(`resolve_turnaround_lora`, `resolve_matchpose_lora`, mesh-ready/`keep_clothes_mask`/
+`turnaround_lora` params, tiptoe/flat-feet strip fix) — breaks Klein base-set
+generation. NOT in git (was uncommitted). Being recovered from the transcript; see
+the paired message. `pose_render.py` was verified clean (git base + intended edits).
+
+## [1.199.6] - 2026-07-20
+### Changed -- Headroom is now BAKED INTO base + pose renders (no more dress-time pad seam)
+Replaces the v1.199.4 dress-time headroom pad (which produced the visible "hard cut"
+strip at the top of dressed outputs) with headroom baked in at generation time, so
+the whole image is one coherent render — hats/headwear have room AND there's no seam.
+- **Base generation framing:** the New-character base prompt and the Clone
+  reference-base prompt (`klein_poses.klein_refbase_prompt` + the new-base builder)
+  now ask for "a small margin of empty space above the head and below the feet (the
+  figure centered, not touching the top or bottom edges)". New/Clone base renders
+  come out at the correct height natively.
+- **Pose captures:** `pose_render.render_pose_captures` now reserves ~14% headroom
+  (top) + 4% margin (bottom): the uniform fill drops from 0.90 → 0.82 and each pose
+  is biased downward so its head sits 14% below the top edge (bottom-aligns instead
+  if a tall pose would clip the feet). Applied uniformly so character size stays
+  constant across a set. Affects all Qwen/Klein pose sets + the mesh turnaround
+  (slightly smaller figure with headroom — beneficial, nothing clipped).
+- **Dropped the dress-time pad:** `qwen_clothes.pad_headroom` is no longer called in
+  the Qwen clothes (Pass A base) or pose-set (Pass B captures) paths.
+- **NOTE:** base images made before v1.199.6 have no baked headroom — **re-render
+  the base (New/Clone), then the costume**, for hats to have room. Pose sets pick up
+  the renderer headroom immediately.
+
+Backend change — restart `run.bat`, then re-render the base + costume.
+
+## [1.199.5] - 2026-07-20
+### Added -- Outfit reference images now PERSIST per costume
+Setting an outfit reference photo used to be session-only (transient worker upload):
+switch costumes, reload, or restart a worker and it was gone. Now it's saved
+app-side and tied to the costume, so you can come back later and re-render / tweak
+settings with the SAME reference.
+- Backend: the uploaded reference is pulled off the worker and stored under
+  `<project>/_studio/garments/<character_id>/<costume>.png`. New endpoints
+  `POST /clothes/garment/{cid}/{costume}/save`, `GET …/meta`, `GET …` (serve),
+  `DELETE …`. Both clothes preview endpoints gained `use_saved_garment` — when set
+  (and no live upload), they re-upload the saved bytes to the worker for the render,
+  so it works even after a worker restart.
+- Frontend: uploading a garment auto-saves it for the costume; switching to a
+  costume that has a saved reference restores it (with a "💾 saved with this outfit"
+  badge); ✕ clear also deletes the saved copy. The costume-preview call sends
+  `use_saved_garment` when the restored (worker-less) reference is in use.
+
+### Investigated -- the "hard cut" at the top of dressed outputs
+Confirmed the seam is the v1.199.4 dress-time headroom pad (a flat strip added above
+the head), NOT a base-image property: our base "New/Clone" renders are generated at
+`klein_canvas` (default 1024×1216) framed "full body head to toe", so the head sits
+at the top edge with ~no headroom — hence the pad. The cleaner fix (bake headroom
+into base + pose generation so no pad/seam is needed) is scoped but NOT done here, as
+it changes framing for every base render and needs on-worker validation.
+
+Backend + frontend — restart `run.bat` and refresh the browser.
+
+## [1.199.4] - 2026-07-20
+### Fixed -- Hats/headwear dropped in Qwen dressing: no headroom above the head
+Root cause (found by diffing our Qwen clothes path against the real VNCCS
+ClothesDesigner node line by line): the prompt, encoder params (target 1024,
+weights 1/1/1, latent_image_index 1, vl_size 384), ClothesCore LoRA, and sampler
+(euler/simple 4-step CFG 1 — their Control Center `DEFAULT_MODEL_SCHEDULER="simple"`
+overrides the node's karras default) ALL match VNCCS exactly, and VNCCS uses no
+AuraFlow/CFGNorm. The ONE divergence: **the image we dress.** VNCCS always dresses a
+tall **640x1536 "Naked"/"Original" base with empty space above the head**; we dress
+the Klein base render / pose captures, which frame the head at the very TOP edge.
+Qwen-Image-Edit can only paint INSIDE image1's canvas, so a hat has nowhere to go
+and gets clipped or omitted.
+- New `qwen_clothes.pad_headroom()` adds ~15% empty canvas above (and 3% below) the
+  figure, filled with the image's own background colour (keys out cleanly), before
+  the Qwen edit. Applied to **Pass A** (the base/sprite dressed in
+  `clothes_qwen_preview`) and **Pass B** (each pose capture in `_qwen_submit`, which
+  is image1 and defines the posed output canvas). Now hats/hoods/ears/tall hair have
+  room to render, matching VNCCS's tall-base framing.
+- **Note:** re-generate the costume PREVIEW after restarting so the saved costume
+  version includes the hat; pose sets built from it then carry it. Costume versions
+  made before this fix won't retroactively gain headwear.
+
+Backend change — restart `run.bat` (then re-run the costume preview).
+
+## [1.199.3] - 2026-07-20
+### Fixed -- Clothes tab: the 🟣 Qwen (VNCCS) engine now STAYS selected
+The Clothes-tab engine toggle (`clothesSub`) was plain component state defaulting to
+🧪 Klein, so every return to the tab reset it to Klein — meaning costumes the user
+thought were rendering through the VNCCS-faithful Qwen path were silently going
+through the Klein reference-edit path instead. Now persisted like the Create/Clone
+engine: saved as `vnccs_clothes_engine`, restored on load, and auto-saved on change.
+This matters because the two paths handle headwear very differently (see below).
+
+### Why hats/headwear were dropping (investigation, no behavior change here)
+- **Qwen (VNCCS) path = faithful:** `qwen_dress_prompt` is VNCCS ClothesDesigner's
+  `construct_prompt` verbatim — "Dress the character:" + the top/bottom/**head**/
+  shoes/face slots — and the reference path uses VNCCS's exact "Dress character:
+  clothes, footwear and **accessories** from Picture 2". Head/hat is included.
+- **Klein path = our own reference-edit, and it suppresses hats two ways:** (1) the
+  base rides as a masked reference latent that KEEPS face+hair (+ a late identity-lock
+  re-assertion of face+hair), so the hatless head is held exactly where a hat would
+  go; (2) with a garment reference attached, `klein_clothes_prompt` explicitly says
+  "Do not add any accessories, jewellery, bags, hats or shoes that are not clearly
+  visible in image 2." So Klein tends to keep the bare head.
+- **Reference-image costumes lose typed detail by design (both VNCCS and us):**
+  attaching a garment ref switches to "reproduce from the image" and DROPS the text
+  slots — so details you typed but that aren't visible in the photo won't appear.
+  This mirrors VNCCS clone mode exactly.
+
+Frontend-only — just refresh the browser.
+
+## [1.199.2] - 2026-07-20
+### Added -- 🏷 Category tags in the Image Workshop gallery
+Optional tags to categorize what an image IS — **Character · Pose · Item · SceneBG ·
+Outfit · Face · Style · Prop** presets (toggle chips) plus free-text custom tags.
+- **At save time:** the review Save bar has a "Tags (optional)" chip row; whatever's
+  selected is applied to every image saved in that batch.
+- **In the gallery:** each tile shows its tags; a 🏷 button opens a per-image tag
+  editor (same preset chips + custom) to add/remove tags after the fact; and a tag
+  **filter chip row** (distinct tags across the gallery, most-used first) narrows the
+  grid to one category. Tags are searchable alongside the existing prompt search.
+- **Backend (`image_workshop.py`):** `tags` persisted on each gallery record;
+  `/save` accepts `tags`; `/gallery` accepts a `tag` filter and returns `all_tags`;
+  new `POST /gallery/tags` replaces an item's tag set. Tags are normalised (trimmed,
+  de-duped case-insensitively, capped 12×40 chars). Older saves simply have no tags.
+- **Frontend:** `imageWorkshopApi` gains `setTags` + tag params; the panel adds a
+  reusable tag-chips picker used by both the Save bar and the editor overlay.
+
+Frontend + backend both touched — restart `run.bat` and refresh the browser.
+
+## [1.199.1] - 2026-07-19
+### Added -- 🔍 LLM "Describe" buttons on outfit / reference image areas
+Vision-scan a reference photo and auto-fill the relevant fields, in three places:
+- **Try-on garments (Clothes step):** each uploaded garment tile now has a
+  **🔍 Describe** button that vision-scans THAT one photo (`wizardGarmentAnalyze`
+  on the single image) and fills its description box — adopting a detected slot if
+  the garment's current slot comes back empty. Per-row busy state (`tgarDescIdx`);
+  the others are untouched.
+- **Clothes outfit reference:** the existing garment vision-scan is now a prominent
+  primary button relabeled **🔍 Describe outfit → fill slots** (was a faint ghost
+  "Analyze outfit (vision)") so it's easy to find under the outfit reference upload.
+- **Image Workshop references:** each reference thumbnail gets a 🪄 corner button
+  that describes the image with the vision LLM and fills the **Character-gen fields**
+  (flips the panel to Character mode). Because the vision model lives on the VNCCS
+  host, the reference bytes are re-uploaded there (`/api/studio/vnccs/upload`) and
+  scanned via `clone-analyze`. New `uploadToVnccs` + `cloneAnalyze` helpers in
+  `imageWorkshopApi`.
+
+Frontend-only — just refresh the browser.
+
+## [1.199.0] - 2026-07-19
+### Added -- 🎨 Image Workshop: a free-form model playground with one shared gallery
+A new place to experiment with any of our image models outside a single character's
+flow — reachable from **two entry points**: a **🎨 Image Workshop** button in the
+Character Studio header (top-right, next to ⚙ Settings) that opens a full lightbox,
+and an **Image Workshop** tab under **Tools** on the main project screen (plus a
+standalone `/image-workshop` route). Both host the SAME panel, so the gallery is
+shared everywhere.
+
+- **Two generation modes:** *Freestyle prompt* (type anything) and *Character gen*
+  (the same creator-style slots we use elsewhere — sex/age/race/skin/hair/eyes/face/
+  body/height/aesthetic/details — composed into a prompt). Character mode has a
+  **Describe → auto-fill** wizard that reuses the VNCCS host / Ollama character
+  wizard to populate the fields from a sentence.
+- **Reference images:** upload files OR pick from the gallery (up to the model's
+  limit). Klein routes through the `KLEIN_EDIT_*REF` graphs (1–5 refs); Qwen-Image-
+  Edit (`qie`) through `STUDIO_QIE_EDIT` (1–2 refs). Text-only models (Z-Image,
+  Krea 2, Anima) show refs as N/A. "Use as reference" on any gallery image (or a
+  fresh render) feeds it straight back into the next run.
+- **Full suite:** model picker with live online/offline state, count, aspect presets
+  + explicit W/H, 🔒 seed lock / 🔀 random, Anima negative prompt. Review grid with
+  per-image select + download; **Save to gallery** persists the keepers.
+- **Shared global gallery:** search by prompt, download, delete, use-as-reference.
+  Persisted under `<project>/_libraries/workshop/` (gallery + refs + in-flight gens).
+- **Very good mobile UI:** single-column stacks on phones, two-column form/results on
+  desktop (860px breakpoint), large tap targets, full-screen image viewer, wrapping
+  tab bars.
+- **Backend:** new `backend/api/image_workshop.py` router (`/api/image-workshop`) —
+  `models`, `generate`, `gen/{id}`, `upload`, `refs`, `save`, `gallery`, delete. Rides
+  the same ComfyUI dispatcher + workflow builders the rest of the app uses (no new
+  render code); references are uploaded per-worker before each render. Registered in
+  `backend/main.py`.
+- **Frontend:** new `components/ImageWorkshop/` (`ImageWorkshopPanel` reusable core,
+  `ImageWorkshopLightbox`, `ImageWorkshopPage`, `imageWorkshopApi`). Wired into
+  `App.tsx` (route), `Tools/ToolsPage.tsx` (tab), and `VNCCSNative/VNCCSNativePage.tsx`
+  (header button).
+
+Restart `run.bat` (new backend router) and refresh the browser (new frontend).
+
+## [1.198.0] - 2026-07-19
+### Fixed -- 🧊 Mesh turnaround now uses a neutral A-pose (was pose 0's hand-over-chest stance)
+The mesh turnaround preset cloned default pose 0 WITH its bones, so every view struck
+that pose (hand over chest). It now zeroes every bone rotation (keeping the bone names
+the renderer needs) -> the mannequin's neutral rest A-pose, arms clear, per view. This
+also should fix the "left/right leaning backwards" look, since pose 0's stance carried
+a forward lean that read as a lean once rotated to profile.
+
+## [1.197.2] - 2026-07-19
+### Fixed -- Qwen POSE SET failed: pose captures uploaded undecoded (LoadImage error)
+The Qwen pose-set path (`_qwen_submit`) uploaded each pose capture as the raw data-URL
+string from render_pose_captures instead of decoding it to PNG bytes — the same bug
+that hit the clone preview. Every worker's LoadImage failed with "cannot identify
+image file ... pose{i}.png", so all pose-set attempts errored. Now decodes the capture
+before upload (matching the clone-preview and Klein paths). Audited all three capture
+uploads — all decode now.
+
+## [1.197.1] - 2026-07-19
+### Fixed -- SFW strip: bra now covers the chest (was bare chest + straps + bottoms)
+"Dress character: plain white underwear only" was giving straps and panties but a
+bare chest — the bra cups weren't covering the breasts. The SFW prompt now spells it
+out: "plain white bra and white panties; the bra fully covers both breasts and the
+whole chest (not topless, no bare chest)". NSFW nude two-pass is unchanged (working).
+
+## [1.197.0] - 2026-07-19
+### Fixed -- THE reason "strip naked" stayed underwear: no NSFW control in Qwen mode
+The SFW/NSFW (Content) toggle lives inside the Klein-only base controls, which are
+hidden in Qwen mode — so in Qwen you could never actually set NSFW. The nude flag
+stayed false, the clone used the underwear prompt, and the nude two-pass never ran.
+That's why every "strip naked" came out in underwear regardless of the prompt work.
+- Added a **Base body** control to the 🟣 Qwen (VNCCS) panel: 🩲 Underwear (SFW) ·
+  🍑 Nude (NSFW) · 👕 Keep clothes. Nude sets the nsfw flag (→ the two-pass full
+  strip) and Keep clones the outfit; persisted as `qwen_base_body`.
+- Both Qwen previews (create + clone) now derive base_clothing/nsfw from this
+  control instead of the hidden Klein toggle.
+Now the two-pass nude strip (1.196.3) will actually execute — pick 🍑 Nude and it runs.
+
+## [1.196.3] - 2026-07-19
+### Fixed -- NSFW strip: use the LoRA's TRAINED trigger twice (verbose prompts under-stripped)
+The verbose "fully nude, remove all underwear…" prompts were fighting the ClothesCore
+LoRA's training — VNCCS's cloner uses the exact phrase "Undress character" (its output
+is literally "naked_sprites"), and paraphrasing it strips LESS, not more. Reverted both
+NSFW passes to the bare trained trigger "Undress character": pass 1 takes the outfit to
+underwear, pass 2 undresses that to fully nude. (SFW strip still uses "Dress character:
+white underwear", which works.)
+
+## [1.196.2] - 2026-07-19
+### Fixed -- NSFW strip: two-pass strip removes the last underwear layer
+Even with an explicit nude prompt, the ClothesCore LoRA leaves a final underwear
+layer in one pass (bare chest but bra straps / bottoms survive). NSFW strip now runs
+a SECOND focused edit on the pass-1 result whose only job is to remove the residual
+bra/straps/panties -> fully nude. Only runs for NSFW (SFW strip stays a single pass
+to white underwear); adds ~one extra Qwen edit (~1 min) to a naked clone.
+
+## [1.196.1] - 2026-07-19
+### Fixed -- "Strip naked" now goes fully nude (was stopping at underwear)
+The NSFW strip used the bare "Undress character" prompt, which the ClothesCore LoRA
+often interprets as strip-to-underwear (leaving a bra/panties), so a naked strip
+came out partially clothed. The NSFW prompt now spells out full nudity: remove ALL
+clothing AND underwear/bra/panties/lingerie, bare skin, barefoot. (SFW strip ->
+white underwear is unchanged.) Note: the 4-step Qwen edit is inherently a bit
+variable run-to-run (occasional partial strip or an anatomy flip) — the new seed
+lock is the tool for that: roll until it's clean, then 🔒 Lock; bumping Qwen steps
+to 6 in the Qwen panel also steadies it at a small speed cost.
+
+## [1.196.0] - 2026-07-19
+### Added -- Seed lock: keep a good preview's seed for reruns + the pose set
+When you get a base preview you like, you can now lock its seed. Default stays random
+per generation; when you find a keeper, one click reuses that seed.
+- Qwen create/clone previews now SEND the fixed seed (when 🎲 "New random seed" is
+  unticked) and the seed row shows **🎲 last: N · 🔒 Lock this seed** after each
+  preview. Locking sets fixed mode + that seed; a **↩ Use last** shortcut appears in
+  fixed mode when the last preview differs.
+- The locked seed already flows to the pose set (via the existing shared-seed path),
+  so the base and every pose render on the same seed — an extra consistency lever for
+  skin tone / lighting between the base and the poses.
+(No backend change — the Qwen previews already accepted and returned the seed; this
+just wires the UI to use it.)
+
+## [1.195.0] - 2026-07-19
+### Changed -- Qwen clone base PREVIEW now uses a neutral standing pose (not a library pose)
+The clone base preview drove its single render from default library pose 0, so the
+base struck that pose. Like the new-character t2i render, the base should just stand.
+The preview now zeroes every bone rotation of the source pose (keeping valid bone
+names so the renderer is happy) to get the mannequin's rest near-A-pose, front-facing
+— a clean standing base. The full pose SET still uses whatever poses you select
+(including the 🧊 Mesh turnaround preset).
+
+## [1.194.1] - 2026-07-19
+### Fixed -- SFW strip kept the reference's shoes; now bares the feet
+The underwear strip prompt was just "Dress character: White underwear", which never
+told the model to remove footwear — so shoes from the reference survived. Now it's
+"Dress character: plain white underwear only, barefoot with bare feet, remove all
+shoes, footwear and socks", so a stripped base comes out barefoot.
+(Confirmed: the Reference strength dial IS applied to the single clone preview —
+it's sent per-run — so it can be tuned live on the preview before the pose set.)
+
+## [1.194.0] - 2026-07-19
+### Added -- Qwen "Reference strength (body adherence)" dial + strip-fix crash fix
+- **Reference strength dial** in the 🟣 Qwen (VNCCS) pose-set settings panel. It
+  drives the encoder's per-image reference weight (quadratically mapped node-side:
+  influence = weight²), so >1.0 holds the reference BODY harder — the lever for
+  "body came out slightly slimmer than the reference." 1.0 = VNCCS-exact. Applies to
+  the base clone PREVIEW (sent per-run) and the full Qwen pose set (via the saved
+  `qwen_ref_weight` setting). Wired through `_encoder_inputs` (weight1 on the undress
+  step where the body is set; weight2 on the pose step where image2 is the body) and
+  clamped 0.5–1.8.
+- **Fix:** the 1.193.1 strip fix read `body.nsfw`, but `QwenCloneIn` has no such
+  field — the clone preview would have raised AttributeError. Now reads nsfw from
+  `character_info` (where the clone actually carries it), so SFW strip → underwear
+  and NSFW → nude both work without crashing.
+
+## [1.193.1] - 2026-07-19
+### Fixed -- Qwen clone STRIP now leaves underwear on (was going fully nude)
+The Qwen clone always ran the "Undress character" prompt for any non-keep base
+outfit, so SFW **Strip** produced a fully nude character instead of white underwear
+(Naked and Keep were fine). Now the undress prompt is chosen by intent: an explicit
+undress_prompt wins; otherwise NSFW → "Undress character" (nude), and SFW strip →
+"Dress character: White underwear" so the character keeps underwear.
+
+## [1.193.0] - 2026-07-19
+### Added -- 🧊 Mesh turnaround one-click pose preset
+New **🧊 Mesh turnaround** button in the pose picker (next to All/None). One click
+selects exactly the four views a 3D mesh needs — front / right / left / back — by
+cloning a real default pose (so it carries valid skeleton bones the renderer needs)
+and re-aiming the 3D mannequin per view via `modelRotation` (0° / 90° / −90° / 180°).
+The set becomes just those four, ready to Generate. Works for both Klein and Qwen
+pose sets — and since Qwen handles side/back well, this is the path to test the
+"pose set → 3D mesh" idea. (First cut uses the default pose's stance rotated; if the
+arms overlap the torso on the side/back views, the next step is a dedicated arms-out
+A-pose stance for cleaner mesh input.)
+
+## [1.192.0] - 2026-07-19
+### Fixed -- Qwen mode now shows Qwen pose-set settings, not Klein's
+The "Pose render settings" panel was gated only by `variant === 'klein'`, so in Qwen
+(VNCCS) mode it still showed all the Klein-only dials (mannequin/skeleton pose input,
+Klein pose LoRA, PuLID, FaceDetailer, Consistency LoRA, etc.). Now:
+- The Klein pose-render panel is gated to Klein mode only (`kleinCreate`).
+- A new **🟣 Qwen (VNCCS) pose-set settings** panel shows in Qwen mode with the
+  suite's real dials — steps (4), CFG (1.0), PoseStudio LoRA strength (1.0), target
+  size (1024) — all at VNCCS-exact defaults. This panel is where our Qwen-specific
+  tweaks will live once every stage is confirmed VNCCS-faithful.
+- Engine note under the generate button now reflects the active engine (Klein vs
+  the QIE2511 PoseStudio pipeline).
+
+## [1.191.0] - 2026-07-19
+### Fixed/Changed -- Qwen VNCCS mode aligned to VNCCS's real workflow + sticky engine tab
+Compared our Qwen graph builders to VNCCS's actual "Pose Studio QWEN" reference
+workflow (subgraph definitions) and closed the biggest gap:
+- **ModelSamplingAuraFlow (shift 3.0) + CFGNorm (strength 1.0) added to the Qwen
+  model chain.** VNCCS's "QWEN Loader" patches the model with both right after the
+  Lightning LoRA; we were skipping them, so Qwen-Image-Edit's flow-sampling shift
+  and CFG normalisation were wrong — softening fidelity (body build, fine detail).
+  Now every Qwen graph (dress / undress / pose set) matches VNCCS's chain. This is
+  the likely cause of the "body slightly less plump than the reference" gap.
+- **Create/Clone engine tab is now sticky.** Generating (or selecting) Qwen in the
+  Create/Clone flow persists it (`vnccs_create_engine`), so Qwen stays the default
+  tab/mode across refreshes instead of resetting to Klein. (Also fixed the base
+  derive-method setting to auto-persist on change.)
+
+More VNCCS-alignment polish (Qwen-specific settings surfacing, mesh-ready
+turnaround pose set, encoder prompt/instruction parity) is in progress.
+
+## [1.190.1] - 2026-07-19
+### Fixed -- Qwen clone preview: pose capture uploaded undecoded (worker LoadImage error)
+The Qwen (VNCCS) CLONE preview uploaded the neutral pose capture as the raw data-URL
+STRING returned by render_pose_captures, instead of decoding it to PNG bytes first
+(every other pose path calls decode_capture). The worker wrote a text file, so its
+LoadImage failed with "cannot identify image file ... pose0.png" and the whole clone
+preview 502'd. Now decodes the capture before upload. (The undress step always
+worked because it uploads real collage bytes; only the pose upload was affected.)
+Surfacing the real ComfyUI node error (1.190.0) is what pinpointed this.
+
+## [1.190.0] - 2026-07-19
+### Changed -- worker render errors now report the REAL cause
+`_wait_first_image_bytes` (used by every Klein/Qwen preview, pose, upscale and
+clone path) reported a generic "reference upscale errored on the worker" for ANY
+worker-side failure — misleading, and useless for debugging (e.g. a Qwen clone
+preview showed "reference upscale errored" when the actual failure was elsewhere).
+It now parses the ComfyUI history's execution_error and raises with the failing
+NODE TYPE + exception message, so the UI shows the true cause (missing model,
+missing node, OOM, etc.). New helper `_comfy_error_detail`.
+
+## [1.189.3] - 2026-07-19
+### Fixed -- matchpose "pose renderer unavailable" error (empty bones)
+The neutral rotation pose was built with empty bones, which is right for the
+reference-driven base (it never renders a mannequin) but wrong for MatchingPose:
+the app-side mannequin renderer needs real joint data, so an empty-bones pose made
+it return nothing -> "app-side pose renderer unavailable (CharacterData missing?)"
+on every view. Now it keeps the baseline pose's real skeleton and only re-aims the
+camera (modelRotation) per view. (If the baseline pose 0 isn't a clean neutral
+stance, the next step is building an explicit A-pose skeleton, but this clears the
+render error first.)
+
+## [1.189.2] - 2026-07-19
+### Fixed -- MatchingPose base sets no longer pull in an existing 3D mesh asset (warping)
+The v1.189 matchpose path forced `mesh3d_pose=True`, which used the character's
+EXISTING rigged 3D clay body as the pose reference. That's backwards: base sets are
+the INPUT that builds the mesh, so they must not depend on a previously-generated 3D
+asset — and a stale/old rig renders a mangled clay capture that MatchingPose then
+copies as a warped, distorted body (the reported issue). Now forced OFF: the
+rotation uses the GENERIC posable mannequin built only from the character's
+description, and the approved base still supplies the real body via the identity
+reference. Base-image generation is now fully independent of the mesh-step 3D assets.
+
+## [1.189.1] - 2026-07-19
+### Fixed -- matchpose crashed with a NameError; MatchingPose now owns all derived views
+- `_matchpose_derive_view` referenced `klein_poses` without importing it in that
+  scope -> every matchpose view failed with "name 'klein_poses' is not defined".
+  Added the import.
+- When MatchingPose is selected it now takes priority over a tagged side/back photo,
+  so every derived view locks its body to the approved base (one consistent body for
+  meshing) instead of a per-angle photo strip that drifts the body.
+
+## [1.189.0] - 2026-07-19
+### Added -- MatchingPose turnaround for base sets (body-shape-preserving, opt-in)
+These base sets exist to build a clean multi-view BODY for 3D meshing, so body
+shape has to survive the rotation. New opt-in derivation method routes the derived
+views through the PROVEN mannequin+MatchingPose pose pipeline instead of rotating a
+flat front:
+- **New control** "How to turn the other views" on the base-set panel:
+  **Reference-edit** (default, unchanged) or **🧍 MatchingPose (mannequin)**. Setting
+  `klein_base_derive_method` = `reference` | `matchpose`; per-run `derive_method`.
+- **How matchpose works:** each derived view (right/left/back + mesh A-pose) reuses
+  `_klein_submit` with a neutral rest-stance pose at that orientation. The
+  anchor/approved base is the IDENTITY (lock_base) so the body shape is taken from
+  the already-correct base; the mannequin/clay supplies only the ORIENTATION; the
+  MatchingPose LoRA (trigger auto-prepended) does the transfer. `mesh3d_pose` is
+  forced on so it uses the character's rigged 3D clay body when present (auto), else
+  the generic mannequin.
+- **No new download needed:** you already have `Maching_Pose_9B_Rank256.safetensors`
+  on the pose-set workers, and the mannequin comes from PoseStudio — the separate
+  nhathoangfoto Mannequin LoRA is NOT required.
+- Tagged real side/back photos still win (hard-strip); Reference-edit stays the
+  default so nothing regresses; Regenerate honors the set's method. `resolve_matchpose_lora`
+  finds the LoRA and warns if it's missing. Docs updated.
+
+## [1.188.1] - 2026-07-19
+### Added -- Turnaround LoRA trigger word (commercial-clean route groundwork)
+Going with the Apache-2.0 Klein 9B route (nhathoangfoto MatchingPose/Mannequin).
+Those LoRAs activate via a trigger word, so the slot now supports one:
+- New optional **Trigger word** field on the Turnaround LoRA control (setting
+  `klein_base_turnaround_lora_trigger`). When set, it's prepended to the START of
+  the derived-view prompt only (e.g. `matchingpose9b`). Blank = triggerless LoRA.
+- Honest scope note: `MatchingPose` is a TWO-STAGE, pose-transfer LoRA that also
+  needs a per-view **mannequin pose reference image** — that image-feeding step is
+  NOT yet wired, so MatchingPose won't rotate through the slot on its own until it
+  is. The LoRA-stack + trigger plumbing is ready; the mannequin-pose integration is
+  the next chunk of work. See `docs/character_studio/base-set-view-derivation.md`.
+- The improved prompt/reference rotation from 1.187.x stays the working default.
+
+## [1.188.0] - 2026-07-19
+### Added -- Turnaround LoRA slot for base sets (the trained way to rotate views)
+The reliable way to get right/left/back views that actually turn (instead of
+hand-easing reference weights) is a trained character-turnaround / multi-view
+LoRA. New optional slot, applied ONLY to the DERIVED views (right/left/back + the
+mesh A-pose) so the front anchor stays clean:
+- **Settings/UI:** Character Studio → Klein → "Identity & consistency" →
+  **Turnaround LoRA (base sets)**: On/Off, an optional exact filename (blank =
+  auto-match a file named turnaround / multi-view / sprite / 4-view / rotation),
+  and a strength (default 1.0). Keys: `klein_base_turnaround_lora`,
+  `klein_base_turnaround_lora_name`, `klein_base_turnaround_lora_strength`.
+- **Backend:** `resolve_turnaround_lora()` verifies the file is on the worker and
+  returns a no-op until it's present AND enabled; `build_klein_refbase_graph`
+  stacks it as a `LoraLoaderModelOnly` after the Consistency LoRA. Nothing changes
+  until you drop a LoRA on the worker and turn it on.
+- **Install:** put the `.safetensors` in each base-set worker's
+  `ComfyUI/models/loras/`; some multi-view LoRAs also need the `ComfyUI-EditUtils`
+  custom node. Candidate: Zovetry "Flux2 Klein Multi-view Character Generation".
+  Most such LoRAs carry the FLUX.1 [dev] NON-COMMERCIAL license.
+- **Docs:** `docs/character_studio/base-set-view-derivation.md` covers the slot and
+  records the Qwen-Image-Edit alternative (dx8152 Multiple-angles) for later, in
+  case we want that route or a hybrid Qwen-rotate → Flux-face-refine backend.
+
+## [1.187.4] - 2026-07-19
+### Fixed -- set views: back showing front torso, side strip keeping clothes, harder turns
+Follow-up to 1.187.3 from a closer look:
+- **Back view had the FRONT torso.** The back came out back-oriented but the front
+  chest/belly bled through onto it. The back reference is now eased harder
+  (strength <=0.85, released by 50%) and the back negative explicitly rejects front
+  anatomy — chest, breasts, belly, navel, face, "front and back at once",
+  "see-through torso" — so the back shows the back (shoulder blades, spine, glutes).
+- **Right/side still front-facing.** Eased the front reference further for the
+  90-degree profiles (strength <=0.7, released by 45%) so the body actually turns
+  rather than just tipping the head.
+- **Side-reference strip kept pants/shoes/tip-toe.** Root cause: the reference
+  latent's **clothing mask was ON**, so it reproduced the outfit. Side/back
+  reference-photo strips now run a HARD strip — the clothing mask is dropped (the
+  prompt fills those regions with the underwear/nude base instead of copying the
+  pants/shoes) and the reference hold is eased so the tail can finish stripping.
+  The body-shape mask stays on, so the good proportions from 1.187.3 are kept.
+Rotations still keep the outfit (clothing mask on); only strips drop it.
+
+## [1.187.3] - 2026-07-19
+### Fixed -- set views: rotation reproducing the front, tip-toe feet, body slimming
+Three fidelity issues in the base set, from a close look at a real run:
+- **Right/side view was just the front again.** On a 90-degree side view with no
+  tagged side reference, the held front reference kept "winning" and reproduced
+  the front pose instead of turning. Right/left profiles now ease the front
+  reference harder (strength <=0.9, released by 55% of the render) and the derived
+  side/back negatives explicitly suppress "front-facing / facing the camera /
+  same pose as the reference", so the requested rotation actually happens.
+- **Feet stuck on tip-toe after stripping heels.** Removing high heels left the
+  feet pointed/arched as if still wearing them. The strip prompt now forces a flat
+  plantigrade stance (soles flat, heels down) and the negative rejects tiptoe /
+  pointed-toe / en-pointe / raised-heel postures.
+- **Fuller figures getting slimmed/"refined".** The strip render was idealizing a
+  heavier character thinner. The prompt now explicitly keeps the reference's exact
+  weight/build (belly, hips, thighs, limb thickness; keep a plus-size figure
+  plus-size) and the negative rejects "slimmed down / idealized / beautified /
+  smaller waist / airbrushed".
+Note: a 90-degree turn from a single flat front is inherently hard; tagging a real
+side/back photo with the angle chip still gives the most accurate side views.
+
+## [1.187.2] - 2026-07-19
+### Fixed -- squish, for real: pad the reference with transparent space, don't stretch
+The v1.187.1 "match the base's tight crop" over-corrected: a tall upscaled base
+(e.g. 1035x2048) made the render frame too NARROW, so the A-pose lost room and
+feet got cropped. Per the diagnosis — the base has a transparent background, so
+the fix is to ADD blank space at the sides to hit the target aspect, never
+stretch or crop. Two changes:
+- **Set runner (use_active_base only).** The approved base is measured by its
+  CHARACTER bounding box (alpha-aware), a generous portrait is sized from that
+  aspect + margin (1.6x for mesh's A-pose arms, 1.35x otherwise), and the base is
+  PADDED to that frame with transparent space before it's held as the reference.
+  Fresh sets are untouched: they render the front into the default generous
+  canvas and every derived view matches it, so view 0 never desyncs.
+- **normalize_base_set.** Now preserves the alpha channel: it crops to the alpha
+  bbox, scales every view uniformly (aspect never distorted), and pads to the
+  common frame with TRANSPARENT (0,0,0,0) space instead of flattening to RGB and
+  filling with a solid colour. Solid-background renders keep the legacy fill path.
+
+## [1.187.1] - 2026-07-19
+### Fixed -- the REAL squish cause: render aspect didn't match the anchor base
+Diagnosed from a real case: base 1035x2048 (aspect 0.50, a tall upscaled single)
+but the set rendered at 812x1216 (0.67) — the held reference got stretched into
+the wider frame ("shortened, kept the width"). The v1.187 portrait cap (0.7x)
+still wasn't as tall as the base, so it didn't fully fix it. Now the set/mesh
+views render at the SAME aspect ratio as the anchor image itself (read its real
+pixel dimensions → match, e.g. a 0.50 base renders ~608x1216), so the reference
+is never stretched. Fresh sets match their generated front. Regenerate reuses the
+same anchor-matched aspect.
+
+## [1.187.0] - 2026-07-19
+### Fixed -- set views forced to a portrait frame so the figure can't be squished
+Verified empirically that the framing/normalize step preserves aspect exactly
+(a synthetic test kept every figure's aspect ratio), so the squish was the render
+filling a too-wide frame: a full-body / A-pose figure drawn into a near-square
+canvas (e.g. your 1024x1216 canvas-width setting) gets stretched wide. Set and
+mesh views now render at a forced PORTRAIT frame — width capped at 0.7x the
+height (≈848 wide for a 1216-tall canvas), multiples of 16 — regardless of the
+character's canvas-width setting, so the figure keeps natural tall proportions.
+Applies to the run and to ↻ Regenerate.
+
+## [1.186.0] - 2026-07-19
+### Fixed -- Stop now actually halts renders + sets no longer hijack the active base
+- **Stop really stops.** Cancelling a set run now interrupts every worker it
+  touched (ComfyUI POST /interrupt + queue clear), so in-flight renders halt
+  instead of finishing. Added `VNCCSClient.interrupt()`; the cancel endpoint
+  calls it on all hosts, and an interrupted run reports "stopped" (not "error").
+- **The single stays your main reference.** A 4-view or 🧊 Mesh-ready set no
+  longer becomes the ACTIVE base (which drives pose/clothing identity) — only a
+  single base auto-activates (and the very first version, so a character always
+  has one). Sets are saved as versions; use "Set active" to switch manually.
+  `save_base_preview(make_active=…)`.
+- **3D still finds the set automatically.** Because the active base is now the
+  single, "🧊 Generate 3D body" now picks the best MULTI-VIEW version for its
+  input — the active if it's already a set, else the latest Mesh-ready, else any
+  4-view set — so generating a mesh set feeds the 3D body without having to be
+  the active base.
+
+## [1.185.0] - 2026-07-19
+### Added -- use a real side/back reference photo for that view of a set
+You can now tag a Clone reference with its ANGLE (an ∠ chip under each reference
+cycles front → left → right → back). When you generate a 4-view / mesh set, any
+view that has a matching tagged photo is built by stripping THAT real photo from
+that angle — the actual body from the side — instead of a rotated guess of the
+front. Views without a tagged photo still derive from the front as before, so it
+degrades gracefully. Front/identity refs (∠ front) are unchanged and, as always,
+every body/full ref already feeds the body-match latents so the base build uses
+front + side together. Backend: the set runner matches `cloner_images[].angle`
+to the view and strips the side photo on the pinned worker. (Note: the angle tag
+is per-session for now — re-tag after a reload; ↻ Regenerate on a side-ref view
+currently re-derives from the front rather than the side photo.)
+
+## [1.184.0] - 2026-07-19
+### Added -- "🩲 SFW + NSFW strip pair" one-click stripped-base pair
+A new button on the Create and Clone tabs generates BOTH the SFW (underwear) and
+NSFW (nude) stripped base from the same references in one go — the "perfect
+stripper" mannequin pair — saved as two base versions you can switch between.
+Runs the base twice with base_clothing=strip (nsfw off then on); reuses the full
+identity chain, so the body build is reconstructed from all your references
+(front + side full-body both feed the body-match reference latents; the face
+closeup drives the face). Frontend-only.
+
+## [1.183.1] - 2026-07-19
+### Fixed -- mesh/set views looked vertically squished (compressed proportions)
+The framing/normalize step scales uniformly (it does not distort aspect), so the
+squish was the A-pose generation compressing the figure to fill a near-square
+frame. The mesh and rotate prompts now demand natural, correctly-proportioned
+human anatomy at full standing height — explicitly NOT stretched, squashed or
+vertically compressed — with clear margin above the head and below the feet, and
+"squashed / stretched / vertically compressed / distorted proportions" added to
+the negatives. If it persists, a taller render canvas is the next lever.
+
+## [1.183.0] - 2026-07-19
+### Added -- in-UI 3D viewer (orbit/rotate) to inspect a generated mesh
+A new "🧊 View 3D" button next to the GLB/FBX download links in the 3D-body panel
+opens the generated mesh in an orbit viewer lightbox — drag to rotate, scroll to
+zoom, right-drag to pan — so you can check the shape, limbs and proportions for
+weirdness instead of assuming it's right. Uses Google's <model-viewer> web
+component, loaded from a CDN on first use (browser needs internet the first time;
+if it can't load, the lightbox falls back to the GLB download). Shows the
+untextured GLB mesh; auto-rotates on open.
+
+## [1.182.2] - 2026-07-19
+### Fixed -- rotated side view rendered TWO fronts (front-reference duplication)
+A side view sometimes came out as two front-facing bodies. Cause: the derived
+view held the front reference at full strength the whole way, so the model
+reproduced the front AND added the turned copy instead of actually turning the
+body. For rotate/derive views the front reference is now eased — strength capped
+at ~1.1 and released over the last third (ref-end 0.65) so identity locks early
+(crop + PuLID keep the face) but the body is free to turn into a single figure —
+plus explicit single-figure language in the prompt and anti-duplication negatives
+(two people, duplicate, cloned, mirrored copy, split image, side by side…).
+
+## [1.182.1] - 2026-07-19
+### Fixed -- rotated set views were shadowing/darkening (directional light on rotation)
+The rotated views read like they were lit by a central/front key light, so as the
+body turned the far side fell into shadow and the skin darkened (and the two side
+views differed in brightness). The rotate prompt now demands completely FLAT,
+EVEN, OMNIDIRECTIONAL ambient light — no single/central light source, no key or
+rim light, identical brightness/exposure to the reference from every angle, so
+turning the body can't self-shadow — and a set of anti-shadow / anti-directional-
+light negatives (shadow, cast/drop/contact shadow, hard light, key light,
+dramatic/high-contrast lighting, darkened skin, underexposed…) is added to the
+derive/rotate renders. Prompt-side change; existing 4-view/mesh flow otherwise
+unchanged.
+
+## [1.182.0] - 2026-07-19
+### Fixed -- set views now ROTATE the character (not re-strip it) + per-view regenerate + column scroll
+- **Rotate, don't strip.** The derived views of a 4-view / mesh set were running
+  through the base STRIP chain (strip release, SAM cleanup, strip negatives) — so
+  they were rebuilding/neutralising the character instead of just showing the
+  approved front from another angle. A set is a *rotation*, not a strip: the
+  derived views now use a dedicated novel-view prompt that keeps the character
+  EXACTLY (face, hair, body, skin AND clothing/state/colours) and changes only the
+  camera angle, holds the front reference the whole way (no release), and skips
+  SAM/strip negatives. New `klein_refbase_prompt(rotate=…)` +
+  `view_override.derive`; the front render is unaffected.
+- **Per-view regenerate.** Each finished view tile has a ↻ Regenerate button —
+  re-rolls just that view with a new seed (keeps the character, redraws that
+  angle) if one came out off. Then 💾 Save set files the current set (after any
+  regenerates) as a base version. Backend: `/base-set/regen/{id}/{idx}` +
+  `/base-set/save/{id}`, per-view `rev` for cache-busting the thumbnail.
+- **Column scrolling.** All three studio columns now scroll independently and
+  stay pinned (sticky, own scrollbar) like the preview column already did — so
+  scrolling options on one side no longer drags the others through blank space.
+
+## [1.181.2] - 2026-07-19
+### Changed -- anchor choice persists + live set thumbnails are clickable
+- The "Anchor the set on" choice (fresh front / ★ approved base) now saves with
+  your other Klein dials, so it's remembered as your last choice across reloads
+  (persisted as `klein_base_set_anchor`; restored on load, reset with the rest).
+- The live per-view thumbnails in a set run are now clickable — click any
+  finished view to open it large in the lightbox for review.
+
+## [1.181.1] - 2026-07-19
+### Fixed -- "Cannot access 'JC' before initialization" when starting a 4-view/mesh set
+The live `baseSetPanel` (defined early in the component) passed the Stop
+handler as `onClick={stopBaseSet}`, but `stopBaseSet` is declared later — so the
+moment a set run set `baseSetData` and the panel rendered, React read the
+handler value before its `const` had initialized (temporal dead zone), crashing
+the page. Wrapped it as `onClick={() => stopBaseSet()}` so the reference is
+deferred to click time. No behaviour change.
+
+## [1.181.0] - 2026-07-19
+### Added -- "Anchor the set on the approved base image"
+When generating a 4-view or 🧊 Mesh-ready set you can now choose the starting
+point: render a fresh front, or anchor on the base image you've already approved
+(the one selected in the preview) so the set is guaranteed to build from what you
+signed off on.
+- New "Anchor the set on" toggle in the base-mode picker (shown for set/mesh):
+  **A fresh front** (default, today's behaviour) or **★ The approved base**.
+- Backend `BaseSetStartIn.use_active_base` + `_active_base_front_bytes()` loads
+  the active base version's front image. 4-view reuses that approved front as
+  view 0 as-is and derives right/left/back from it; Mesh-ready derives the whole
+  A-pose gray set from it (the approved base is the identity reference). Start
+  returns 409 with a clear message if there's no approved base yet.
+- The picker note explains it and greys the option's usefulness until a base
+  exists.
+
+## [1.180.0] - 2026-07-19
+### Added -- front-anchored base sets with live per-view status, parallel workers & Stop
+Generating a 4-view or 🧊 Mesh-ready set is now a live, cancellable, front-
+anchored run instead of a silent blocking call that re-rolled every view.
+- **Front-anchored generation.** The FRONT view renders first (from your refs
+  for a clone, or T2I for a fresh character), then right/left/back — and the
+  mesh A-pose views — are generated as Klein reference-EDITS of that front. Every
+  view is a view of ONE approved image, so the set matches instead of four
+  independent attempts at the same prompt. (This is the design Lorenzo asked for:
+  references → single base → set built from that base. It also fixes ref-less
+  T2I sets, which now anchor to their own generated front.)
+- **Live per-view status.** A tile per view (front/right/left/back) shows
+  queued → rendering on worker X → done, with the thumbnail streaming in the
+  moment it lands. Poll-based; survives a browser refresh mid-run.
+- **Parallel across workers.** The front renders on the pinned worker; the
+  derived views fan out across all online VNCCS workers (only the front image
+  needs to travel, so distribution is clean even for clones).
+- **Stop.** Cancel mid-set; whatever views already finished are kept and saved
+  as a partial base version (cooperative — an in-flight view finishes, no new
+  views start).
+- Backend: `PreviewIn.host` + `view_override` (render exactly one view on a
+  chosen worker, reusing the whole T2I/clone identity chain); `_BASE_SET_RUNS`
+  + `/base-set/start|status|image|cancel` endpoints + `_base_set_run` coroutine;
+  shared seed across the set. Frontend: Single still uses the plain synchronous
+  path; 4-view / 🧊 Mesh-ready route to the live runner with a per-view grid +
+  Stop button.
+- The old synchronous set path remains in code as a fallback (unused by the UI).
+
+## [1.179.0] - 2026-07-19
+### Added -- "?" how-to guides beside each Generate button
+Each generation type now has a ? button next to its Generate button that opens
+a plain-English guide in a lightbox: what it does, the settings that matter,
+GOTCHAS (including two-dials-together traps), and a best-practice starting
+point. Three guides so far:
+- **base** (Create → Generate Character): view modes, body adherence, strip
+  release, reference masking, match-views + consistency LoRA, cleanup/SAM3.
+  Gotchas cover the clothing-bleed combo (high strip-release + Person+clothes
+  masking), body-adherence + hold over-referencing, consistency-LoRA-too-high +
+  shared-seed flattening the set, and the restore-settings button overwriting
+  defaults.
+- **clone** (Clone → Generate Preview): reference roles, body match, PuLID gating.
+- **pose** (Generate Poses / clothed / costume set): 3D clay vs mannequin, pose
+  LoRA strength, pose-ref release, steps, consistent skin. Gotchas cover the
+  black-contact-line LoRA=1.0 trap and holding the pose ref too long.
+- Frontend-only: `HELP_TOPICS` content map + `helpBtn()` + a lightbox modal;
+  guides are easy to extend (add a topic key + a ? button).
+
+## [1.178.0] - 2026-07-19
+### Added -- base-set consistency (match the reference across views) + grouped base settings
+Base sets can now use the same consistency tools the pose sets have, and the
+base settings panel is grouped into labeled sections so what to tweak is easy
+to find.
+- **Consistency LoRA on base sets.** `build_klein_refbase_graph` now takes a
+  `consistency_lora` and stacks the same dx8152 cross-image LoRA the pose graph
+  uses, so the 4-view / mesh views hold a matching look. Gated by a new
+  `klein_base_consistency_lora` (+ `_strength`) setting; resolves the same file
+  the pose path resolves. (You already have the LoRA installed -- this just
+  wires it into the base path, which never used it before.)
+- **Shared seed across a set.** New `klein_base_consistent_seed` (default on):
+  every view in a 4-view / mesh set renders from ONE seed so skin tone and
+  lighting stay consistent front-to-back instead of drifting per view. Applies
+  to both the reference-driven (refbase) and pure-T2I set paths.
+- **Grouped base settings.** The base-render panel now has labeled section
+  headers -- 🧍 Character & build, 🎨 Style & look, 👕 Base outfit/strip/cleanup
+  (with an inline note on fixing clothing bleed), 🧬 Identity & consistency (body
+  adherence, reference masking, the new consistency LoRA + shared-seed, pose
+  consistency), 🖼 Framing, ✨ Quality & face, 🧽 Article cleanup (SAM3). Nothing
+  was removed; controls were regrouped and the two new consistency dials added.
+- Note on clothing bleed / body-off: usually a drifted setting (strip release /
+  body adherence). The 👕 section calls out the three levers with recommended
+  base defaults (strip release 0.85, body adherence 1.60). Restoring an older
+  image's settings via "Use current preview image settings" also overwrites
+  these live dials, which can reintroduce bleed.
+- NOT yet done (tracked): ref-less T2I front-anchor (so pure-T2I sets match
+  without references), and the live per-view status / parallel-across-workers /
+  cancel-mid-set runner for base generation -- next up.
+
+## [1.177.0] - 2026-07-19
+### Changed -- pose settings now adapt to the 🧊 Use-3D-body toggle
+The "🧊 Use 3D body for pose references" toggle now reshapes the pose-set
+settings so only the dials that matter for the chosen path are shown, each with
+sensible defaults to tweak.
+- **Backend:** when 3D clay references are actually used, the DWPose skeleton
+  conversion is skipped automatically -- skeletonizing the clay would discard the
+  real body shape that is the entire point of the 3D path. (`_klein_submit`
+  tracks `_clay_used` and forces `dwpose=None`.)
+- **Simple mode:** the Mannequin / 2D-skeleton "Pose reference" picker is hidden
+  when 3D is on (the clay body drives the pose) and replaced with a short note;
+  Quality + Consistent-skin remain as the tweakables.
+- **Advanced mode:** the "Pose input (Mannequin / DWPose skeleton)" control is
+  hidden under 3D and a green banner explains the clay reference + recommends a
+  starting point (VNCCS PoseStudio LoRA ~0.7, pose-ref release ~0.85). The
+  skeleton-only **RefControl** LoRA option is dropped from the Pose-LoRA list
+  under 3D, and the Pose-ref-release copy switches "mannequin/CGI" -> "clay". All
+  other dials (steps, cleanup, LoRA strength, set consistency) stay available.
+- Non-3D mode is unchanged -- it keeps the full mannequin/skeleton option set.
+- Also: the greyed-out "Use current preview image settings" button now explains
+  on hover that older bases (pre-settings-tracking, e.g. Rhonda's) have nothing
+  saved to restore.
+
+## [1.176.1] - 2026-07-19
+### Fixed -- base-mode picker was buried; now sits by the Generate buttons + set tabs
+The v1.176.0 base-mode selector was inside the collapsed "🎛 Base render
+settings" accordion, so it was effectively invisible.
+- **Moved the Single / 4-view / 🧊 Mesh-ready picker directly above the Generate
+  button** on BOTH the Create and Clone tabs (a bordered block you can't miss).
+  The Generate button label now reflects the choice ("✨ Generate 4-view set",
+  "✨ Generate 🧊 Mesh-ready set").
+- **Set tabs above the main preview.** Each mode you generate files as its own
+  base version; a new tab row above the preview (Single / 4-view / 🧊 Mesh-ready,
+  with counts) lets you flip between the sets you've made — clicking jumps to the
+  latest version of that mode. Shown once more than one kind exists. Mode is read
+  from gen_meta.base_mode (new renders) or inferred from view count (older ones).
+- Removed the duplicate picker from the advanced settings block.
+
+## [1.176.0] - 2026-07-19
+### Added -- Mesh-ready base sets (3-way base mode) + "Use current preview image settings"
+Two Create-tab additions aimed at feeding the 3D pipeline better input and
+making renders reproducible.
+
+**Base preview mode is now a 3-way selector** (was a 2-way Front/4-view toggle):
+- **Front only** -- unchanged fast single-view base.
+- **4-view set** -- front/right/left/back of the SAME character. Previously
+  ONLY the clone path (uploaded refs) could make a view set, so a plain
+  text-to-image character generated `views=['front']` and its 3D mesh lost
+  detail. Now the non-clone Klein T2I path renders the full set too, so ANY
+  character can produce a proper multiview base.
+- **🧊 Mesh-ready** -- the 4-view set rendered in a locked symmetric A-pose
+  with the arms held ~30 degrees clear of the torso, hands open, on a plain
+  neutral-gray backdrop and uniformly framed. This is the preferred input for
+  "🧊 Generate 3D body" (Hunyuan3D): clean silhouette, arms separated from the
+  body, consistent scale across views.
+- Backend: `PreviewIn.base_mode` ('single'|'set'|'mesh') + `_resolve_base_mode`
+  (wins over legacy `base_set`/`klein_base_set`); shared `_BASE_VIEW_SPEC`;
+  `klein_preview_prompt`/`klein_refbase_prompt` gained `view_desc` + `mesh_ready`
+  so both the T2I and reference-driven paths render every angle (and the A-pose
+  for mesh mode). The set is normalized (uniform framing) before saving. Every
+  view is stored on the base version, so `mesh3d_generate` picks up
+  left/back/right automatically -- no change needed there.
+- The mesh3d panel copy now points users at 🧊 Mesh-ready for the best shape.
+
+**"⤵ Use current preview image settings"** (button by the Presets box, mirrored
+in the "Settings that made this image" panel): loads the exact generation
+settings stored on the currently-shown base version (`gen_meta`) back into the
+live dials -- body adherence, strip release, cleanup, steps, face-refine, PuLID,
+SAM cleanup, canvas, clothing, style, and the view mode -- so you can reproduce
+or iterate from the same starting point (handy before kicking off a multi-view
+run). It also pins that image's seed (shown as a 🎲 chip with a clear button) so
+the next Generate reproduces the identical output; clear the chip to explore
+variations again. gen_meta now also records `base_mode`.
+
+## [1.175.1] - 2026-07-19
+### Fixed -- clay pose renders: distorted upper body + cropped framing
+First real run diagnosis ("legs fine, torso/arms twisted, stuffed in a box"):
+- **Axis conversion now auto-detected.** Pose rotations were being conjugated
+  Y-up -> Z-up unconditionally, but whether that is needed depends on the
+  armature space the FBX imported with. X rotations survive that mistake
+  (legs looked right) while Y/Z rotations get swapped (twisted torso/arms).
+  The driver now reads the rig's own Hips->Head direction to detect the up
+  axis and converts only when needed (CLAY_LOG line reports the decision).
+- **Importer object transforms preserved** -- modelRotation now composes on
+  top of them instead of overwriting (FBX importers park -90X/0.01-scale on
+  objects; flattening that could lay the character down or break mesh/rig
+  alignment).
+- **Camera framing fixed + uniform.** ortho_scale was computed against the
+  wrong sensor axis for portrait frames, overflowing the figure ("stuffed in
+  a box"). Sensor fit is now explicit, and framing is measured across ALL
+  poses first (VNCCS-style uniform scale) so the character stays the same
+  size through the set.
+- **Clay renders saved for inspection** at <project>/mesh3d/<char_id>/
+  clay_last/pose_XXX.png -- when a set looks wrong, look at THESE first;
+  they show what Klein was actually asked to reproduce.
+
+## [1.175.0] - 2026-07-19
+### Added -- 3D-body CLAY pose references (phases B2+B3): the payoff
+The rigged 3D body now actually DRIVES pose generation. New toggle in the
+Pose Set area (both Simple and Advanced modes): **🧊 Use 3D body for pose
+references** -- each pose in the set is applied to the character's own
+MIA-rigged mesh in Blender and rendered as an untextured clay figure, so the
+pose reference Klein reproduces has the character's REAL body shape instead
+of the generic MakeHuman mannequin. This is the fix for the body-shape
+tug-of-war (and the only pose path that can represent non-standard bodies).
+- mia_local/clay_driver.py (runs in the MIA venv -- bpy already there):
+  MakeHuman game_engine -> Mixamo bone mapping, viewer-exact pose math
+  (Euler XYZ in world-axis-aligned frames, conjugated into Blender's Z-up
+  space, pose_bone.matrix = deform @ rest FK), modelRotation support,
+  Workbench clay render (studio light + cavity, single color), orthographic
+  front camera auto-framed per pose, transparent PNGs.
+- pose_clay.py (app side): finds the character's rigged.fbx (by
+  character_name in mesh3d meta.json -- now stamped at rig time; a single
+  pre-1.175 unnamed rig is matched as a fallback), runs the driver, composites
+  onto the capture background, returns captures in the exact
+  render_pose_captures format, caches per (fbx, poses, size). Returns None on
+  ANY failure -> automatic mannequin fallback, run never blocked.
+- _klein_submit: settings key mesh3d_pose (rides per-run settings_overrides,
+  queue-safe) switches the pose-reference source. Log line says which path
+  was used.
+### Notes
+- Works with the existing tuned recipes: the clay figure replaces the
+  mannequin IMAGE only -- LoRA/strength dials apply unchanged. Expect the
+  VNCCS-LoRA mannequin recipe to behave best initially; the clay figure has
+  the same "CGI render" character as the tuned mannequin path.
+- First clay render per pose set takes ~10-30s (bpy startup + N renders),
+  then it is cached until poses/canvas/rig change.
+
+## [1.174.5] - 2026-07-18
+### Fixed -- successful rig no longer discarded (bpy teardown crash)
+- THE PIPELINE WORKS: the first full local MIA rig completed end-to-end
+  (sampling -> joints -> skinning -> pose-to-rest -> Mixamo FBX export,
+  ~50s on CPU for a 175k-vert mesh). But bpy-as-module crashed in its exit
+  handlers ~9s AFTER printing success, poisoning the process return code,
+  and the app discarded the finished FBX. Now: the driver hard-exits
+  (os._exit(0)) the moment the FBX is confirmed on disk, and the app treats
+  a seen MIA_DONE + existing FBX as success regardless of exit code.
+- Temp driver files (_<name>_in.glb / _<name>_out.fbx) are cleaned up after
+  the FBX bytes are read.
+
+## [1.174.4] - 2026-07-18
+### Fixed -- MIA env: missing shapely (trimesh slice_plane)
+- MIA's point sampling slices the mesh with trimesh, which needs shapely --
+  now in the env spec, plus scipy + networkx (trimesh's other soft geometry
+  deps) to preempt the same class of error. Env tag bumped to v3: the next
+  rig click rebuilds the env automatically (fast -- pip cache has the big
+  wheels). Progress in this run: all 5 checkpoints loaded (the 1.174.3
+  unwrap fix confirmed working) and inference reached step 2/4.
+
+## [1.174.3] - 2026-07-18
+### Fixed -- MIA checkpoint loading ("Unexpected key(s): model")
+- MIA's .pth checkpoints wrap the weights as {"model": <state_dict>}. The
+  comfy.utils shim now mirrors ComfyUI's real load_torch_file unwrapping
+  (state_dict key, or single-key dict) so PCAE.load_state_dict gets the
+  actual weights. No env rebuild needed -- just restart and re-run 🦴.
+  (The 1.174.2 fixes proved out in this run: env rebuilt clean in ~2 min,
+  live MIA_LOG streaming worked, and the failure preserved the mesh.)
+
+## [1.174.2] - 2026-07-18
+### Fixed -- MIA rig hang at "loading models"
+- **Subprocess pipe deadlock:** the rig child process's stderr was piped but
+  never read -- once warnings filled the 64KB buffer the child froze
+  mid-write, hanging the run (seen at "loading models"). stderr is now
+  merged into stdout, warnings are silenced in the driver, and
+  PYTHONUNBUFFERED is set. Errors now report from the merged tail.
+- **Live progress from inside the pipeline:** the driver routes the vendored
+  code's logging to stdout as MIA_LOG lines, which stream into the 🧊 status
+  detail ("Loading joints_coarse...", "Step 2/2: Applying skinning..." etc.)
+  -- a hang can never be silent again.
+- **torch pin protection:** torchvision==0.16.2 is now installed together
+  with torch 2.1.2 (timm depends on torchvision; resolving it later could
+  upgrade torch from PyPI and break the pinned torch-cluster wheel), with a
+  post-install verification of the pins. Env tag bumped to mia-env-v2: the
+  next setup/rig run REBUILDS the MIA env cleanly (weights are kept).
+- **Fast model construction:** the ops shim now truly skips weight init
+  (reset_parameters no-op, like ComfyUI's disable_weight_init) -- PCAE
+  construction no longer grinds through random init of ~500M params on CPU.
+
+## [1.174.1] - 2026-07-18
+### Added -- MIA rigging in the installer/updater
+- **install.bat step [4b]:** offers to set up local 3D rigging during
+  install/update (dedicated python env + one-time ~2.2GB model download);
+  answering "n" skips it -- the app still auto-bootstraps on first use.
+  Re-running install.bat is the update path: setup is idempotent (existing
+  env/weights detected and skipped; a dependency-set change bumps the env
+  tag in mia_rig.py and triggers a clean rebuild automatically).
+- **tools/setup_mia.py:** the setup CLI install.bat calls. Also usable
+  directly: `--status` (readiness report), `--env-only` (env without the
+  big download), no args = full setup.
+- **Python 3.11 finder:** the MIA env needs Python 3.11 (bpy wheels). If the
+  app venv isn't 3.11, mia_rig now finds one via the Windows `py -3.11`
+  launcher or python3.11 on PATH before giving a clear install hint --
+  the app venv itself can stay on 3.10-3.12.
+
+## [1.174.0] - 2026-07-18
+### Added -- Local auto-rigging via Make-It-Animatable (no worker installs!)
+The 3D body pipeline no longer depends on the fragile comfyui-unirig custom
+node. Rigging now runs LOCALLY on the app machine using Make-It-Animatable
+(MIA, CVPR 2025 Highlight, MIT) -- chosen after research as the best proven
+fit: it outputs a NATIVE Mixamo-skeleton FBX (it is trained on the Mixamo
+rig, which is exactly what our pose-retarget plan needs), handles input
+meshes in any pose and stylized/cartoon proportions, and runs on CPU
+(~1-3 min per character, once) or CUDA (<1s) automatically.
+- **Zero-install for users:** on first rig the app creates a small dedicated
+  Python env (runtime/mia/venv -- pinned prebuilt wheels only: torch 2.1.2
+  CPU or cu121 auto-detected via nvidia-smi, torch-cluster, einops, timm,
+  bpy 4.3; NO spconv, NO flash-attn, NO compiling) and downloads the 5 MIA
+  checkpoints (~2.2GB) + Mixamo template. Progress streams into the 🧊
+  status line. Everything lands under runtime/ (auto-gitignored).
+- **Engine order:** worker UniRig nodes are still used when they exist
+  (GPU-fast, creature templates); otherwise -- or if the worker rig fails --
+  the run falls back to local MIA automatically. manifest.vnccs.mesh3d now
+  records rig_engine ('unirig'|'mia') and the status shows live detail text
+  (env setup / download % / rigging steps).
+- **🦴 Rig existing mesh** now works with no UniRig anywhere: it rigs the
+  stored GLB locally. The 409 for missing worker nodes is gone.
+- New: backend/services/character_studio/vnccs_native/mia_rig.py (env/
+  weights/subprocess manager, no heavy imports in the app process) and
+  mia_local/ (vendored MIA inference code from the ComfyUI-UniRig wrapper,
+  MIT, running against tiny local shims of the ComfyUI APIs -- comfy.ops/
+  utils/model_management/model_patcher + folder_paths -- plus driver.py, the
+  standalone CLI executed inside the MIA venv).
+### Notes
+- MIA rigs with the humanoid Mixamo skeleton: perfect for humans and bipedal
+  furries/hybrids (the skeleton fits inside the mesh regardless of surface).
+  True creature body plans (quadrupeds etc.) still want worker UniRig with
+  the articulationxl template, or wait for Tier 2.
+- Why not comfyui-unirig? Its comfy-env/pixi isolated-env loader crashed
+  with 0xC0000005 during its metadata scan on our worker (a known failure
+  pattern across that loader's packs), silently registering 0 nodes while
+  Manager showed "installed and active". Diagnosis preserved in
+  docs/CHARACTER_3D_PLAN.md and the project memory.
+
+## [1.173.2] - 2026-07-18
+### Fixed -- UniRig graph now matches the wrapper's REAL node schemas
+Verified against the PozzettiAndrea/ComfyUI-UniRig source and its bundled
+unirig_humanoid.json example workflow -- our graph had three wiring bugs that
+would have failed even with the node installed:
+- **UniRigLoadMesh takes no path string.** Its inputs are a source_folder
+  combo ('input'|'output') + a file_path combo SCANNED from that folder
+  (output scans use OS-specific separators -- Windows backslashes). Fix: the
+  GLB (fresh from Hunyuan3D, or the stored one on 🦴 re-rig) is uploaded to
+  the worker's INPUT root and referenced by bare filename with
+  source_folder='input'. Same code path for both cases now.
+- **UniRigAutoRig is NOT an output node** -- it returns a STRING
+  (fbx_output_path). Without a terminal output node ComfyUI prunes the graph
+  and executes NOTHING. The graph now appends UniRigPreviewRiggedMesh
+  (is_output_node) wired to that string, exactly like the author's example
+  workflow (fuzzy fallback to any UniRig preview/view class).
+- **FBX harvest handles string outputs.** The preview node reports the FBX
+  in history as plain strings (ui 'fbx_file': ["name.fbx"]), not
+  filename-dict records; harvest_output_files now normalizes those. Belt +
+  suspenders: fbx_name is set on UniRigAutoRig so the FBX lands at the
+  output root as <fbx_name>_<template>.fbx and is fetched by that known
+  name if history parsing still yields nothing.
+### Notes -- "installed and active" but nodes absent from /object_info
+comfyui-unirig registers through the experimental comfy-env isolated-
+environment loader (pixi): its prestartup builds a separate env and the
+first use downloads ~3GB of UniRig models. Until that finishes, the node
+pack can look installed while registering zero classes. If the 🧊 run warns
+that rigging is unavailable: let the worker finish downloading, restart
+ComfyUI, and confirm by searching "UniRig" in the node-add dialog on that
+worker.
+
+## [1.173.1] - 2026-07-18
+### Fixed -- 3D body: a failed rig no longer loses the finished mesh
+- **Mesh survives rig failure.** The Hunyuan3D mesh step and the UniRig rig
+  step are now decoupled: if rigging fails for ANY reason (nodes missing,
+  schema drift, worker error), the GLB is still saved to the character and
+  the run ends as "mesh ready (not rigged)" with the rig error recorded in
+  meta.json -- previously the whole task errored and the ~2-min mesh was
+  thrown away (the exact failure Rhonda hit).
+- **UniRig availability is checked up-front** at POST /mesh3d/generate: when
+  the nodes aren't registered on the worker the run proceeds mesh-only and
+  the UI warns immediately, instead of discovering it mid-run. The response
+  now returns rig_available + rig_hint.
+- **Fuzzy UniRig class detection** (char_mesh.find_unirig_classes): if the
+  wrapper renamed its classes, any registered class containing "unirig" is
+  matched by role (load/mesh, load/model, autorig). The missing-nodes error
+  now also LISTS the rig-ish classes the worker DOES have, plus the likely
+  cause: comfyui-unirig's experimental installer can fail on first run and
+  leave the nodes unregistered -- check the ComfyUI startup console for a
+  ComfyUI-UniRig import error and restart ComfyUI after fixing it.
+- **Mesh path fix:** UniRigLoadMesh is now given the ComfyUI-root-relative
+  path ("output/<subfolder>/<file>") instead of the output-relative one,
+  which could fail to resolve.
+### Added -- 🦴 Rig existing mesh
+- When a character has a saved-but-unrigged mesh, a "🦴 Rig existing mesh"
+  button appears: it uploads the stored character.glb back to the worker and
+  runs ONLY the UniRig step (reuse_mesh=true) -- so after installing/fixing
+  comfyui-unirig you don't have to re-run the 2-min Hunyuan3D step. A ⬇ FBX
+  download link is also shown once a rig exists.
+
+## [1.173.0] - 2026-07-18
+### Added -- Tier-1 3D character body (phase B1): mesh + auto-rig
+- **🧊 Generate 3D body** button under the base preview (Create tab):
+  builds a character-shaped 3D mannequin from the ACTIVE base render -- all
+  four views condition the mesh when the base is a 4-view set. Pipeline
+  (once per character, ~2-3 min on the worker): Hunyuan3D-2 shape-only GLB
+  (ComfyUI-core nodes: ImageOnlyCheckpointLoader ->
+  Hunyuan3Dv2ConditioningMultiView -> KSampler 20/7.5 euler/normal ->
+  VAEDecodeHunyuan3D -> VoxelToMesh surface-net -> SaveGLB; auto-detects the
+  2.1 checkpoint and adjusts to 30/5/4096) -> ComfyUI-UniRig auto-rig
+  (UniRigLoadMesh -> UniRigLoadModel -> UniRigAutoRig) -> rigged FBX.
+  Template picker: 🧍 Humanoid (mixamo -- retarget target for our pose
+  library) or 🐾 Creature (articulationxl -- rigs ANY body plan: furries,
+  hybrids, monsters).
+- Results are saved app-side under <project>/mesh3d/<char_id>/
+  (character.glb + rigged.fbx + meta.json) and recorded in
+  manifest.vnccs.mesh3d; the UI shows a live status chip (mesh -> rig ->
+  ready), error surface, and a GLB download link. Endpoints:
+  POST /mesh3d/generate, GET /mesh3d/status/{name}, GET /mesh3d/file/{name}/{kind}.
+- The UniRig graph is built DEFENSIVELY from the worker's /object_info
+  (third-party node schemas drift): required inputs fill from their declared
+  defaults, with readable errors naming any missing node/model. New module
+  backend/services/character_studio/vnccs_native/char_mesh.py.
+### Changed -- Installer/updater now covers the 3D pipeline
+- bpy==4.2.0 (Blender-as-a-module, cp311) added to pyproject dependencies
+  (what install.bat's `pip install -e .` reads) and requirements.txt, guarded
+  to Python 3.11 -- posing + clay rendering (phase B2) needs no separate
+  Blender install.
+### Next (B2/B3, planned)
+- Blender retarget + clay render (pose library -> rigged FBX -> clay pose
+  captures) and the "3D character" Pose input that feeds them to Klein.
+
+## [1.172.0] - 2026-07-18
+### Added -- Simple pose mode ("2D reference") + regrouped pose settings
+- The Pose render settings box now opens with a mode toggle:
+  - **Simple (2D reference)** -- ONE picker (🧍 Mannequin, the tuned VNCCS
+    combo @0.7 · 🦴 2D skeleton stick-figure through RefControl @0.9 with
+    zero CGI material to leak), a Quality selector (Fast 10 / Balanced 14 /
+    Max 20 steps) and the consistent-skin toggle. Everything else locks to
+    the session's proven recipe (consistency stack 0.7, PuLID 1.0, face
+    refine 0.45, gentle cleanup, default ref release) and rides as PER-RUN
+    settings overrides -- your saved Advanced dials are never touched.
+    Works for creator, cloner and clothed-set Klein runs, on both the direct
+    and queued paths (GenerateIn.settings_overrides, merged in
+    _klein_submit).
+  - **Advanced (all dials)** -- everything as before, but REGROUPED with
+    divider headers so related settings live together: 🎛 Render quality
+    (steps, cleanup) · 🕺 Pose control (input, LoRA + strength, ref
+    release) · 🧬 Set consistency (consistent skin, Consistency stack) ·
+    🙂 Face (PuLID + strength, face refine + denoise/steps/guide). Also
+    removed a stale duplicate caption under PuLID strength.
+
+## [1.171.1] - 2026-07-17
+### Changed -- PuLID strength ceiling raised for identity dial-in
+- The global PuLID strength (Settings) now accepts up to 3.0 (backend clamp
+  was 2.0); the pose-local strength picker gains 1.6 / 1.8 / 2.0 options with
+  an extremes caption. Above ~1.6 the identity embedding progressively stamps
+  its texture into the skin (waxy/etched look, less prompt adherence around
+  the head) -- climb in 0.1 steps and let Face refine clean up.
+
+## [1.171.0] - 2026-07-17
+### Added -- Debug Options + Settings Variation Test
+- **Debug toggle** in the studio Settings box (persisted): reveals a yellow
+  debug toolbox under the header with "Export settings JSON" (full settings
+  dump for pasting to an LLM) and "Run Settings Variation Test".
+- **Settings Variation Test**: sweep a batch of renders across setting
+  variations, walk away, come back and rate them, get a settings report.
+  - Test types: Base (new character), Base (clone) -- both render the
+    standard neutral base pose through the REAL preview pipeline without
+    cataloging versions -- and Pose set (selected poses through the real
+    Klein pose pipeline, locked to the active base). Poses are only selected
+    for pose-set tests; base tests always use the base's own neutral pose.
+  - Setup lightbox: curated axes per test family (pose: steps / LoRA
+    strength / cleanup / ref release / skeleton input / consistency / face
+    refine; base: steps / face refine + denoise / PuLID + strength /
+    cleanup), run budget 8-24, ONE shared seed by default so only the
+    settings differ, BASELINE (current settings) always included. Oversized
+    grids are evenly sampled to the budget.
+  - Runs server-side (survive closing the browser); live progress bar with
+    percent; when done, "Review results".
+  - Results viewer: 4-per-row grid, per-tile override chips, 👍/👎 under every
+    thumbnail AND in the built-in lightbox (click again to clear; rating
+    everything is optional). Ratings persist instantly.
+  - Report: per-axis score tables ((ups-downs)/rated), concrete suggestions
+    ("setting X -> use V, avoid W") once >=2 rated per value with a clear gap,
+    liked/disliked lists with their exact overrides, base-settings snapshot.
+    One-click export as Markdown -- built to paste at an LLM.
+  - Everything persists under <project>/varitests/<id>/ (images +
+    manifest.json with full generation info); "Past runs" lists and reopens
+    old tests, including ones still running.
+- Backend: /varitest/start|list|{id}|image|rate|cancel|report endpoints,
+  background asyncio runner reusing the real pipelines (preview gets
+  settings_overrides + varitest flags; pose tests go through _klein_submit
+  with a merged settings copy).
+
+## [1.170.0] - 2026-07-17
+### Changed -- Per-model prompt templates + proven quality stacks (deep pass)
+Completes the multi-model creator (1.169) with each model treated the way it
+actually wants:
+- **Per-model NL prompt templates** (was one generic prose blob): Z-Image
+  Turbo now gets STRUCTURED camera-direction blocks (Subject / Appearance /
+  Framing / Lighting / Background -- it's a literal instruction-follower);
+  Krea2 gets the FEWEST-modifier minimal prose (extra adjectives push it back
+  toward the "AI look" it was trained to remove); Klein 9B and Qwen keep
+  concise descriptive prose. All carry the identical VNCCS creator semantics.
+- **Per-model quality LoRA stacks** (new toggle, default ON, auto-skipped if
+  the files aren't on the worker): Anima stacks the app's tuned aesthetic
+  trio from the ANIMA_T2I workflow (highres boost + masterpieces-v5 + rdbt);
+  Klein 9B applies the lenovo realism LoRA from the KLEIN t2i workflow.
+  Untick for a bone-stock / VNCCS-exact render.
+- **Steps / CFG overrides** in Qwen create settings (blank = each model's
+  proven default, labeled per model); persisted as
+  qwen_create_steps/cfg/quality_loras and honored by the preview endpoint.
+
+## [1.169.0] - 2026-07-17
+### Added -- Qwen-create base render supports SIX t2i models
+The "Qwen create settings" model picker now covers both VNCCS's own stacks
+AND the app's project-side t2i family -- all rendering the same 640x1536
+base with per-model graphs mirrored from our proven workflows:
+- **Tag family (VNCCS-exact prompts + negatives, field for field):**
+  Illustrious SDXL (euler/normal 20/8, DMD2 turbo -> 4/1, mimimeter age
+  LoRA curve) and Anima (er_sde/simple 30/4, turbo LoRA -> 12/1) --
+  Anima remains fully supported and is the Auto fallback when no
+  Illustrious checkpoint is installed.
+- **NL family (same character semantics, adapted to natural-language prose
+  per docs/MODEL_PROMPTING.md -- no booster tags, no weight syntax, zeroed
+  negatives at CFG 1):**
+  - Qwen (Qwen-Image-Edit-2511 as t2i, Lightning 4-step / CFG 1)
+  - Klein 9B (Flux2Scheduler + CFGGuider, 8 steps / CFG 1, euler)
+  - Z-Image Turbo (ModelSamplingAuraFlow shift 3, res_multistep/simple,
+    8 steps / CFG 1 -- the ZIMAGE_TURBO_T2I workflow's exact stack)
+  - Krea2 Turbo (qwen3vl CLIP type krea2, er_sde/simple, 8 steps / CFG 1 --
+    the KREA2_TURBO_T2I workflow's core stack)
+- New prompt adapter `creator_prompt_natural()`: maps the character fields
+  1:1 to prose with the SAME semantics as VNCCS's tag template (solo,
+  expressionless, thighs-up, white underwear / nude, solid keyable
+  background, hair/eyes/face/body/skin/details), following each model's
+  documented prompting rules so instruction-following matches the tag
+  models' fidelity.
+- Every model resolves its files from the worker's /object_info with a
+  readable "missing on this worker" error; per-mode overrides via
+  qwen_create_unet/clip/ckpt settings. gen_meta records t2i_mode.
+
+## [1.168.0] - 2026-07-17
+### Added -- Create mode gets Klein / Qwen sub-tabs (VNCCS creation, app-side)
+Same treatment as the Clothes tab (1.167): the Create tab now has 🧪 Klein /
+🟣 Qwen engine buttons next to New/Clone. Qwen = VNCCS 3.0.2's exact
+character-creation process, extracted from source and rebuilt app-side:
+- **New characters** (`POST /create/qwen-preview`): the CharacterCreatorV2
+  text-to-image base render at 640x1536 -- NO multi-view sheet in VNCCS 3.x;
+  pose variety comes from the pose pass. Two t2i stacks, auto-resolved from
+  the worker (pick one in "Qwen create settings"): Illustrious SDXL
+  (ILFlatMix et al., euler/normal 20 steps CFG 8, DMD2 turbo -> 4/1, the
+  mimimeter age LoRA with VNCCS's piecewise age->strength curve) or Anima
+  (anima-base + qwen_3_06b CLIP, er_sde/simple 30/4, turbo LoRA -> 12/1
+  with strength_clip 0). Prompt template field-for-field theirs: aesthetics,
+  "simple background, expressionless, solo, cowboy_shot", gender tags,
+  SFW underwear / NSFW tags, age + age-bucket descriptor, background color,
+  then (race)(hair)(eyes)(face)(body)(skin)(details) at :1.0 -- plus their
+  per-gender negative prompts. Saved as a base version (engine qwen-creator).
+- **Clones** (`POST /create/qwen-clone-preview`): the CharacterCloner
+  pipeline -- reference photos packed into ONE collage grid (their exact
+  cell/column algorithm), then per Base outfit: **Strip** first runs the
+  suite's remove-clothes Qwen edit on the collage ("Undress character",
+  ClothesCore LoRA -- the Naked branch), **Keep** draws them in their photo
+  clothes (Original branch); either way a neutral-pose Pass-B render becomes
+  the base version (engine qwen-cloner).
+- **Pose sets**: engine "qwen" now covers creator/cloner too -- every selected
+  pose's mannequin render (image 1) + the ACTIVE base version (image 2)
+  through the QIE2511 PoseStudio LoRA, one shared seed, fanned across
+  workers with the live dashboard. Klein pose runs still queue as before.
+- UI: Klein's Base-render-settings accordion swaps for "Qwen create settings"
+  (t2i mode picker) / "Qwen clone settings" (branch picker + explainer) when
+  the Qwen engine is selected; presets stay Klein-side.
+
+## [1.167.0] - 2026-07-17
+### Added -- Qwen mode = the FULL VNCCS clothes process, rebuilt app-side
+The Clothes tab's Qwen sub-tab no longer relays to the worker-side VNCCS
+character store -- it reproduces the suite's exact clothing pipeline from our
+own catalog, so Klein Hybrid characters work directly. Researched from
+ComfyUI_VNCCS 3.0.2 source (clothes_designer.py, character_generator.py,
+vnccs_qwen_encoder.py):
+- **Pass A -- costume preview** (`POST /clothes/qwen-preview`, new module
+  backend/services/character_studio/vnccs_native/qwen_clothes.py): the
+  ClothesDesigner graph verbatim -- Qwen-Image-Edit-2511 (GGUF) + Lightning
+  4-step turbo LoRA (model+clip @1.0) + VNCCS ClothesCore LoRA (model-only),
+  VNCCS_QWEN_Encoder (squared weights, latent_image_index 1, vl_size 384,
+  qwen_2511 reference_latents_method, white alpha-fill), KSampler
+  4 steps / CFG 1.0 / euler / simple / denoise 1.0, tiled VAE decode. Prompt
+  template exactly theirs: "Dress the character:" + slots in
+  top/bottom/head/shoes/face order + "solid green (00FF00) background".
+  With an outfit photo it switches to VNCCS's CLONE mode prompt ("Dress
+  character: clothes, footwear and accessories from Picture 2"). Dresses the
+  active base, a chosen base version, or any cataloged pose sprite (Dress
+  target picker now available on both sub-tabs). Saves as a costume version
+  (gen_meta engine "qwen-clothes").
+- **Pass B -- clothed pose set** (engine "qwen" on /generate-parallel): the
+  ClothesGenerator loop -- each selected pose's app-rendered 3D-mannequin
+  capture rides as "image 1" and the ACTIVE dressed costume version
+  (alpha-filled #00FF00, like the suite's fill_alpha_with_color) as
+  "image 2" through the QIE2511 PoseStudio LoRA, prompt "Draw character from
+  image2, Change background to solid Green color", ONE shared seed for the
+  whole set (VNCCS's policy -- identity comes from image 2). Chunks fan out
+  across your workers with the live dashboard, and results file into the
+  library as costume sprites like Klein sets do.
+- **Model auto-resolution** per worker from /object_info (qwen-image-edit-2511
+  GGUF/unet, qwen_2.5_vl_7b text encoder, qwen_image_vae, Lightning +
+  ClothesCore + PoseStudio LoRAs) with a human-readable "missing on this
+  worker" error listing anything not installed. Settings overrides:
+  qwen_unet/qwen_clip/qwen_vae/qwen_*_lora.
+- **UI**: "Qwen dressing settings" accordion with the suite's exact defaults
+  labeled (steps 4 / CFG 1.0 / LoRAs 1.0 / target 1024) and extremes captions;
+  persisted as qwen_* settings. Outfit-reference box now explains clone mode
+  on the Qwen sub-tab. The clothed-set panel explains the Pass-B mechanics.
+### Changed -- Deliberate divergences (documented)
+- Background removal uses our proven RMBG-2.0 node instead of
+  VNCCSChromaKey+SAM3 edge recovery (same RGBA sprite output our ingest
+  expects); no in-graph SeedVR upscale -- use the gallery's on-demand SeedVR2.
+
+## [1.166.0] - 2026-07-17
+### Added -- Klein / Qwen sub-tabs on the Clothes tab
+- The Clothes tab now has two engine sub-tabs (Klein page only):
+  - **🧪 Klein** -- our reference-edit dressing pipeline (active base render +
+    outfit reference photos + virtual try-on + dressing settings). This is the
+    experimental path we keep tuning.
+  - **🟣 Qwen (VNCCS)** -- VNCCS's OWN clothes process, exactly as their
+    nodes run it: pick a mannequin pose sprite from the workers, dress it via
+    the VNCCS clothes designer, and generate costume pose sets through the
+    stock VNCCS workflow (no Klein engine override). Duplicates the suite's
+    native functionality inside our UI. Note: the character must exist on the
+    worker (node-side) for this path, same as VNCCS itself.
+- Switching sub-tabs swaps the whole flow: mannequin strip vs dress-target
+  picker, VNCCS preview vs Klein dressing (with its settings/try-on/garment
+  boxes shown only on Klein), and the clothed-set generator dispatches to the
+  matching engine. The Native page is unchanged (it is the Qwen path).
+
+## [1.165.2] - 2026-07-17
+### Fixed -- Garment cleanup pre-pass now preserves COMPLETE outfits
+- The 🧼 cleanup pre-pass prompt asked for "the clothing garment" (singular),
+  which could simplify a multi-piece costume photo down to one item. It now
+  explicitly extracts the COMPLETE outfit -- every garment piece and accessory
+  (top, bottom, shoes, belt, gloves, headwear, jewellery) arranged together on
+  white, with an explicit "do not drop, merge or simplify any piece" clause --
+  so full-costume photos survive the cleanup intact for both the dress path
+  and virtual try-on.
+
+## [1.165.1] - 2026-07-17
+### Added -- Garment reference thumbnails (click to lightbox, hover to remove)
+- The Outfit-reference image now shows a real 170px thumbnail after upload
+  (instead of just "checkmark filename") -- click it to inspect the clothing
+  full-size in the lightbox, or hit the corner X to remove it.
+- Virtual try-on garment tiles grew from 130px to 160px with taller previews
+  and are now click-to-lightbox too (arrow through all garment photos).
+
+## [1.165.0] - 2026-07-17
+### Fixed -- Reference images now survive leaving the page (unsaved clones too)
+- Uploading a reference image on the Clone screen now auto-saves it to the
+  character within a second -- even for a brand-new clone you never hit Save
+  on (uploading a reference is intent enough). Reopening the character
+  restores the full reference set as before.
+### Added -- Sticky center preview column
+- The center Results column now sticks to the viewport while you scroll the
+  (often longer) side columns: it stays on screen, capped at the window
+  height, and scrolls internally when its own content is taller.
+### Fixed -- Pose tiles showing only border + name (no thumbnail)
+- Poses added from the Pose Library stored a LIVE preview URL that 404s
+  whenever the worker is offline or the pose repository is unloaded -- on the
+  Clothes tab that left empty bordered tiles. Thumbnails are now BAKED into a
+  data URI at add time; previously saved pose sets are re-fetched once on
+  load and upgraded in place (a failed fetch cleanly falls back to the pose
+  name). Default-pose tiles also fall back to the name if their thumb errors.
+
+## [1.164.3] - 2026-07-17
+### Added -- "What does each end do" captions on every key dial
+- Every important segmented selector now shows a two-sided caption under it
+  ("◀ this end does X ... this end does Y ▶") so it's obvious which way to
+  experiment: dressing body-ref release/strength/steps/guidance, try-on
+  steps/guidance, pose steps/cleanup/ref-release/LoRA strength/Consistency
+  strength/PuLID strength, base steps/cleanup/canvas width.
+  Examples: body-ref strength "loose body grip -- outfit redraws freely" vs
+  "iron body grip -- outfit may refuse to change"; pose LoRA strength "weak
+  style stamp -- no black contact lines" vs "full pose control -- VNCCS at 1.0
+  draws black lines where skin touches skin".
+
+## [1.164.2] - 2026-07-17
+### Changed -- Dressing/try-on dials become segmented selectors with instructions
+- Dressing steps and Guidance were bare number boxes with no explanation --
+  both are now segmented selectors like every other dial: steps Global/8-20,
+  guidance 1.0(off)/1.5-4.0, each with a bold heading explaining exactly what
+  it does (incl. that guidance 1.0 IGNORES the negative box and 1.5+
+  activates it).
+- The negative prompt box got its own heading + explanation (what to type,
+  when it works, typical use = fighting see-through clothing).
+- Virtual try-on steps/guidance also became selectors, labeled with the
+  LoRA's TRAINED values (28 steps / 2.5 guidance) and what raising/lowering
+  each does.
+- All small description text bumped from 11px to 12px and brightened --
+  the fine print is readable now.
+
+## [1.164.1] - 2026-07-17
+### Changed -- UI readability pass (toggles, spacing, labels, columns, presets)
+- Option-group toggles are now unmistakably BLUE (gradient fill + blue border
+  + thick left edge + brighter bold text) -- the previous tint rendered as
+  grey-on-grey on most monitors.
+- Field labels are bigger and bold (13px/600, brighter) everywhere, including
+  the section headings inside the Pose render settings box, so you can tell
+  face settings from body settings at a glance.
+- More breathing room: accordion bodies space their children 12px apart, the
+  Base-render-settings stack went from 8px to 15px gaps, and the Dressing /
+  Try-on boxes got bigger padding + gaps. Accordion headers are larger/bolder.
+- Columns rebalanced: roughly equal thirds (center only slightly wider)
+  instead of a dominant center; every column box now has minWidth:0 so wide
+  content can no longer push side panels off screen.
+- Presets moved to the TOP of the left column on the Create tab (own accent
+  box, right under New/Clone) -- they were buried mid-list inside Base render
+  settings.
+
+## [1.164.0] - 2026-07-17
+### Added -- Research-driven dressing upgrades (identity + garment accuracy)
+Implements the three highest-impact findings from the VNCCS/community
+outfit-swap research (see memory: research_klein_dressing_tricks):
+- **🪪 Late face/hair identity ref (split-gated references, def ON).**
+  The dress graph now rides TWO gated references in one ReferenceLatentPlus
+  node: the classic face+hair+body composition ref released at your Body-ref
+  release setting (garments finish opaque), PLUS a face+hair-ONLY ref at
+  strength 0.9 held from ~(release-0.3) through 1.0 -- identity forms in the
+  clean LATE steps, so the face and hair stop drifting after the body ref
+  releases, without re-opening the skin-through-fabric leak (the late mask
+  never covers the clothing area). Toggle in Dressing settings; persisted as
+  klein_clothes_identity_lock.
+- **🧼 Garment cleanup pre-pass (def ON).** Before dressing or try-on, each
+  garment photo gets a quick 10-step Klein edit that extracts the garment
+  onto a plain white background (person, mannequin, background removed).
+  A clean "garment on white" reference measurably beats telling the swap
+  prompt to ignore the person. Applies to the Outfit-reference image on the
+  dress path AND every try-on garment; falls back to the raw photo on any
+  error. Toggle in Dressing settings + mirrored in the Virtual try-on box;
+  persisted as klein_clothes_clean_garment. Adds ~20-40s per garment.
+- **Community Klein swap prompt template.** When a garment reference rides
+  along, the dress prompt now uses the converged template: "Change only the
+  clothing ... to match the garments shown in image 2 ... Do not add any
+  accessories, jewellery, bags, hats or shoes that are not clearly visible in
+  image 2. Keep the face, hair, pose and background unchanged."
+- gen_meta on costume versions records identity_lock / clean_garment so A/B
+  comparisons stay traceable.
+
+## [1.163.0] - 2026-07-17
+### Added -- Live run dashboard (eye-catching status)
+- The multi-chunk status panel is now a proper live dashboard at the top of
+  the Results column: glowing blue border + spinner while running, a big
+  header ("Generating -- 3 chunks across 3 workers"), an overall run clock
+  (mm:ss, ticking every second), done/total + % + image count, and a gradient
+  progress bar.
+- Every chunk row shows: a spinner (rendering) / pulsing dot (waiting in
+  queue) / solid dot (done, error), a COLOR-CODED worker chip (each worker
+  gets its own color so you can see at a glance who is doing what), the chunk
+  label, a live per-chunk clock that freezes at the chunk's total time when it
+  finishes, and a status ("waiting for a worker", "rendering - 4 imgs",
+  "filing into library", "done - 12 imgs", "error - ...").
+- Single-operation runs get the same treatment: base preview, costume
+  dressing and virtual try-on now show a glowing LiveBanner with a spinner,
+  what is running, WHICH worker, and a ticking elapsed clock.
+- Reconnected runs (after a page refresh) resume the clock from the run's
+  original start time.
+
+## [1.162.1] - 2026-07-17
+### Changed -- Taller center preview + tinted option-group toggles
+- The base/costume preview in the center column got ~300-350px taller
+  (58vh -> min(58vh + 350px, 86vh) -- capped so it never runs off screen);
+  the lightbox is still the place to zoom all the way in.
+- Checkbox toggles that reveal or steer a GROUP of options now sit on a
+  blue-tinted chip background so they stand out from plain labels:
+  "✨ Enhance references", "✨ Enhance base", "🎨 Switch Style",
+  "Stack the Consistency LoRA", "Consistent skin/lighting", and the new
+  "🧬 Identity guard" in Dressing settings.
+
+## [1.162.0] - 2026-07-17
+### Fixed -- Run status was invisible in the 3-column layout
+- The live run status (progress bar, per-chunk worker rows, Stop run / Reset
+  status view) had ended up BELOW the galleries at the bottom of the center
+  column, so a running clothed-set render looked like nothing was happening.
+  The whole status block now sits at the TOP of the Results column, right
+  under the heading -- any run (poses, clothed set, emotions) is visible the
+  moment it starts. Virtual try-on also shows a "running on the host" line
+  there while its 28-step pass runs.
+### Changed -- Settings live next to their generate button
+- Create (New + Clone): the "🎛 Base render settings" accordion moved from
+  the right column into the LEFT column directly above Generate Character /
+  Generate Preview -- tweak, then click, no cross-screen hop.
+- Clothes: the "👗 Dressing settings" accordion moved into the LEFT column
+  directly above "Generate costume preview" for the same reason. The right
+  column keeps the pose-set runners (and Virtual try-on).
+### Changed -- Base/costume preview capped at 58vh
+- The big center preview no longer fills most of the screen on load: it is
+  capped at 58% of the viewport height (whole outfit visible at a glance) and
+  clicking it still opens the full-resolution lightbox for pixel-peeping.
+### Added -- "🧬 Identity guard" for dressing (Consistency LoRA)
+- New checkbox in Dressing settings: stacks the dx8152 Flux2-Klein-9B
+  Consistency LoRA on the DRESSING chain (same file + strength as the pose
+  Consistency stack, default 0.7) to help hold the character's face, body and
+  skin colour while the outfit is redrawn. Persisted as
+  klein_clothes_consistency; recorded in the costume version's gen_meta.
+
+## [1.161.1] - 2026-07-17
+### Fixed -- Center column squashed in the new 3-column layout
+- The studio page shell was still capped at 1100px wide, so the left+right
+  columns ate nearly all of it and the center preview/gallery column got
+  squeezed to a sliver. The shell now stretches to 1880px (still centered),
+  and the grid guarantees the CENTER column at least 420px while capping the
+  sides (left <=380px, right <=460px) -- the preview column is now the widest
+  thing on a big monitor and stays usable on smaller ones.
+
+## [1.161.0] - 2026-07-17
+### Changed -- Three-column studio layout (Create / Clothes / Emotions)
+- The Klein studio's Create, Clothes and Emotions tabs now use a 3-column
+  layout: inputs on the LEFT, the base/preview image gallery in the CENTER,
+  and a new "⚙ Generation settings" column on the RIGHT. Settings that used
+  to stretch the page into a long scroll now live in collapsible accordion
+  groups (▶/▼) that stay closed until you need them:
+  - Create (new + clone): 🎛 Base render settings (steps, refine, PuLID,
+    presets…) and 🧍 Pose set (open by default).
+  - Clothes: 👗 Dressing settings, 🧥 Virtual try-on, and 🧍 Clothed pose
+    set (open by default).
+  - Emotions: 😊 Generate emotions (open by default) -- the generate button
+    now also lives in the right column.
+### Removed -- Library tab
+- The Library tab is gone (the galleries inside each tab cover it).
+### Added -- Clone from the main Character Studio screen
+- Character cards on the main studio screen now show a clone button (📋 icon,
+  next to delete, on hover) for VNCCS characters that have a base image.
+  Clicking it opens the Klein Clone screen with the character's ACTIVE base
+  image preloaded as a full-body reference and the name prefilled as
+  "<Name> v2" (deep link: /studio/vnccs-klein?cloneof=<name>).
+
+## [1.160.0] - 2026-07-17
+### Added -- "Analyze outfit (vision)" on the Clothes tab
+- New 🔍 button in the Outfit-reference box (appears once a garment reference
+  and/or try-on garment photos are uploaded): STAGE 1 the Ollama VISION model
+  describes each garment photo in fashion-catalogue prose (type, colours,
+  pattern, fabric, cut, details, where worn -- person/pose/background ignored);
+  STAGE 2 the existing Clothes-Wizard TEXT model synthesises the costume SLOT
+  fields (top/bottom/head/face/shoes) from those descriptions and fills them in.
+  The dress prompt then pulls in the SAME direction as the garment reference
+  latents -- text and image reinforcing each other instead of fighting.
+- Scans up to 4 images (the classic outfit reference + any try-on garment
+  photos). The full prose scan opens in the Vision-Scan viewer for reference;
+  filled slots stay editable. Backend: `POST /wizard/garment-analyze` (same
+  describe-then-synthesise pattern as clone-analyze; needs Ollama vision+text
+  models configured in Settings).
+
+## [1.159.0] - 2026-07-17
+### Fixed -- Clothing blending into skin when dressing the costume base
+- Root cause: the dress graph holds the BARE-SKIN body reference (person-minus-
+  clothes ReferenceLatentPlus) active for the ENTIRE render (end=1.0) -- during
+  the late texture-forming steps the model keeps seeing bare skin exactly where
+  the garment must go, so skin bleeds through the fabric (translucent /
+  skin-toned clothing). Same failure family as the pose mannequin leak; same
+  cure: RELEASE the reference before textures form.
+- New "Dressing settings" panel on the Clothes tab (Klein), all persisted:
+  * **Body-ref release** (`klein_clothes_ref_end`, default 0.80; 1.0 = old
+    behavior) -- the main fix; lower if garments still look translucent.
+  * **Body-ref strength** (`klein_clothes_strength`) -- was backend-only.
+  * **Steps** (blank = global) and **guidance** (>1 activates the negative).
+  * **Negative** field (e.g. "sheer fabric, see-through, skin showing through
+    fabric, body paint").
+- `klein_clothes_prompt` gained an always-on OPAQUE-fabric clause (positive
+  wording, works at guidance 1.0): garments fully cover the skin with a crisp
+  fabric-meets-skin edge, no skin tone through any garment.
+- `build_klein_clothes_graph(ref_end=..., negative_prompt=...)`;
+  `KleinClotheIn.steps/guidance/ref_end/negative`; per-run log line records the
+  resolved dressing settings.
+
+## [1.158.1] - 2026-07-17
+### Fixed -- Dress-target strip blew up the Clothes-tab column
+- The Dress-target thumbnails rendered as ONE horizontal row (overflow-x), which
+  stretched the left column across most of the screen with a full pose set.
+  Thumbnails now WRAP onto multiple rows (smaller, 66px), and the current
+  selection shows as a LARGE preview (240px, click to zoom in the lightbox)
+  above the grid with its pose name + HD marker -- easy to see exactly what the
+  costume preview / try-on will dress.
+
+## [1.158.0] - 2026-07-17
+### Added -- EDIT IMAGE: masked inpaint editor for the base AND costume images
+- New "🖌 Edit image" button in the Base-image header (Create tab) and "🖌 Edit
+  costume image" on the Clothes tab (Klein). Opens a full-screen editor over the
+  current version with two mask modes:
+  * **Brush** -- paint (red) over what should change; size slider, erase, clear.
+  * **Segments (SAM3)** -- type what to find ("earrings", "hair", "left arm"),
+    Detect runs SAM3 text segmentation on the worker and returns EVERY found
+    region as a clickable thumbnail; select one or many (blue tint shows the
+    live selection). Brush strokes and selected segments COMBINE into one mask.
+- Prompt-driven repaint of ONLY the masked region (SetLatentNoiseMask +
+  ImageCompositeMasked -- everything outside the mask stays pixel-identical),
+  with optional negative (active when guidance > 1), steps (def 12), guidance,
+  and edge grow/feather. Up to 3 REFERENCE IMAGES ride as Klein reference
+  latents -- "add the makeup style from image 1", "the tattoo design from
+  image 1 on her upper arm", "hair like image 2" -- refs are numbered in the
+  prompt as image 1..3.
+- **Revisions built in:** every Apply saves a NEW base version (or costume
+  version) that becomes ACTIVE -- so edits layer run after run (the editor
+  reloads the result each time), the existing version arrows are the revision
+  history, and Set-active picks the final. Perfect for cleaning reference
+  remnants after Strip: brush over the leftover item, prompt "bare skin".
+- Backend: `POST /base/segment` (SAM3 detect -> per-mask PNGs via
+  `build_sam3_detect_graph`), `POST /base/inpaint` (`build_klein_inpaint_graph`;
+  costume_name switches the target+save path to costume versions;
+  gen_meta records engine 'klein-inpaint' + parent_version + edit prompt).
+
+## [1.157.0] - 2026-07-17
+### Added -- Gallery Originals/Upscaled tabs, Klein clothes pose target, VIRTUAL TRY-ON
+- **Pose gallery tabs:** an "Upscaled (default refs) / Originals" toggle above the
+  pose output gallery. Upscaled view (the default) shows the HD copy of every
+  pose that has one plus the originals that don't -- a complete, de-mingled set;
+  Originals shows only raw renders. Upscaled copies are also what the clothes
+  Dress-target picker prefers, making them the character's default references.
+- **Klein clothes "Dress target" (bug fix):** the Clothes tab's mannequin picker
+  queried WORKER-side sprites, which Klein characters don't have (their sprites
+  are ingested into the app catalog) -- hence "No pose sprites on the workers
+  yet" despite a full set. Klein mode now shows a catalog picker instead: the
+  base render (default) or ANY cataloged pose sprite (upscaled copies take
+  precedence, HD-badged). The classic costume preview accepts the choice too
+  (`KleinClotheIn.pose_asset_id`; RGBA sprites are flattened onto chroma green
+  before dressing).
+- **VIRTUAL TRY-ON (fal flux-klein-tryon LoRA):** dress the character from
+  garment PHOTOS. New "🧥 Virtual try-on" panel on the Clothes tab (Klein):
+  add up to 3 garment photos per pass (slot-tagged top/bottom/shoes/accessory/
+  dress + optional description each), person = the Dress target (pose sprite or
+  base), steps/guidance exposed (trained defaults 28 / 2.5 -- heavier than pose
+  runs). Each pass returns the dressed result AND re-uploads it as a worker
+  input, so the next pieces LAYER onto it ("Layer on the last result" -- keep
+  adding until the outfit is complete). With a Costume name set, every pass
+  saves as a costume VERSION (same path as the classic preview), so a finished
+  layered outfit slots straight into "Generate clothed set" for the full pose
+  set. Text-slot prompting is untouched -- describe, photograph, or both.
+  Backend: `POST /clothes/tryon`, `build_klein_tryon_graph` (person + garments
+  as reference latents, TRYON trigger prompt, CFGGuider at real guidance),
+  `resolve_tryon_lora` (auto-finds flux-klein-tryon*.safetensors; overrides
+  `klein_tryon_lora_name` / `klein_tryon_lora_strength`).
+
 ## [1.156.0] - 2026-07-17
 ### Added -- Klein settings PRESETS (snapshot / restore every dial)
 - New "🎛 Presets" bar at the top of the Klein controls (above Canvas width):
@@ -16,8 +1644,7 @@
   want and it IS the default; presets are named copies you can come back to.
 - **First-run migration:** if no presets exist yet, the CURRENT tuned settings
   are cloned as a preset named "Realistic" automatically -- Lorenzo's dialed-in
-  configuration (VNCCS + reduced LoRA strength + consistency stack + pose
-  refine 0.45 + steps 14 etc.) is preserved verbatim without transcribing it.
+  configuration is preserved verbatim without transcribing it.
 - Stored under `klein_presets` in the studio settings JSON.
 
 ## [1.155.0] - 2026-07-17

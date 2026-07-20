@@ -186,7 +186,8 @@ async def save_base_preview(session, *, character_name: str,
                             views: Optional[List[Dict[str, Any]]] = None,
                             story_id: Optional[UUID] = None,
                             variant: Optional[str] = None,
-                            gen_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                            gen_meta: Optional[Dict[str, Any]] = None,
+                            make_active: bool = True) -> Dict[str, Any]:
     """Persist a "Generate Character" preview as a BASE-IMAGE VERSION.
 
     A base version is now a SET of views (front/left/right/back) when ``views``
@@ -242,7 +243,11 @@ async def save_base_preview(session, *, character_name: str,
              "gen_meta": dict(gen_meta or {})}
     versions.append(entry)
     v["base_versions"] = versions
-    v["active_base"] = ver_id                # latest version = default active
+    # v1.186: only auto-activate when asked (single bases) -- a 4-view / mesh set
+    # must NOT hijack the main reference. Always activate the FIRST ever version
+    # so a character is never left without an active base.
+    if make_active or not v.get("active_base"):
+        v["active_base"] = ver_id            # latest version = default active
     if variant in ("native", "klein"):
         v["variant"] = variant               # which studio mode made this char
     v.setdefault("ref", character_name)
@@ -250,7 +255,7 @@ async def save_base_preview(session, *, character_name: str,
     char.manifest = manifest
     await session.commit()
     return {"character_id": str(char.id), "version": entry,
-            "count": len(versions), "active": ver_id}
+            "count": len(versions), "active": v.get("active_base") or ver_id}
 
 
 async def save_pose_upscale(session, *, character_name: str, label: str,
