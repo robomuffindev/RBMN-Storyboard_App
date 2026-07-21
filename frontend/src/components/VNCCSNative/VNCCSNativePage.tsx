@@ -54,7 +54,7 @@ interface ChunkState {
 // jobs are durable + ingest server-side; direct chunks finish on the workers).
 // We persist a compact descriptor of the in-flight run to localStorage so the
 // page can restore the status view and resume polling when it re-mounts.
-const ACTIVE_RUN_KEY = 'rbmn_vnccs_active_run';
+const ACTIVE_RUN_KEY = 'rbmn_vnccs_active_runs';   // v1.199.22: MAP {charName: desc}
 type ActiveRunDesc =
   | { kind: 'queue'; runId: string; jobIds: string[]; step: VNCCSStepT; charName: string; started: number }
   | { kind: 'direct'; step: VNCCSStepT; charName: string; engine?: string;
@@ -65,24 +65,34 @@ type ActiveRunDesc =
                       label: string; pose_names?: string[] | null }>;
       ingested: number[]; started: number };
 
-function saveActiveRun(d: ActiveRunDesc): void {
-  try { window.localStorage.setItem(ACTIVE_RUN_KEY, JSON.stringify(d)); } catch { /* storage disabled */ }
-}
-function loadActiveRun(): ActiveRunDesc | null {
+function _loadRunsMap(): Record<string, ActiveRunDesc> {
   try {
     const s = window.localStorage.getItem(ACTIVE_RUN_KEY);
-    if (!s) return null;
-    const d = JSON.parse(s) as ActiveRunDesc & { started?: number };
-    // drop stale descriptors (>3h) so a long-dead run never re-arms the UI
-    if (!d || typeof d !== 'object' || (Date.now() - (d.started || 0)) > 3 * 60 * 60 * 1000) {
-      window.localStorage.removeItem(ACTIVE_RUN_KEY);
-      return null;
+    if (!s) return {};
+    const m = JSON.parse(s) as Record<string, ActiveRunDesc & { started?: number }>;
+    const now = Date.now();
+    const out: Record<string, ActiveRunDesc> = {};
+    for (const [k, v] of Object.entries(m || {})) {
+      // drop stale descriptors (>3h) so a long-dead run never re-arms the UI
+      if (v && typeof v === 'object' && (now - (v.started || 0)) <= 3 * 60 * 60 * 1000) out[k] = v as ActiveRunDesc;
     }
-    return d;
-  } catch { return null; }
+    return out;
+  } catch { return {}; }
 }
-function clearActiveRun(): void {
-  try { window.localStorage.removeItem(ACTIVE_RUN_KEY); } catch { /* ignore */ }
+function _saveRunsMap(m: Record<string, ActiveRunDesc>): void {
+  try { window.localStorage.setItem(ACTIVE_RUN_KEY, JSON.stringify(m)); } catch { /* storage disabled */ }
+}
+// runs are stored per CHARACTER so queueing across characters never clobbers, and
+// returning to a character re-shows its status (survives tab switch + browser close).
+function saveActiveRun(d: ActiveRunDesc): void {
+  const m = _loadRunsMap(); if (d.charName) { m[d.charName] = d; _saveRunsMap(m); }
+}
+function loadActiveRunFor(charName: string): ActiveRunDesc | null {
+  const m = _loadRunsMap(); return (charName && m[charName]) || null;
+}
+function clearActiveRun(charName?: string): void {
+  if (!charName) return;
+  const m = _loadRunsMap(); delete m[charName]; _saveRunsMap(m);
 }
 
 const shortHost = (h: string) => h.replace(/^https?:\/\//, '').replace(/\/$/, '');
@@ -409,6 +419,37 @@ function MannequinStrip({ character, hosts, sel, onSelect, hint, costume, onOpen
         <span style={{ fontSize: 12, color: '#9aa4b2' }}>
           pose {pos + 1} / {entries.length}{hosts.length > 1 ? ` · ${shortHost(cur.host)}` : ''}
         </span>
+      </div>
+      {hint && <p style={{ fontSize: 12, color: '#8d97a5', margin: '4px 0 0' }}>{hint}</p>}
+    </div>
+  );
+}
+
+// v1.199.17: catalog-sourced pose preview strip (app-side). MannequinStrip queries
+// the WORKER, which is empty for app-catalog characters; this shows the sprites we
+// already ingested into the catalog (engine-filtered) so the preview actually renders.
+function CatalogPoseStrip({ images, hint, onOpen }: {
+  images: string[]; hint?: string;
+  onOpen?: (urls: string[], i: number, onNav?: (i: number) => void) => void;
+}) {
+  const [pos, setPos] = useState(0);
+  const key = images.join('|');
+  useEffect(() => { setPos(0); }, [key]);
+  if (!images.length) {
+    return <p style={{ fontSize: 12, color: '#6b7280' }}>No sprites cataloged for this set/engine yet — generate poses or a costume set first (or switch engine).</p>;
+  }
+  const p = Math.min(pos, images.length - 1);
+  const step = (d: number) => setPos((p + d + images.length) % images.length);
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button style={{ ...btnGhost, padding: '4px 10px' }} onClick={() => step(-1)}>‹</button>
+        <img src={images[p]} alt={`sprite ${p + 1}`}
+             onClick={() => onOpen?.(images, p, (i) => setPos(i))}
+             style={{ height: 220, borderRadius: 6, border: '1px solid #2a2f3a', background: '#0e1116',
+                      cursor: onOpen ? 'zoom-in' : 'default' }} />
+        <button style={{ ...btnGhost, padding: '4px 10px' }} onClick={() => step(1)}>›</button>
+        <span style={{ fontSize: 12, color: '#9aa4b2' }}>sprite {p + 1} / {images.length}</span>
       </div>
       {hint && <p style={{ fontSize: 12, color: '#8d97a5', margin: '4px 0 0' }}>{hint}</p>}
     </div>
@@ -851,6 +892,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [baseTurnLoraStr, setBaseTurnLoraStr] = useState<string>('');
   const [baseTurnLoraTrig, setBaseTurnLoraTrig] = useState<string>('');
   const [qwenRefWeight, setQwenRefWeight] = useState<string>('');   // v1.194: Qwen reference strength (body adherence)
+  const [qwenHeadwearRoom, setQwenHeadwearRoom] = useState<string>('');   // v1.199.13: Qwen reserved top headroom for tall hats
   const [qwenBaseBody, setQwenBaseBody] = useState<'underwear' | 'nude' | 'keep'>('underwear');  // v1.197: Qwen-mode base body (SFW/NSFW toggle lives in Klein-only controls)
   const [baseMatchViews, setBaseMatchViews] = useState<boolean>(true);
   const [cleanup, setCleanup] = useState<string>('gentle');
@@ -969,6 +1011,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // clothes process, exactly as their nodes do it (same path the Native page
   // uses). On the Native page this is always effectively 'qwen'.
   const [clothesSub, setClothesSub] = useState<'klein' | 'qwen'>('klein');
+  const [emotionsSub, setEmotionsSub] = useState<'klein' | 'qwen'>('klein');   // v1.199.15: Emotions engine
+  const [emoCostumesMap, setEmoCostumesMap] = useState<Record<string, unknown>>({});
+  const [emoBaseVersions, setEmoBaseVersions] = useState<unknown[]>([]);
   // v1.168: Create tab engine sub-tab. 'klein' = our reference/identity chain;
   // 'qwen' = VNCCS's exact creation process rebuilt app-side (t2i base render
   // 640x1536 for new characters, reference-collage pipeline for clones, plus
@@ -1031,7 +1076,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [createSub, setCreateSub] = useState<'new' | 'clone'>('new');
   const [cloneSelIdx, setCloneSelIdx] = useState(0);
   const lastSyncedChar = useRef('');
-  const [emoMannequin, setEmoMannequin] = useState<{ host: string; index: number } | null>(null);
   const [costumesMap, setCostumesMap] = useState<NonNullable<api.CharacterImagesT['costumes']>>({});
   // Klein clothes: pose-sprite target ('' = active base) + virtual try-on (v1.157)
   const [kcPose, setKcPose] = useState<string>('');
@@ -1216,7 +1260,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setBaseDeriveMethod(String(st.klein_base_derive_method ?? 'reference').toLowerCase() === 'matchpose' ? 'matchpose' : 'reference');
     setCreateEngine(String(st.vnccs_create_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein');
     setClothesSub(String(st.vnccs_clothes_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein');
+    setEmotionsSub(String(st.vnccs_emotions_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein');
     setQwenRefWeight(st.qwen_ref_weight !== undefined ? String(st.qwen_ref_weight) : '');
+    setQwenHeadwearRoom(st.qwen_headwear_room !== undefined ? String(st.qwen_headwear_room) : '');
     setQwenBaseBody(['nude', 'keep', 'underwear'].includes(String(st.qwen_base_body)) ? (String(st.qwen_base_body) as 'underwear' | 'nude' | 'keep') : 'underwear');
     setCleanup(String(st.klein_cleanup ?? 'gentle'));
     setKSteps(parseInt(String(st.klein_steps ?? '6'), 10) || 6);
@@ -1530,6 +1576,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         setEmoOutputs(r.outputs || []);
         setEmoRuns(r.emotion_runs || []);
         setEmoCharId(item.character_id);
+        setEmoCostumesMap(r.costumes || {});
+        setEmoBaseVersions(r.base_versions || []);
         const done = Array.from(new Set((r.emotion_runs || []).flatMap((x) => x.emotions || [])));
         if (done.length) setEmoSelected(done);
       } catch { setEmoOutputs([]); setEmoRuns([]); }
@@ -1537,33 +1585,31 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, emoChar]);
 
-  // Costume list for the Emotions tab — queried on EVERY tab open (so clothes
-  // generated moments ago appear without a browser refresh) and unioned across
-  // ALL workers holding the character: a costume generated on a shard worker
-  // may be unknown to the pinned host.
+  // Costume/base sets for the Emotions tab — sourced from the APP CATALOG (not the
+  // worker store, which is empty for Klein-Hybrid characters) and filtered by the
+  // active engine toggle: Qwen shows Qwen-made sets; Klein shows Klein-made + any
+  // untagged/legacy sets. 'Base' (the character's base pose sprites) is always
+  // offered; the backend engine-filters the actual sprites it runs on.
   useEffect(() => {
-    if (tab !== 'emotions') return;
-    setEmoCostumeOpts([]);
-    if (!emoChar || !host?.online) return;
-    const rec = catItems.find((c) => c.name === emoChar)?.hosts || [];
-    const online = rec.filter((h) => vnccsHosts.includes(h));
-    const hostsToAsk = online.length ? online : (host?.host ? [host.host] : []);
-    let alive = true;
-    Promise.all(hostsToAsk.map(async (h) => {
-      try {
-        const r = await api.relayJson<unknown>(
-          `get_character_costumes?character=${encodeURIComponent(emoChar)}&_vnccs_host=${encodeURIComponent(h)}`);
-        return Array.isArray(r) ? r.map(String) : [];
-      } catch { return [] as string[]; }
-    })).then((lists) => {
-      if (!alive) return;
-      const list = Array.from(new Set(lists.flat()));
-      setEmoCostumeOpts(list);
-      if (list.length) setEmoCostumesSel((prev) => prev.filter((c) => list.includes(c)).length ? prev.filter((c) => list.includes(c)) : [list[0]]);
+    if (tab !== 'emotions') { return; }
+    const matchEng = (eng?: unknown) => {
+      const e = String(eng || '').toLowerCase();
+      if (!e) return true;                       // untagged legacy shows under BOTH engines
+      return emotionsSub === 'qwen' ? e === 'qwen' : e === 'klein';
+    };
+    const cos: string[] = [];
+    for (const [nm, entry] of Object.entries(emoCostumesMap || {})) {
+      const vers = ((entry as { versions?: { engine?: unknown }[] })?.versions) || [];
+      if (!vers.length || vers.some((v) => matchEng(v?.engine))) cos.push(nm);
+    }
+    const list = ['Base', ...cos];
+    setEmoCostumeOpts(list);
+    setEmoCostumesSel((prev) => {
+      const keep = prev.filter((c) => list.includes(c));
+      return keep.length ? keep : ['Base'];
     });
-    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, emoChar, host?.online, vnccsHosts, catItems]);
+  }, [tab, emoChar, emotionsSub, emoCostumesMap, emoBaseVersions]);
 
   const modelOptions = useMemo(() => {
     if (!ctx) return [] as string[];
@@ -1610,7 +1656,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_base_derive_method = baseDeriveMethod;   // v1.189: reference | matchpose
     settings.vnccs_create_engine = createEngine;   // v1.191: remember last Create/Clone engine (klein|qwen)
     settings.vnccs_clothes_engine = clothesSub;   // v1.199.3: remember last Clothes engine (klein|qwen)
+    settings.vnccs_emotions_engine = emotionsSub; // v1.199.15: remember last Emotions engine
     if (qwenRefWeight.trim() !== '') settings.qwen_ref_weight = qwenRefWeight; else delete settings.qwen_ref_weight;
+    if (qwenHeadwearRoom.trim() !== '') settings.qwen_headwear_room = qwenHeadwearRoom; else delete settings.qwen_headwear_room;
     settings.qwen_base_body = qwenBaseBody;   // v1.197: Qwen-mode base body (underwear|nude|keep)
     settings.klein_cleanup = cleanup || 'gentle';
     settings.klein_steps = kSteps || 6;
@@ -1745,7 +1793,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength, switchStyleRealism,
-      createEngine, clothesSub, baseDeriveMethod, qwenRefWeight, qwenBaseBody]);
+      createEngine, clothesSub, emotionsSub, baseDeriveMethod, qwenRefWeight, qwenHeadwearRoom, qwenBaseBody]);
 
   const resetSettings = () => {
     setEditModel(''); setGenMode(''); setGenModel(''); setGenSteps(''); setGenCfg('');
@@ -1757,7 +1805,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setCleanup('gentle'); setKSteps(6); setPoseSteps(8); setPoseCleanup('gentle'); setRbEnd('0.85');
     setBaseFr(true); setBaseFrDenoise(''); setBaseFrSteps('');
     setBaseConsLora(false); setBaseConsLoraStr(''); setBaseMatchViews(true);
-    setBaseTurnLora(false); setBaseTurnLoraName(''); setBaseTurnLoraStr(''); setBaseTurnLoraTrig(''); setQwenRefWeight(''); setQwenBaseBody('underwear');
+    setBaseTurnLora(false); setBaseTurnLoraName(''); setBaseTurnLoraStr(''); setBaseTurnLoraTrig(''); setQwenRefWeight(''); setQwenHeadwearRoom(''); setEmotionsSub('klein'); setQwenBaseBody('underwear');
     setSamClean(false); setSamPrompt(''); setSamThresh('');
     // the debounced auto-save effect persists these defaults
   };
@@ -1965,8 +2013,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // Watch a queued run's chunk jobs to completion.  This is the RESUMABLE core:
   // both a fresh enqueue and a restore-after-refresh call it.  The backend
   // ingests each chunk server-side, so we only track status + refresh the grid.
+  // v1.199.22: supersede token + which char's run is on screen (so switching
+  // characters stops the old poll loop and shows the new character's status).
+  const watchTokRef = useRef(0);
+  const displayedRunCharRef = useRef<string>('');
   const watchQueueRun = async (rid: string, jobIds: string[], step: VNCCSStepT,
                                charName: string, started: number) => {
+    const myTok = ++watchTokRef.current;
+    displayedRunCharRef.current = charName;
     let cid = '';
     const refreshLib = async () => {
       if (!cid) {
@@ -1997,6 +2051,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     const missCount = new Map<string, number>();  // consecutive poll failures per job
     const deadline = Date.now() + 2 * 60 * 60 * 1000; // 2h safety net
     while (terminal.size < jobIds.length) {
+      if (watchTokRef.current !== myTok) return;   // superseded by another character's run
       let newDone = false;
       await Promise.all(jobIds.filter((id) => !terminal.has(id)).map(async (id) => {
         try {
@@ -2049,7 +2104,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     if (anyError && !anyDone) setErrMsg('All queued chunks failed — check the Generation Queue / worker consoles.');
     setStatusText('');
     setRunId('');
-    clearActiveRun();
+    clearActiveRun(charName);
+    if (displayedRunCharRef.current === charName) displayedRunCharRef.current = '';
   };
 
   const runGenerateQueued = async (step: VNCCSStepT, charName: string,
@@ -2070,7 +2126,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       if (g.seed && seedMode === 'fixed' && !seedVal) setSeedVal(String(g.seed));
       setRunId(g.run_id);
       const jobIds = g.job_ids || [];
-      if (!jobIds.length) { setPhase('error'); setErrMsg('No chunks were queued.'); setStatusText(''); clearActiveRun(); return; }
+      if (!jobIds.length) { setPhase('error'); setErrMsg('No chunks were queued.'); setStatusText(''); clearActiveRun(charName); return; }
       const initial: ChunkState[] = jobIds.map((jid, i) => ({
         host: '', prompt_id: jid, tap_map: {},
         label: `chunk ${i + 1}`, status: 'running', images: [],
@@ -2084,7 +2140,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       saveActiveRun({ kind: 'queue', runId: g.run_id, jobIds, step, charName, started: Date.now() });
       await watchQueueRun(g.run_id, jobIds, step, charName, Date.now());
     } catch (e) {
-      clearActiveRun();
+      clearActiveRun(charName);
       setPhase('error');
       setErrMsg((e as Error).message);
       setStatusText('');
@@ -2120,6 +2176,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   };
   const watchDirectRun = async (initial: ChunkState[], ctx: DirectCtx,
                                 started: number, alreadyIngested: Set<number>) => {
+    const myTok = ++watchTokRef.current;
+    displayedRunCharRef.current = ctx.charName;
     const ingested: string[] = [];
     const filed = new Set<number>(alreadyIngested);
     let lastCharId = '';
@@ -2189,9 +2247,11 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       }
     }
     setPhase(anyError && totalOut === 0 ? 'error' : 'done');
+    if (watchTokRef.current !== myTok) return;    // superseded — another char owns the display
     if (anyError && totalOut === 0) setErrMsg('All chunks failed — check the worker consoles.');
     setStatusText('');
-    clearActiveRun();
+    clearActiveRun(ctx.charName);
+    if (displayedRunCharRef.current === ctx.charName) displayedRunCharRef.current = '';
   };
 
   const runGenerate = async (step: VNCCSStepT, charName: string, body: Partial<api.GenerateBody>,
@@ -2200,7 +2260,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     // + cancellable): native creator/cloner/clothes/emotions, and Klein poses.
     // Klein emotions (crop-and-stitch) still use the direct path below.
     const _eng = (body as { engine?: string }).engine;
-    if (_eng !== 'qwen' && (_eng !== 'klein' || step === 'creator' || step === 'cloner')) {
+    // v1.199.20: Qwen EMOTIONS go through the queue (cancel/retry/threading); Qwen
+    // pose sets/clothes stay on the direct path.
+    const qwenEmotionsQueued = _eng === 'qwen' && step === 'emotions';
+    if (qwenEmotionsQueued || (_eng !== 'qwen' && (_eng !== 'klein' || step === 'creator' || step === 'cloner'))) {
       return runGenerateQueued(step, charName, body);
     }
     setErrMsg(''); setIngestMsg(''); setChunks([]);
@@ -2241,7 +2304,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       });
       await watchDirectRun(initial, ctx, Date.now(), new Set());
     } catch (e) {
-      clearActiveRun();
+      clearActiveRun(charName);
       setPhase('error');
       const msg = (e as Error).message;
       setErrMsg(msg.includes('Timed out')
@@ -2258,79 +2321,89 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // Manually clear the run view (non-destructive: any real server-side work keeps
   // going).  Escape hatch if a restored run ever looks stuck.
   const dismissRun = () => {
-    clearActiveRun();
+    watchTokRef.current++;                       // stop any poll loop
+    clearActiveRun(displayedRunCharRef.current);
+    displayedRunCharRef.current = '';
     setPhase('idle'); setChunks([]); setRunId(''); setStatusText('');
   };
 
-  const restoredRunRef = useRef(false);
-  useEffect(() => {
-    if (restoredRunRef.current) return;
-    restoredRunRef.current = true;
-    const d = loadActiveRun();
-    if (!d) return;
-    void (async () => {
-      const refreshFor = async (charName: string) => {
-        try {
-          const cat = await api.getCatalog();
-          const hit = cat.find((c) => c.name === charName);
-          const cid = hit?.character_id || editingCharId;
-          if (!cid) return;
-          const r = await api.getCharacterImages(cid);
-          setExistingOutputs(r.outputs || []);
-          setPoseRuns(r.pose_runs || []);
-          setCostumesMap(r.costumes || {});
-        } catch { /* best-effort */ }
-      };
-      if (d.kind === 'queue') {
-        if (!d.jobIds?.length) { clearActiveRun(); return; }
-        // Only re-attach if a job is ACTUALLY still pending/running.  A restart of
-        // run.bat (startup cleanup), a completed run, or purged jobs leave them
-        // done/cancelled/missing — restoring 'polling' then would pin busy=true and
-        // block previews/generation.  If nothing is live, clear + refresh instead.
-        let anyLive = false;
-        await Promise.all(d.jobIds.map(async (id) => {
-          try {
-            const jr = await api.getJob(id);
-            const s = (jr.status || '').toLowerCase();
-            if (s === 'pending' || s === 'running' || s === 'queued') anyLive = true;
-          } catch { /* 404 / gone -> not live */ }
-        }));
-        if (!anyLive) { clearActiveRun(); await refreshFor(d.charName); return; }
-        setRunId(d.runId);
-        setChunks(d.jobIds.map((jid, i) => ({
-          host: '', prompt_id: jid, tap_map: {}, label: `chunk ${i + 1}`,
-          status: 'running', images: [], pose_names: null,
-          startedAt: d.started || Date.now(),
-        })));
-        setRunStarted(d.started || Date.now());
-        setPhase('polling');
-        setStatusText('Reconnected to a running queue job — resuming live status…');
-        void watchQueueRun(d.runId, d.jobIds, d.step, d.charName, d.started);
-      } else if (d.kind === 'direct') {
-        // completed-but-not-cleared (every chunk already filed) -> just clear.
-        if (!d.chunks?.length || (d.ingested?.length || 0) >= d.chunks.length) {
-          clearActiveRun(); await refreshFor(d.charName); return;
-        }
-        const done = new Set(d.ingested || []);
-        const initial: ChunkState[] = d.chunks.map((c, i) => ({
-          host: c.host, prompt_id: c.prompt_id, tap_map: c.tap_map,
-          label: c.label || `chunk ${i + 1}`, status: done.has(i) ? 'done' : 'running',
-          images: [], pose_names: c.pose_names || null,
-          startedAt: d.started || Date.now(),
-        }));
-        setChunks(initial);
-        setRunStarted(d.started || Date.now());
-        setPhase('polling');
-        setStatusText('Reconnected to a running generation — resuming live status…');
-        const ctx: DirectCtx = {
-          step: d.step, charName: d.charName, engine: d.engine, ingestExtra: d.ingestExtra ?? null,
-          runSeed: d.runSeed ?? null, poseNamesAll: d.poseNamesAll ?? null, poseSet: d.poseSet ?? null,
-        };
-        void watchDirectRun(initial, ctx, d.started, done);
+  // v1.199.22: resume the VIEWED character's run — on mount and whenever the active
+  // tab's character changes. Queued jobs are durable server-side; direct chunks finish
+  // on the workers. Supersedes any previously-shown run via watchTokRef so switching
+  // characters stops the old poll loop and shows the new character's status.
+  const resumeRun = async (d: ActiveRunDesc) => {
+    const myTok = ++watchTokRef.current;
+    displayedRunCharRef.current = d.charName;
+    const refreshFor = async (charName: string) => {
+      try {
+        const cat = await api.getCatalog();
+        const hit = cat.find((c) => c.name === charName);
+        const cid = hit?.character_id || editingCharId;
+        if (!cid) return;
+        const r = await api.getCharacterImages(cid);
+        setExistingOutputs(r.outputs || []); setEmoOutputs(r.outputs || []); setCloOutputs(r.outputs || []);
+        setEmoRuns(r.emotion_runs || []); setPoseRuns(r.pose_runs || []); setCostumesMap(r.costumes || {});
+      } catch { /* best-effort */ }
+    };
+    if (d.kind === 'queue') {
+      if (!d.jobIds?.length) { clearActiveRun(d.charName); displayedRunCharRef.current = ''; return; }
+      let anyLive = false;
+      await Promise.all(d.jobIds.map(async (id) => {
+        try { const jr = await api.getJob(id); const st = (jr.status || '').toLowerCase();
+          if (st === 'pending' || st === 'running' || st === 'queued') anyLive = true; } catch { /* gone */ }
+      }));
+      if (watchTokRef.current !== myTok) return;   // switched away during the check
+      if (!anyLive) { clearActiveRun(d.charName); displayedRunCharRef.current = ''; await refreshFor(d.charName); return; }
+      setRunId(d.runId);
+      setChunks(d.jobIds.map((jid, i) => ({
+        host: '', prompt_id: jid, tap_map: {}, label: `chunk ${i + 1}`,
+        status: 'running', images: [], pose_names: null, startedAt: d.started || Date.now(),
+      })));
+      setRunStarted(d.started || Date.now());
+      setPhase('polling');
+      setStatusText('Reconnected to a running queue job — resuming live status…');
+      void watchQueueRun(d.runId, d.jobIds, d.step, d.charName, d.started);
+    } else if (d.kind === 'direct') {
+      if (!d.chunks?.length || (d.ingested?.length || 0) >= d.chunks.length) {
+        clearActiveRun(d.charName); displayedRunCharRef.current = ''; await refreshFor(d.charName); return;
       }
-    })();
+      const done = new Set(d.ingested || []);
+      const initial: ChunkState[] = d.chunks.map((c, i) => ({
+        host: c.host, prompt_id: c.prompt_id, tap_map: c.tap_map,
+        label: c.label || `chunk ${i + 1}`, status: done.has(i) ? 'done' : 'running',
+        images: [], pose_names: c.pose_names || null, startedAt: d.started || Date.now(),
+      }));
+      if (watchTokRef.current !== myTok) return;
+      setChunks(initial);
+      setRunStarted(d.started || Date.now());
+      setPhase('polling');
+      setStatusText('Reconnected to a running generation — resuming live status…');
+      const ctx: DirectCtx = {
+        step: d.step, charName: d.charName, engine: d.engine, ingestExtra: d.ingestExtra ?? null,
+        runSeed: d.runSeed ?? null, poseNamesAll: d.poseNamesAll ?? null, poseSet: d.poseSet ?? null,
+      };
+      void watchDirectRun(initial, ctx, d.started, done);
+    }
+  };
+  useEffect(() => {
+    const viewed = (tab === 'emotions' ? emoChar
+      : tab === 'clothes' ? clothesChar
+      : (createSub === 'clone' ? cloneName : name)).trim();
+    if (displayedRunCharRef.current === viewed) return;   // already showing this character's run
+    const d = viewed ? loadActiveRunFor(viewed) : null;
+    if (!d) {
+      // viewing a character with no active run — drop any stale status view (the other
+      // character's run keeps going server-side + stays persisted for when you return).
+      if (displayedRunCharRef.current) {
+        watchTokRef.current++;
+        displayedRunCharRef.current = '';
+        setPhase('idle'); setChunks([]); setRunId(''); setStatusText('');
+      }
+      return;
+    }
+    void resumeRun(d);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tab, emoChar, clothesChar, name, cloneName, createSub]);
 
   // --- Create-tab actions -------------------------------------------------
   // v1.180: live, parallel, cancellable base-SET generation (4-view / mesh).
@@ -2541,6 +2614,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
             background,
             base_clothing: qwenBaseBody === 'keep' ? 'keep' : 'strip',
             ref_weight: qwenRefWeight.trim() !== '' ? (parseFloat(qwenRefWeight) || undefined) : undefined,
+            headwear_room: qwenHeadwearRoom.trim() !== '' ? (parseFloat(qwenHeadwearRoom) || undefined) : undefined,
             ...(seedMode === 'fixed' && seedVal.trim() ? { seed: Number(seedVal) } : {}),
           })
         : await api.generatePreview({
@@ -2664,12 +2738,12 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     ? emoCostumesSel
     : emoCostumesText.split(',').map((c) => c.trim()).filter(Boolean);
   const canEmotions = !!host?.online && !!emoChar.trim() && emoSelected.length > 0
-    && (variant === 'klein' || emoCostumes.length > 0) && !busy;
+    && ((variant === 'klein' && emotionsSub === 'klein') || emoCostumes.length > 0) && !busy;
   const doEmotions = () => runGenerate('emotions', emoChar.trim(), {
     costumes: emoCostumes,
+    ...(variant === 'klein' ? { engine: emotionsSub } : {}),
     emotions: emoSelected,
     gen_settings: seedGenSettings(),
-    ...(variant === 'klein' ? { engine: 'klein' } : {}),
   }, { emotions: emoSelected, costumes: emoCostumes });
 
   const onUploadRefs = async (files: FileList | null) => {
@@ -3509,12 +3583,31 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     if (online.length) return online;
     return host?.host ? [host.host] : [];
   }, [catItems, clothesChar, vnccsHosts, host?.host]);
-  const emoMannequinHosts = useMemo(() => {
-    const rec = catItems.find((c) => c.name === emoChar)?.hosts || [];
-    const online = rec.filter((h) => vnccsHosts.includes(h));
-    if (online.length) return online;
-    return host?.host ? [host.host] : [];
-  }, [catItems, emoChar, vnccsHosts, host?.host]);
+  // Emotions preview sprites — from the CATALOG (emoOutputs), for the selected preview
+  // set (blank/Base = base sprites), filtered by the active engine (untagged shows under both).
+  const emoPreviewSprites = useMemo(() => {
+    const want = emoPreviewCostume;
+    const wantBase = !want || want === 'Base';
+    const matchEng = (e?: unknown) => {
+      const x = String(e || '').toLowerCase();
+      if (!x) return true;
+      return emotionsSub === 'qwen' ? x === 'qwen' : x === 'klein';
+    };
+    const baseLabels = ['creator/sprites', 'cloner/sprites', 'creator/sheet', 'cloner/original_sprites'];
+    const urls: string[] = [];
+    for (const grp of emoOutputs) {
+      const isSprite = grp.label.includes('sprites') || grp.label.endsWith('sheet');
+      if (!isSprite) continue;
+      if (wantBase && !baseLabels.includes(grp.label)) continue;
+      for (const im of grp.images) {
+        const meta = im as { url: string; engine?: string; costume?: string };
+        if (!matchEng(meta.engine)) continue;
+        if (!wantBase && String(meta.costume || '') !== want) continue;
+        urls.push(meta.url);
+      }
+    }
+    return urls;
+  }, [emoOutputs, emoPreviewCostume, emotionsSub]);
 
   const outfitInfoOf = (entry?: { versions?: api.CostumeVersionT[]; active?: string; costume_info?: Record<string, string> }) => {
     const vlist = entry?.versions || [];
@@ -3645,6 +3738,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
             cfg: qwenCfg.trim() !== '' ? parseFloat(qwenCfg) || undefined : undefined,
             clothes_lora_strength: qwenClothesLora.trim() !== '' ? parseFloat(qwenClothesLora) || undefined : undefined,
             target_size: qwenTarget.trim() !== '' ? parseInt(qwenTarget, 10) || undefined : undefined,
+            headwear_room: qwenHeadwearRoom.trim() !== '' ? (parseFloat(qwenHeadwearRoom) || undefined) : undefined,
             host: cloPreviewHost || undefined,
           })
         : kleinClothes
@@ -4386,6 +4480,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           {segRow([{ v: '0.8', label: '0.8' }, { v: '', label: '1.0 (VNCCS)' }, { v: '1.15', label: '1.15' }, { v: '1.3', label: '1.3' }, { v: '1.45', label: '1.45' }, { v: '1.6', label: '1.6' }],
                   qwenRefWeight, setQwenRefWeight)}
           {extremes('lets the model idealise more — slimmer/cleaner', 'holds your reference build harder — fuller, truer body (too high can stiffen)')}
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#7ee0b0', margin: '14px 0 5px', paddingTop: 10, borderTop: '1px solid #2a3242' }}>🎩 Headwear room — blank space reserved above the head so tall hats / headdresses have canvas to render into before the top edge clips them. Raise it for stovepipe hats, big feathered pieces or tall hair; the figure sits a little smaller in frame. 14% = prior default. Applies to the base preview AND the pose set.</div>
+          {segRow([{ v: '', label: '14% · default' }, { v: '0.22', label: '22% · tall hat' }, { v: '0.28', label: '28% · stovepipe' }, { v: '0.34', label: '34% · headdress' }],
+                  qwenHeadwearRoom, setQwenHeadwearRoom)}
+          {extremes('tighter frame, bigger figure — normal hats', 'more room up top for very tall headwear — figure sits a bit smaller')}
         </div>
       )}
       {variant === 'klein' && tab === 'create' && kleinCreate && (
@@ -5326,18 +5424,25 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                         <select style={{ ...input, width: 180 }} value={emoPreviewCostume}
                                 onChange={(e) => setEmoPreviewCostume(e.target.value)}>
                           <option value="">(base sprites)</option>
-                          {emoCostumeOpts.map((c) => <option key={c} value={c}>{c}</option>)}
+                          {emoCostumeOpts.filter((c) => c !== 'Base').map((c) => <option key={c} value={c}>{c}</option>)}
                         </select>
                       )}
                     </div>
-                    <MannequinStrip character={emoChar} costume={emoPreviewCostume || undefined}
-                                    hosts={emoMannequinHosts} sel={emoMannequin} onSelect={setEmoMannequin}
-                                    onOpen={openLightboxGallery}
-                                    hint="All generated poses across every worker — click the image to view it large and arrow through." />
+                    <CatalogPoseStrip images={emoPreviewSprites} onOpen={openLightboxGallery}
+                                      hint={`${emoPreviewSprites.length} cataloged ${emotionsSub === 'qwen' ? 'Qwen/untagged' : 'Klein/untagged'} sprite(s) for this set — click to view large. This is what the emotion pass will run on.`} />
+                  </div>
+                )}
+                {variant === 'klein' && (
+                  <div>
+                    <label style={label}>Engine</label>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button style={tabBtn(emotionsSub === 'klein')} onClick={() => setEmotionsSub('klein')}>🧪 Klein</button>
+                      <button style={tabBtn(emotionsSub === 'qwen')} onClick={() => setEmotionsSub('qwen')}>🟣 Qwen (VNCCS)</button>
+                    </div>
                   </div>
                 )}
                 <div>
-                  <label style={label}>Clothing sets * ({emoCostumes.length} selected — emotions are generated for each)</label>
+                  <label style={label}>{emotionsSub === 'qwen' ? 'Sets to emote * ' : 'Clothing sets '}({emoCostumes.length} selected — emotions are generated for each)</label>
                   {emoCostumeOpts.length ? (
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       {emoCostumeOpts.map((c) => {
@@ -5431,8 +5536,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                 {seedRow}
                 {variant === 'klein' && (
                   <p style={{ fontSize: 11, color: '#c4b5fd', margin: 0 }}>
-                    🧪 Klein face-inpaint engine — emotions re-render the FACES of this character's
-                    cataloged sprites (app-side face detection + Klein inpaint). Clothing sets don't apply.
+                    {emotionsSub === 'qwen'
+                      ? '🟣 Qwen (VNCCS) emotions — re-renders the FACE of each selected set\'s sprites via VNCCS_QWEN_Detailer ("Change emotion to X"), leaving body/clothes/background intact. Runs on the Qwen-made (or untagged) sprites for each set.'
+                      : '🧪 Klein face-inpaint engine — re-renders the FACES of this character\'s cataloged sprites (app-side face detection + Klein inpaint). Runs across all sprites; the clothing-set choice mainly matters for the Qwen engine.'}
                   </p>
                 )}
                 <button style={{ ...btn, opacity: canEmotions ? 1 : 0.5, cursor: canEmotions ? 'pointer' : 'not-allowed' }}
@@ -5943,7 +6049,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
               </div>
             );
           })()}
-          {tab === 'emotions' && !busy && (() => {
+          {tab === 'emotions' && (() => {
             const groups = emoOutputs
               .filter((o) => isFinalLabel(o.label) && o.label.startsWith('emotions/'))
               .flatMap((o) => {

@@ -247,7 +247,7 @@ export const generateQwenClonePreview = (body: {
   character_name: string; cloner_images: Array<Record<string, unknown>>;
   character_info?: Record<string, unknown>; background?: string;
   base_clothing?: string; undress_prompt?: string; seed?: number;
-  target_size?: number; ref_weight?: number; host?: string;
+  target_size?: number; ref_weight?: number; headwear_room?: number; host?: string;
 }) =>
   fetch(`${BASE}/create/qwen-clone-preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -261,7 +261,7 @@ export const generateQwenClothesPreview = (body: {
   garment_ref?: { name: string; subfolder?: string; type?: string } | null;
   background?: string; base_version_id?: string; pose_asset_id?: string | null;
   seed?: number; steps?: number; cfg?: number; clothes_lora_strength?: number;
-  target_size?: number; use_saved_garment?: boolean; host?: string;
+  target_size?: number; use_saved_garment?: boolean; headwear_room?: number; host?: string;
 }) =>
   fetch(`${BASE}/clothes/qwen-preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

@@ -1,5 +1,311 @@
 # Changelog
 
+## [1.199.22] - 2026-07-21
+### Fixed -- run status now persists per character (survives tab switch + browser close)
+The in-flight run was stored under ONE localStorage key, so queuing a second character
+overwrote the first, and restore only ran once on mount -> returning to a character showed
+nothing. Now runs are stored in a MAP keyed by character, and a resume effect re-attaches the
+status for whichever character you're viewing (on mount AND on tab/character change). A
+supersede token (`watchTokRef`) stops the old poll loop when you switch, so no double-polling;
+`displayedRunCharRef` tracks which character is on screen. Queued jobs are durable server-side,
+so you can queue across characters, walk away / close the browser, and return to live status.
+Frontend only -- **browser refresh**.
+
+## [1.199.21] - 2026-07-21
+### Changed -- watch emotion renders land live + stop early; one sprite per job
+- The "Generated emotions" gallery was gated `tab==='emotions' && !busy`, so it was HIDDEN
+  during a run and only reappeared at the end. Removed `!busy` -> it renders during the run,
+  and since the queue refreshes the catalog after every completed job, images now stream in
+  live (organized by set/costume) as each sprite finishes. Spot a bad render and hit Stop to
+  cancel the rest instead of wasting the whole set.
+- `qwen_emotions_per_job` default 1 (was 2): one sprite (x all its emotions) per queue job, so
+  the first results appear fast and Stop is fine-grained. Tune up via the setting. Applies to
+  the queue path and the direct fallback. Backend + frontend -- **run.bat restart + refresh**.
+
+## [1.199.20] - 2026-07-21
+### Added -- Qwen emotions run through the Generation Queue (cancel + retry + threading)
+Qwen emotions now enqueue as central Job rows (`workflow_type: studio_pose_qwen`) instead of
+the direct path, so they get the Stop button, retry, SSE and consistent worker threading like
+native/Klein runs. One job per sprite-batch (`qwen_emotions_per_job`, default 2), fanned
+across all workers by the dispatcher.
+- `generate_queue`: qwen-emotions branch chunks sprites (shared `_qwen_emotion_workitems`
+  gather) into jobs; eligibility lets qwen use all hosts (uploads its own sprites).
+- `dispatcher._process_studio_pose_job`: new `studio_pose_qwen` branch builds+submits the
+  app-side Qwen emotion graph via `_qwen_emotion_submit_one`; reuses the generic monitor +
+  `ingest_result` (engine=qwen tag flows through) + cancel path verbatim.
+- Frontend: qwen emotions route to `runGenerateQueued` (Stop button appears); qwen pose
+  sets/clothes stay on the direct path (unchanged, zero regression risk).
+- The direct `_qwen_emotions_parallel` handler is kept as a safety net (revert the one
+  frontend routing line to fall back to it). Backend + frontend -- **run.bat restart + refresh**.
+- NOTE: routing Qwen POSE SETS + CLOTHES through the queue too (same pattern) is the next
+  step; this pass does emotions (the immediate need) to avoid risking working pose runs.
+
+## [1.199.19] - 2026-07-21
+### Changed -- Qwen emotions now batch + fan out across ALL workers (was 1 worker, 1 push)
+`_qwen_emotions_parallel` gathered all sprites and ran one submit per costume on the PINNED
+host. Now it collects every engine-appropriate sprite across the selected sets, splits them
+into `qwen_emotions_per_job` batches (default 2, falls back to `qwen_poses_per_job`), and
+round-robins the batches across every available worker -- each batch x every emotion is one
+job on one worker, matching the Qwen pose-set fan-out. Models resolve per-host. Also:
+`generate_parallel` eligibility now lets qwen clothes/emotions use ALL hosts (they upload
+their sprites/refs to whatever worker runs the chunk, like klein), instead of only recorded
+shard hosts. Backend -- **run.bat restart**.
+
+### Known gap -- cancel for Qwen runs
+The Stop button only appears for QUEUED runs (native + Klein base, which carry a run_id).
+All Qwen runs (emotions AND pose sets) use the direct /generate-parallel path, which has no
+Stop button. Giving Qwen cancel means routing it through the Generation Queue (batch +
+threading + cancel + retry together) -- a JobDispatcher change, scoped as the next step.
+
+## [1.199.18] - 2026-07-21
+### Fixed -- Qwen emotions: invalid color_match_method for the installed VNCCS_QWEN_Detailer
+The worker's `VNCCS_QWEN_Detailer` only accepts `color_match_method` in
+['disabled','kornia_reinhard'] (the example workflow's 'mvgd' is a newer node build) ->
+`prompt_outputs_failed_validation`. Changed `build_qwen_emotion_graph` to the node default
+`kornia_reinhard`. Backend change -- **run.bat restart**.
+
+## [1.199.17] - 2026-07-21
+### Fixed -- Emotions character preview was blank for app-catalog characters (frontend only)
+The Emotions "Character preview" used `MannequinStrip`, which queries the WORKER
+(`get_character_pose_preview_meta`) -- empty for app-catalog (Klein-Hybrid) characters -> it
+showed "No pose sprites on the workers yet". New `CatalogPoseStrip` renders the sprites we
+already ingested into the catalog (`emoOutputs`), for the selected preview set (blank/Base =
+base sprites), filtered by the active engine (untagged shows under both). The preview now
+shows the actual sprites the emotion pass will run on, so you can see what you're selecting.
+'Base' is filtered out of the preview dropdown (the "(base sprites)" default already covers it).
+Removed the now-orphaned `emoMannequin`/`emoMannequinHosts`. Frontend only -- **browser refresh**.
+(Note: the Clothes tab preview still uses the worker-query MannequinStrip -- same limitation,
+not touched here.)
+
+## [1.199.16] - 2026-07-21
+### Fixed -- Emotions engine filter was reversed for untagged/legacy sets (frontend only)
+The Emotions set picker hid untagged legacy costumes from the Qwen toggle (strict
+`engine === 'qwen'`), so pre-1.199.15 sets (which have no engine tag yet) only appeared
+under Klein -- looking "reversed". Per the chosen rule (matching + untagged legacy),
+untagged now shows under BOTH engines; Klein now matches `engine === 'klein'` (+ untagged)
+instead of "anything not qwen". Newly generated sets are engine-tagged and separate cleanly.
+Frontend only -- **browser refresh** (no run.bat restart).
+
+## [1.199.15] - 2026-07-21
+### Added -- Emotions tab: Klein/Qwen engine toggle, working set/base picker, engine-tagged outputs
+Audit + rebuild of the Emotions tab (Klein Hybrid studio).
+
+- **Qwen (VNCCS) emotions engine (NEW):** `qwen_clothes.build_qwen_emotion_graph` replicates
+  VNCCS's `QwenDetailer_ChangeEmotion` workflow -- `VNCCS_QWEN_Detailer` (Ultralytics face
+  bbox -> QIE face edit -> stitch) with a "Change emotion to X" prompt per (sprite x emotion),
+  on our standard Qwen loaders. Leaves body/clothes/background intact. EmotionCore LoRA is
+  OPTIONAL/off by default (setting `qwen_emotion_lora_on`), matching VNCCS's own example.
+  `resolve_qwen_models` now also resolves an optional `emotion_lora` + a `face_detector`
+  (non-fatal). Backend route `_qwen_emotions_parallel` (engine=qwen, step=emotions) gathers
+  the character's engine-appropriate sprites per selected set (or Base), submits, returns the
+  same {step,chunks} contract as the Klein path so ingest/polling is unchanged.
+- **Engine toggle for Emotions:** 🧪 Klein / 🟣 Qwen segmented control (persists
+  `vnccs_emotions_engine`), routing `body.engine`. Mirrors the Clothes tab.
+- **Set/base selector FIXED:** it silently fell back to a free-text field because it sourced
+  the costume list from the worker-side `get_character_costumes` (empty for app-catalog
+  characters). Now sourced from the APP CATALOG (`getCharacterImages.costumes`) + a selectable
+  **Base**, so the multi-select checkbox picker actually appears.
+- **Engine-tagged outputs + engine-aware selection:** ingest now tags every output asset, and
+  each base/costume VERSION, with the engine that made it (normalized klein|qwen; Qwen previews
+  already stamped qwen-*). `get_character_images` exposes it. The Emotions set picker filters by
+  the active toggle: Qwen shows Qwen-made sets, Klein shows Klein-made + untagged legacy. This
+  lets base/clothes/emotions be mixed or switched per engine. (Legacy untagged = shown on the
+  Klein side.)
+- Requires a `run.bat` restart (backend) + browser refresh (frontend). Qwen emotions render
+  quality is worker-validation-pending (needs `VNCCS_QWEN_Detailer` from vnccs-utils on the worker).
+
+## [1.199.14] - 2026-07-21
+### Fixed -- "Headwear room" now also drives the COSTUME PREVIEW (Pass A dress)
+Follow-up to 1.199.13: Lorenzo reported the slider had no effect on the clothing
+preview. Correct -- the costume preview is the Pass A dress step
+(`clothes/qwen-preview` -> `build_qwen_dress_graph`), which dresses the EXISTING base
+image and never calls the pose-capture renderer, so the 1.199.13 wiring (capture-side)
+never reached it. Headroom there is "baked into the base" (v1.199.6 design), so changing
+the slider without regenerating the base showed nothing.
+
+- New `qwen_clothes.pad_base_to_headroom(data, target)`: measures the base figure's top
+  margin and pads blank space ABOVE it (base's own corner colour, keys out) so the head
+  sits at the target fraction. Only ADDS room when the base has less than target; never
+  crops, never distorts, idempotent. Unit-verified: 14/22/28/34% targets land exactly,
+  and an already-tall base is left untouched.
+- `clothes_qwen_preview` pads the base to `_qwen_headwear_room(saved, body.headwear_room)`
+  before the dress edit, so the slider now visibly changes the costume preview WITHOUT a
+  base re-render. `QwenClotheIn.headwear_room` added; frontend sends it + api types updated.
+- BUGFIX in the new helper: figure detection used int16, which OVERFLOWS on a green
+  background (225^2 > 32767) and silently no-oped -> switched to float32. (This is why an
+  early build would still have shown "no change" on green.)
+- Still: `run.bat` restart (backend) + browser refresh (frontend).
+
+## [1.199.13] - 2026-07-21
+### Added -- per-costume "Headwear room" so tall hats/headdresses stop clipping
+Diagnosis (confirmed with Lorenzo's VNCCS ComfyUI renders + our app renders): the hat is
+generated growing UPWARD from where the head sits in the reference image (image1), so the
+blank space above the head is a HARD CEILING on hat height. Our capture reserved a fixed
+14% (`pose_render._TOP_HEADROOM`), ~170px on the 1216-tall canvas -- fine for a cowboy
+hat, too little for a stovepipe hat or a Mayan headdress (which clipped in our app AND in
+VNCCS). Bounded limit, not a bug; the fix RAISES the ceiling per costume.
+
+- `pose_render.render_pose_captures` now honors a per-run
+  `pose_data['export']['top_headroom']` override (fallback `_TOP_HEADROOM` 0.14, clamped
+  0.0-0.45), applied to the uniform fill scale AND the down-bias, folded into the cache
+  key. No behavior change when unset.
+- Qwen pose SET (`_qwen_submit`) and CLONE preview (`create_qwen_clone_preview`) set
+  `top_headroom` from the new `qwen_headwear_room` setting (clone also accepts a per-run
+  `headwear_room`), via helper `_qwen_headwear_room`.
+- Frontend: "Headwear room" segmented control in the Qwen studio next to Reference
+  strength -- 14% default / 22% tall hat / 28% stovepipe / 34% headdress. Persists as
+  `qwen_headwear_room`; higher = more room up top, figure sits a little smaller.
+- NOT a post-processing reframe and NOT a forced square (both rejected earlier): gives the
+  generator canvas ABOVE the head before it draws -- the legitimate version of VNCCS's own
+  `computeModelFitZoom` margin, and can exceed VNCCS's fixed 8%.
+- Scope: clone base + all pose sets. The brand-new-character t2i base
+  (`create_qwen_preview`) frames via prompt (no mannequin capture), so the slider does not
+  affect it yet -- dress a costume onto a clone/existing base to get the extra room.
+- Requires a `run.bat` restart (backend) + browser refresh (frontend).
+
+## [1.199.12] - 2026-07-20
+### Reverted -- the square-canvas experiment was wrong; back to the tall canvas
+User feedback (with a render): VNCCS outputs are TALL, never square, and making our
+Qwen canvas square did NOT add headroom -- the clothed clone still had head/feet near
+the edges. Both points correct. Reverted v1.199.11 (`_qwen_square_canvas`) so Qwen
+clone + pose set use the tall klein canvas again, and confirmed v1.199.10's
+`frame_with_headroom` post-hoc reframe is fully gone. Kept only v1.199.9's
+head-to-toe (full-body, not thighs-up) t2i base prompt, which is independent.
+
+### Finding (evidence, not assumption)
+- The tightness is NOT the canvas shape. The Qwen pose step (Pass B,
+  `build_qwen_pose_set_graph`) REGENERATES the figure filling the frame, so the clone
+  BASE comes out tight; the clothing preview (Pass A) then faithfully dresses that
+  tight base -> tight clothed output. Square vs tall only changed the aspect of the
+  tightness.
+- Our `_encoder_inputs` already mirrors VNCCS's encoder (image1=mannequin,
+  image2=character, latent_image_index=1, vl_size=384, qwen_2511) -- by that config
+  the output should inherit the mannequin's ~framing (our capture measures ~82% figure
+  / ~14% top margin). It doesn't in practice, which means the real VNCCS clothes node
+  behaves differently from our hand-built replica.
+- CORRECTION (found after Lorenzo pointed it out): the FULL main `ComfyUI_VNCCS`
+  3.0.2 pack IS in the repo -- `vnccs/` and `VNCCS302/` (identical copies). Ground-
+  truth nodes: `vnccs/nodes/character_generator.py` (VNCCS_CharacterGenerator base +
+  VNCCS_CharacterCloneGenerator + VNCCS_ClothesGenerator + VNCCS_EmotionsGenerator),
+  `clothes_designer.py`, `character_creator_v2.py`, `vnccs_qwen_encoder.py`, plus the
+  original workflows in `vnccs/workflows/` (Step1_CharacterCreator, Step1_CharacterCloner,
+  Step2_CharacterClothes, Step3_CharacterEmotions). Our `qwen_clothes.py` is a SIMPLIFIED
+  app-side replica of these.
+- Verified from the real encoder (`vnccs_qwen_encoder.py::_process_image`): it scales
+  image1 to `target_size^2` TOTAL pixels PRESERVING aspect (crop disabled/center -- no
+  square-force, no headroom crop); `latent_image_index=1` = image1 (1-based) = the pose
+  mannequin. By this config our output SHOULD inherit the mannequin's framing. Since it
+  doesn't, the divergence is in the higher-level VNCCS_ClothesGenerator/CharacterGenerator
+  orchestration (sheet gen at resolution 2048, sprite crop via sheet_crop.py/sprite_
+  generator.py, pose framing) that our replica omits -- THAT is where the next chat looks.
+
+Next chat: diff `VNCCS_ClothesGenerator`/`VNCCS_CharacterCloneGenerator` + the original
+Step2/Step1 workflows against our replica; do NOT post-process the output or force square.
+Ask Lorenzo for one VNCCS ComfyUI clothed render to confirm whether VNCCS keeps margin.
+
+Backend change -- **restart `run.bat`** (restores the tall canvas).
+
+
+## [1.199.11] - 2026-07-20
+### Changed -- do it the VNCCS way: SQUARE 1024x1024 Qwen pose canvas (reverted the post-hoc reframe)
+Read the actual VNCCS node pack + reference workflows (`vnccs-utils/`) instead of
+reinventing framing:
+- **What VNCCS does:** the `VNCCS_Utils Pose Studio QWEN` workflow renders the pose
+  mannequin on a **1024x1024 SQUARE** canvas (PoseStudio export
+  `view_width=view_height=1024`, `cam_zoom=3.53`, `cam_offset_y=-4.14`) and feeds it
+  straight to the Qwen-Image-Edit node. The head/foot margin is baked in by the
+  camera framing and carried through because the source aspect already matches the
+  encoder's square latent budget. No post-processing anywhere.
+- **Where we diverged:** our Qwen clone/set used the TALL klein canvas (1024x1216).
+  When the Qwen encoder fits a tall source into its square-ish target budget, the
+  top/bottom margin gets squeezed/cropped away -- which is why the pose capture
+  measurably had 14% headroom yet the render came out with none.
+- **Fix:** new `_qwen_square_canvas()` -> Qwen clone preview and Qwen pose SET now
+  render on VNCCS's square 1024x1024 (override `qwen_canvas_size`). Verified the
+  square capture frames the figure at 14.3% top / 5.5% bottom / 80% tall, centered
+  -- matching VNCCS. The new-character t2i base stays on VNCCS's 640x1536 creator
+  canvas (it is prompt-framed, not a pose-transfer).
+- **Reverted** the v1.199.10 `frame_with_headroom` post-generation reframe (and its
+  helper): it worked but added side spacing and was a post-hoc bolt-on. Framing now
+  comes from the source canvas, the way VNCCS does it.
+
+Note: this aligns the input to the same QIE pose node VNCCS uses, so it should
+reproduce VNCCS's headroom/hat behavior. Worker-side generation can only be
+confirmed on your ComfyUI workers -- please run a Qwen clone + a costume set.
+
+Verification: `py_compile` clean; square capture measured 14.3%/5.5%/80% centered;
+no `frame_with_headroom` references remain.
+
+Backend change -- **restart `run.bat`**.
+
+
+## [1.199.10] - 2026-07-20
+### Fixed -- Qwen CLONE/base headroom: reframe AFTER the render (capture headroom can't survive the pose LoRA)
+Diagnosed why the v1.199.6/1.199.9 headroom still didn't show in Qwen **clone**
+mode, with hard evidence instead of guessing:
+- **Measured a real pose capture** (device-side render): 14.2% top margin, 5.4%
+  bottom, figure 80.3% tall. So `pose_render` IS baking headroom correctly.
+- Confirmed there is **no trim/crop** in the qwen graph or in `save_base_preview`.
+- Reconciled the two observations that looked contradictory: the old `pad_headroom`
+  padded the *input* and produced a visible "hard cut" in the output -> that proves
+  the **dress path (Pass A) PRESERVES image1 framing**. But the **clone/set path
+  (Pass B) runs the QIE PoseStudio LoRA, which REGENERATES the figure filling the
+  frame** and discards the capture's headroom. That is exactly why clone/set output
+  has no margin while the capture does.
+Conclusion: for the pose paths, baking headroom into the source can't survive; the
+only reliable lever is a deterministic reframe AFTER generation.
+- New helper `qwen_clothes.frame_with_headroom(data, top=0.14, bottom=0.04)`: finds
+  the figure's bounding box on its flat chroma background (used only for the bbox,
+  never to mask -> no holes) and recomposes it onto a fresh same-size canvas so the
+  head sits 14% below the top and the feet 4% above the bottom. Safe/best-effort:
+  returns the ORIGINAL bytes on any detection anomaly (blank frame, bg mis-detect,
+  degenerate bbox). Unit-tested: flush-to-top figure -> 14.0%/4.0%/81.9%; an
+  already-framed image is idempotent; blank -> unchanged; a full-width pose is
+  width-clamped without clipping.
+- Wired into BOTH Qwen base outputs (`/create/qwen-preview` and
+  `/create/qwen-clone-preview`). The t2i new-base prompt already asks for headroom
+  (v1.199.9); this makes it exact and consistent with the clone path. Because the
+  dress pass preserves framing, a reframed base carries its headroom into every
+  costume dressed on it -> hats/tall hair get their room.
+
+### Still to do (next)
+The costume **pose SET** (Pass B) reframes each pose the same way, so its sprites
+also need `frame_with_headroom` (alpha-aware for the rembg'd transparent finals),
+gated to the Qwen engine so the Klein ingest path is untouched. Staged separately
+to avoid blindly editing the shared `ingest_result` path.
+
+Verification: `py_compile` clean for both modules; the in-file helper reproduces
+14.0%/4.0%/81.9% on a flush figure; both call sites present.
+
+Backend change — **restart `run.bat`**.
+
+
+## [1.199.9] - 2026-07-20
+### Fixed -- Qwen-mode base now gets the v1.199.6 headroom (was still thighs-up)
+The v1.199.6 base-framing headroom clause was added to the Klein base path
+(`klein_preview_prompt` / `klein_refbase_prompt`) and to the pose-capture renderer,
+but the **Qwen / NL creator base** path was missed: `creator_prompt_natural`
+(and the tag-based `creator_prompt`) still rendered a *thighs-up / cowboy-shot*
+figure with the head at the top edge and no feet. So in Qwen mode a fresh base
+came out with no top/bottom margin — exactly what was reported.
+- `creator_prompt_natural`: all flavors (klein/qwen shared, zimage, krea2) changed
+  from "framed from the thighs up" to **"the whole figure visible head to toe, with
+  a small margin of empty space above the head and below the feet (the figure
+  centered, not touching the top or bottom edges)"** — the same wording used by the
+  Klein base so the two engines now frame identically.
+- Tag-based `creator_prompt` (Illustrious / Anima): `cowboy_shot` -> `full_body`.
+- The Qwen **set** path was already correct in code: pose captures carry the
+  pose_render 14%/4% headroom and the QIE encoder uses `latent_image_index=1`
+  (image1 = the pose capture) as the output latent, so the set output inherits the
+  capture's framing. If a set still shows no margin, it is a **stale running
+  backend** — the pose_render/base changes only take effect after a restart.
+
+Verification: `py_compile` clean; all four framing replacements matched exactly
+once (asserted); no `thighs`/`cowboy` framing left in the creator prompts.
+
+Backend change — **restart `run.bat`** for this (and any prior v1.199.x) to take effect.
+
+
 ## [1.199.8] - 2026-07-20
 ### Fixed -- klein_poses.py regression fully recovered (base-set generation)
 Recovered the ~11.5KB of base-set work the stale-stage trap reverted in v1.199.6,

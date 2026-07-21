@@ -129,6 +129,11 @@ present next to the app, the graph is submitted unchanged (and the worker's fall
 on rotated poses — the alternative fix is patching `np.asarray` into the worker's
 `vnccs-utils/nodes/pose_studio.py` `_apply_pose` model-rotation branch).
 
+**Headroom (v1.199.13):** the capture reserves `_TOP_HEADROOM` (default 14%) of blank space
+above the head so hats/tall hair have canvas to render into; overridable per run via
+`pose_data['export']['top_headroom']` (clamped 0.0–0.45). Driven by the **Headwear room**
+setting — see the addendum below.
+
 ## Staged creation flow (v1.56.0)
 
 The Create tab now mirrors the VNCCS panel's intended workflow instead of firing the whole
@@ -245,3 +250,68 @@ authoritative. Summary:
   **photoreal Switch Style** that stacks the anime2real-semi LoRA off the rendered active
   base (realism kept OUT of generation for predictability). Full addendum in
   docs/KLEIN_MODE_PLAN.md. UNTESTED-until-live.
+
+## Addendum — Headwear room (v1.199.13 → v1.199.14, user-confirmed)
+
+Tall headwear (stovepipe hats, feathered headdresses, tall hair) could clip at the top edge
+in the Qwen (VNCCS-replica) studio. Root cause: the QIE dress/pose step reproduces the
+reference image (image1) at denoise=1, so the hat grows UPWARD from where the head sits —
+the blank space above the head is a hard ceiling on hat height. (Real VNCCS clips
+big-enough headwear too; this is a bounded "within reason" limit, not a pure bug.)
+
+The **Headwear room** control (Qwen studio, next to Reference strength) reserves that space
+per costume: **14% (default) / 22% tall hat / 28% stovepipe / 34% headdress**. Persists as
+the `qwen_headwear_room` setting; higher = more room above the head, figure sits a little
+smaller in frame. Set above ~8% it exceeds VNCCS's own fixed `computeModelFitZoom(margin=0.08)`.
+Two levers, because the hat appears at two stages:
+
+- **Pose captures (Pass B)** — `pose_render.render_pose_captures` honors a per-run
+  `pose_data['export']['top_headroom']` (fallback `_TOP_HEADROOM` 0.14, clamped 0.0–0.45),
+  applied to the uniform fill scale + the figure down-bias. Set from the setting in
+  `_qwen_submit` (pose set) and `create_qwen_clone_preview` (clone base).
+- **Costume preview / dress (Pass A)** — `clothes_qwen_preview` dresses the EXISTING base and
+  never calls the capture renderer, so it has its own lever:
+  `qwen_clothes.pad_base_to_headroom(data, target)` measures the base figure's top margin and
+  pads blank space above it (base's own corner colour, so it still keys out) up to the target
+  — only ADDS when short, never crops/distorts, idempotent. NOTE: figure detection MUST use
+  float32; int16 overflows on a green background (225² > 32767) and silently no-ops.
+
+Scope: clone base, all pose sets, and the costume preview/dress. NOT yet the brand-new
+(non-clone) t2i character base (`create_qwen_preview`), which frames from its text prompt
+rather than a mannequin capture — extend with `pad_base_to_headroom` if a fresh base ever
+needs tall hats. Backend change → `run.bat` restart; frontend → refresh.
+
+## Addendum — Emotions engine, Qwen queue, live results, run persistence (v1.199.15 → v1.199.22)
+
+**Emotions tab now has a 🧪 Klein / 🟣 Qwen engine toggle** (`vnccs_emotions_engine`), mirroring
+the Clothes tab.
+- **Qwen emotions** = an app-side replica of VNCCS's `VNCCS_QWEN_Detailer`
+  "QwenDetailer_ChangeEmotion" workflow (`vnccs-utils/workflows/`): Ultralytics face bbox →
+  QIE face edit ("Change emotion to X") → stitch, on our standard Qwen loaders. Builder:
+  `qwen_clothes.build_qwen_emotion_graph`. EmotionCore LoRA optional/off by default
+  (`qwen_emotion_lora_on`). The installed node's `color_match_method` must be `kornia_reinhard`
+  (the example workflow's `mvgd` is a newer build).
+- **Klein emotions** = the existing crop-and-stitch face inpaint (`build_klein_emotion_graph`).
+
+**Set/base selector:** sourced from the APP CATALOG (`getCharacterImages.costumes`) + a
+selectable **Base**, NOT the worker `get_character_costumes` (which is empty for app-catalog
+characters). The character-preview strip uses `CatalogPoseStrip` (catalog sprites), not the
+worker-query `MannequinStrip`.
+
+**Engine-tagging:** `ingest.py` tags every output asset and each base/costume VERSION with the
+engine that produced it (normalized klein|qwen; untagged legacy). Pickers filter by the active
+toggle — matching + untagged legacy (untagged shows under BOTH engines). `get_character_images`
+exposes `engine` per output.
+
+**Qwen emotions run through the Generation QUEUE** (`workflow_type: studio_pose_qwen`): cancel +
+retry + worker threading like native/Klein. `generate_queue` chunks sprites (`_qwen_emotion_workitems`)
+into jobs; the dispatcher's `_process_studio_pose_job` `studio_pose_qwen` branch builds+submits via
+`_qwen_emotion_submit_one` and reuses the generic monitor + `ingest_result` + cancel. One sprite
+per job (`qwen_emotions_per_job` default 1) so results appear fast. (Qwen pose sets/clothes still
+use the direct path — routing them through the queue too is a pending follow-up.)
+
+**Live results + run persistence:** the emotion results gallery renders DURING a run (not gated on
+`!busy`), so images stream in per completed job. Run status persists PER CHARACTER in localStorage
+(a map keyed by character, not one key) and re-attaches for whichever character you view — on tab/
+character change and after a browser close — with a supersede token so switching stops the old poll
+loop. Queue across characters, walk away, and return to live status.

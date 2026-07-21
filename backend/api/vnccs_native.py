@@ -639,17 +639,22 @@ def _klein_canvas(settings: Optional[dict],
             _px(override_h, "klein_canvas_height", 1216))
 
 
-# v1.176: the four base-set view angles (label, prose view description).  The
-# labels MUST stay front/right/left/back so mesh3d_generate picks up left/back/
-# right as the extra views feeding Hunyuan3D.  Shared by the T2I and clone
-# base-preview paths so every "view set" is consistent.
-_BASE_VIEW_SPEC = [
-    ("front", "seen from the FRONT, facing the camera directly"),
-    ("right", "seen from the RIGHT side, the body turned 90 degrees to a full right-side profile"),
-    ("left", "seen from the LEFT side, the body turned 90 degrees to a full left-side profile"),
-    ("back", "seen from directly BEHIND, facing away from the camera"),
-]
-
+def _qwen_headwear_room(settings, override=None) -> float:
+    """v1.199.13: reserved top headroom (fraction of canvas height) for the Qwen
+    pose captures, so tall hats / headdresses have room to render before the top
+    edge clips them. 0.14 = prior behavior; the 'Headwear room' slider raises it
+    per costume. Clamped 0.0-0.45."""
+    val = override
+    if val in (None, ""):
+        try:
+            val = (settings or {}).get("qwen_headwear_room")
+        except Exception:  # noqa: BLE001
+            val = None
+    try:
+        hr = float(val) if val not in (None, "") else 0.14
+    except Exception:  # noqa: BLE001
+        hr = 0.14
+    return max(0.0, min(0.45, hr))
 
 def _resolve_base_mode(body, saved: Optional[dict]) -> str:
     """Resolve the base-preview mode -> 'single' | 'set' | 'mesh'.
@@ -1081,7 +1086,8 @@ def _qwen_submit(host: str, st_settings: dict, body: "GenerateIn",
     pd["mesh"] = {**(pd.get("mesh") or {}),
                   **klein_poses.body_mesh_params(body.character_info or {})}
     _cw, _ch = _klein_canvas(st_settings, canvas_w, canvas_h)
-    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch}
+    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch,
+                    "top_headroom": _qwen_headwear_room(st_settings)}
     captures = pose_render.render_pose_captures(pd, False)
     if not captures or len(captures) != len(pd["poses"]):
         raise VNCCSError("app-side pose renderer unavailable (CharacterData missing?) -- "
@@ -2291,6 +2297,254 @@ class ParallelGenerateIn(GenerateIn):
     max_hosts: int = 0          # 0 = use every eligible worker; 1 = pinned only
 
 
+async def _qwen_emotion_workitems(session, body, saved, pinned):
+    """Shared gather for Qwen emotions -> (work_paths, emo_specs, empty_sets): the
+    character's engine-appropriate sprites across the selected sets (Base = base
+    sprites; untagged legacy passes the qwen filter), plus the emotion prompt specs.
+    Used by BOTH the direct path and the queue path."""
+    from pathlib import Path as _Path
+    from uuid import UUID as _UUID
+    from sqlmodel import select as _select
+    from backend.config import settings as _cfg
+    from backend.database.models import Asset, StudioCharacter
+    sets = [str(c) for c in (body.costumes or []) if c] or ["Base"]
+    name = body.character_name.strip()
+    char = (await session.execute(
+        _select(StudioCharacter).where(StudioCharacter.name == name))).scalars().first()
+    if char is None:
+        raise HTTPException(status_code=404, detail=f"character {name!r} not in the catalog")
+    v = (char.manifest or {}).get("vnccs") or {}
+    outputs = v.get("outputs") or {}
+    base_labels = ("creator/sprites", "cloner/sprites", "creator/sheet", "cloner/original_sprites")
+
+    async def _paths_for(cset):
+        want_base = cset.strip().lower() in ("base", "base sprites", "")
+        got = []
+        for label, ids in outputs.items():
+            if not (("sprites" in label) or label.endswith("sheet")):
+                continue
+            if want_base and label not in base_labels:
+                continue
+            for aid in (ids or []):
+                try:
+                    a = await session.get(Asset, _UUID(str(aid)))
+                except Exception:  # noqa: BLE001
+                    a = None
+                if a is None:
+                    continue
+                mv = (a.meta or {}).get("vnccs") or {}
+                eng = str(mv.get("engine") or "").lower()
+                if eng and eng != "qwen":
+                    continue
+                if not want_base and str(mv.get("costume") or "") != cset:
+                    continue
+                rel = str(a.rel_path).replace("\\", "/")
+                pid = str(a.project_id)
+                p = (_Path(_cfg.project_dir) / rel if rel.startswith(pid + "/")
+                     else _Path(_cfg.project_dir) / pid / rel)
+                if p.exists():
+                    got.append(p)
+        return got[:12]
+
+    seen = set()
+    work = []
+    empty = []
+    for cset in sets:
+        paths = await _paths_for(cset)
+        if not paths:
+            empty.append(cset)
+            continue
+        for p in paths:
+            sp = str(p)
+            if sp not in seen:
+                seen.add(sp)
+                work.append(p)
+    emotions_sel = [str(e) for e in (body.emotions or []) if e]
+    emo_map = {}
+    try:
+        data = await asyncio.to_thread(_client(pinned, timeout=30).get_json, "get_emotions")
+        for lst in (data or {}).values():
+            for e in (lst or []):
+                if isinstance(e, dict) and e.get("safe_name"):
+                    emo_map[str(e["safe_name"])] = {
+                        "key": str(e.get("key") or e["safe_name"]),
+                        "natural": str(e.get("natural_prompt") or "")}
+    except Exception:  # noqa: BLE001
+        logger.warning("qwen emotions: get_emotions unavailable -- bare names")
+    emo_specs = [{"key": emo_map.get(s, {}).get("key", s),
+                  "natural": emo_map.get(s, {}).get("natural", "")} for s in emotions_sel]
+    return work, emo_specs, empty
+
+
+def _qwen_emotion_submit_one(host, st_settings, sprite_paths, emo_specs, seed):
+    """Upload a batch of sprite files to ``host`` and submit ONE Qwen emotion graph
+    (sprites x emotions) -> (prompt_id, tap_map). The queue dispatcher calls this per job."""
+    from pathlib import Path as _Path
+    import uuid as _u
+    from backend.services.character_studio.vnccs_native import qwen_clothes
+    st = st_settings or {}
+    client = _client(host, timeout=120)
+    models = qwen_clothes.resolve_qwen_models(_object_info(host), st)
+    token = _u.uuid4().hex[:8]
+    files = []
+    for i, sp in enumerate(sprite_paths):
+        fn = f"rbmn_qemo_{token}_{i}.png"
+        client.upload_image(fn, _Path(sp).read_bytes(), "", True, 120)
+        files.append(fn)
+    graph, tap = qwen_clothes.build_qwen_emotion_graph(
+        sprite_files=files, emotions=emo_specs, seed=int(seed), models=models,
+        use_emotion_lora=bool(st.get("qwen_emotion_lora_on")),
+        steps=int(st.get("qwen_steps") or 4), cfg=float(st.get("qwen_cfg") or 1.0),
+        target_size=int(st.get("qwen_target_size") or 1024),
+        filename_prefix="rbmn_vnccs/qwen_emotions")
+    return client.submit_prompt(graph, timeout=120).get("prompt_id"), tap
+
+
+async def _qwen_emotions_parallel(session, body: GenerateIn, saved: dict,
+                                  eligible: list, pinned: str, gen_settings: dict):
+    """Qwen (VNCCS) emotions: VNCCS_QWEN_Detailer "Change emotion to X" per
+    (sprite x emotion), on the character's ENGINE-APPROPRIATE sprites for each
+    selected costume set (or Base). Untagged/legacy sprites pass the filter.
+    Returns the same {step, chunks, ...} contract as the Klein path so the
+    frontend polls + ingests identically (engine tag flows from body.engine)."""
+    import random as _random
+    import uuid as _uuid2
+    from pathlib import Path as _Path
+    from uuid import UUID as _UUID
+    from sqlmodel import select as _select
+    from backend.config import settings as _cfg
+    from backend.database.models import Asset, StudioCharacter
+    from backend.services.character_studio.vnccs_native import qwen_clothes
+
+    emotions_sel = [str(e) for e in (body.emotions or []) if e]
+    if not emotions_sel:
+        raise HTTPException(status_code=400, detail="Select at least one emotion")
+    sets = [str(c) for c in (body.costumes or []) if c] or ["Base"]
+    name = body.character_name.strip()
+    char = (await session.execute(
+        _select(StudioCharacter).where(StudioCharacter.name == name))).scalars().first()
+    if char is None:
+        raise HTTPException(status_code=404, detail=f"character {name!r} not in the catalog")
+    v = (char.manifest or {}).get("vnccs") or {}
+    outputs = v.get("outputs") or {}
+    _base_labels = ("creator/sprites", "cloner/sprites", "creator/sheet", "cloner/original_sprites")
+
+    async def _paths_for(costume_set: str):
+        want_base = costume_set.strip().lower() in ("base", "base sprites", "")
+        got = []
+        for label, ids in outputs.items():
+            if not (("sprites" in label) or label.endswith("sheet")):
+                continue
+            if want_base and label not in _base_labels:
+                continue
+            for aid in (ids or []):
+                try:
+                    a = await session.get(Asset, _UUID(str(aid)))
+                except Exception:  # noqa: BLE001
+                    a = None
+                if a is None:
+                    continue
+                mv = (a.meta or {}).get("vnccs") or {}
+                eng = str(mv.get("engine") or "").lower()
+                if eng and eng != "qwen":          # engine filter (untagged legacy passes)
+                    continue
+                if not want_base and str(mv.get("costume") or "") != costume_set:
+                    continue
+                rel = str(a.rel_path).replace("\\", "/")
+                pid = str(a.project_id)
+                p = (_Path(_cfg.project_dir) / rel if rel.startswith(pid + "/")
+                     else _Path(_cfg.project_dir) / pid / rel)
+                if p.exists():
+                    got.append(p)
+        return got[:12]
+
+    emo_map: dict = {}
+    try:
+        data = await asyncio.to_thread(_client(pinned, timeout=30).get_json, "get_emotions")
+        for lst in (data or {}).values():
+            for e in (lst or []):
+                if isinstance(e, dict) and e.get("safe_name"):
+                    emo_map[str(e["safe_name"])] = {
+                        "key": str(e.get("key") or e["safe_name"]),
+                        "natural": str(e.get("natural_prompt") or "")}
+    except Exception:  # noqa: BLE001
+        logger.warning("qwen emotions: get_emotions unavailable -- using bare emotion names")
+    emo_specs = [{"key": emo_map.get(s, {}).get("key", s),
+                  "natural": emo_map.get(s, {}).get("natural", "")} for s in emotions_sel]
+
+    seed = int(gen_settings.get("seed") or 0) or (
+        int(body.seed) if getattr(body, "seed", None) else _random.randint(1, 2_000_000_000))
+    use_emo_lora = bool((saved or {}).get("qwen_emotion_lora_on"))
+    steps = int((saved or {}).get("qwen_steps") or 4)
+    cfg = float((saved or {}).get("qwen_cfg") or 1.0)
+    tsize = int((saved or {}).get("qwen_target_size") or 1024)
+    safe = "".join(ch for ch in name if ch.isalnum())[:24] or "char"
+
+    # gather every engine-appropriate sprite across the selected sets (dedupe by path)
+    seen_paths: set = set()
+    work: list = []
+    empty_sets: list = []
+    for cset in sets:
+        paths = await _paths_for(cset)
+        if not paths:
+            empty_sets.append(cset)
+            continue
+        for p in paths:
+            sp = str(p)
+            if sp not in seen_paths:
+                seen_paths.add(sp)
+                work.append(p)
+    if not work:
+        raise HTTPException(status_code=502,
+                            detail="No Qwen/untagged sprites for " + ", ".join(sets)
+                            + " -- generate poses/costumes in Qwen mode first.")
+
+    # batch + fan out across ALL available workers (like the Qwen pose set): sprites
+    # split into per_job batches, round-robin across hosts; each batch x every emotion
+    # is one job on one worker -> real worker threading, not one big push.
+    try:
+        per_job = int((saved or {}).get("qwen_emotions_per_job") or 1)
+    except Exception:  # noqa: BLE001
+        per_job = 2
+    per_job = max(1, min(8, per_job))
+    hosts = list(eligible) or [pinned]
+    batches = [work[i:i + per_job] for i in range(0, len(work), per_job)]
+    chunks = [(hosts[bi % len(hosts)], b) for bi, b in enumerate(batches)]
+
+    def _submit(h, paths):
+        client = _client(h, timeout=120)
+        models = qwen_clothes.resolve_qwen_models(_object_info(h), saved)
+        token = _uuid2.uuid4().hex[:8]
+        files = []
+        for i, p in enumerate(paths):
+            fn = f"rbmn_qemo_{safe}_{token}_{i}.png"
+            client.upload_image(fn, p.read_bytes(), "", True, 120)
+            files.append(fn)
+        graph, tap = qwen_clothes.build_qwen_emotion_graph(
+            sprite_files=files, emotions=emo_specs, seed=seed, models=models,
+            use_emotion_lora=use_emo_lora, steps=steps, cfg=cfg, target_size=tsize,
+            filename_prefix=f"rbmn_vnccs/{safe}/qwen_emotions")
+        return client.submit_prompt(graph, timeout=120).get("prompt_id"), tap
+
+    out = []
+    errors = [f"{s}: no sprites" for s in empty_sets]
+    for h, paths in chunks:
+        try:
+            pid, tap = await asyncio.to_thread(_submit, h, paths)
+            out.append({"prompt_id": pid, "host": h, "tap_map": tap,
+                        "label": f"{len(paths)}x{len(emo_specs)} emo * Qwen (VNCCS)",
+                        "pose_count": len(paths) * len(emo_specs)})
+        except (VNCCSError, ValueError) as e:
+            logger.warning("qwen emotions: chunk on %s failed: %s", h, e)
+            errors.append(f"{h}: {e}")
+    if not out:
+        raise HTTPException(status_code=502,
+                            detail="Qwen emotions produced no runs: " + "; ".join(errors))
+    logger.info("qwen emotions: %d chunk(s) across %d worker(s), %d sprite(s) x %d emotion(s)",
+                len(out), len({h for h, _ in chunks}), len(work), len(emo_specs))
+    return {"step": "emotions", "chunks": out, "errors": errors, "seed": seed, "engine": "qwen"}
+
+
 async def _klein_emotions_parallel(session, body: GenerateIn, saved: dict,
                                    eligible: list, pinned: str, gen_settings: dict):
     """Klein face-inpaint emotions: for each (cataloged sprite x emotion),
@@ -2517,12 +2771,15 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
 
     # eligible hosts per sharding rules
     _is_klein = (body.engine or "").lower() == "klein"
-    if step in ("clothes", "emotions") and not _is_klein:
+    _is_qwen = (body.engine or "").lower() == "qwen"
+    if step in ("clothes", "emotions") and not _is_klein and not _is_qwen:
         # native clothes/emotions FaceDetail the sprites that live on each worker's
         # own disk, so they must run on the recorded shard hosts.
         recorded = await _character_hosts(session, body.character_name.strip())
         eligible = [h for h in recorded if h in all_hosts] or [pinned]
     else:
+        # klein AND qwen UPLOAD their sprites/refs to whatever worker runs the chunk,
+        # so they fan out across every available worker (v1.199.19: qwen emotions/clothes).
         # Klein (incl. clothed sets) uploads the identity/dressed reference to each
         # worker, so it can fan out across ALL hosts like a creator run.
         eligible = list(all_hosts)
@@ -2553,6 +2810,8 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
             for h, bucket, nb in zip(eligible[:n], buckets, nbuckets):
                 chunks.append((h, bucket, f"{len(bucket)} pose(s)", nb if names_ok else None))
 
+    if (body.engine or "").lower() == "qwen" and step == "emotions":
+        return await _qwen_emotions_parallel(session, body, saved, eligible, pinned, gen_settings)
     if (body.engine or "").lower() == "klein" and step == "emotions":
         return await _klein_emotions_parallel(session, body, saved, eligible, pinned, gen_settings)
 
@@ -2798,7 +3057,7 @@ async def generate_queue(step: str, body: ParallelGenerateIn, request: Request,
 
     # eligibility per sharding rules (clothes/emotions must run on the hosts
     # that already hold this character's sprites)
-    if step in ("clothes", "emotions"):
+    if step in ("clothes", "emotions") and engine != "qwen":
         recorded = await _character_hosts(session, body.character_name.strip())
         eligible = [h for h in recorded if h in all_hosts] or [pinned]
     else:
@@ -2837,7 +3096,28 @@ async def generate_queue(step: str, body: ParallelGenerateIn, request: Request,
         jobs.append(Job(project_id=proj.id, scene_id=None, job_type=JobType.IMAGE,
                         status=JobStatus.PENDING, parameters=params, priority=0))
 
-    if is_klein:
+    if engine == "qwen" and step == "emotions":
+        # v1.199.20: Qwen emotions via the QUEUE -> cancel + retry + worker threading.
+        # One job per sprite-batch; dispatcher (studio_pose_qwen) uploads + submits.
+        work, emo_specs, _empty = await _qwen_emotion_workitems(session, body, saved, pinned)
+        if not work:
+            raise HTTPException(status_code=400,
+                                detail="No Qwen/untagged sprites for the selected sets -- "
+                                       "generate poses/costumes in Qwen mode first.")
+        try:
+            per_job = int(saved.get("qwen_emotions_per_job") or 1)
+        except Exception:  # noqa: BLE001
+            per_job = 2
+        per_job = max(1, min(8, per_job))
+        recipe = {"postprocess": None, "engine": "qwen",
+                  "emotions": body.emotions, "costumes": body.costumes}
+        for bi in range(0, len(work), per_job):
+            batch = work[bi:bi + per_job]
+            _mk_job({"workflow_type": "studio_pose_qwen", "step": "emotions", "engine": "qwen",
+                     "chunk_index": bi // per_job, "seed": base_seed, "pin_host": None,
+                     "sprite_paths": [str(p) for p in batch], "emotions_spec": emo_specs,
+                     "ingest_recipe": dict(recipe)})
+    elif is_klein:
         if not kposes:
             raise HTTPException(status_code=400, detail="Select at least one pose for a Klein run")
         # fast-fail if no identity image is available
@@ -4436,6 +4716,7 @@ class QwenCloneIn(BaseModel):
     seed: Optional[int] = None
     target_size: Optional[int] = None
     ref_weight: Optional[float] = None        # v1.194: encoder reference strength (body adherence), 1.0 = VNCCS
+    headwear_room: Optional[float] = None     # v1.199.13: reserved top headroom for tall hats (0.14 default)
     host: Optional[str] = None
 
 
@@ -4510,7 +4791,8 @@ async def create_qwen_clone_preview(body: QwenCloneIn, request: Request,
     pd["mesh"] = {**(pd.get("mesh") or {}),
                   **klein_poses.body_mesh_params(body.character_info or {})}
     _cw, _ch = _klein_canvas(saved, None, None)
-    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch}
+    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch,
+                    "top_headroom": _qwen_headwear_room(saved, getattr(body, "headwear_room", None))}
     captures = pose_render.render_pose_captures(pd, False)
     if not captures:
         raise HTTPException(status_code=502,
@@ -4609,6 +4891,7 @@ class QwenClotheIn(BaseModel):
     cfg: Optional[float] = None               # def 1.0
     clothes_lora_strength: Optional[float] = None  # def 1.0 (VNCCS hard-codes 1)
     target_size: Optional[int] = None         # def 1024 (encoder total-pixel budget)
+    headwear_room: Optional[float] = None     # v1.199.13: reserved top headroom for tall hats
     use_saved_garment: bool = False           # v1.199.5: use the costume's saved outfit ref
     host: Optional[str] = None
 
@@ -4721,7 +5004,8 @@ async def clothes_qwen_preview(body: QwenClotheIn, request: Request,
         # v1.199.6: base renders now bake in headroom at generation time (framing
         # clause in the base prompts), so no dress-time pad is needed. Older bases
         # (made before v1.199.6) have no headroom -> re-render the base for hats.
-        client.upload_image(bn, _flat_green(src), "", True, 120)
+        _hr = _qwen_headwear_room(saved, getattr(body, "headwear_room", None))
+        client.upload_image(bn, qwen_clothes.pad_base_to_headroom(_flat_green(src), _hr), "", True, 120)
         garment_name = None
         if _live_garment:
             gr = body.garment_ref or {}
@@ -6089,6 +6373,7 @@ async def catalog_images(character_id: str, session: AsyncSession = Depends(get_
                          "base_version": mv.get("base_version"),
                          "costume": mv.get("costume"),
                          "pose_name": mv.get("pose_name"),
+                         "engine": mv.get("engine"),
                          "upscaled": bool(mv.get("upscaled")),
                          "upscale_source": mv.get("upscale_source")})
         if imgs:

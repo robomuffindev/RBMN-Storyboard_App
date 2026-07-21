@@ -1119,7 +1119,7 @@ class JobDispatcher:
         try:
             from backend.api.vnccs_native import (
                 _klein_submit, _native_submit, _klein_identity_bytes,
-                _resolve_lock_base, GenerateIn,
+                _resolve_lock_base, GenerateIn, _qwen_emotion_submit_one,
             )
             from backend.services.character_studio.vnccs_native.ingest import ingest_result
             from backend.services.character_studio.vnccs_native.client import VNCCSError
@@ -1128,7 +1128,7 @@ class JobDispatcher:
             await self.job_queue.mark_failed(job.id, f"Studio job handler import failed: {e}")
             return
 
-        if wf_type not in ("studio_pose", "studio_pose_native"):
+        if wf_type not in ("studio_pose", "studio_pose_native", "studio_pose_qwen"):
             # studio_emotion (Klein crop-and-stitch) is not queued yet.
             await self.job_queue.mark_failed(
                 job.id, f"Studio job type '{wf_type}' is not queued yet.")
@@ -1196,6 +1196,14 @@ class JobDispatcher:
                 prompt_id, tap_map, _extras = await asyncio.to_thread(
                     _klein_submit, worker_url, st_settings, body, pose_subset,
                     identity_bytes, seed)
+            elif wf_type == "studio_pose_qwen":
+                # v1.199.20: app-side Qwen emotion graph (VNCCS_QWEN_Detailer) for one
+                # sprite batch -> queue gives cancel/retry/threading like native/klein.
+                sprite_paths = params.get("sprite_paths") or []
+                emo_specs = params.get("emotions_spec") or []
+                prompt_id, tap_map = await asyncio.to_thread(
+                    _qwen_emotion_submit_one, worker_url, st_settings,
+                    sprite_paths, emo_specs, seed)
             else:  # studio_pose_native
                 gen_settings = params.get("gen_settings") or {}
                 control_center = params.get("control_center")

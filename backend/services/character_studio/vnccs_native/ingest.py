@@ -238,9 +238,11 @@ async def save_base_preview(session, *, character_name: str,
     manifest = dict(char.manifest or {})
     v = dict(manifest.get("vnccs") or {})
     versions = list(v.get("base_versions") or [])
+    _raw_eng = str((gen_meta or {}).get("engine") or "").strip().lower()
+    _eng = "qwen" if "qwen" in _raw_eng else ("klein" if "klein" in _raw_eng else (_raw_eng or None))
     entry = {"id": ver_id, "asset_id": primary["asset_id"], "url": primary["url"],
              "views": view_entries, "created_at": datetime.utcnow().isoformat(),
-             "gen_meta": dict(gen_meta or {})}
+             "engine": _eng, "gen_meta": dict(gen_meta or {})}
     versions.append(entry)
     v["base_versions"] = versions
     # v1.186: only auto-activate when asked (single bases) -- a 4-view / mesh set
@@ -367,9 +369,11 @@ async def save_costume_preview(session, *, character_name: str, costume: str,
     costumes = dict(v.get("costumes") or {})
     entry_map = dict(costumes.get(costume) or {})
     versions = list(entry_map.get("versions") or [])
+    _raw_eng = str((gen_meta or {}).get("engine") or "").strip().lower()
+    _eng = "qwen" if "qwen" in _raw_eng else ("klein" if "klein" in _raw_eng else (_raw_eng or None))
     entry = {"id": ver_id, "asset_id": str(asset.id), "url": url,
              "created_at": datetime.utcnow().isoformat(),
-             "costume_info": dict(costume_info or {}),
+             "engine": _eng, "costume_info": dict(costume_info or {}),
              "gen_meta": dict(gen_meta or {})}
     versions.append(entry)
     entry_map["versions"] = versions
@@ -547,7 +551,8 @@ async def ingest_result(
                                 "costume": costume, "costume_version": costume_version,
                                 "seed": seed, "pose_name": pose_name,
                                 "emotions": emotions if step == "emotions" else None,
-                                "costume_sets": costumes if step == "emotions" else None}},
+                                "costume_sets": costumes if step == "emotions" else None,
+                                "engine": (str(engine).lower() if engine else None)}},
             )
             asset_ids.append(str(asset.id))
             asset_urls[str(asset.id)] = asset_url

@@ -109,6 +109,46 @@ def pad_headroom(data: bytes, top: float = 0.15, bottom: float = 0.03) -> bytes:
         return data
 
 
+def pad_base_to_headroom(data: bytes, target: float) -> bytes:
+    """v1.199.13: pad blank space ABOVE the figure so its head sits at ``target``
+    fraction from the top, giving tall headwear canvas to render into at the Qwen
+    dress (Pass A) step -- where the hat is first drawn.  Measures the figure's
+    current top margin (vs the corner background) and ONLY adds space when the base
+    has less than target; never crops, never distorts, idempotent when the base
+    already has room.  Pads with the base's own corner colour so it still keys out.
+    Best-effort: returns the input bytes on any failure."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        import numpy as np
+        target = max(0.0, min(0.45, float(target)))
+        if target <= 0.001:
+            return data
+        im = Image.open(BytesIO(data)).convert("RGB")
+        w, h = im.size
+        if w < 2 or h < 2:
+            return data
+        arr = np.asarray(im).astype("float32")
+        bg = arr[1, 1]
+        dist = np.sqrt(((arr - bg) ** 2).sum(-1))
+        rows = np.where((dist > 40.0).any(axis=1))[0]
+        if len(rows) == 0:
+            return data
+        top_px = int(rows[0])
+        if (top_px / h) >= target:
+            return data
+        p = int(round((target * h - top_px) / (1.0 - target)))
+        if p <= 1:
+            return data
+        bgt = tuple(int(x) for x in im.getpixel((1, 1)))
+        canvas = Image.new("RGB", (w, h + p), bgt)
+        canvas.paste(im, (0, p))
+        buf = BytesIO()
+        canvas.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001 -- never break a render over framing
+        return data
+
 def resolve_qwen_models(oi: dict, settings: Optional[dict] = None) -> Dict[str, Any]:
     """Resolve the Qwen-Image-Edit-2511 model set on a worker from its
     /object_info.  Raises ValueError with a human-readable list of anything
@@ -176,9 +216,21 @@ def resolve_qwen_models(oi: dict, settings: Optional[dict] = None) -> Dict[str, 
         raise ValueError("Qwen (VNCCS) clothes pipeline -- missing on this worker: "
                          + "; ".join(missing))
     has_tiled = "VAEDecodeTiled" in (oi or {})
+    # v1.199.15: OPTIONAL emotion pieces (never fatal -- only the Qwen Emotions engine
+    # uses them). EmotionCore LoRA is off by default (VNCCS's ChangeEmotion example runs
+    # it disabled and drives the change via the prompt); the face detector is for
+    # VNCCS_QWEN_Detailer's bbox.
+    emotion_lora = _pick(lora_opts, ["emotioncore", "qie2511_emotion"],
+                         str(st.get("qwen_emotion_lora") or "").strip())
+    _det_opts = _options(oi, "UltralyticsDetectorProvider", "model_name")
+    face_detector = (str(st.get("qwen_face_detector") or "").strip() or
+                     next((o for o in _det_opts if "face_yolov8" in o.lower()), None) or
+                     next((o for o in _det_opts if o.lower().startswith("bbox/")), None) or
+                     (_det_opts[0] if _det_opts else "bbox/face_yolov8m.pt"))
     return {"unet": unet, "unet_loader": unet_loader, "clip": clip, "vae": vae,
             "lightning": lightning, "clothes_lora": clothes_lora,
-            "pose_lora": pose_lora, "tiled_decode": has_tiled}
+            "pose_lora": pose_lora, "tiled_decode": has_tiled,
+            "emotion_lora": emotion_lora, "face_detector": face_detector}
 
 
 def _qwen_loaders(api: Dict[str, dict], models: Dict[str, Any]) -> Tuple[list, list, list]:
@@ -372,6 +424,95 @@ def build_qwen_pose_set_graph(
     return api, {"sprites": "save"}
 
 
+# --------------------------------------------------------------------------- #
+# v1.199.15 -- Qwen EMOTIONS engine (VNCCS Step 3 replica).                    #
+# Mirrors vnccs-utils "QwenDetailer_ChangeEmotion" workflow: VNCCS_QWEN_Detailer
+# (Ultralytics face bbox -> QIE face edit -> stitch) with a "Change emotion to X"
+# prompt, on our standard Qwen loaders. EmotionCore LoRA optional (off by default).
+QWEN_EMOTION_INSTRUCTION = (
+    "Describe the key features of the input image (color, shape, size, texture, "
+    "objects, background), then explain how the user's text instruction should alter "
+    "or modify the image. Generate a new image that meets the user's requirements "
+    "while maintaining consistency with the original input where appropriate.")
+
+
+def qwen_emotion_prompt(natural: str = "", key: str = "") -> str:
+    """VNCCS's ChangeEmotion prompt form ("Change emotion to <x>")."""
+    e = (str(natural or "").strip() or str(key or "").strip() or "neutral")
+    return f"Change emotion to {e}"
+
+
+def build_qwen_emotion_graph(
+    *,
+    sprite_files: List[str],
+    emotions: List[Dict[str, str]],
+    seed: int,
+    models: Dict[str, Any],
+    use_emotion_lora: bool = False,
+    emotion_lora_strength: float = 1.0,
+    steps: int = 4,
+    cfg: float = 1.0,
+    denoise: float = 1.0,
+    target_size: int = 1024,
+    face_threshold: float = 0.5,
+    filename_prefix: str = "rbmn_vnccs/qwen_emotions",
+) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """For every (sprite x emotion) run VNCCS_QWEN_Detailer with a
+    "Change emotion to X" prompt -- VNCCS's own Qwen emotion method (face detect
+    -> QIE edit -> stitch), leaving body/clothes/background untouched.
+    ``emotions`` = [{"key","natural"}...]. Decoded results batch into one SaveImage
+    in (sprite, emotion) order so the standard ingest maps them back."""
+    if not sprite_files:
+        raise ValueError("qwen emotion graph needs sprite(s)")
+    if not emotions:
+        raise ValueError("qwen emotion graph needs emotion(s)")
+    api: Dict[str, dict] = {}
+    model_ref, clip_ref, vae_ref = _qwen_loaders(api, models)
+    if use_emotion_lora and models.get("emotion_lora"):
+        api["el"] = {"class_type": "LoraLoaderModelOnly",
+                     "inputs": {"model": model_ref, "lora_name": models["emotion_lora"],
+                                "strength_model": float(max(0.1, min(1.5, emotion_lora_strength)))}}
+        model_ref = ["el", 0]
+    det = models.get("face_detector") or "bbox/face_yolov8m.pt"
+    api["det"] = {"class_type": "UltralyticsDetectorProvider",
+                  "inputs": {"model_name": det}}
+    decoded: List[str] = []
+    for si, sp in enumerate(sprite_files):
+        api[f"s{si}_load"] = {"class_type": "LoadImage", "inputs": {"image": sp}}
+        for ei, emo in enumerate(emotions):
+            t = f"s{si}e{ei}"
+            api[f"{t}_det"] = {"class_type": "VNCCS_QWEN_Detailer",
+                               "inputs": {
+                                   "image": [f"s{si}_load", 0], "bbox_detector": ["det", 0],
+                                   "model": model_ref, "clip": clip_ref, "vae": vae_ref,
+                                   "prompt": qwen_emotion_prompt(emo.get("natural"), emo.get("key")),
+                                   "threshold": float(face_threshold), "dilation": 0,
+                                   "drop_size": 10, "feather": 0, "steps": int(steps),
+                                   "cfg": float(cfg), "seed": int(seed), "sampler_name": "euler",
+                                   "scheduler": "simple", "denoise": float(denoise),
+                                   "tiled_vae_decode": False, "tile_size": 512,
+                                   "sam_detection_hint": "center-1", "sam_dilation": 0,
+                                   "sam_threshold": 0.93, "sam_bbox_expansion": 0,
+                                   "sam_mask_hint_threshold": 0.7,
+                                   "sam_mask_hint_use_negative": "False",
+                                   "target_size": int(target_size), "upscale_method": "nearest-exact",
+                                   "crop_method": "disabled", "instruction": QWEN_EMOTION_INSTRUCTION,
+                                   "inpaint_mode": False,
+                                   "inpaint_prompt": "[!!!IMPORTANT!!!] Inpaint mode: draw only inside black box.",
+                                   "color_match_method": "kornia_reinhard", "seam_fix": True,
+                                   "qwen_2511": True, "distortion_fix": True}}
+            decoded.append(f"{t}_det")
+    cur = decoded[0]
+    for i, d in enumerate(decoded[1:]):
+        bid = f"emb{i}"
+        api[bid] = {"class_type": "ImageBatch",
+                    "inputs": {"image1": [cur, 0], "image2": [d, 0]}}
+        cur = bid
+    api["save"] = {"class_type": "SaveImage",
+                   "inputs": {"images": [cur, 0], "filename_prefix": filename_prefix}}
+    return api, {"sprites": "save"}
+
+
 # =========================================================================== #
 # v1.168 -- CHARACTER CREATION stage (VNCCS Step 1), replicated app-side.
 # Source: character_creator_v2.py, character_cloner.py, character_generator.py
@@ -427,7 +568,7 @@ def creator_prompt(info: dict, *, anima: bool = False) -> str:
     nsfw = bool(ci.get("nsfw"))
     aesthetics = str(ci.get("aesthetics") or "").strip() or (
         "masterpiece, best quality, score_7, anime" if anima else "masterpiece")
-    parts = [aesthetics, "simple background", "expressionless", "solo", "cowboy_shot"]
+    parts = [aesthetics, "simple background", "expressionless", "solo", "full_body"]
     parts += ["(1boy)", "(male_focus)"] if male else ["(1girl)"]
     if nsfw:
         parts.append("(naked, nude, penis)" if male else "(naked, nude, vagina, nipples)")
@@ -456,7 +597,8 @@ def creator_prompt(info: dict, *, anima: bool = False) -> str:
 def creator_prompt_natural(info: dict, flavor: str = "klein") -> str:
     """v1.169/1.170: the SAME creator semantics as VNCCS's tag template,
     adapted PER MODEL per docs/MODEL_PROMPTING.md.  Field mapping is 1:1 with
-    construct_prompt -- solo, expressionless, thighs-up framing, white
+    construct_prompt -- solo, expressionless, full-body head-to-toe framing
+    with headroom above the head and below the feet, white
     underwear (SFW) / nude (NSFW), solid keyable background.  Flavors:
     * klein  -- concise prose (~30-90w), lighting emphasized, no boosters.
     * qwen   -- descriptive natural sentences (Qwen-Image reads prose well).
@@ -499,8 +641,9 @@ def creator_prompt_natural(info: dict, flavor: str = "klein") -> str:
         ]
         if feats:
             lines.append(f"Appearance: {feats}.")
-        lines.append("Framing: cowboy shot from the thighs up, subject centered, "
-                     "camera at chest height, straight-on angle.")
+        lines.append("Framing: full-length shot showing the whole figure head to "
+                     "toe, a small margin of empty space above the head and below the "
+                     "feet, subject centered, camera at waist height, straight-on angle.")
         lines.append(f"Lighting: soft even studio light from the front, uniform "
                      f"exposure, sharp focus on the whole figure.")
         lines.append(f"Background: solid flat {bg.lower()}, completely uniform, "
@@ -509,8 +652,9 @@ def creator_prompt_natural(info: dict, flavor: str = "klein") -> str:
     if flavor == "krea2":
         # minimal modifiers -- let Krea's aesthetic do the work
         parts = [f"Studio photo of a {age}-year-old {race} {noun} standing in a "
-                 f"neutral pose facing the camera, expressionless, {wear}, framed "
-                 f"from the thighs up."]
+                 f"neutral pose facing the camera, expressionless, {wear}, the whole "
+                 f"figure visible head to toe with a small margin of empty space above "
+                 f"the head and below the feet."]
         if feats:
             parts.append(f"{has} {feats}.")
         parts.append(f"Plain {bg.lower()} backdrop, soft even light.")
@@ -518,8 +662,10 @@ def creator_prompt_natural(info: dict, flavor: str = "klein") -> str:
     # klein / qwen -- concise descriptive prose
     parts = [
         f"A full-body studio reference photo of a single {age}-year-old {race} {noun}, "
-        f"standing upright in a neutral relaxed pose facing the camera, framed from "
-        f"the thighs up, with a calm, expressionless face.",
+        f"standing upright in a neutral relaxed pose facing the camera, the whole "
+        f"figure visible head to toe, with a small margin of empty space above the "
+        f"head and below the feet (the figure centered, not touching the top or "
+        f"bottom edges), with a calm, expressionless face.",
         f"{pron} is {wear}.",
     ]
     if feats:

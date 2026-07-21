@@ -364,12 +364,19 @@ def render_pose_captures(pose_data: Dict[str, Any],
         bg = export.get("bg_color", [40, 40, 40])
         bg = [int(c) for c in bg[:3]] if isinstance(bg, (list, tuple)) else [40, 40, 40]
         cam_zoom = export.get("cam_zoom", 1.0)
+        # v1.199.13: per-costume headroom override ("Headwear room" slider) so tall
+        # hats / headdresses have canvas above the head. Falls back to the default.
+        try:
+            hr = float(export.get("top_headroom", _TOP_HEADROOM))
+        except Exception:  # noqa: BLE001
+            hr = _TOP_HEADROOM
+        hr = max(0.0, min(0.45, hr))
         lights = pose_data.get("lights", [])
         mesh = pose_data.get("mesh", {}) or {}
 
         key = hashlib.sha256(json.dumps(
             {"m": mesh, "p": poses, "w": width, "h": height, "bg": bg,
-             "z": cam_zoom, "l": lights, "sil": silhouette}, sort_keys=True, default=str,
+             "z": cam_zoom, "l": lights, "sil": silhouette, "hr": hr}, sort_keys=True, default=str,
         ).encode()).hexdigest()
         hit = _CACHE.get(key)
         if hit:
@@ -398,7 +405,7 @@ def render_pose_captures(pose_data: Dict[str, Any],
             posed_list.append(_apply_pose(base_verts, pose.get("bones", {}),
                                           pose.get("modelRotation", [0, 0, 0])))
         # reserve headroom (top) + a small margin (bottom) so hats/tall hair fit.
-        uniform_scale = height * (1.0 - _TOP_HEADROOM - _BOTTOM_MARGIN) / ref_ext_y * z
+        uniform_scale = height * (1.0 - hr - _BOTTOM_MARGIN) / ref_ext_y * z
         for posed in posed_list:
             _mn = posed[:, :2].min(axis=0)
             _mx = posed[:, :2].max(axis=0)
@@ -410,7 +417,7 @@ def render_pose_captures(pose_data: Dict[str, Any],
         for posed in posed_list:
             img = _render_pose(posed, width, height, bg, lights, cam_zoom,
                                silhouette=silhouette, fixed_scale=uniform_scale,
-                               headroom=_TOP_HEADROOM)
+                               headroom=hr)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             captures.append("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii"))
