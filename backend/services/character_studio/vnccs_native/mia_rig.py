@@ -212,6 +212,7 @@ def run_rig(
     device: str = "auto",
     use_normal: bool = False,
     fingers: bool = False,
+    reset_to_rest: bool = False,
     cb: ProgressCB = None,
     timeout: int = 3600,
 ) -> bytes:
@@ -235,6 +236,13 @@ def run_rig(
         cmd.append("--use-normal")
     if fingers:
         cmd.append("--fingers")
+    # v1.199.70: DEFAULT to keeping the mesh's input pose as the bind
+    # (reset_to_rest=False -> --no-rest).  reset_to_rest=True force-reposes the
+    # mesh to a T-pose during rigging, which SHEARS the arms into the bind on
+    # heavy organic meshes (broke every clay pose reference).  We apply our own
+    # pose rotations for clay, so a T-rest buys us nothing and costs clean arms.
+    if not reset_to_rest:
+        cmd.append("--no-rest")
     env = dict(os.environ)
     env["MIA_WORK_DIR"] = str(RUNTIME_DIR / "work")
     env["PYTHONUNBUFFERED"] = "1"

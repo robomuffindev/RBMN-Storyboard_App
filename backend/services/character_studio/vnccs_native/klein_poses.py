@@ -41,6 +41,34 @@ SAM3_DEFAULT_MODEL = "sam3.pt"
 SAM3_DEFAULT_ARTICLES = (
     "necklace, chain, pendant, choker, bracelet, wristband, watch, ring, earrings, "
     "shirt, t-shirt, blouse, collar, sleeve, jacket, coat")
+# --- RefControl DEPTH path (v1.199.83) --------------------------------------
+# thedeoxen/refcontrol-FLUX.2-klein-9B-reference-depth-lora.  Fuses a DEPTH MAP
+# (structure + VOLUME + height) with a reference image (identity), which is the
+# one control signal that can carry a heavy/short body through Klein.  Its
+# sibling ...-reference-pose-lora consumes a DWPose SKELETON instead, and the
+# author states outright that it "works best when the pose map has similar
+# proportions and scale to the reference" -- i.e. it CANNOT transfer body mass.
+# That is why every strength/release tuning attempt on the skeleton path failed.
+# These constants are the author's own reference workflow, verbatim, so the
+# depth mode is a single validated preset rather than a set of dials.
+DEPTH_LORA_BASENAME = "flux2_klein_9b_refcontrol_depth.safetensors"
+DEPTH_BASE_UNET = "flux-2-klein-base-9b-fp8.safetensors"
+DEPTH_TRIGGER = "refcontrol"
+DEPTH_STEPS = 20
+DEPTH_CFG = 5.0
+DEPTH_LORA_STRENGTH = 1.0
+DEPTH_MODES = ("depth", "depthmap", "depth_map", "3d depth")
+# --- RefControl NORMAL path (v1.199.115) -------------------------------------
+# thedeoxen/refcontrol-FLUX.2-klein-9B-reference-normal-lora -- same family,
+# same feeding mechanism and same base-model preset as the depth LoRA, but the
+# control map is a camera-space SURFACE NORMAL render (DSINE convention, which
+# clay_driver's check_normal matcap matches). Where depth loses an arm pressed
+# against the torso (near-zero tonal separation), a normal map keeps a hard
+# orientation discontinuity at the boundary -- the depth path's one remaining
+# defect. Meant to be A/B'd against depth with everything else identical.
+NORMAL_LORA_BASENAME = "flux2_klein_9b_refcontrol_normal.safetensors"
+NORMAL_MODES = ("normal", "normalmap", "normal_map", "normals", "3d normal")
+
 DEFAULT_KLEIN_UNET = "flux-2-klein-9b-fp8.safetensors"
 DEFAULT_KLEIN_CLIP = "qwen_3_8b_fp8mixed_abliterated.safetensors"
 DEFAULT_KLEIN_VAE = "flux2-vae.safetensors"
@@ -59,8 +87,12 @@ KLEIN_STRIP_NEGATIVE = (
     # the target white bra + panties from _base_body_state are never suppressed.
     "shirt, t-shirt, blouse, sweater, hoodie, jacket, coat, cardigan, vest, "
     "dress, gown, robe, skirt, pants, jeans, trousers, shorts, leggings, "
+    # v1.199.68: steer the male base AWAY from loose boxers (whose leg length rendered
+    # inconsistently front vs side/back) toward the form-fitting briefs target below.
+    "boxers, boxer shorts, boxer-shorts, loose boxers, baggy underwear, long underwear, "
     "collar, lapel, sleeves, cuffs, buttons, zipper, pocket, necktie, tie, scarf, "
-    "shoes, boots, sandals, high heels, loafers, footwear, socks, shoe soles, "
+    "shoes, boots, sandals, high heels, loafers, footwear, socks, white socks, "
+    "ankle socks, crew socks, tube socks, sock cuffs, stockings, shoe soles, "
     "slippers, sneakers, earrings, necklace, chain, bracelet, wristband, anklet, "
     "ring, watch, jewelry, piercing, glasses, hat, headwear, "
     # foot POSTURE: removing heels must not leave the feet pointed/arched as if
@@ -113,6 +145,10 @@ KLEIN_ANATOMY_NEGATIVE = (
     "extra limbs, extra arms, extra legs, extra hands, extra feet, duplicated "
     "limbs, fused limbs, malformed limbs, mutated hands, extra fingers, missing "
     "fingers, deformed, disfigured, bad anatomy, "
+    # v1.199.69: recurring DOUBLE NAVEL on heavy bellies -- suppress the duplicate.
+    "two belly buttons, double belly button, double navel, extra navel, duplicate "
+    "navel, two navels, multiple navels, second belly button, malformed navel, "
+    "extra navel on belly, two navels on stomach, "
     # dark ink-like separation lines where skin overlaps skin (fingers/hands, arm
     # against torso) at low step counts -- raising Pose steps is the main fix, this
     # nudges the model away from hard black occlusion contours
@@ -551,7 +587,7 @@ def resolve_face_refine(oi: dict, settings: Optional[dict] = None) -> Optional[D
       klein_face_refine_steps    int, default 6
     """
     st = settings or {}
-    mode = str(st.get("klein_face_refine") or "auto").strip().lower()
+    mode = str(st.get("klein_face_refine") or "off").strip().lower()  # v1.199.28 pure-mode: FaceDetailer OFF by default (not in the VNCCS Klein workflow)
     if mode in ("off", "false", "0", "disabled", "none"):
         return None
     if "FaceDetailer" not in (oi or {}) or "UltralyticsDetectorProvider" not in (oi or {}):
@@ -653,14 +689,19 @@ def _base_body_state(nsfw: bool, sex: str = "") -> str:
                     "build, body fat and weight, belly, hips, thighs and limb thickness. "
                     "If the reference is heavy-set, plus-size or has a fuller figure, KEEP "
                     "that exact fuller body -- do NOT slim, tone, shrink, idealize or "
-                    "beautify it into a thinner or generic model figure. ")
+                    "beautify it into a thinner or generic model figure. The character has "
+                    "exactly ONE navel -- a single natural belly button centered on the "
+                    "abdomen, never two. ")
     if nsfw:
         return ("The character is fully NUDE -- naked, no clothing, underwear, "
                 "footwear or accessories of any kind. " + _flat_feet + _keep_weight)
     if male:
         return ("REMOVE every garment the reference is wearing. The character is "
-                "bare-chested and wears ONLY plain WHITE boxers and nothing else. The "
-                "feet are COMPLETELY BARE and barefoot -- NO shoes, sandals, socks or "
+                "bare-chested and wears ONLY plain WHITE FORM-FITTING briefs -- snug "
+                "underwear that hugs the hips and upper thighs and ends high on the thigh "
+                "(tight briefs / boxer-briefs), the SAME snug short shape from EVERY angle. "
+                "NOT loose boxers, NOT boxer shorts, NOT long or baggy underwear, NOT shorts. "
+                "The feet are COMPLETELY BARE and barefoot -- NO shoes, sandals, socks or "
                 "shoe soles, nothing under the feet. " + _flat_feet + "NO jewelry of any "
                 "kind -- remove every necklace, chain, bracelet, ring, watch and "
                 "piercing. No other clothing, footwear or accessories. " + _keep_weight + "SFW.")
@@ -740,7 +781,8 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
                       style_kind: Optional[str] = None, sex: str = "",
                       body_ref_active: bool = False, style_custom: str = "",
                       consistent_skin: bool = False,
-                      pose_input: str = "mannequin") -> str:
+                      pose_input: str = "mannequin",
+                      rmbg_active: bool = False) -> str:
     """Klein-style instruction: image 1 = pose reference, images 2..N = identity,
     optionally image ``face_image_index`` = a close-up crop of the SAME face.
 
@@ -763,7 +805,33 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
     # reference (documented Flux.2 "style blending"), so say explicitly what
     # image 1 is and that ONLY its pose may be taken -- otherwise the CGI
     # mannequin's plastic material and drawn outlines bleed into the skin.
-    if str(pose_input or "").lower() == "skeleton":
+    if str(pose_input or "").lower() == "depth":
+        # The depth map is the ONE reference that legitimately carries body
+        # shape, so -- unlike the skeleton/mannequin guards -- we explicitly tell
+        # the model to take proportions from it. That is the whole point of the
+        # depth path: the silhouette is measured from the character's own rigged
+        # 3D scan, so it is more trustworthy than the model's body prior.
+        guard = ("Image 1 is a grayscale DEPTH MAP of this exact character's own "
+                 "3D body scan, where brighter is nearer the camera. Take the "
+                 "body position, camera framing AND the full body shape from it: "
+                 "match its height, build, weight, belly, limb thickness and "
+                 "silhouette EXACTLY. Do not slim, lengthen, straighten or "
+                 "idealise the body. Nothing of image 1's grayscale appearance "
+                 "may show in the output. ")
+    elif str(pose_input or "").lower() == "normal":
+        # v1.199.115: same contract as depth -- the map is rendered from the
+        # character's own scan, so shape may be taken from it; the per-limb
+        # boundary is exactly what normals carry that depth loses.
+        guard = ("Image 1 is a colour-coded SURFACE NORMAL MAP of this exact "
+                 "character's own 3D body scan, where colour encodes the "
+                 "direction each surface faces. Take the body position, camera "
+                 "framing AND the full body shape from it: match its height, "
+                 "build, weight, belly, limb thickness and silhouette EXACTLY. "
+                 "Where the map shows a boundary between an arm and the torso, "
+                 "keep that arm clearly separate from the body. Do not slim, "
+                 "lengthen, straighten or idealise the body. Nothing of image "
+                 "1's colour-coded appearance may show in the output. ")
+    elif str(pose_input or "").lower() == "skeleton":
         guard = ("Image 1 is a stick-figure pose skeleton diagram on a black "
                  "background: use it ONLY to read the body position and camera "
                  "framing. Nothing of image 1's appearance may show in the "
@@ -850,6 +918,16 @@ def klein_pose_prompt(pose_prompt: str, background: str, n_identity: int = 1,
     if det and _keep_clothing(base_clothing):
         parts.append(f"Reference outfit details to match (do not invent beyond these): {det}.")
     bg = str(background or "Green").strip() or "Green"
+    # v1.199.91 GREEN SPILL: a green backdrop is a chroma-key requirement, and it
+    # stopped being one the moment worker-side RMBG-2.0 took over the cut-out
+    # (RMBG is a learned matting model -- it does not care what colour is behind
+    # the subject). Meanwhile a full-frame green backdrop makes the model paint
+    # green bounce light onto the subject, worst on white/pale surfaces: the
+    # white briefs and the pale skin came out visibly green-yellow while the BASE
+    # image -- which already renders on "neutral gray" -- stayed clean. So when
+    # RMBG is doing the keying, ask for neutral gray and the spill has no source.
+    if rmbg_active and bg.strip().lower() in ("green", "greenscreen", "green screen", ""):
+        bg = "neutral gray"
     # The shadow ban is scoped to the BACKGROUND only (v1.149).  The old wording
     # ("absolutely no shadows of any kind ... do not reproduce any shading")
     # forbade the soft contact shading a body needs where skin presses against
@@ -920,6 +998,30 @@ def _height_to_cm(height) -> Optional[float]:
     return None
 
 
+def explicit_mesh_overrides(character_info: dict) -> Dict[str, float]:
+    """The manual UI build sliders (0..100) as mesh overrides -- the ONLY values
+    that beat every derived source (text keywords, image auto-fit, 3D-scan fit).
+    Absent/blank sliders contribute nothing."""
+    ci = character_info or {}
+    out: Dict[str, float] = {}
+    for src, key in (("body_weight", "weight"), ("body_muscle", "muscle"),
+                     ("body_height", "height"), ("body_breast", "breast_size")):
+        v = ci.get(src)
+        if v is None or str(v).strip() == "":
+            continue
+        try:
+            out[key] = max(0.0, min(1.0, float(v) / 100.0))
+        except Exception:  # noqa: BLE001
+            pass
+    bv = ci.get("body_belly")
+    if bv is not None and str(bv).strip() != "":
+        try:
+            out["belly"] = max(0.0, min(1.5, float(bv) / 100.0 * 1.5))
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def body_mesh_params(character_info: dict) -> Dict[str, float]:
     """Map the character's Body-Helper descriptors (sex / body tags / height /
     age) to the POSE-MANNEQUIN's MakeHuman morph sliders (all 0..1) so the pose
@@ -951,7 +1053,8 @@ def body_mesh_params(character_info: dict) -> Dict[str, float]:
         m["weight"] = 0.95
     elif _has("overweight", "chubby", "plump", "heavy", "fat", "thick", "heavyset",
               "stocky", "husky", "chunky", "pudgy", "full-figured", "plus size",
-              "plus-size", "big", "large body", "wide"):
+              "plus-size", "big", "large", "wide", "robust", "portly", "rounder",
+              "burly", "beefy", "barrel"):
         m["weight"] = 0.82
     elif _has("curvy", "voluptuous", "chubby-cute", "soft body", "rubenesque"):
         m["weight"] = 0.68
@@ -973,27 +1076,49 @@ def body_mesh_params(character_info: dict) -> Dict[str, float]:
     else:
         m["muscle"] = 0.5
 
+    # belly (v1.199.73): forward-hanging gut on the pose mannequin -- drives the
+    # DIRECTIONAL anterior displacement in pose_render._apply_belly (the MakeHuman
+    # weight morph alone tops out at mildly chubby). mesh['belly'] is an ADD amount
+    # (0 = none, ~0.6-1.2 = big gut, 1.5 = max).
+    if _has("obese", "very overweight", "morbidly"):
+        m["belly"] = 1.30
+    elif _has("beer belly", "pot belly", "potbelly", "big belly", "huge belly", "paunch"):
+        m["belly"] = 1.15
+    elif _has("slight belly", "small belly", "little belly", "bit of a belly"):
+        m["belly"] = 0.50
+    elif _has("belly", "gut", "prominent stomach", "round stomach"):
+        m["belly"] = 0.90
+    elif _has("overweight", "chubby", "plump", "heavy", "fat", "heavyset", "stocky",
+              "husky", "chunky", "pudgy", "full-figured", "plus size", "plus-size",
+              "robust", "portly", "rounder"):
+        m["belly"] = 0.90
+    elif _has("curvy", "soft body", "doughy", "flabby", "out of shape", "rubenesque"):
+        m["belly"] = 0.40
+
     # height (prefer a real cm/ft value, else descriptors)
     cm = _height_to_cm(ci.get("height"))
     if cm is not None and cm > 0:
-        if cm < 150:
-            m["height"] = 0.12
-        elif cm < 160:
-            m["height"] = 0.3
-        elif cm < 170:
-            m["height"] = 0.45
-        elif cm < 178:
-            m["height"] = 0.6
-        elif cm < 186:
-            m["height"] = 0.78
-        else:
-            m["height"] = 0.92
-    elif _has("petite", "short", "tiny", "diminutive"):
-        m["height"] = 0.22
-    elif _has("very tall", "towering", "statuesque"):
-        m["height"] = 0.85
-    elif _has("tall", "long-limbed", "long legs"):
-        m["height"] = 0.75
+        # v1.199.77: SEX-RELATIVE mapping. The old absolute ladder put 168cm at
+        # 0.45 and 170-177cm at 0.6, so a 5'6" MAN -- short for a man -- rendered
+        # essentially average and the height field looked like it did nothing.
+        # What matters for the LOOK is height relative to the sex norm
+        # (male ~178cm, female ~165cm); +-45cm spans the slider.
+        _avg = 178.0 if m.get("gender", 0.5) >= 0.5 else 165.0
+        m["height"] = round(max(0.08, min(0.92, 0.5 + (float(cm) - _avg) / 45.0)), 3)
+    else:
+        # v1.199.74: match stature words against the HEIGHT field only -- matching
+        # the whole description made "dark gray shorts" read as "short" stature.
+        _ht = str(ci.get("height") or "").lower()
+        if any(k in _ht for k in ("petite", "short", "tiny", "diminutive")):
+            m["height"] = 0.22
+        elif any(k in _ht for k in ("very tall", "towering", "statuesque")):
+            m["height"] = 0.85
+        elif any(k in _ht for k in ("tall", "long-limbed", "long legs")):
+            m["height"] = 0.75
+    # v1.199.75: ALWAYS set height -- without it the vendored baseline pose
+    # blob's height=0.85 (tall template mannequin) leaks through the merge and
+    # stretches every underived character tall with long legs.
+    m.setdefault("height", 0.5)
 
     # breast size for female builds
     if not sex.startswith("m"):
@@ -1002,17 +1127,9 @@ def body_mesh_params(character_info: dict) -> Dict[str, float]:
         elif _has("flat", "small breasts", "flat-chested", "petite"):
             m["breast_size"] = 0.3
 
-    # EXPLICIT slider overrides (0..100 from the UI) win over the text derivation —
-    # the direct way to dial the mannequin to match a reference body.
-    for src, key in (("body_weight", "weight"), ("body_muscle", "muscle"),
-                     ("body_height", "height"), ("body_breast", "breast_size")):
-        v = ci.get(src)
-        if v is None or str(v).strip() == "":
-            continue
-        try:
-            m[key] = max(0.0, min(1.0, float(v) / 100.0))
-        except Exception:  # noqa: BLE001
-            pass
+    # EXPLICIT slider overrides (0..100 from the UI) win over the text derivation --
+    # via the shared helper so every derivation stage applies the same precedence.
+    m.update(explicit_mesh_overrides(ci))
     return m
 
 
@@ -1087,6 +1204,8 @@ def build_klein_pose_graph(
     dwpose: Optional[Dict[str, Any]] = None,
     pose_lora_strength: float = 1.0,
     consistency_lora: Optional[Dict[str, Any]] = None,
+    structure_lock: Optional[float] = None,
+    init_files: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, dict], Dict[str, str]]:
     """API-format graph: one Klein9b-Encoder chain per pose, batched into a
     single SaveImage tap.  Returns (api_graph, tap_map={'sprites': save_id}).
@@ -1302,10 +1421,43 @@ def build_klein_pose_graph(
         _pseed = int(seed) if consistent_seed else int(seed) + i
         api[f"{p}_ns"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": _pseed}}
         api[f"{p}_sm"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+        # STRUCTURE LOCK (v1.199.83): start from the pose render itself instead
+        # of empty noise, and denoise only the tail of the sigma curve.  Flux.2
+        # has no ControlNet, so ReferenceLatent is the only conditioning channel
+        # available and it is purely advisory -- the body prior can and does
+        # overrule it.  A starting latent cannot be overruled: the silhouette is
+        # already in the pixels.  ``init_files`` deliberately carries the SHADED
+        # render even in depth mode; initialising from a grey depth map would
+        # bake the grey into the skin.
+        _lat_ref = [f"{p}_lat", 0]
+        _sig_ref = [f"{p}_sig", 0]
+        _initf = (init_files or [])[i] if init_files and i < len(init_files) else None
+        if structure_lock and _initf:
+            api[f"{p}_iload"] = {"class_type": "LoadImage", "inputs": {"image": _initf}}
+            if out_width and out_height:
+                api[f"{p}_iscale"] = {"class_type": "ImageScale",
+                                      "inputs": {"image": [f"{p}_iload", 0],
+                                                 "upscale_method": "lanczos",
+                                                 "width": int(out_width),
+                                                 "height": int(out_height),
+                                                 "crop": "disabled"}}
+            else:
+                api[f"{p}_iscale"] = {"class_type": "ImageScaleToTotalPixels",
+                                      "inputs": {"image": [f"{p}_iload", 0],
+                                                 "upscale_method": "lanczos",
+                                                 "megapixels": 1.0,
+                                                 "resolution_steps": 1}}
+            api[f"{p}_ienc"] = {"class_type": "VAEEncode",
+                                "inputs": {"pixels": [f"{p}_iscale", 0], "vae": ["v", 0]}}
+            api[f"{p}_split"] = {"class_type": "SplitSigmasDenoise",
+                                 "inputs": {"sigmas": [f"{p}_sig", 0],
+                                            "denoise": float(structure_lock)}}
+            _lat_ref = [f"{p}_ienc", 0]
+            _sig_ref = [f"{p}_split", 1]      # low_sigmas = the img2img tail
         api[f"{p}_sc"] = {"class_type": "SamplerCustomAdvanced",
                           "inputs": {"noise": [f"{p}_ns", 0], "guider": [f"{p}_gd", 0],
-                                     "sampler": [f"{p}_sm", 0], "sigmas": [f"{p}_sig", 0],
-                                     "latent_image": [f"{p}_lat", 0]}}
+                                     "sampler": [f"{p}_sm", 0], "sigmas": list(_sig_ref),
+                                     "latent_image": list(_lat_ref)}}
         api[f"{p}_dec"] = {"class_type": "VAEDecode",
                            "inputs": {"samples": [f"{p}_sc", 0], "vae": ["v", 0]}}
         tail = f"{p}_dec"
@@ -1418,6 +1570,119 @@ def resolve_dwpose(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[s
     est = _options(oi, DWPOSE_CLASS, "pose_estimator")
     return {"bbox_detector": next((o for o in bbox if "yolox_l" in o.lower()), bbox[0]) if bbox else "yolox_l.onnx",
             "pose_estimator": next((o for o in est if "dw-ll" in o.lower()), est[0]) if est else "dw-ll_ucoco_384_bs5.torchscript.pt"}
+
+
+def is_depth_mode(settings: Optional[dict] = None) -> bool:
+    return str((settings or {}).get("klein_pose_input") or "").strip().lower() in DEPTH_MODES
+
+
+def is_normal_mode(settings: Optional[dict] = None) -> bool:
+    return str((settings or {}).get("klein_pose_input") or "").strip().lower() in NORMAL_MODES
+
+
+def resolve_depth_recipe(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """The RefControl-DEPTH recipe resolved against THIS worker, or None.
+
+    Returns everything the depth path needs as ONE preset -- lora, base unet,
+    steps, cfg, strength -- so switching Pose input to "Depth" is a single
+    automatable mode change with no per-character dialing.  Explicit studio
+    settings still win (see the ``*_explicit`` flags the caller honours).
+
+    Returns None (and logs why) when the LoRA is not installed, so the caller
+    can fall back to the previous behaviour instead of submitting a graph that
+    silently ignores the depth map."""
+    st = settings or {}
+    _normal = is_normal_mode(st)
+    if not (is_depth_mode(st) or _normal):
+        return None
+    loras = _options(oi, "LoraLoaderModelOnly", "lora_name")
+    if _normal:
+        # v1.199.115: NORMAL variant -- identical recipe, different control map
+        # and LoRA file. Resolved here so the whole depth machinery (base unet,
+        # cfg/steps preset, clay auto-enable, keep-smear, trigger) is reused
+        # verbatim; the returned "mode" tells the caller which map to render.
+        want = str(st.get("klein_normal_lora") or NORMAL_LORA_BASENAME).strip()
+        lora = _resolve_name(loras, want)
+        if not lora:
+            lora = next((o for o in loras
+                         if "refcontrol" in o.lower() and "normal" in o.lower()), None)
+        if not lora:
+            logger.warning(
+                "klein pose input: NORMAL requested but no RefControl normal LoRA is "
+                "on this worker (looked for %r, then any lora matching "
+                "refcontrol+normal; worker has %d loras). Download "
+                "thedeoxen/refcontrol-FLUX.2-klein-9B-reference-normal-lora into "
+                "models/loras. Falling back to the previous pose input.", want, len(loras))
+            return None
+    else:
+        want = str(st.get("klein_depth_lora") or DEPTH_LORA_BASENAME).strip()
+        lora = _resolve_name(loras, want)
+    if not lora:
+        # Tolerate re-naming / subfolder layouts (workers differ -- the QIE LoRAs
+        # needed a "qwen/VNCCS/" prefix on some hosts): any LoRA that is clearly
+        # the RefControl DEPTH one will do.
+        lora = next((o for o in loras
+                     if "refcontrol" in o.lower() and "depth" in o.lower()), None)
+    if not lora:
+        logger.warning(
+            "klein pose input: DEPTH requested but no RefControl depth LoRA is on "
+            "this worker (looked for %r, then any lora matching refcontrol+depth; "
+            "worker has %d loras). Download "
+            "thedeoxen/refcontrol-FLUX.2-klein-9B-reference-depth-lora into "
+            "models/loras. Falling back to the previous pose input.", want, len(loras))
+        return None
+    unets = _options(oi, "UNETLoader", "unet_name")
+    unet = _resolve_name(unets, str(st.get("klein_depth_unet") or DEPTH_BASE_UNET))
+    if not unet:
+        # Same tolerance for the base checkpoint: it is the klein 9B *base*
+        # (undistilled) build, whatever the quantisation suffix says.  Must be
+        # loadable by UNETLoader -- the pose graph has no GGUF loader.
+        unet = next((o for o in unets
+                     if "klein" in o.lower() and "base" in o.lower()), None)
+    if not unet:
+        logger.warning(
+            "klein pose input: DEPTH LoRA found but no klein-9B BASE checkpoint is "
+            "loadable by UNETLoader on this worker (looked for %r, then any unet "
+            "matching klein+base; worker has %d: %s). Running the depth LoRA on the "
+            "DISTILLED model it was not trained on -- pose/identity fidelity will be "
+            "lower. Note a .gguf base will NOT be found: the pose graph uses "
+            "UNETLoader, not UnetLoaderGGUF.",
+            DEPTH_BASE_UNET, len(unets), ", ".join(unets[:12]))
+    try:
+        if _normal:
+            strength = float(st.get("klein_normal_lora_strength")
+                             or st.get("klein_pose_lora_strength_depth")
+                             or st.get("klein_depth_lora_strength") or DEPTH_LORA_STRENGTH)
+        else:
+            strength = float(st.get("klein_pose_lora_strength_depth")
+                             or st.get("klein_depth_lora_strength") or DEPTH_LORA_STRENGTH)
+    except Exception:  # noqa: BLE001
+        strength = DEPTH_LORA_STRENGTH
+    return {"lora": lora, "unet": unet or "", "steps": DEPTH_STEPS, "cfg": DEPTH_CFG,
+            "strength": max(0.1, min(1.5, strength)), "trigger": DEPTH_TRIGGER,
+            "mode": "normal" if _normal else "depth"}
+
+
+def resolve_structure_lock(settings: Optional[dict] = None) -> Optional[float]:
+    """``klein_pose_structure_lock`` -- 0/off (default) or 0.35..0.95.
+
+    When set, the pose render is VAE-encoded as the STARTING LATENT and only the
+    last ``value`` fraction of the sigma curve is denoised, so the silhouette is
+    physically present in the initial pixels and cannot drift.  This is the hard
+    backstop for body size on an architecture with no ControlNet: reference
+    latents are advisory, a starting latent is not.  Lower = stronger lock (less
+    denoising) but more of the render's own grey survives; 0.65-0.8 is the band
+    that repaints texture while holding proportions."""
+    raw = str((settings or {}).get("klein_pose_structure_lock") or "off").strip().lower()
+    if raw in ("", "off", "none", "0", "false", "no"):
+        return None
+    try:
+        v = float(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if v <= 0.0 or v >= 0.999:
+        return None
+    return max(0.35, min(0.95, v))
 
 
 def resolve_consistency_lora(oi: dict, settings: Optional[dict] = None) -> Optional[Dict[str, Any]]:
@@ -2202,7 +2467,9 @@ def klein_refbase_prompt(character_info: dict, background: str, nsfw: bool = Fal
     if rotate:
         vd = str(view_desc or "").strip() or "the same view"
         bg = "neutral gray" if mesh_ready else (str(background or "Green").strip() or "Green")
-        stance = ("the SAME symmetric A-pose, arms held out about 30 degrees from the body"
+        stance = ("the SAME T-pose, both arms raised straight out horizontally to the "
+                  "sides at shoulder height like the letter T, with wide empty background "
+                  "clearly visible between each arm and the body"
                   if mesh_ready else "the SAME relaxed standing pose")
         return (
             "Novel-view render of the EXACT SAME character shown in the reference image. "
@@ -2221,12 +2488,14 @@ def klein_refbase_prompt(character_info: dict, background: str, nsfw: bool = Fal
 
     vd = str(view_desc or "").strip() or "front view, facing the camera"
     if mesh_ready:
-        parts.append("Standing in a symmetric A-pose: upright and centered, both arms "
-                     "lowered and held out to the sides about 30 degrees away from the "
-                     "torso so the arms and hands are clearly separated from the body "
-                     "with a visible gap on each side, hands open with fingers apart, "
-                     "legs straight and feet about shoulder-width apart, the whole figure "
-                     "visible head to toe and uniformly framed, " + vd + ".")
+        parts.append("Standing in a T-POSE: upright and centered, both arms raised "
+                     "straight out HORIZONTALLY to the sides at shoulder height, like the "
+                     "letter T, palms down. There must be wide empty background clearly "
+                     "visible between each arm and the body and below each arm -- even on "
+                     "a heavy build the arms must NOT touch or rest against the body "
+                     "anywhere. Hands open with fingers apart, legs straight and feet "
+                     "about shoulder-width apart, the whole figure visible head to toe "
+                     "and uniformly framed, " + vd + ".")
     else:
         parts.append("Standing straight and relaxed, arms resting slightly away from the "
                      "body, the whole figure visible head to toe, with a small margin of empty space above the head and below the feet (the figure centered, not touching the top or bottom edges), " + vd + ".")
@@ -2437,12 +2706,14 @@ def klein_preview_prompt(character_info: dict, background: str,
     style = (style + " ") if style else ""
     vd = str(view_desc or "").strip() or "front view"
     if mesh_ready:
-        stance = ("Standing in a symmetric A-pose: upright and centered, both arms "
-                  "lowered and held out to the sides about 30 degrees away from the torso "
-                  "so the arms and hands are clearly separated from the body with a visible "
-                  "gap on each side, hands open with fingers apart, legs straight and feet "
-                  "about shoulder-width apart, " + vd + ", the whole figure visible head to "
-                  "toe and uniformly framed with even margins")
+        stance = ("Standing in a T-POSE: upright and centered, both arms raised "
+                  "straight out HORIZONTALLY to the sides at shoulder height, like the "
+                  "letter T, palms down, with wide empty background clearly visible "
+                  "between each arm and the body and below each arm; even on a heavy "
+                  "build the arms must NOT touch or rest against the body anywhere. "
+                  "Hands open with fingers apart, legs straight and feet about "
+                  "shoulder-width apart, " + vd +
+                  ", the whole figure visible head to toe and uniformly framed with even margins")
     else:
         stance = "Standing relaxed, " + vd + ", whole figure visible head to toe, with a small margin of empty space above the head and below the feet (the figure centered, not touching the top or bottom edges)"
     return (f"{style}Full body character reference of {desc}. {stance}. "
@@ -2601,3 +2872,60 @@ def build_klein_emotion_graph(
     api["save"] = {"class_type": "SaveImage",
                    "inputs": {"images": [cur, 0], "filename_prefix": filename_prefix}}
     return api, {"sprites": "save"}
+
+
+# --------------------------------------------------------------------------- #
+# T-POSE EDIT PROMPT (v1.199.136)
+# --------------------------------------------------------------------------- #
+def tpose_edit_prompt(label: str) -> str:
+    """The edit instruction that turns ONE turnaround view into a T-pose.
+
+    Lives here, not inline in the API, so `tools/tpose_retry.py` iterates the exact
+    text production uses -- one worker image per attempt instead of a whole set.
+
+    v1.199.135 field result (set base_b164f62f92f5, engine=edit): front, right and
+    left came back with the arms up AND the build intact -- the first set to manage
+    both.  The BACK view failed in a specific way: the body flipped to FRONT-facing
+    (chest, nipples, navel all visible) while keeping the back of the head, because
+    "person with arms out" is overwhelmingly a front view in the prior and the
+    generic "do not turn the body" clause was not enough to hold it.  So the back
+    view now enumerates what must be visible and what must NOT be.
+    """
+    lab = str(label or "front").strip().lower()
+    if lab in ("front",):
+        arms = ("both arms raised straight out to the sides at shoulder height, "
+                "horizontal, like the letter T, palms down, hands open, with clearly "
+                "visible empty background between each arm and the torso and below "
+                "each arm")
+        view = ("Keep the same front view: the person faces the camera exactly as in "
+                "the reference image.")
+    elif lab in ("back",):
+        arms = ("both arms raised straight out to the sides at shoulder height, "
+                "horizontal, like the letter T, palms down, hands open, with clearly "
+                "visible empty background between each arm and the torso and below "
+                "each arm")
+        # the whole fix: name the visible surfaces, and forbid the front ones
+        view = ("This is a BACK view and it must stay a BACK view: the person is seen "
+                "from directly behind and is facing AWAY from the camera. Only the "
+                "back of the head and hair, the back of the neck, the shoulder "
+                "blades, the spine, the lower back, the seat of the underwear, the "
+                "backs of the thighs and calves and the heels are visible. The face, "
+                "eyes, mouth, chest, nipples, stomach, belly, navel and the fronts of "
+                "the legs and feet are NOT visible and must not be drawn anywhere in "
+                "the image. Do not rotate the person to face the camera.")
+    else:
+        arms = ("both arms raised straight out to the sides at shoulder height in a "
+                "T-pose, which from this side angle means the arms point directly "
+                "toward and directly away from the camera and appear strongly "
+                "foreshortened, with the near hand visible at shoulder height")
+        view = ("Keep the same side view and the same turn of the body as the "
+                "reference image -- the person must keep facing the same direction, "
+                "do not turn the body toward the camera.")
+    return ("Keep this exact same person and this exact same camera angle. Change "
+            "ONLY the arms: " + arms + ". " + view + " Do not change the body at all: "
+            "same height, same weight, same size, same belly, same wide torso, same "
+            "thick legs, same proportions, same face, same skin and same underwear. "
+            "Do not slim, shrink, idealize or reshape the body in any way. The person "
+            "has exactly ONE pair of arms -- do not draw extra arms, extra hands or "
+            "leftover lowered arms. Standing straight, feet shoulder-width apart, "
+            "full body visible head to toe, plain solid white background.")

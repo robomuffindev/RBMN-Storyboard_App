@@ -1,0 +1,1257 @@
+{
+ "version": 3,
+ "note": "RBMN default pose set v3 (2026-07-31). Spans CATEGORIES, not arm positions: neutral, locomotion (walk/run), weight+attitude (contrapposto, lean back, braced, hands on hips), key action (recoil, celebrate), and a turn. Authored on the mannequin -- which is now the same frame the clay renders in (v1.199.144 rest alignment). LIMIT FOUND: this pose format is rotation-only with a fixed root, so a real crouch or a seated pose folds the legs in place instead of lowering the body -- both were dropped, not shipped broken.",
+ "category": "RBMN Defaults",
+ "poses": [
+  {
+   "name": "Neutral reference",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      0,
+      0,
+      -25
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      25
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "spine_02": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "spine_03": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "thigh_l": [
+      0,
+      0,
+      4
+     ],
+     "thigh_r": [
+      0,
+      0,
+      -4
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "standing straight and relaxed facing the camera, arms hanging at his sides"
+   }
+  },
+  {
+   "name": "Contrapposto \u2014 weight shift",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      0,
+      0,
+      -20
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      28
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      0.0,
+      -2.0999999999999996,
+      3.6
+     ],
+     "spine_02": [
+      0.0,
+      -2.4000000000000004,
+      2.6999999999999997
+     ],
+     "spine_03": [
+      0.0,
+      -1.5,
+      2.6999999999999997
+     ],
+     "thigh_l": [
+      -8,
+      0,
+      7
+     ],
+     "thigh_r": [
+      5,
+      0,
+      -1
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      12,
+      0,
+      0
+     ],
+     "head": [
+      3,
+      -8,
+      0
+     ],
+     "neck_01": [
+      1.2000000000000002,
+      -2.8,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "standing with his weight on one leg, one hip pushed out, shoulders tilted the other way"
+   }
+  },
+  {
+   "name": "Walking \u2014 contact step",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      34,
+      0,
+      -23
+     ],
+     "upperarm_r": [
+      -30,
+      0,
+      23
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      -1.2000000000000002,
+      -2.8,
+      0.0
+     ],
+     "spine_02": [
+      -1.0499999999999998,
+      -3.2,
+      0.0
+     ],
+     "spine_03": [
+      -0.75,
+      -2.0,
+      0.0
+     ],
+     "thigh_l": [
+      30,
+      0,
+      3
+     ],
+     "thigh_r": [
+      -24,
+      0,
+      -3
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      26,
+      0,
+      0
+     ],
+     "head": [
+      0,
+      -5,
+      0
+     ],
+     "neck_01": [
+      0.0,
+      -1.75,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "walking forward, one foot forward and one back at the moment both feet touch the ground, arms swinging opposite"
+   }
+  },
+  {
+   "name": "Running",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      -38,
+      0,
+      -20
+     ],
+     "upperarm_r": [
+      36,
+      0,
+      20
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      52
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      -52
+     ],
+     "spine_01": [
+      -4.4,
+      -3.15,
+      0.0
+     ],
+     "spine_02": [
+      -3.8499999999999996,
+      -3.6,
+      0.0
+     ],
+     "spine_03": [
+      -2.75,
+      -2.25,
+      0.0
+     ],
+     "thigh_l": [
+      34,
+      0,
+      2
+     ],
+     "thigh_r": [
+      -26,
+      0,
+      -2
+     ],
+     "calf_l": [
+      34,
+      0,
+      0
+     ],
+     "calf_r": [
+      16,
+      0,
+      0
+     ],
+     "head": [
+      -4,
+      -5,
+      0
+     ],
+     "neck_01": [
+      -1.6,
+      -1.75,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "running hard, driving forward, knees high and arms pumping"
+   }
+  },
+  {
+   "name": "Braced \u2014 wide stance",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      0,
+      0,
+      -18
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      18
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      -1.6,
+      0.0,
+      0.0
+     ],
+     "spine_02": [
+      -1.4,
+      0.0,
+      0.0
+     ],
+     "spine_03": [
+      -1.0,
+      0.0,
+      0.0
+     ],
+     "thigh_l": [
+      6,
+      0,
+      17
+     ],
+     "thigh_r": [
+      6,
+      0,
+      -17
+     ],
+     "calf_l": [
+      14,
+      0,
+      0
+     ],
+     "calf_r": [
+      14,
+      0,
+      0
+     ],
+     "head": [
+      -3,
+      0,
+      0
+     ],
+     "neck_01": [
+      -1.2000000000000002,
+      0.0,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "standing squarely with his feet planted wide apart, knees soft, arms loose"
+   }
+  },
+  {
+   "name": "Leaning back",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      42,
+      0,
+      -21
+     ],
+     "upperarm_r": [
+      42,
+      0,
+      21
+     ],
+     "lowerarm_l": [
+      40,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      40,
+      0,
+      0
+     ],
+     "spine_01": [
+      8.8,
+      0.0,
+      0.0
+     ],
+     "spine_02": [
+      7.699999999999999,
+      0.0,
+      0.0
+     ],
+     "spine_03": [
+      5.5,
+      0.0,
+      0.0
+     ],
+     "thigh_l": [
+      -8,
+      0,
+      6
+     ],
+     "thigh_r": [
+      -8,
+      0,
+      -6
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      -16,
+      0,
+      0
+     ],
+     "neck_01": [
+      -6.4,
+      0.0,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "leaning back with his chest open and hands low behind him, chin up"
+   }
+  },
+  {
+   "name": "Turning \u2014 look back",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      0,
+      0,
+      -25
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      25
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      0.0,
+      16.799999999999997,
+      0.0
+     ],
+     "spine_02": [
+      0.0,
+      19.200000000000003,
+      0.0
+     ],
+     "spine_03": [
+      0.0,
+      12.0,
+      0.0
+     ],
+     "thigh_l": [
+      -6,
+      0,
+      4
+     ],
+     "thigh_r": [
+      0,
+      0,
+      -4
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      0,
+      -32,
+      0
+     ],
+     "neck_01": [
+      0.0,
+      -11.2,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "turned away from the camera, looking back over his shoulder, arms relaxed"
+   }
+  },
+  {
+   "name": "Recoiling \u2014 surprised",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      -30,
+      0,
+      1
+     ],
+     "upperarm_r": [
+      -30,
+      0,
+      -1
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      64
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      -64
+     ],
+     "spine_01": [
+      8.0,
+      2.0999999999999996,
+      0.0
+     ],
+     "spine_02": [
+      7.0,
+      2.4000000000000004,
+      0.0
+     ],
+     "spine_03": [
+      5.0,
+      1.5,
+      0.0
+     ],
+     "thigh_l": [
+      -14,
+      0,
+      8
+     ],
+     "thigh_r": [
+      16,
+      0,
+      -6
+     ],
+     "calf_l": [
+      18,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      -14,
+      6,
+      0
+     ],
+     "neck_01": [
+      -5.6000000000000005,
+      2.0999999999999996,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "flinching backwards in surprise, weight on the back foot, both hands up"
+   }
+  },
+  {
+   "name": "Celebrating \u2014 arms up",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      0,
+      0,
+      96
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      -96
+     ],
+     "lowerarm_l": [
+      0,
+      0,
+      20
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      -20
+     ],
+     "spine_01": [
+      4.0,
+      0.0,
+      0.0
+     ],
+     "spine_02": [
+      3.5,
+      0.0,
+      0.0
+     ],
+     "spine_03": [
+      2.5,
+      0.0,
+      0.0
+     ],
+     "thigh_l": [
+      0,
+      0,
+      8
+     ],
+     "thigh_r": [
+      0,
+      0,
+      -8
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      -18,
+      0,
+      0
+     ],
+     "neck_01": [
+      -7.2,
+      0.0,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "both arms thrown up above his head celebrating, head back"
+   }
+  },
+  {
+   "name": "Hands on hips \u2014 leaning in",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      30,
+      0,
+      -13
+     ],
+     "upperarm_r": [
+      30,
+      0,
+      13
+     ],
+     "lowerarm_l": [
+      40,
+      0,
+      -40
+     ],
+     "lowerarm_r": [
+      40,
+      0,
+      40
+     ],
+     "spine_01": [
+      -4.800000000000001,
+      1.4,
+      0.0
+     ],
+     "spine_02": [
+      -4.199999999999999,
+      1.6,
+      0.0
+     ],
+     "spine_03": [
+      -3.0,
+      1.0,
+      0.0
+     ],
+     "thigh_l": [
+      0,
+      0,
+      8
+     ],
+     "thigh_r": [
+      -6,
+      0,
+      -6
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      -6,
+      0,
+      0
+     ],
+     "neck_01": [
+      -2.4000000000000004,
+      0.0,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "standing with both hands on his hips, leaning in toward the camera"
+   }
+  },
+  {
+   "name": "Waving",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      0,
+      0,
+      64
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      25
+     ],
+     "lowerarm_l": [
+      10,
+      0,
+      32
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      0.0,
+      -1.75,
+      0.0
+     ],
+     "spine_02": [
+      0.0,
+      -2.0,
+      0.0
+     ],
+     "spine_03": [
+      0.0,
+      -1.25,
+      0.0
+     ],
+     "thigh_l": [
+      0,
+      0,
+      5
+     ],
+     "thigh_r": [
+      0,
+      0,
+      -4
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      -3,
+      0,
+      0
+     ],
+     "neck_01": [
+      -1.2000000000000002,
+      0.0,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "raising one hand to wave, palm forward, the other arm hanging at his side"
+   }
+  },
+  {
+   "name": "Talking \u2014 one hand",
+   "category": "RBMN Defaults",
+   "repository": "app",
+   "data": {
+    "bones": {
+     "clavicle_l": [
+      0,
+      0,
+      0
+     ],
+     "clavicle_r": [
+      0,
+      0,
+      0
+     ],
+     "upperarm_l": [
+      34,
+      0,
+      -19
+     ],
+     "upperarm_r": [
+      0,
+      0,
+      25
+     ],
+     "lowerarm_l": [
+      58,
+      0,
+      0
+     ],
+     "lowerarm_r": [
+      0,
+      0,
+      0
+     ],
+     "spine_01": [
+      -0.8,
+      -2.4499999999999997,
+      0.0
+     ],
+     "spine_02": [
+      -0.7,
+      -2.8000000000000003,
+      0.0
+     ],
+     "spine_03": [
+      -0.5,
+      -1.75,
+      0.0
+     ],
+     "thigh_l": [
+      0,
+      0,
+      5
+     ],
+     "thigh_r": [
+      0,
+      0,
+      -4
+     ],
+     "calf_l": [
+      0,
+      0,
+      0
+     ],
+     "calf_r": [
+      0,
+      0,
+      0
+     ],
+     "head": [
+      -3,
+      -5,
+      0
+     ],
+     "neck_01": [
+      -1.2000000000000002,
+      -1.75,
+      0
+     ]
+    },
+    "modelRotation": [
+     0,
+     0,
+     0
+    ],
+    "camera": {
+     "posX": 0,
+     "posY": -0.698316574096677,
+     "posZ": 46.11073878407478,
+     "targetX": 0,
+     "targetY": -0.6983165740966798,
+     "targetZ": 1.1107387840747833
+    },
+    "cameraParams": {
+     "offset_x": 0,
+     "offset_y": 0,
+     "yaw_deg": 0,
+     "pitch_deg": 0,
+     "zoom": 1.4625742783650049
+    },
+    "prompt": "talking, one forearm lifted in a small gesture close to the body, the other arm down"
+   }
+  }
+ ]
+}

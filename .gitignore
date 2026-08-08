@@ -128,3 +128,7 @@ anima/
 
 # Diagnostic scratch: PuLID face probe + third-party node copies (workers only)
 /pulid_*.py
+
+# Diagnostic dumps (scripts/dump_state.ps1) - local only
+scripts/_diag/
+scripts/_agent/

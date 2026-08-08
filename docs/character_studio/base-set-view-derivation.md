@@ -5,7 +5,32 @@ face, a front, and maybe one side) into a consistent multi-view / mesh-ready bas
 set, and the options for improving the hardest part: rotating the character to
 right / left / back views.
 
-## TL;DR — the working mesh path (as of v1.198): 🧊 Qwen Mesh turnaround
+## ✅ CURRENT (v1.199.67+): Klein SAM3D real-photo turnaround IS the mesh base
+
+Lorenzo-validated **perfect** path (Klein 9B). Both **🧊 Mesh turnaround** (pose tab) and
+**Generate Mesh-ready Set** (create tab, 🧊 Mesh-ready mode) now run the SAME generator and the
+front is auto-set as the ACTIVE base.
+
+Winning principle: **for each of the 4 views use the SAME real reference photo as BOTH the identity
+reference AND the pose image** (`klein_pose_source=sam3d`). No mesh averaging, no base-render lean.
+Per view: front→real front photo, right→real side, left→mirror of it, back→real back (or a KLEIN_EDIT
+rotate-to-back when there's no back photo); any view with no photo falls back to a SAM3D body render.
+
+- Generator: `_klein_submit`'s SAM3D block (`backend/api/vnccs_native.py`). The base-set runner's
+  mesh branch (`_base_set_run` + `_turnaround_view_bytes`) calls it per view with
+  `settings_overrides={klein_pose_source: sam3d}`, streams per view, and saves via
+  `save_base_preview(make_active=True)` → FRONT becomes the active base that `mesh3d/generate` reads.
+- Missing angles are made with the **✨ Generate missing views** button (`/generate-ref-view`), each
+  tagged with its angle and persisted in the reference set.
+- A standalone Mesh turnaround (pose run) can be promoted with **⬆ Use Mesh-turnaround as base**
+  (`POST /base/promote-turnaround`).
+- **Do NOT re-fork the mesh base generator** — one source of truth (`_klein_submit`). Full detail:
+  memory `feedback_klein_turnaround_perfect_v1_199_64.md` + `reference_handover_2026_07_23_v1_199_69.md`.
+
+The sections below are HISTORICAL (the pre-v1.199.67 Qwen path + the Klein refbase/derive +
+turnaround-LoRA experiments). The mesh base no longer uses the refbase/derive path.
+
+## (historical) TL;DR — the working mesh path (as of v1.198): 🧊 Qwen Mesh turnaround
 
 The path Lorenzo validated ("did a great job") is: clone/create a base in **🟣 Qwen
 (VNCCS) mode**, then in the pose picker click **🧊 Mesh turnaround** and generate.

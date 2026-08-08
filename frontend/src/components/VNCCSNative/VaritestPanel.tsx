@@ -36,7 +36,7 @@ const POSE_AXES: Array<{ key: string; label: string; values: unknown[] }> = [
   { key: 'klein_pose_lora_strength', label: 'Pose LoRA strength', values: ['0.6', '0.8', '1.0'] },
   { key: 'klein_pose_cleanup', label: 'Cleanup', values: ['off', 'gentle'] },
   { key: 'klein_pose_ref_end', label: 'Pose ref release', values: ['1', '0.85', '0.7'] },
-  { key: 'klein_pose_input', label: 'Pose input (mannequin/skeleton)', values: ['', 'skeleton'] },
+  { key: 'klein_pose_input', label: 'Pose input (mannequin/skeleton/depth/normal)', values: ['', 'skeleton', 'depth', 'normal'] },
   { key: 'klein_consistency_lora', label: 'Consistency stack', values: ['on', 'off'] },
   { key: 'klein_pose_face_refine', label: 'Pose face refine', values: ['on', 'off'] },
 ];

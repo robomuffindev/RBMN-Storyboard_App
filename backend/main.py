@@ -452,6 +452,19 @@ app.include_router(character_studio_router)
 app.include_router(vnccs_native_router)
 app.include_router(tools_router)
 app.include_router(image_workshop_router)
+from backend.api.klein2 import router as klein2_router  # noqa: E402
+app.include_router(klein2_router)
+from backend.api.klein3 import router as klein3_router  # noqa: E402
+app.include_router(klein3_router)
+
+from backend.api.lora import router as lora_router  # noqa: E402
+app.include_router(lora_router)
+
+from backend.api.charsheet import router as charsheet_router  # noqa: E402
+app.include_router(charsheet_router)
+
+from backend.api.forge import router as forge_router  # noqa: E402
+app.include_router(forge_router)
 
 # Log registered routes for debugging
 _gen_routes = []

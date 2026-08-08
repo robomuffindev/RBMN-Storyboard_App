@@ -48,6 +48,9 @@ aiofiles>=23.2
 # Cloud GPU (optional)
 runpod>=1.7
 opencv-python
+# ArcFace identity scoring (v1.218) — optional, CPU-only
+insightface>=0.7
+onnxruntime>=1.17
 
 # 3D character pipeline (Blender-as-a-module; app venv is Python 3.11)
 bpy==4.2.0; python_version == '3.11'

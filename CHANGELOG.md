@@ -1,4 +1,6535 @@
+## v1.270.0 -- test your LoRAs where you made your characters (2026-08-08)
+
+Docs wave two (README status block, HANDOVER to v1.270 with Era 6 + the DHCP reality,
+LORA_DATASET gains the standing-recipe chapter) plus the feature Lorenzo asked for: a
+**character LoRA picker in 🧬 Text 2 Image, Krea 2 only** -- that is the model the LoRAs are
+trained for, and the router refuses a LoRA on any other engine rather than silently ignoring it.
+
+The design decision that matters: the trained LoRAs live in the TRAINING box's ComfyUI (that
+is where install-lora puts them), and that box has no decorator custom nodes. So the Krea 2
+engine in 🧬 now renders **directly on that box** with the same core-node graph the TURBO exam
+validated (fp8 unet auto-picked from the box's own model list, LoraLoaderModelOnly injected
+when a LoRA is chosen) -- in-app testing is bit-identical to the validated exam path, and the
+klein workers are not involved. Because the box is on DHCP and moves (.202 -> .201 so far),
+the box IP is a **setting**: `PUT /api/forge/krea2-host`, editable right in the panel next to
+the LoRA dropdown, persisted in `_libraries/forge/settings.json`. `GET /api/forge/loras` asks
+the box's own `/models/loras` for the list -- no separate registry to go stale.
+
+UI: pick Krea 2 Turbo -> a 🎓 Character LoRA dropdown appears (none / any installed
+.safetensors), strength 1.0/0.8 chips (1.0 is the measured pick), a reminder that the prompt
+needs the character's trigger + a named outfit, and the editable box IP. Gallery records
+carry lora + strength so a test render is traceable later.
+## v1.269.3 -- the controlled experiment: better dataset in, better character out (2026-08-07)
+
+Same character, same pipeline, same exam -- only the dataset changed. redv1's balanced-20
+(4 face crops, identity median 0.534) was re-planned to face_heavy-39 (18 face+headshot rows,
+universal face ref, median 0.5684 after ONE targeted re-render round on the 9 weakest rows),
+trained (run 20260807-144249-7d89, 23 epochs, rc 0), scored (best e21, window-filtered against
+the shared output folder), installed as redv1-v2-e21.safetensors, and examined:
+
+                      dorian e16    redv1-v1 e36    redv1-v2 e21
+    dataset           40 face_heavy  20 balanced     39 face_heavy
+    dataset median    0.69           0.534           0.5684
+    trig_default_10   0.8118         0.5677          0.6089
+    trig_suit_10      0.7526         0.5365          0.6062
+    notrig_10         0.8127         0.5524          0.6014
+    control_nolora    0.1211         0.0478          0.0478
+
+**The thesis held, proportionally: +0.034 of dataset median bought +0.041 of exam likeness**
+(and +0.07 on the suit test). The ranking across all three columns tracks the dataset column
+exactly. Krea2 LoRAs are as good as their datasets, no more, and now measurably no less.
+
+The lessons this round paid for:
+* **Re-rendering is a coin flip.** The 9-row targeted round improved the tail overall
+  (below-match 9 -> 5, match band 29 -> 33) but row 0003 -- a left-profile FACE CROP -- got
+  WORSE twice (0.266 -> 0.240 -> 0.181). Profile face crops are a hard cell for this
+  character. One targeted round, then stop; a stranger is worse than a gap, so 0003 was
+  dropped at export via `min_likeness: 0.25` (39 shipped, first real use of the floor).
+* **Third small-set run still climbing at its last epoch** (e21/e23 span 0.08). ~900
+  image-steps is proving to be a floor, not a ceiling, for sets under ~40 images. Unmeasured
+  fix candidates: raise the step target or lower the cap threshold -- measure before tuning.
+* Previews understate TURBO for the third time (0.4851 -> 0.6089).
+
+**The standing dataset recipe** (default for every new character): face_heavy 40, universal
+face ref, dressed base, one targeted re-render round on below-match rows, `min_likeness 0.25`
+at export. Both redv1 LoRAs remain installed; **redv1-v2-e21.safetensors is the one to use.**
+## v1.269.2 -- character two: the pipeline generalizes; likeness tracks the dataset (2026-08-07)
+
+The generality question, answered by running redv1 through the IDENTICAL lane dorian passed.
+Also the night's operational lesson: the training box slept after finishing the run and came
+back on a NEW DHCP address (.202 -> .201). scripts/find_helper.py (subnet scan) found it;
+lora_test.py/lora_score.py now take --host/--char args so an IP move never blocks again.
+
+**redv1 run 20260806-232032-4c24**: 40 epochs, 23:20 -> 05:22, rc 0 (the box slept AFTER
+finishing -- nothing lost; state.json + load_runs survived the helper restart). Checkpoint
+scores climb to the end (no plateau -- unlike dorian's set, 40 epochs was barely enough):
+best **e36 0.4746**, final e40 0.3895. e36 installed via the window-guarded route.
+
+**Both TURBO exams, side by side (same grid, same seed discipline):**
+
+                       dorian e16      redv1 e36
+    trig_default_10      0.8118          0.5677
+    trig_default_08      0.7330          0.5087
+    trig_suit_10         0.7526          0.5365
+    trig_suit_08         0.6905          0.4502
+    notrig_10            0.8127          0.5524
+    control_nolora       0.1211          0.0478
+
+**Every structural behavior replicates:** trigger binds identity; the navy suit works (her, in
+a suit, eyeballed); no-trigger still leaks the character at strength 1.0; the control is a
+completely different woman. TURBO again scores ABOVE the RAW previews (0.57 vs 0.47) --
+second data point for that pattern. **And the quality gap is explained by the inputs, not the
+pipeline: redv1's dataset identity median was 0.518 (min 0.33) vs dorian's 0.69.** A LoRA
+faithfully learns what its dataset knows; redv1's dataset knew less. Raising redv1 = raising
+its dataset (better/more front refs, the profile-baseline scoring fix, re-render weak rows),
+then retrain -- the lane itself is proven.
+
+One observed difference, recorded not explained: redv1 rendered DRESSED on the no-clothing
+prompt (pink tank + jeans -- her dataset's dominant outfit), where dorian rendered shirtless.
+Consistent single-outfit datasets appear to bind wardrobe to the trigger more than varied
+ones. Do not rely on it; the name-the-outfit rule stands.
+
+Operational: give ZOMAIN01 a DHCP reservation and disable sleep -- one overnight run has now
+been interrupted-in-appearance (though not in fact) by power management.
+## v1.269.1 -- forge smoke test: one wrong attribute, then a sea captain (2026-08-07)
+
+The first live call to /api/forge/.../generate 500'd: forge read
+`request.app.state.dispatcher` but the app stores it as `comfy_dispatcher` (klein3's
+`_dispatcher` helper existed precisely so nobody has to remember that). Both call sites now use
+the helper and 503 cleanly if the dispatcher is not ready.
+
+Then the MEASURED smoke test, per the iron rule that wired is not working: created
+"Forge Smoke Test", generated 1 Klein image with the fullbody_front scaffold ("a rugged bald
+sea captain in his fifties with a thick gray beard, navy wool coat"), pulled the PNG and LOOKED
+at it -- full body head to feet, facing camera, plain gray studio background, exactly the
+framing the scaffold promises. Ran on .224 (163 is offline and 202's ComfyUI is stopped while
+redv1 trains -- the run picked the one live worker correctly). Test character deleted after.
+## v1.269.0 -- 🧬 Text 2 Image: the master character creation mode (2026-08-07)
+
+Lorenzo's ask, in his words: the mode for when "we arent starting with a set of reference
+images from elsewhere." Name the character FIRST, generate candidates from text on a chosen
+model, iterate on a favorite with plain-English edit instructions, keep everything in a master
+gallery, write the lore, and finish by promoting one image as the character's FRONT reference
+-- from where the existing modes (missing views, Clothes, Poses, 🎓 LoRA, 🪪 Sheet) take over.
+
+* `backend/api/forge.py` (/api/forge). Engines are data-driven and declare whether they take
+  reference images: **Klein 9B** (0 refs = the existing Text2Image graph; 1-5 refs =
+  the N-REF edit graphs) and **Krea 2 Turbo** (pure t2i, node map from the app's own tested
+  workflow). Renders fan across ALL klein workers with live per-job worker/status (standing
+  rule 1), reusing klein3's pinned-thread queue pattern. Batch size 1-8 per run.
+* **Name-first + resumable:** POST /characters creates the Klein 3.0 character record before
+  any render; reopening it resumes with the full gallery and prompt history intact. Creating
+  an existing name RESUMES it, never clobbers.
+* **Pose scaffolds** appended to the prompt: full-body-front (default -- head-to-feet, facing
+  camera, studio background), A-pose, T-pose, portrait, or free. Affirmative wording only.
+* **The iterate loop:** pick an image, type "change the hair to a silver buzzcut" / "make him
+  taller and broader," get 1-4 Klein-edit variants that carry parent= links -- version chains
+  are traceable in the UI, and the wrapper prompt pins identity/pose/background so only the
+  named change moves (and per rule 2, it never says "do not").
+* **Master gallery:** every generation and edit is kept under
+  `_libraries/klein3/chars/<slug>/forge/` with star / download / delete; filters for
+  starred/gens/edits. Prompt history (last 30) is reusable from a dropdown.
+* **🏁 Promote** copies the image in as a front-tagged ref AND an active base version (view
+  "front" recorded -- the v1.217 lesson), then points the user at the Create tab's
+  missing-views generator.
+* **📖 Profile & Lore tab** -- the Story Builder substrate, stored in char.json["lore"]:
+  description, backstory, personality, motivations, relationships, voice, story role,
+  occupation, strengths, flaws, fears, arc, tags, notes. ✨ LLM fill (Ollama, JSON-only
+  prompt, vision-grounded on the active base when one exists) fills EMPTY fields by default,
+  Overwrite is explicit, and both honor an optional creative direction. Physical fields stay
+  in the Create tab; this tab shows them read-only and the generator can inject them into
+  prompts ("include character field sheet").
+* UI: 🧬 Text 2 Image is now the FIRST tab -- the row reads in workflow order: create the
+  character, give it views/clothes/emotions, then produce (poses, LoRA, sheet).
+## v1.268.0 -- 🪪 Character Sheet, the sixth mode (2026-08-07)
+
+New mode next to 🎓 LoRA Dataset Gen, built while redv1 trains. Pick a character from a
+dropdown, get ONE downloadable reference image -- a full-body turnaround row plus a face row --
+for models that accept a character sheet as reference (MiniMax H3 and friends).
+
+**No new models, no LoRA, no worker involvement.** The sheet is composited server-side with
+PIL from material the character already has, best-first: rendered LoRA dataset items matching
+each cell's framing+angle (QC-ok, not bare, highest ArcFace identity score wins -- the same
+number QC already computed), then tagged refs (front/left/right/back/face), then the active
+base. Empty cells are reported as `missing`, never silently skipped.
+
+* `backend/api/charsheet.py` -- `GET /characters` (with per-character dataset-image counts),
+  `POST /generate` {slug, preset standard|turnaround, labels, width}, sheet list / serve /
+  delete. `?download=1` sets a download filename. Composition runs in a thread; storage under
+  `_libraries/charsheet/<slug>/` with a JSON sidecar recording exactly which image filled
+  each cell and its identity score.
+* `CharacterSheetPanel.tsx` + a 🪪 tab in the VNCCS Native page: character dropdown, layout
+  chips (Standard 8-cell / Turnaround 4-cell), a No-text/Labeled toggle -- **labels default
+  OFF because text on a reference sheet can leak into generations** -- output size, preview,
+  per-cell source table with identity scores, previous-sheets gallery with download/delete.
+* Standard cells: full front / ¾ / profile / back · face front / face ¾ · upper front ·
+  expression (best non-neutral face row). Back cells ignore identity scores (frontal
+  baselines make them meaningless there -- v1.221's lesson applied, not relearned).
+## v1.267.0 -- the documentation catches up with the lane it describes (2026-08-07)
+
+Docs only, written while redv1 trains. The handover was three days and one validated lane out
+of date -- it still said "Fizgig / Krea 2 training -- BUILT, NOT YET TESTED".
+
+* **HANDOVER_PROMPT.md rewritten** for v1.267: five eras (LoRA training/validation is Era 5,
+  TESTED), the measurement-lesson section now carries the full instrument list including
+  wardrobe and the person mask, the training loop with the shared-folder trap, the two LoRA
+  consumer rules, the training-box facts (fp8, no decorator nodes, the network bat), and the
+  operational traps (agent dies with its console, stage-cache, 45s device_bash cap).
+* **docs/LORA_DATASET.md** gains "The training loop as it exists (v1.259-v1.266.1)" -- the
+  full loop, loss-is-not-likeness, the window trap, install-lora, the TURBO exam table with
+  dorian's numbers, and the two rules. The stale "designed, not built" sections are marked
+  SUPERSEDED in place rather than deleted, per the running-record convention.
+* **docs/WORKER_HELPER.md** gains the v1.217 route (install-lora with the run-window guard),
+  the comfy.start_cmd network-bat requirement, and restart semantics (load_runs).
+* **README.md** gains a current Status block (lane validated, headline numbers, the two
+  rules) above the parked pose-status block, and the LoRA feature bullet now describes the
+  whole loop, not just dataset export.
+## v1.266.1 -- the LoRA passed its TURBO exam; nudity is a prompt property now (2026-08-07)
+
+Two script fixes and the measurement they bought. The training box's ComfyUI turned out to have
+none of the decorator custom nodes (RBG seed variance, rgthree loader/switch, KJ sharpen) and it
+had been started localhost-only by the helper's derived bat -- fixed by pointing the helper's
+`comfy.start_cmd` at `run_nvidia_gpu-LTX2-16GB.bat` (a config change, no redeploy) and by
+stripping the test graph to CORE nodes (same models, same sampler; the strip is identical across
+variants so within-grid comparison is untouched). `lora_score.py` split scoring from rendering so
+a dead backend cannot cost a re-render.
+
+**Checkpoint e16 on Krea 2 TURBO, fp8, one seed, ArcFace vs his own references:**
+
+    trig_default_10   0.8118  match      trig_suit_10     0.7526  match
+    trig_default_08   0.7330  match      trig_suit_08     0.6905  match
+    notrig_10         0.8127  match      control_nolora   0.1211  not him
+
+The control is a different man entirely, so the grid means something. Likeness at strength 1.0
+BEATS the RAW previews (0.77 was the training-run ceiling); 0.8 costs ~0.06 likeness and bought
+nothing here -- run at 1.0.
+
+**The two behaviours to know, both consequences of correct captioning, not defects:**
+* The trigger prompt with NO clothing words rendered him SHIRTLESS. Every training caption names
+  the visible clothing ("caption what varies"), so wardrobe belongs to the PROMPT, not the
+  trigger. Asked for a navy suit, he wears a navy suit, at likeness 0.75. RULE: a Krea2+LoRA
+  prompt must always name the outfit -- an unclothed prompt is a request for skin.
+* With the LoRA loaded and NO trigger, he shows up anyway (0.8127, in the training tee). At
+  strength 1.0 a 40-image LoRA owns the whole distribution. RULE: do not leave a character LoRA
+  in the graph for shots that character is not in.
+## v1.266.0 -- the LoRA's first exam on the model it will actually run on (2026-08-07)
+
+Tooling only: `scripts\lora_test.py`, run through the agent. Checkpoint e16 was installed into
+the training box's ComfyUI via the new helper route (117,431,024 bytes, window-verified). Every
+judgement of this LoRA so far came from Fizgig's RAW-model previews; nothing had ever run it on
+TURBO, the model it will actually be used with.
+
+One batch, six renders, one seed, each isolating one variable: trigger prompt at strength
+1.0/0.8 (likeness + default wardrobe), navy-suit prompt at 1.0/0.8 (is wardrobe controllable, or
+did the tee bake in), no-trigger at 1.0 (identity leak), and no-LoRA control (the base-model
+floor -- if the trigger prompt scores high WITHOUT the LoRA, the test proves nothing). Preflight
+asks ComfyUI for its own model lists before queueing anything -- missing Krea2 pieces fail loud
+with the exact filename, they do not render garbage. Renders go through the app-tested
+`workflows/KREA2_TURBO_T2I.json` with a `LoraLoaderModelOnly` inserted between the UNETLoader
+and the passthrough Power Lora Loader; the graph mutation was dry-run offline against the real
+node map (every wired ref checked) before shipping. Outputs land in `scripts/_diag/lora_test/`
+and are ArcFace-scored against the character's own front/face references -- same instrument,
+same units as dataset QC and checkpoint_score.
+## v1.265.0 -- the helper installs the picked checkpoint itself (2026-08-07)
+
+Backend/tooling only, nothing in the UI. Two things, both about getting the retrained LoRA from
+the run folder to where ComfyUI can load it without a person carrying files between machines.
+
+**Where the retrain landed first.** Run `20260806-151443-af60` (the dressed dorian-v1, 22
+epochs) finished clean at 20:04. `checkpoint_score.py` gained the run-window filter its v1.265
+comment already described: Fizgig keys its output folder on the DATASET, so both runs of
+dorian-v1 share one folder and the first scoring pass happily scored 62 previews from two
+different LoRAs. Filtered to this run's window: best epoch 16 at 0.7733 (old run's best was
+0.7598), plateau from ~12, final 22 at 0.7594. Previews for e14/e15/e16/e21/e22 pulled and
+LOOKED AT (`scripts/fetch_pick.py`): dressed in every one -- beige tee, dark shorts, socks,
+slides -- and the plateau faces are indistinguishable, so the number picked: **epoch 16.**
+`scripts/fetch_ckpt.py` downloads a named weights artifact with the same window guard (it
+refuses a file whose mtime is outside the run) -- e16 verified and fetched.
+
+**The helper route (rbmn_helper.py v1.216 -> v1.217).** `POST /runs/{id}/install-lora`
+`{name, dest_name?, force?}` copies a `.safetensors` artifact from the run's output folder into
+ComfyUI's loras folder on the same box -- copy to a `.part` name, size check, then `os.replace`.
+The same run-window guard applies: an artifact modified outside the run's start/finish is the
+OTHER run's checkpoint (the folder still holds e23-e40 from the underwear-trained run) and is
+refused without `force:true`. Destination resolves in order: explicit `comfy.loras_dir` config ->
+`comfy.root`/ComfyUI/models/loras -> `comfy.root`/models/loras -> the training box's known
+install (`E:\ComfyMaster\V1\ComfyUI_windows_portable\ComfyUI\models\loras`) as the
+blank-config fallback. `dest_name` is flattened to its basename so the route cannot write outside
+the loras folder. `_RUNS` reloads from `state.json` on startup (`load_runs`), so the helper
+restart this update needs does not lose the run.
+
+Deploy: copy `scripts\worker\rbmn_helper.py` over the copy on the training box and restart the
+helper there. Everything after that goes through the agent.
+
+## v1.264.0 -- the crop check was failing correct pictures (2026-08-06)
+
+Backend only. One word changed; the measurement behind it is the point.
+
+After the wardrobe repair I re-ran a full QC pass so every row would be measured by every
+instrument for the first time. Five images failed on crop. I pulled 0006 -- an extreme close-up
+whose shirt fills the bottom fifth of the frame, edge to edge -- and `subject.box()` said the
+subject stops 9% above the bottom edge. **The "clear space below him" is his shirt.**
+
+`u2net` segments the SALIENT OBJECT. A sunlit beige shirt against a warm brick wall is not
+salient, so the mask clipped it. `u2net_human_seg` is trained on people.
+
+Measured, all 40 images, both models, the same rule (`scripts\mask_probe.py`):
+
+    u2net             fails 5 of 40    0003 0006 0015 0016 0025 -- every one a false failure
+    u2net_human_seg   fails 0 of 40
+
+    the two agree on every other row, including all 12 full-body rows, whose y2 stays at
+    0.89-0.97 -- so the bottom-edge separator between `upper` and `full`, which is the entire
+    reason the mask is here, is unchanged.
+
+v1.246 validated the RULE on redv1's twenty images, and the rule was right both times. The
+instrument underneath it was the part that had never been compared against anything -- the same
+shape of gap as v1.213 (LLM confidence read as an ArcFace cosine) and v1.259 (loss read as
+likeness). A rule can only be as good as what measures its inputs, and "it passed on the images I
+had" is not the same as "it is right".
+
+Two of those five (0015, 0025) had already been re-rendered six times each by the repair loop,
+chasing a defect that was never in the picture.
+
+Same model size (176MB), same CPU path, same speed.
+
+## v1.263.0 -- the caption named the park twice (2026-08-06)
+
+Backend only.
+
+v1.261 reused the observed description verbatim, and the description answers two questions
+because that is what the enrichment prompt asks for -- clothing AND background. The plan already
+owns the background, so the captions came out like this:
+
+    "...in front of a park, flat overcast light, a light gray t-shirt,
+     green grassy park with trees in background."
+
+The park is in there twice, in two vocabularies. Whatever a caption names becomes a knob the
+trainer can turn; naming one thing twice in two wordings is the sloppiest way to turn it.
+
+`wardrobe.garment_clause()` keeps only the clauses that name something worn and drops the scene.
+Measured on all 40 real descriptions from dorian-v1 before it shipped
+(`scripts\clause_probe.py`): **40 trimmed, 0 emptied.** An emptied row would be a caption that
+loses the clothing it was supposed to gain, which is the failure that mattered.
+
+The reuse also stopped clobbering hand edits: it now replaces `caption_extra` only when it is
+empty, the raw sentence a previous run pasted in, or the clause already derived from it.
+
+**Where dorian-v1 stands after v1.260-v1.263**
+
+    bare rows        12 of 40  ->  0 of 40      (re-rendered, 2 repair rounds)
+    flagged          12        ->  1            (0016, a crop complaint, not clothing)
+    likeness median  0.6502    ->  0.6902
+    below match      3         ->  2
+    captions         template  ->  template + the garments actually visible
+
+0017 is the one to look at: the old render was a slimmer stranger in grey boxer briefs, because
+the stripped base was a different body. The new one is him, in the stained beige t-shirt, from
+behind. The likeness gain and the wardrobe fix are the same fix.
+
+## v1.262.0 -- the check repair was about to erase (2026-08-06)
+
+Backend only.
+
+v1.261 shipped the wardrobe check as its own route and it flagged twelve rows of dorian-v1. Then
+I read the repair loop before running it. Repair re-renders every flagged image and re-runs QC,
+and QC **replaces `x["qc"]` wholesale**. So the sequence I was one command away from running was:
+
+    wardrobe-check      ->  12 rows flagged "he is undressed"
+    repair              ->  12 rows re-rendered (dressed, per v1.260)
+    QC inside repair    ->  x["qc"] = {...}      <- the bare verdict is gone
+    repair reports      ->  "0 still flagged"
+
+...whether or not the re-render actually put clothes on him. A check a later step silently erases
+is worse than no check, because it produces a clean number. This is the same failure shape as
+v1.248 (the repair loop fixed angles and broke faces because it did not re-measure everything
+each round) and I nearly shipped it again.
+
+The two vision passes now run **inside `_qc_blocking`**, on the same worker thread against the
+same already-loaded bytes, and `bare` participates in `ok` alongside `one_person`, `artifacts`,
+`same_person`, `framing_ok` and `crop_ok`. `flags.get("bare") is not True` -- unmeasured never
+fails an image, the same contract every other measured flag has. `seen_clothing` is written
+outside `qc` so a re-check does not throw away the description the caption pass reuses.
+
+Cost: two extra vision calls per image, about 4.4s per image (measured: 40 images in 175s on the
+standalone route). All local, one server, strictly sequential.
+
+The standalone `POST /wardrobe-check` route stays. It re-audits a set without paying for a full
+QC pass, which is what you want on a dataset that is already checked.
+
+## v1.261.0 -- twelve of the forty were in their underwear (2026-08-06)
+
+Backend only: a new service module, one new route, an export gate, and a shorter default
+training run. No UI yet.
+
+v1.260 closed the configuration hole and said plainly that nothing measured whether a rendered
+person was actually dressed. So I measured it. All 40 rendered images of dorian-v1, described
+TWICE by `qwen2.5vl:7b` (`scripts\caption_probe.py`, non-destructive):
+
+    self-agreement (Jaccard over content words):  median 0.786   3 of 40 below 0.40
+    rows reporting bare skin:                     12 of 40
+    confirmed by eye:                              8 of 8   (0010 0013 0014 0016
+                                                              0017 0020 0023 0028)
+                                                   0 false positives
+
+**Twelve of the forty images that trained the shipped LoRA are of a man in his underwear, and
+not one of our captions mentions it.** The weights carry "shirtless in grey boxer briefs" as part
+of what `rbmndorianv` means. That is a defect in the model, not just in the folder. The likeness
+number was fine -- 0.76 ArcFace -- because ArcFace looks at the face and nothing was looking
+anywhere else.
+
+**Why this vision model is trusted here and was not for framing.** v1.241 withdrew its framing
+answer at 0-for-12. Framing is a geometric judgement about the edges of the picture. Naming
+visible clothing is a description task, which is what these models do well -- and it was measured
+before it was believed, to the same standard that got framing thrown out.
+
+**What ships**
+
+* `backend/services/wardrobe.py` -- the vocabulary and the verdict, pure text, no GPU or network,
+  so it is testable. Word-boundary matching, so "briefcase" is not briefs. `CONTEXT_OK` keeps a
+  swimming shot from failing. A description that names no clothing at all is **unmeasured**, never
+  a pass.
+* `POST /api/lora/datasets/{id}/wardrobe-check` -- two passes per image; a row is bare if EITHER
+  says so, because a false positive costs one re-render and a false negative costs a training run.
+  A bare row is marked `qc.ok = false` with a plain-English issue, which puts it in front of the
+  repair loop that already exists -- and with v1.260 resolving datasets to the dressed base,
+  repairing it now actually fixes it. Clearing the condition un-flags the row, so repair converges.
+* `_flag_summary` counts `bare_skin` / `wardrobe_measured` / `wardrobe_unmeasured`, and lists
+  `wardrobe` under `not_checked` until the check has actually run.
+* Export excludes a bare row **even with `include_flagged` on**. `include_flagged` means "ship the
+  near misses"; it should never have quietly also meant "ship the nudes". `include_bare` is a
+  separate, deliberate choice.
+* Captions reuse the description the wardrobe check already paid for (`seen_clothing`) instead of
+  making a second vision call -- so a caption says "grey boxer briefs" on the rows where that is
+  the truth.
+
+**And the epoch count.** v1.259 measured likeness per epoch: it plateaus at epoch 21 of 40 on a
+40-image set, and the last eight epochs span 0.028. The heuristic was `n * 1.2` capped at 40,
+which asked for 40 epochs on 40 images -- about three hours of GPU past the point where the number
+stopped moving. `_epochs_for(n)` now targets ~900 image-steps: **23 epochs on a 40-image set.**
+The cap stays at 40 and the floor at 15 on purpose -- 900 steps is measured on ONE set size, so a
+20-image set still gets 40 epochs until someone measures one. Every epoch is saved;
+`scripts\checkpoint_score.py` can end a run early on evidence rather than on arithmetic.
+
+**Still open.** dorian-v1 itself is not fixed by this -- the twelve rows have to be re-rendered and
+the LoRA retrained. redv1 is unaffected: `scripts\base_probe.py` shows that character was never
+stripped, so `auto` and `dressed` resolve to the same file for all four views.
+
+## v1.260.0 -- a training set rendered a nude image and nothing noticed (2026-08-06)
+
+Found by reading a caption Fizgig wrote. Its auto-recaptioner described row 0011 of dorian-v1 as
+*"a man standing shirtless in a narrow street"*. I pulled the image. He is bare-chested, in a
+street, in a set meant to teach a clothed character. Our own caption for that row said:
+
+    "a close-up portrait, head and shoulders of rbmndorianv man, facing the camera,
+     with a slight smile, in front of a city street, warm indoor lamp light."
+
+The caption says nothing about clothing, so nothing contradicted anything. The image went into
+training with no description of the most obvious thing in it.
+
+**Root cause.** dorian-v1 has `base_mode: null` and `outfits: null`. A null `base_mode` fell
+through to the CHARACTER's setting, which is `auto` -- v1.217's "newest version of that view
+wins". dorian's newest front base is the STRIPPED one, made by the Strip SET tool. So every row
+that resolved to a base rather than a tagged reference started from a nude image, and with no
+outfit defined the render prompt said nothing about clothes either. 22 of 40 rows happened to use
+a tagged reference and came out dressed; the rest were a coin flip.
+
+v1.217 built the dressed/stripped toggle for exactly this and defaulted it to the character's
+setting. For a CHARACTER that is right -- the Klein 3.0 panel is where stripping is chosen. For a
+TRAINING SET it is not: a LoRA learns whatever is in the pixels, and "sometimes nude" is not a
+thing anyone asked this dataset to teach.
+
+**The fix.** `_ds_base_mode(ds)` -- a dataset with no explicit `base_mode` resolves to **dressed**.
+`stripped` and `auto` remain available and are recorded when chosen. All five dataset-side
+`_base_for_view` call sites now route through it, including the tworef slot-2 side base, which I
+missed on the first pass and found by grepping every call site instead of trusting the four I
+remembered.
+
+**And it is now visible before a render, not after a training run.**
+`GET /api/lora/datasets/{id}/identity-preview` says, per view, which file will be used, what its
+label is, whether it looks stripped, and warns when a stripped base meets an empty wardrobe. The
+same warnings are folded into the plan response via `_plan_warnings_identity`.
+
+**What this does NOT fix.** Nothing measures whether a rendered person is dressed. `outfit_ok` is
+the vision model and the vision model is not trusted (v1.241). This closes the CONFIGURATION hole
+that caused it. The detection hole is still open and is recorded as such.
+
+## v1.259.0 -- I told him to use the wrong checkpoint (2026-08-06)
+
+Yesterday's report said: *loss is 0.0282 at epoch 27 and 0.0367 at the end, so use checkpoint 27.*
+
+Then the helper started serving previews, I looked at epoch 27 and epoch 40 side by side, and
+could not tell them apart. So I stopped guessing and scored all 40 previews with the same ArcFace
+path the dataset QC uses -- `scripts\checkpoint_score.py`, against the character's own front and
+face references.
+
+    epoch  1   0.4111  borderline
+    epoch  7   0.7049       first solid match
+    epoch 21   0.7397       plateau begins
+    epoch 27   0.6999   <-- the checkpoint I recommended
+    epoch 30   0.7598   <-- actual best
+    epoch 40   0.7245       final
+    last 8 epochs span 0.0279 -- flat
+
+**Epoch 27 is the WORST checkpoint in the whole plateau.** It is a local dip in likeness that
+happens to sit at the loss minimum. I read a training statistic as a measure of resemblance, which
+is the same mistake as v1.213 reading LLM confidence as an ArcFace cosine: right number, wrong
+scale, confident recommendation.
+
+**What the measurement actually says:**
+
+* Likeness climbs steeply to epoch 7 and plateaus from about epoch 21. Anything from 21 onward is
+  within 0.03 of the best -- **the choice of checkpoint barely matters, and 40 epochs was roughly
+  15 more than this dataset needed.** That is about three hours of GPU per character.
+* The final checkpoint at 0.7245 is fine. So is 30 at 0.7598. Neither is worth agonising over.
+* The LoRA works: 0.41 to 0.72 against his own references, and the previews are unmistakably him
+  -- the hair, the receding line, the stained shirt, the socks-in-sandals.
+
+**Also shipped:** agent `download`, which is what made this possible. `upload` could send and
+nothing could receive; `http` decoded as JSON or text, so a PNG came back as mojibake. Previews
+are the entire point of a training run and there was no way to look at one. Destinations are
+confined to the repo -- a download WRITES, so unlike `upload`'s source it cannot go anywhere it
+likes.
+
+The rule this leaves behind: **loss says whether training is progressing; it does not say whether
+the output looks like him. Only the likeness score does, and now it is one command.**
+
+## v1.258.0 / helper 1.216.0 -- a run's artifacts are more than its weights (2026-08-06)
+
+`run_artifacts` globbed `*.safetensors` in the output folder's top level, so everything Fizgig
+writes that says whether the LoRA is any GOOD was unreachable over HTTP:
+
+    sample/*.png                    the per-epoch previews -- the only way to judge a
+                                    checkpoint by eye
+    loss_log/per_image_loss.jsonl   which image is dragging, epoch by epoch
+
+The first real training run finished with its best checkpoint at epoch 27 and a final one
+measurably worse, and there was no way to look at either.
+
+**Artifacts are collected recursively**, named by their path relative to the output folder
+(`sample/epoch_000027_00.png`), and tagged with a `kind` -- `weights` · `image` · `log` ·
+`config` -- so `?kind=image` fetches the previews without wading through forty 117MB checkpoints.
+The download route serves the right Content-Type, so a PNG opens in a browser instead of arriving
+as a blob. Optimizer states and other binaries stay out of the listing.
+
+**Bounded.** An artifact name comes off the URL, so it is resolved and required to land UNDER the
+output folder. Tested against `../../etc/passwd`, `..\\..\\Windows\\System32\\hosts`,
+`/etc/passwd` and `sample/../../../etc/passwd` -- all four rejected, while
+`sample/epoch_000027_00.png` and `final.safetensors` resolve. The listing is capped at 500
+entries so a folder full of checkpoint states cannot make a response enormous.
+
+Still stdlib-only, so it drops onto the training box with nothing to install.
+
+## v1.257.0 -- the first Krea 2 LoRA trained, and Fizgig graded our dataset (2026-08-06)
+
+`run 20260806-003544-e0f7` · dorian-v1 · 40 images · **rc 0 · 8h47m · 40 checkpoints + final LoRA**
+
+The whole chain ran end to end with nobody at a keyboard: plan -> render -> measure -> repair ->
+export -> transfer to the training box -> train.
+
+### Two bugs found by running it, both invisible to a dry run
+
+**v1.255.** The first real run died in 90 seconds: `found 0 images`. `dataset_fizgig.toml` said
+`image_directory = "./images"`, and `fizgig_run.py` runs every step with `cwd=<fizgig checkout>`
+— deliberately, so `from fizgig.krea2 import ...` resolves. Fizgig therefore globbed
+`D:\Fitzgig\Fizgig\images`. The cache steps "succeeded" over zero images and the failure
+surfaced three steps later as a message about the cache.
+
+A `--dry-run` that echoes commands cannot catch a bad path INSIDE a file those commands point at.
+The runner now rewrites the config to absolute paths at run time and prints
+`images dir ... (40 png)` before anything starts.
+
+**v1.256.** My fix for that had its own escaping bug. The runner is a template inside `lora.py`,
+so `"\n"` was consumed when the BACKEND IMPORTED the module, and the generated script had an
+unterminated string literal. Fixed by removing the escape entirely — it writes line by line, and
+the generated file now contains no backslash at all. Verified by evaluating the template exactly
+as Python does on import and parsing the result.
+
+### What the training run says about the DATASET
+
+    loss   0.0440 (ep 1)  ->  0.0367 (ep 39)     down 16.6%
+    best   0.0282 at EPOCH 27 — the final checkpoint is WORSE than the best
+    last 8 epochs vary 16.4% around their mean — noisy, not converged
+
+**Use checkpoint 27, not the final LoRA.** That is exactly the signal the v1.214 sample-prompts
+fix exists to expose, and it would have been invisible without per-epoch checkpoints.
+
+**Adaptive LR hit its floor by epoch 10** — probed up to 1.77e-04 at epoch 4, then REDUCED twice
+to 5.00e-05, the configured minimum, and stayed there for thirty epochs. The floor was binding.
+
+**Our ArcFace scores did their job.** `[look-warmup] 1 look-outlier image on LR warm-up: 0032` —
+the lowest-likeness image in the set at 0.4068, eased in rather than allowed to drag the trigger
+word off-face.
+
+**And the finding that matters most: Fizgig re-captioned about 35 of our 40 images.** Its vision
+model judged our template captions inadequate for most of the dataset and rewrote them:
+
+    ours:    "an extreme close-up face shot of rbmndorianv man, in left profile,
+              with smiling broadly, in front of a city street, warm indoor lamp light."
+    Fizgig:  "a man smiling with his mouth open, side profile close-up, head turned
+              slightly upward, wearing a light-colored ..."
+
+The per-image loss watch then went further:
+
+    epoch  5  STUCK: 0002 0003 0004 0006 0008 ...
+    epoch 10  STUCK: 0003 0004 0006 0012 0028 ...
+    epoch 15  0036 EXCLUDED — two AI captions couldn't fix it
+    epoch 17  0038 retired as exhausted (x0.6)
+    epoch 31  0015 retired as exhausted (x0.6)
+
+Three images were effectively rejected by the trainer. **Captions are now the weakest link in
+the dataset generator**, and this is the first hard evidence for it — every other property has an
+instrument and passes.
+
+One caption is worth flagging on its own: Fizgig described `0011` as *"a man standing shirtless
+in a narrow street"*. Our caption for that row names an outfit. Either the outfit was not applied
+or a stripped base leaked through — and **no instrument we have would catch it**, because
+`outfit_ok` is the vision model and the vision model is not trusted.
+
+## v1.253.0 -- the agent reaches the rest of the LAN, and the export is verified (2026-08-06)
+
+### The export, opened for the first time
+
+Nobody had ever looked inside a training zip. `scripts\inspect_export.py` does, and the dorian
+export checks out:
+
+    40 images · 40 caption files · every image has a caption with a matching name
+    dataset_fizgig.toml · dataset_kohya.toml · dataset_aitoolkit.yaml · dataset_musubi.toml
+    fizgig_run.py · train_krea2_fizgig.bat / .sh / .txt · train_krea2_musubi.txt
+    manifest.json · README.md
+    sample_prompts.txt + sample_ref.png     <- the v1.214 fix, so previews actually render
+    images/fizgig_look_scores.json          <- real ArcFace numbers since v1.218
+
+The Fizgig config gives the dataset its own `cache_directory`, the training command already
+carries `--quantize_4bit` (correct for the 16GB box per Fizgig's own planner: NF4, no block
+swapping, ~14.8 GB free needed), and `fizgig_run.py` resolves every model path out of Fizgig's
+`prefs.json` rather than hardcoding one.
+
+The inspector found two bugs on its first run and both were **its own**: it counted
+`sample_ref.png` as a training image and reported a false 41-vs-40 mismatch, and it died with a
+`UnicodeEncodeError` printing a config containing a warning glyph to a cp1252 console. Both
+fixed; a check that cries wolf is worse than no check.
+
+### The agent can now talk to the other machines
+
+The Fizgig box and the two Klein workers are separate machines. Claude's cloud shell cannot reach
+any of them and the device bridge only mounts this repo on this machine — so the moment work
+moved to the training box, every measurement would have gone back to copy-paste.
+
+But the agent is ON that network and already speaks HTTP. It was just hardcoded to
+127.0.0.1:8899. An `http` job may now name a `host`, so the Worker Helper on the 16GB box, the
+Klein workers at 192.168.12.163 and .224, and the Ollama server at .176 all become things Claude
+can query directly.
+
+**Bounded to private addresses**: 127.*, 10.*, 192.168.*, 172.16-31.* and localhost. Tested
+against `evil.com`, `8.8.8.8`, `api.openai.com` and `172.32.0.1`, all rejected. Job files are
+written by something that is not Lorenzo, so this agent must not be pointable at the internet by
+one.
+
+**And the reload path proved itself**: this version was patched onto disk and loaded by a
+`reload` job, with nobody at the keyboard. The agent now updates itself.
+
+## v1.252.0 -- every shot type gets the face reference (2026-08-06)
+
+`scripts\faceref_test.ps1` on redv1's twelve `upper` and `full` rows, rendered both ways. Five
+and a half minutes, nobody at the keyboard.
+
+| | median | min | below match | NOT HIM |
+|---|---|---|---|---|
+| **closeups** (old) all | 0.431 | 0.247 | 6 | 2 |
+| closeups upper | 0.538 | 0.253 | 2 | 0 |
+| closeups full | **0.261** | 0.247 | 4 | 2 |
+| **always** (new) all | 0.526 | 0.485 | 0 | 0 |
+| always upper | 0.526 | 0.512 | 0 | 0 |
+| always full | **0.515** | 0.485 | 0 | 0 |
+
+    median +0.095 · below the match line 6 -> 0 · scored as a different person 2 -> 0
+    worst score 0.247 -> 0.485
+
+**The `full` rows are the whole story: median 0.261 to 0.515, nearly doubled.** Those are the
+rows whose base reference shows the face at about a twelfth of the frame height, leaving the
+model nothing to preserve. Hand it the face reference and the drift stops.
+
+Nothing was traded away. `upper` held its median and lost both of its below-match rows, and no
+row got worse.
+
+`FACE_REF_DEFAULT` is now `always`. `closeups` and `never` stay selectable -- a character with a
+poor face reference is better off without one, and `never` says so honestly rather than making it
+impossible.
+
+**One cost, stated:** an extra reference is an extra image in every Klein edit, so `upper` and
+`full` rows move from the 1REF/2REF workflows to 2REF/3REF. The A/B measured that too -- 12 rows
+took 130 seconds with the face reference against 115 without, across both workers. Fifteen
+seconds for six images that stop being a different person.
+
+**And this is the first finding of the session produced end to end without Lorenzo doing
+anything.** He typed `scripts\agent.bat` once. The agent restarted the backend onto v1.250, ran
+both test suites, ran a 24-render A/B, and wrote the results where they could be read. The whole
+answer -- including the number that decides the default -- came back without a single copy-paste.
+
+## v1.251.0 -- the agent goes quiet during long jobs, and cannot pick up new code (2026-08-06)
+
+Two flaws, both visible within ten minutes of the agent's first run. Both found by using it
+rather than by reading it.
+
+**1. No heartbeat while working.** `status.json` was written by the main loop, and the main loop
+sits blocked inside `run_job` for a job's whole duration. The face-reference A/B takes minutes;
+for all of them the agent was indistinguishable from a crashed one -- nothing in the outbox, no
+status file, one log line saying it started and nothing after.
+
+"Is it working or is it hung" is the exact question this agent exists to stop anyone having to
+ask, and its first real job re-created it.
+
+Jobs now run on a worker thread. The loop keeps ticking, `status.json` carries `current` -- job
+id, label, and how many seconds it has been going -- and the console gets a line every 30 seconds
+while a job runs, so a long render looks like a long render instead of a frozen cursor.
+
+**2. No way to load new agent code.** Patching `rbmn_agent.py` does nothing to a process already
+running, and only Lorenzo could restart it -- which is precisely the thing the agent exists to
+avoid. A `reload` job now exits with code 7, and `agent.bat` loops on that code, so the agent
+comes straight back on the new code with nobody at the keyboard.
+
+That closes the last dependency: the agent can update itself.
+
+**Measured, from the first four jobs:** restart 1.249.0 -> 1.250.0 and waited for `/api/health`
+to answer, `test_v1234` 108 checks in 2.3s, `test_v1235` 52 checks in 2.4s, all passing, and the
+A/B running unattended. Total human involvement: one command, once.
+
+## v1.250.0 -- the agent: Claude stops asking Lorenzo to run scripts (2026-08-06)
+
+Lorenzo, correctly and with some irritation: *"why are we back to me running a bunch of scripts
+for you and pasting... this is taking a very long time to get done because of the back and forth
+just to get you answers that you should easily be able to get yourself."*
+
+He is right, and the cause is a constraint I worked around instead of solving.
+
+**Claude's shell runs in a cloud container that cannot reach `127.0.0.1:8899`. The device bridge
+that CAN see this folder has no network access.** Neither channel can, on its own, ask the
+backend a question. So every measurement in this whole session became: Claude writes a script,
+Lorenzo runs it, Lorenzo pastes the output, Claude reads it. Dozens of round trips for answers
+that take a second to fetch.
+
+**`scripts\agent.bat` closes the loop through the one channel that touches both sides: this
+folder.** Claude writes a job file into `scripts\_agent\inbox\`. The agent -- running on the
+Windows machine, where the API and the venv are -- picks it up, does the work, and writes the
+answer to `scripts\_agent\outbox\`. Claude reads the answer through the device bridge. Lorenzo
+does nothing.
+
+Start it once. Leave the window open. That is the entire interaction.
+
+**Job kinds**
+
+| kind | what it does |
+|---|---|
+| `http` | any request against the local backend -- every route, any body |
+| `script` | run a `.ps1` / `.bat` / `.py` from `scripts\` (python jobs use the venv) |
+| `restart` | stop run.bat, start it again, wait for `/api/health` -- the round trip that cost the most, since every backend patch needed a human to close a window |
+| `ping` | version, uptime, what is pending |
+| `shell` | arbitrary command -- **OFF** unless started with `--allow-shell` |
+
+**Bounded on purpose.** `script` jobs resolve inside `scripts\` and nothing else; the path check
+is tested against `..\..\evil.ps1`, `../../evil.py` and `C:\evil.bat`. `http` jobs only reach
+127.0.0.1:8899. Arbitrary commands are off until Lorenzo turns them on. Job files are plain JSON
+he can read, every job is logged to `scripts\_agent\log.txt` with the command and the result, and
+finished jobs are kept in `scripts\_agent\done\`. There is a record of everything done on his
+behalf.
+
+Other details that matter in practice: a job file still being written is skipped until its JSON
+closes, so a half-written file is never executed; the loop catches its own exceptions so one bad
+job cannot kill the agent; `status.json` carries a heartbeat, the backend version and the pending
+count, so "is it running" is answerable without asking; stdlib only, nothing to install.
+
+`scripts/_agent/` is gitignored.
+
+**This should have been the second thing built today, not the fiftieth.** The measurement
+discipline was right; the delivery mechanism was a human doing a machine's job for eight hours.
+
+## v1.249.0 -- the face reference is withheld from exactly the shots that lose the face (2026-08-06)
+
+I looked at redv1's failures next to its reference. **ArcFace is right.** 0012 and 0015 are a
+visibly different woman -- rounder face, younger, a different nose and jaw. 0.19 is not a scoring
+artifact, it is an accurate report that the render drifted off the character.
+
+Then I read `_render_jobs`:
+
+    face = _refs_by_tag(char, "face")
+    if it["framing"] in ("face", "headshot") and face:
+        refs.append(face_ref)          # close-ups get the face reference too
+
+**Close-ups get the face reference. `upper` and `full` do not.** redv1's base is a wide full-body
+photograph in which the face is about a twelfth of the frame height, so on those rows Klein is
+handed one small face and asked to re-pose her, and it invents the detail it cannot see.
+
+    0012  upper  three_quarter_left   0.1905    no face reference
+    0015  full   three_quarter_right  0.1994    no face reference
+    0019  full   three_quarter_right  0.2146    no face reference
+    0003  face   profile_left         0.2312    HAS the face reference
+
+Three of four are exactly the framings denied it. dorian does not show this because his front
+base is a tighter shot -- his face is a larger share of the reference to begin with.
+
+**New option `face_ref`:** `closeups` (today's behaviour, still the default) · `always` · `never`,
+with `PUT /datasets/{id}/face-ref`. `scripts\faceref_test.ps1` renders the upper and full rows
+both ways and compares identity medians. Not defaulted on faith however obvious it looks -- the
+last two things that looked obvious, the framing question and the crop top-edge rule, were both
+wrong, and both were caught by measuring first.
+
+### What the repair loop showed, which is the other half of the story
+
+    round 1   16 clean, 4 to repair      round 3   19 clean, 1
+    round 2   17 clean, 3                round 4   19 clean, 1
+
+    0015 across five draws: 0.1994 -> 0.1942 -> 0.1746 -> 0.1639 -> 0.266
+
+That is not noise around a good value. It is a row that reliably produces a different person, and
+the loop's own oscillation detector named it: `0015 identity -> angle+identity -> identity ->
+identity`. Re-rolling cannot fix a row whose inputs are insufficient, and the loop now says so
+instead of burning renders.
+
+### `below_match` is a dataset-level warning now
+
+redv1's export shipped 20 of 20 with `flagged: 0` -- and **7 of 18 scored faces below
+`ARC_MATCH`**, a median of 0.5037 against dorian's 0.6502, and a minimum of 0.266 that only
+cleared the different-person floor on its fifth draw.
+
+"Nothing flagged" read as "this is a good dataset". It is not. Only 0.25 fails an image, by
+design, but a set this far from its own reference will teach the trigger word a face that drifts.
+`_flag_summary` now carries `likeness_median`, `likeness_min`, `below_match` and -- when a fifth
+or more of the scored faces are under the match line -- a warning that says all of that in
+words, where it cannot be missed.
+
+**Read plainly: redv1 is not ready to train on, and dorian is.** That is the difference between a
+pipeline that reports and a pipeline that flatters.
+
+## v1.248.0 -- the repair loop was breaking faces to fix angles (2026-08-06)
+
+### The profile fix worked, measured
+
+dorian-v1, before and after v1.247:
+
+    profile_left    0.33 / 0.40 / 0.42   ->   median 0.5231, min 0.4313
+    profile_right   0.33                 ->   median 0.6223, min 0.4910, none below match
+
+Four rows under the match line became two, both marginal, and the right side cleared entirely.
+Geometry, exactly as predicted. dorian's whole set: 33 match, 3 borderline, **0 "not him"**,
+minimum 0.4068 across 36 scored faces.
+
+### And then redv1 said something else
+
+    front baselines   n=16  scored 14  median 0.5102  min 0.1905  6 below match
+    left              n=2              median 0.5090  min 0.2312  1 below
+    right             n=2              median 0.4687  min 0.4598  0 below
+
+    bands: 11 match · 3 borderline · **4 NOT HIM** · 2 no face
+
+**Four images of twenty score 0.19-0.23 -- below ArcFace's different-person floor.** They are
+already excluded from an export: `same_person` gates `ok` and the export skips flagged rows. The
+pipeline caught them, which is the system working.
+
+**But two of them -- 0012 and 0019 -- are rows the angle repair loop had just re-rendered.**
+
+`repair_angles.ps1` re-rendered until the ANGLE was right and checked nothing else. It fixed the
+angle and broke the face, and nothing noticed until a separate likeness run went looking. Two of
+three repaired rows came back as a different person. That is the single worst kind of bug in this
+pipeline: a tool that improves one measurement while silently degrading another, in a system
+whose whole premise is that measurements are trustworthy.
+
+### `scripts\repair.ps1` replaces it
+
+Every round it re-measures **angle, shot type, crop AND identity**, and repairs anything failing
+any of them. Both scoring passes are CPU-only and take seconds; only failing rows are re-rendered.
+Three more things it does that the old one did not:
+
+* **A final vision-QC pass over the repaired rows.** The "one person" and "artifacts" answers on a
+  repaired row belong to the image that WAS there. Nothing was re-checking them.
+* **Oscillation detection.** A row that fails on angle, is repaired, then fails on identity, is
+  repaired, then fails on angle again is a plan problem, not bad luck. It is named and the loop
+  says more rendering will not settle it.
+* **A per-baseline identity readout at the end**, so "did the repair cost me likeness" is answered
+  in the same output rather than in a separate run three steps later.
+
+`repair_angles.ps1` now prints why it is superseded and exits rather than quietly doing the
+narrow thing.
+
+### `min_likeness` on export -- optional, and optional on purpose
+
+An ArcFace floor, default off. The `ok` gate already excludes anything under 0.25.
+
+It is NOT defaulted to `ARC_MATCH`, because measured, dorian's profile rows sit at 0.4313 and
+0.4410 and are fine -- profiles scored against a single profile reference carry that photograph's
+framing bias. One number for every view would trade four bad images for two good ones.
+
+So the export REPORTS rather than decides. Every response now carries the likeness distribution of
+what it actually shipped, a `would_drop` count at 0.30 / 0.40 / 0.45 / 0.50, and an `excluded`
+list saying WHY each skipped image was skipped -- so the gap between "40 rendered" and "36
+exported" is never something you have to work out for yourself.
+
+## v1.247.0 -- a profile is scored against a PROFILE (2026-08-06)
+
+First, redv1 finished clean. The repair loop cleared all three angle misses in ONE round --
+including the profile that had rendered as a *right* profile on a `profile_left` row:
+
+    round 1   17 correct, 3 wrong        round 2   20 correct, 0 wrong
+
+    front 6/6 · 3/4 left 4/4 (-37.9) · 3/4 right 4/4 (+46.2)
+    profile left 2/2 (-52.9) · profile right 2/2 (+87.4) · back 2/2
+
+**Two characters, both 100% on angle and shot type.**
+
+### The identity fix
+
+Measured on dorian-v1: `profile_left` 0.42 / 0.33 / 0.40 and `profile_right` 0.33, against
+nothing else in the dataset below `ARC_MATCH`. Four of eight profiles under the line and no other
+row anywhere near it. That is not drift, it is geometry -- a face turned 60-80 degrees away scores
+low against a frontal baseline for LOOKING SIDEWAYS. Same shape as the back-row problem fixed in
+v1.221.
+
+The character already has left and right references. `_likeness_baselines` never used them for
+this: it collected the front base, then face / left / right refs in that order and stopped at
+THREE, so **the right reference never made the cut at all** and a right-profile render was scored
+against front + face + left.
+
+Baselines are now built as VIEW SETS and each row scored against the one matching how it was shot:
+
+| row | baselines |
+|---|---|
+| front, three-quarter left/right | front base + face reference |
+| profile_left | the left reference (the left base only if there is no tagged one) |
+| profile_right | the right reference, likewise |
+| back | frontal, and still not an identity verdict (v1.221) |
+
+Real tagged references beat generated bases, because a generated base is itself a Klein render
+and scoring renders against renders produces a beautiful number that means nothing. A fallback is
+NAMED -- `front (no left reference)` -- so a geometry-penalised score is never mistaken for a
+clean one.
+
+**`ARC_MATCH` stays at 0.45.** Whether profile scores actually rise is a measurement, not a
+prediction, and moving a threshold in the same breath as changing what it measures is exactly how
+v1.213 shipped an inert file. Every row now records `identity_baseline` and
+`identity_baseline_n`, and `POST /datasets/{id}/likeness` returns a `by_baseline` block --
+median, min, max and how many fall below the match line, per view. The next run answers it.
+
+A side set usually holds ONE reference, against Fizgig's three-baseline averaging. That is a real
+weakness -- one photograph's framing bias can dominate -- and `identity_baseline_n` exists so it
+stays visible rather than being assumed away.
+
+`_likeness_baselines` is now a shim onto `_baseline_sets`, because two functions building
+baselines slightly differently is how a profile ended up scored against a left reference and a
+face crop in the first place.
+
+Also fixed: the test rig writes one-byte placeholder files, so with rembg installed it printed
+forty "cannot identify image file" warnings and every crop read unmeasured. The route test stubs
+the mask out -- it is testing the angle and framing route, and the crop rule has its own section
+against 20 real measurements.
+
+Tests: `scripts\patches\test_v1234.py` -- 111 checks.
+
+## v1.246.0 -- character two passes, and the crop probe corrected my rule (2026-08-06)
+
+### Character two: the calibration generalises
+
+`redv1`, a different character, 20 images, **no re-tuning of anything**:
+
+    face      median face height  59.9%   (dorian 68.4%)   4 of 4 correct
+    headshot                      40.1%   (dorian 47.0%)   4 of 4
+    upper                         18.9%   (dorian 19.4%)   5 of 5
+    full                          10.0%   (dorian 11.5%)   5 of 5
+    spacing 1.49x / 2.12x / 1.9x · order correct · no warnings
+
+**18 of 18 measurable rows correct on shot type**, and the two unmeasured are the two back rows.
+A visibly different head -- the face median is 8.5 points lower -- and the self-calibration
+absorbed it silently. That is the thing v1.243 was for, and it is now measured rather than
+argued.
+
+Angle on the same set: **15 of 18 correct.** Three misses, and they are not the same kind:
+
+    0013  profile_left        yaw +81.3   turned entirely the WRONG WAY -- a right profile
+    0012  three_quarter_left  yaw -19.0   1.0 degree short of the band
+    0019  three_quarter_right yaw +17.7   2.3 degrees short
+
+One real reversal and two that missed by a hair. The repair loop takes all three. Worth noting
+the profile reversal specifically: dorian's eight profiles were all correct, so **profile
+direction can flip too**, not just three-quarter.
+
+The wordings transferred unevenly and the numbers say so: `frame` on the left gave a median of
+-37.9 against dorian's -38.4, near-identical. `halfway` on the right gave +46.2 against dorian's
++36.6 -- still in band, but running hot, with two rows at 46.2 and 48.2 against a 25-45 target.
+Four rows a side is too few to act on. Recorded, not patched.
+
+### The crop probe found my rule wrong before it failed an image
+
+    full      6 of 6 OK   subject 81-95% of the height, bottom edge at 94.9-97.4%
+    upper     6 of 6 OK   all touching the bottom, tops at 3.6-19.0%
+    headshot  1 of 4 OK   three "wrong": tops at 0.0%, 0.6%, 0.7%
+    face      0 of 4 OK   all four "wrong": tops at 0.0%
+
+Those seven are not defects. A face crop is an extreme close-up FILLING the frame -- the subject
+covers 63-65% of the pixels and spans 100% of the height. The top of the head running off the top
+is what that shot IS. Same for a tight headshot; 0005 passing at 2.9% while 0006 fails at 0.7% is
+a distinction without a difference.
+
+I wrote "every shot type wants the top of the head inside the frame" from an armchair. True for
+the two shot types where the whole body is the point, false for the two where the face is.
+
+    face, headshot   must touch the BOTTOM edge. Top edge NOT CHECKED -- filling the frame is
+                     correct, and this instrument cannot tell a tight crop from a sliced forehead.
+    upper            must touch the bottom, must NOT touch the top.
+    full             must NOT touch either.
+
+Same 20 images, corrected rule: **20 of 20**, and all three real failure modes still fire.
+
+### And it did the job it was built for
+
+v1.243 recorded that face height could not separate `upper` from `full` -- medians 1.7x apart
+against a 1.6x within-type spread. Measured now:
+
+    subject HEIGHT   upper 81-96%  vs  full 81-95%              no separation, as predicted
+    bottom EDGE      upper 6 of 6 touching · full 0 of 6        perfect separation
+
+The binary separates them exactly where the continuous measure could not.
+
+**So crop is promoted: `crop_ok` gates `ok`, and `not_checked` empties.** Not because the rule
+sounds right -- the first version sounded right and was wrong for half the shot types -- but
+because it has been run against 20 real images across all four, disagreed with me, and been
+corrected by what the pictures contain. Unmeasured still never fails a row: no rembg, no mask, or
+a mask that does not look like one subject all leave it alone.
+
+Also fixed: the likeness route recomputed `ok` with the pre-v1.242 rule, so a likeness re-score
+would silently un-fail an image that QC had failed for being the wrong shot type or wrongly
+cropped. Both routes now build `ok` from the same five checks.
+
+Tests: `scripts\patches\test_v1234.py` -- 100 checks, including all 20 real redv1 crop
+measurements and the seven that the first rule got wrong.
+
+## v1.245.0 -- a script bug that faked a test result, and the person mask (2026-08-05)
+
+### The bug first, because it invalidates a result I reported
+
+**Every diagnostic script picked its dataset with `Sort-Object rendered -Descending`** -- the one
+with the MOST images. So when a second character's dataset was created and measured, the scripts
+silently kept measuring the 40-image `dorian-v1` set, and the only sign was an id in one line of
+output.
+
+The "angles are done" run I read as a second-character result was character one, re-measured.
+The medians were byte-identical to the previous dorian run, which is what gave it away.
+
+Every script now takes the NEWEST dataset (the API already returns newest-first), prints its
+**name and character** in a headline rather than an id in passing, says "newest of N datasets"
+when there is a choice, and takes `-ListDatasets` / `--id`. Fixed in: `angles.ps1`,
+`repair_angles.ps1`, `tq_test.ps1`, `crop_test.ps1`, `dump_images.ps1`, `repair_dataset.ps1`,
+`watch_run.ps1`, `ab_tq_base.ps1`, `diag_likeness.ps1`, `yaw_probe.py`, `framing_probe.py`.
+
+### `backend/services/subject.py` -- the person mask
+
+Face geometry answers "how tight is the crop" and cannot answer the one that matters for a
+full-body shot: **are his feet in the picture**. A face box says nothing about feet. It also
+cannot separate `upper` from `full` -- measured, their face-height medians sit 1.7x apart against
+a within-type spread of 1.6x. Two problems, one missing instrument.
+
+A person segmentation gives the subject's bounding box, and the box's relationship to the frame
+EDGES is the whole answer -- a binary, not a threshold:
+
+| shot type | rule |
+|---|---|
+| `full` | must **NOT** touch the bottom edge. Feet inside the frame is what "head to feet" means. |
+| everything else | **MUST** touch the bottom edge. Being cut off at the waist is what makes a waist-up shot a waist-up shot; one with clear air beneath it is a full body rendered small. |
+
+Every shot type also wants the top of the head inside the frame. That settles the upper/full
+separation v1.243 explicitly could not, on a property that is not a matter of degree.
+
+**Limits stated up front rather than discovered later:** u2net segments the SALIENT SUBJECT, not
+"a person", so on a busy background it can take in a chair or a doorway. The box is trusted only
+when the mask looks like one subject -- 3% to 90% of the frame, largest connected region at least
+75% of the mask. Outside that it returns UNMEASURED, which never fails an image. The box also
+includes hair, clothing and anything held, so "touches the bottom" on a full-body row might be a
+long coat rather than a cropped foot -- still worth a human's eye either way. A missing `rembg`
+is a degraded mode, same contract as insightface.
+
+### It is ADVISORY, deliberately
+
+`crop_ok` is recorded, counted and shown. **It does not gate `ok`.** Every instrument this session
+that was trusted before it was measured turned out to be wrong -- the vision model on framing
+(0 for 12), on angle (anti-correlated), on crop (5 false positives). This one has been run on
+exactly zero real images.
+
+`scripts\crop_probe.bat` measures it across a whole dataset and decides nothing. When the numbers
+exist, crop gets promoted in its own version, with the numbers in the changelog. Until then the
+summary lists it under `unreliable` as "crop (advisory, not yet validated)" rather than moving it
+out of `not_checked` on the strength of an argument.
+
+Install, if it is not there: `venv\Scripts\pip install rembg` -- CPU only, about 176MB of model on
+first use, and it never touches the GPU.
+
+## v1.244.0 -- the dataset is measurably clean, and one systematic pattern is left (2026-08-05)
+
+Full state of `dorian-v1-b1966f` after the repair loop and a fresh QC pass on every shot type:
+
+    angle       40 of 40 correct, 0 unmeasured
+                front +2.1 median · 3/4 left -38.4 · 3/4 right +36.6
+                profile left -63.9 · profile right +81.8 · back 4/4 no face
+    shot type   40 of 40 correct, 36 measured, 4 unmeasured (the back rows)
+    identity    40 scored by ArcFace, 0 off-identity
+    artifacts   0 · more than one person 0 · flagged 0 · stuck 0
+
+The repair loop cleared both broken images in ONE round: 38 correct with 2 wrong and 2
+unmeasured, then 40 correct with nothing wrong and nothing unmeasured. 0001 -- the face crop with
+no face -- and 0021 -- the face at the bottom of the frame -- both came back correct on a single
+fresh draw, which is what a one-off generation failure looks like.
+
+Three-quarter is the number worth pausing on. It began this session at **7 of 16 in band**, judged
+by an instrument that turned out to be anti-correlated. It ends at **16 of 16**, judged by head
+yaw, with medians of -38.4 and +36.6 -- both inside the 25-45 degree target rather than scraping
+the edge of the band.
+
+**The one pattern left: profile rows score low on likeness by GEOMETRY, not by drift.**
+
+    profile_left   0003 0.42 · 0023 0.33 · 0033 0.40
+    profile_right  0036 0.33
+    everything else: nothing below 0.45
+
+Four of the eight profile rows land under `ARC_MATCH`, and no other row in the dataset does. This
+is the same shape as the back-row problem fixed in v1.221: the baselines are FRONTAL, so a face
+turned 60-80 degrees away scores low for looking sideways rather than for looking like someone
+else. Nothing fails -- `same_person` only needs 0.25, and these are 0.33 and up -- so the cost is
+noise in the issues list rather than bad training data.
+
+The fix is not a threshold. The character already HAS left and right references, so a profile
+render should be scored against a PROFILE baseline. Recorded as measured and open rather than
+patched in the same breath as the measurement, because n=8 and the sensible next test is whether
+it reproduces on a second character.
+
+Also seen once, not yet acted on: `0031` carried "hands are deformed" in `issues` while
+`artifacts` stayed false. The instruction that `issues` must agree with the booleans above them
+came out with the framing question in v1.241. It should go back, scoped to anatomy only.
+
+Nothing is patched in this entry. It records where the pipeline actually stands, which is the
+thing that was hardest to answer at any earlier point today.
+
+## v1.243.0 -- framing calibrates itself, so nothing is tuned to one man's head (2026-08-05)
+
+v1.242's bands -- 57% / 26% / 13.2% of image height -- came from ONE character on ONE set of
+canvas sizes. Face height depends on how big a person's head is relative to their body and on
+the aspect ratio of the frame. Character two would have started failing good images, and the
+failure would have looked like a render problem.
+
+**Every image is now judged against the median face height of its OWN shot type in its OWN
+dataset.** No absolute number survives in the primary path.
+
+**Why a 2x fence.** Within-shot-type spread across the 36 detected faces, as a ratio to that shot
+type's own median:
+
+    face      0.94 .. 1.04   (n=7)      upper   0.72 .. 1.16   (n=9)
+    headshot  0.63 .. 1.08   (n=8)      full    0.79 .. 1.06   (n=11)
+
+The widest real deviation is 0.628 -- one headshot -- which is 1.59x from its median. A gross
+failure is far further out: a full-body row rendering as a headshot lands 4.1x from the full-body
+median. 2.0x sits in that gap, closer to the noise than to the failure.
+
+**A limit stated rather than discovered later: 2x cannot separate `upper` from `full`.** Their
+medians are only 1.73x apart, so an upper row that renders as a full body is inside the fence.
+That is deliberate -- the alternative is a tighter fence that fails the real 1.59x headshot.
+Catching adjacent-type confusion needs a person mask, the same instrument crop is waiting on.
+
+**What stays absolute, and why it is allowed to:**
+
+* no detectable face on a NON-BACK row -- a face crop with no face is broken for any character
+* the face sitting below 60% of the frame height -- no portrait shot type of any person puts it
+  there (measured across all four types: 16.6% to 49.7%)
+
+Neither depends on head size or canvas. `FRAMING_BANDS` survives only as the fallback for a shot
+type with fewer than 4 measurable images, and every note it produces says "default bands" out
+loud so a fallback is never mistaken for a measurement.
+
+**A dataset-level check that did not exist.** The four medians must come out in order: face >
+headshot > upper > full. If they do not, the shot types are not actually different shots, and no
+per-image verdict can tell you that. Reported once, in `framing_cal.warnings`, along with how
+much air is between adjacent shot types -- measured here as 1.45x, 2.36x and 1.73x, so the
+tightest pair is flagged before it becomes a mystery.
+
+`POST /datasets/{id}/angles` now runs two passes: measure every face, calibrate from those
+measurements, then judge. `pose` is cached on (path, mtime, size) so the second pass is free. The
+calibration is STORED on the dataset as `framing_cal`, and the QC pass reads it, so both paths
+judge by the same numbers instead of one of them quietly falling back.
+
+`repair_angles.ps1` now re-renders shot-type failures as well as angle failures, which means 0001
+and 0021 -- the two genuinely broken images -- are finally things the loop can fix rather than
+things it steps around. `angles.ps1` prints the calibration, the spacing between shot types, and
+any dataset-level warning.
+
+**Proof it generalises, in the test suite rather than in a claim:** the whole 40-image set is
+replayed with every face height HALVED -- a character with a much smaller head. All 35 measurable
+images still pass with no re-tuning, while the v1.242 absolute bands would have failed more than
+20 of them. 0021 still fails, because its defect is WHERE the face sits, which no amount of
+re-calibration should forgive.
+
+Tests: `scripts\patches\test_v1234.py` -- 85 checks.
+
+## v1.242.0 -- framing gets an instrument, and it finds two broken images (2026-08-05)
+
+`framing_probe` over the 40 images, face-box height as a share of image height:
+
+    face      n=8    64.43% .. 71.38%   median 68.37%
+    headshot  n=8    29.55% .. 50.99%   median 47.04%
+    upper     n=12   14.36% .. 23.01%   median 19.92%
+    full      n=12    9.16% .. 12.18%   median 11.54%
+
+**Four shot types, four non-overlapping ranges, in the right order.** The gaps are 13.4 points
+(face/headshot), 6.5 (headshot/upper) and 2.2 (upper/full). Bands are the geometric midpoints --
+57%, 26%, 13.2% -- which is the right kind of midpoint for a quantity spanning 7x. The
+upper/full fence is the tight one and is labelled as such: it is the first thing to re-check on
+a new character or a new canvas size.
+
+**And the probe found two real defects that no checker has ever mentioned** -- in the two rows
+every instrument so far has been calling "unmeasurable" and therefore passing:
+
+* **0021** (upper, front) -- `head_top 75.10%`, `face_cy 86.61%`. **His face is in the bottom
+  sixth of the frame.** Every other image in the set puts it between 16.6% and 49.7%. That is
+  also why its 3D pose fit disagreed with its keypoints in v1.238: the fit was not wrong, the
+  image was.
+* **0001** (face, front) -- **no detectable face at all, on a 1024x1024 face crop**, where the
+  other seven face rows carry a face filling 64-71% of the height. A face crop with no face in
+  it is not an unmeasurable image, it is a broken one.
+
+So two more checks, both free from geometry already in hand: a face below 60% of the frame
+height is wrong for every shot type we generate, and **no detectable face on a NON-BACK row is a
+failure, not an absence.** Back rows are the only place a missing face is correct, and all four
+of ours are back rows.
+
+Replayed over the real 40: **34 correct, 2 wrong, 4 unmeasured** -- and the 4 unmeasured are
+exactly the 4 back rows.
+
+**Framing goes back into `ok`.** v1.232 made it advisory and v1.241 removed it, both times
+because the VISION MODEL could not do it. The objection was never to the check. A shot type that
+renders as the wrong shot type is a real training defect: a "full body" row that is actually a
+headshot teaches the trigger word the wrong composition. Unmeasured still never fails an image,
+same contract as angle.
+
+`POST /datasets/{id}/angles` measures both from the same face detection -- one pass, no extra
+cost, still no GPU and no Ollama -- and reports `by_framing` beside `by_angle`. `not_checked`
+drops framing and keeps **crop**, which still has no honest instrument: face geometry cannot
+answer "are his feet inside the frame". That needs a person mask, and it is now the only
+unmeasured property left.
+
+UI: the wrong-shot-type count returns to the summary, every image shows its measured face-height
+percentage next to the yaw, and the measured-vs-not line updates.
+
+Fixed properly this time: `dump_images.ps1 -Ids 0001,0021` still matched nothing, because
+PowerShell can hand the whole thing over as one string. It now splits on commas itself, prints
+what it is looking for, and prints the dataset's actual ids when nothing matches -- so a zero
+result explains itself instead of being silent twice.
+
+Tests: `scripts\patches\test_v1234.py` -- 64 checks, replaying all 40 real framing measurements
+plus the two defects, through `framing_verdict` and through the route.
+
+## v1.241.0 -- the framing question is withdrawn. 0 for 12. (2026-08-05)
+
+First, the good news, because the repair loop worked on its first outing: **0005 cleared in one
+round.** Every measurable row in the dataset is now correct on angle.
+
+    round 1   37 correct   1 wrong   2 unmeasured
+    round 2   38 correct   0 wrong   2 unmeasured
+
+    front 10/10 · three_quarter_left 8/8 · three_quarter_right 8/8
+    profile_left 4/4 · profile_right 4/4 · back 4/4
+
+**Then a QC pass over the twelve full-body rows flagged ALL TWELVE** `framing_ok: false`, eleven
+carrying "The image is not a full body shot, head to feet."
+
+I have opened those twelve images. Every one shows the whole man, head to feet, with margins.
+**Seven of them were not re-rendered since the previous pass** -- the same pictures went from 8
+flagged to 12 flagged. That is worse than the v1.232 measurement that made framing advisory, and
+worse in the direction v1.232's prompt edit was written to fix. Telling a model to be careful
+about a judgement it cannot make does not make it able to make it.
+
+So the question is withdrawn. `framing_ok` and `cropped_badly` leave the prompt, the parsed
+flags, and the flag summary. `angle_ok` is no longer parsed from the vision model either -- head
+yaw has owned it since v1.234, and reading a second opinion in only invited it to win a race.
+
+What the vision model is still asked, because it has held up: **one person, artifacts, outfit.**
+Identity is ArcFace. Angle is head yaw. **Framing is now simply NOT CHECKED**, and the summary
+says so in a `not_checked` field rather than reporting a clean zero. `expression` stays but is
+listed under `unreliable` -- it called a plain scowl and an open-mouthed surprise "missing".
+
+**The UI changes with it,** because a panel showing "0 bad crop" and a `cropped (0)` filter reads
+as "no crop problems" when the truth is "crop is not checked":
+
+* the crop filter becomes a **wrong angle** filter -- measured, and actionable
+* the shot-type breakdown swaps its dead `cropped` column for `angle off`
+* the summary bar states in plain words what is measured, what is NOT checked (in amber), and
+  what is unreliable
+* **every image now shows its measured yaw** next to the QC badge. That number has existed since
+  v1.234 and has been visible only inside a script.
+
+**New: `scripts\framing_probe.bat`.** Measures face-box height against image height for every
+rendered image and prints the distribution grouped by planned shot type, so framing bands can be
+CALIBRATED rather than guessed -- the order of operations that made the yaw bands hold. It also
+says plainly whether the four shot types separate at all; if they do not, the next instrument is
+a person mask (rembg), not a tighter threshold on this one. It decides nothing on its own.
+
+Fixed: `dump_images.ps1 -Ids 0001,0021` matched nothing, because PowerShell parses an unquoted
+`0001` as the number 1 and the ids arrived as "1","21". Both sides are normalised to the 4-digit
+form now instead of the caller having to remember quotes.
+
+## v1.240.0 -- the angle side is done: 39 of 40 (2026-08-05)
+
+`scripts\angles.ps1` on the `auto` renders, with the v1.238 guard:
+
+    front                n=12  ok 10  miss 0  unmeasured 2   median   +2.0
+    three_quarter_left   n=8   ok  8  miss 0  unmeasured 0   median  -38.4
+    three_quarter_right  n=8   ok  7  miss 1  unmeasured 0   median  +36.6
+    profile_left         n=4   ok  4  miss 0  unmeasured 0   median  -63.9
+    profile_right        n=4   ok  4  miss 0  unmeasured 0   median  +81.8
+    back                 n=4   ok  4  miss 0  unmeasured 0   no face, 4 of 4
+
+    angle_off 1 · angle_measured 38 · angle_unmeasured 2 · 13 of 16 three-quarter in target
+
+Exactly what v1.238 predicted. Recovering 0007 took three-quarter-left to **8 of 8**, and the
+whole dataset is **39 of 40 correct on angle**, from a starting point where the three-quarter
+rows were 7 of 16 and the instrument measuring them was anti-correlated.
+
+Three rows are not passing, and they are three different things:
+
+* **0005** (face crop, three-quarter right) -- yaw -9.1, turned slightly the wrong way. A real
+  render failure, and the only one left.
+* **0021** (upper, front) -- unmeasured. yaw +13.6 against a keypoint ratio of 3.567; the two
+  measures disagree about how far he is turned, so the pose is refused. Needs an eye, not a
+  re-render.
+* **0001** (face crop, front) -- unmeasured. No detectable face at all on a face crop, which is
+  its own oddity and also needs an eye.
+
+**New: `scripts\repair_angles.ps1`.** Loops measure -> re-render only the measured misses ->
+measure again, up to N rounds. Each render is an independent draw at roughly 85 percent, so a
+handful of misses clears in two or three rounds, and a row that survives three independent draws
+is telling you something other than bad luck.
+
+It deliberately **never re-renders an UNMEASURED row.** Unmeasured means the angle could not be
+measured, not that the image is wrong; feeding those to the repair loop spends GPU on a
+measurement gap and never converges, because the next render has the same chance of being
+unmeasurable. They are listed at the end with the `dump_images.ps1` command to look at them.
+
+Not measured yet, and worth saying so: the vision QC blocks on the three-quarter rows are STALE.
+Those 16 images have been re-rendered four times since their last QC pass, so the dataset's
+`flagged: 13` counts identity and artifact verdicts on pictures that no longer exist. A QC pass
+over the three-quarter rows is the last thing standing between here and a defensible export.
+
+## v1.239.0 -- HANDOVER_PROMPT.md rewritten (2026-08-05)
+
+It was two days and 35 versions stale: still dated v1.203, still listing pose tag editing as the
+headline open item, and knowing nothing about the LoRA dataset lane, ArcFace identity, head-pose
+angle measurement, or the wording experiments. A fresh assistant reading it would have started
+from the wrong lane with the wrong instruments.
+
+Rewritten around what actually matters now:
+
+* **A new section 1: the lesson of v1.232-v1.238.** The vision LLM is trustworthy for "is there
+  one person" and "are there artifacts" and nothing else -- framing, crop, angle and expression
+  each measured wrong, and angle measured ANTI-correlated. The rule that replaces it: when a
+  property can be measured, measure it, and `likeness.py` is where measurement lives. Bands,
+  sign convention and the v1.238 consistency guard are stated as numbers.
+* **Era 4** added: LoRA Dataset Generation as the active lane, with the wording table, the
+  left/right asymmetry, and `auto` at 14/16 in band from 3/16.
+* **Standing rules 6-9** written down for the first time: backend-only news goes in the FIRST
+  line, decide rather than offer, batch the experiments into one script, PowerShell stays pure
+  ASCII with single-line statements. All four are things Lorenzo had to say twice.
+* **The traps that cost real time** are now recorded where they will be read: re-planning
+  destroys images (33 lost), the write lock, `asyncio.to_thread` for anything CPU-bound,
+  `--sample_prompts` failing silently, never inventing Fizgig model paths, ComfyUI's `/free`
+  not releasing the CUDA context, `device_stage_files` serving a stale cache while reporting a
+  fresh mtime, and `device_bash` being unable to delete.
+* **What is unmeasured is labelled unmeasured** -- `tq_base` in particular, whose motivating
+  measurement came from the angle checker now known to be noise.
+
+## v1.238.0 -- `auto` works, and the confidence guard was throwing away good measurements (2026-08-05)
+
+`auto` over the same 16 three-quarter rows:
+
+    LEFT  (frame)    8 of 8 in band     6 of 8 in the 25-45 target   median -40.5
+    RIGHT (halfway)  7 of 8 in band     7 of 8 in target             median +36.6
+    ------------------------------------------------------------------------------
+    TOTAL           14 of 16 in band   13 of 16 in target            median  37.0
+
+Against 3 of 16 for the sentence this started from, and it beat the per-side prediction on the
+right while landing where expected on the left. One genuine failure: **0005** (a face crop on a
+right row) came out at -9.1 degrees, turned slightly the wrong way.
+
+**The confidence guard was wrong, and it cost a good measurement.**
+
+    0007  three_quarter_left   yaw -40.9   keypoints -1.461   det 0.646   -> UNMEASURED
+
+Both measures agree on sign and magnitude, and -40.9 is a textbook three-quarter turn. It was
+discarded for a detector score three thousandths under the 0.65 floor I set in v1.234.
+
+That floor was the wrong lesson from the right observation. The one image whose pose genuinely
+could not be trusted was `0021` (front, yaw +13.6, keypoints +3.567, det 0.571), and what made it
+untrustworthy was that **the two measures said different things** -- +13.6 degrees is nearly front
+while a keypoint ratio of 3.567 is what a full profile looks like. The low det score was sitting
+next to the real signal, and I tuned the wrong one.
+
+Measured -- yaw divided by keypoint ratio, over every face detected so far:
+
+    profiles        10.4  18.8  18.9  19.2  21.6  22.4  23.6  25.0
+    three-quarters  24.3  26.0  28.0  30.4  37.7  39.2  39.6  40.4  40.7  40.7
+                    40.8  44.1  44.3  47.1  48.5  52.2
+    0021             3.8    <- the only value outside 8..70, by a wide margin
+
+So the guard is now the CONSISTENCY of the two independent measures: opposite signs, or a ratio
+outside 8..70, rejects a pose. `det_score` drops to a weak 0.50 floor that only excludes
+detections too faint to be a face. Below 8 degrees of yaw both numbers are near zero and their
+ratio is noise, so the check is skipped there and only the floor applies.
+
+0021 is still rejected, for the right reason, and is the only one of the 40 that is. 0007 is
+measured, because there was never anything wrong with it. And an unmeasured row now says WHICH
+check failed -- "not trustworthy" followed by three numbers is what let me tune the wrong one for
+four versions.
+
+Tests: `scripts\patches\test_v1234.py` -- 51 checks, including that 0021 is the sole rejection
+across all 40 real measurements and that its stated reason names the ratio rather than the det
+score.
+
+## v1.237.0 -- LEFT and RIGHT need different wording (2026-08-05)
+
+A second run of `halfway` over the same 16 rows split cleanly by direction, and that split is
+the finding:
+
+    halfway  run 1     left  6 of 8 in band       right  8 of 8
+             run 2     left  3 of 8               right  8 of 8
+             ----------------------------------------------------
+             both      left  9 of 16   (56%)      right 16 of 16  (100%)
+
+Right is perfect twice. Left is a coin flip. If the true rate were the same on both sides, right
+going 16 for 16 has probability about 0.02 -- a real asymmetry in the model, not run-to-run noise.
+
+**`frame` -- the wording that overshot and lost v1.236 -- is the right answer for LEFT.** Counted
+on the 25-45 degree target window, per side:
+
+| | LEFT rows | RIGHT rows |
+|---|---|---|
+| frame | **7 of 8** | 2 of 8 |
+| halfway | ~5 of 16 | **14 of 16** |
+
+frame's overshoot is entirely on the right: +43.4 +48.2 +51.1 +48.4 +47.6 +53.0 +49.4, against a
+left side that lands -26.3 -40.8 -33.2 -32.4 -27.1 -28.3 -42.8. Same sentence, opposite behaviour
+by direction. Neither wording is better; each is better on one side.
+
+So `TQ_DEFAULT` is now `auto`: **frame on the left, halfway on the right.** Expected about 21 of 24
+in the target window, against 3 of 16 for the sentence this started from. Both fixed wordings stay
+selectable, because the honest reading is that the model has a directional prior we are steering
+around, and a new base or a model update could move it.
+
+The direction words are NOT the bug: left rows produce negative yaw and right rows positive,
+consistently, across every variant and both runs. The asymmetry is in how far it turns, not which
+way. An `auto` dataset stamps each image with the RESOLVED wording, never the word "auto", so the
+output stays scoreable; `PUT /datasets/{id}/tq-wording` reports both sentences and a `resolves_to`
+map rather than showing one side and misreporting the other.
+
+**Two corrections to what I said in v1.236, both mine:**
+
+* I estimated run-to-run noise at about +/-4 images on 16. The `halfway` repeat moved 13 to 7 on
+  the target window. It is +/-6 there, and the tighter the window the noisier the count -- the
+  wide 20-55 band moved only 13 to 11, so that is the stabler comparison metric and the target
+  window belongs to judging central tendency, not repeatability.
+* `scripts\angles.ps1` was run against a dataset whose option said `frame` but whose IMAGES were
+  the `tworef` renders -- tworef ran last in the sweep, so it left the pictures behind while the
+  script set the option to the winner. Setting a wording does not re-render, and the run before
+  this one was measuring the wrong thing. The numbers in this entry come from the per-variant
+  results, which are stamped at render time and were unaffected.
+
+Tests: `scripts\patches\test_v1235.py` -- 55 checks, including that a LEFT row under `auto` records
+`frame` rather than `auto`, and that the route reports both directions.
+
+## v1.236.0 -- `halfway` becomes the default, on 64 measured renders (2026-08-05)
+
+All four wordings rendered over the same 16 three-quarter rows, scored on head yaw:
+
+| wording | in target 25-45 | in band 20-55 | median \|yaw\| | max \|yaw\| | wrong way |
+|---|---|---|---|---|---|
+| degrees (control) | 3 of 16 | 3 | 15.6 | 41.0 | 5 |
+| tworef | 4 of 16 | 4 | 11.4 | 31.7 | 1 |
+| frame | 9 of 16 | 15 | 43.4 | 53.9 | 0 |
+| **halfway** | **13 of 16** | 13 | **32.1** | 43.3 | **0** |
+
+**`frame` wins the wide band and is not the pick.** Its median 43.4 and max 53.9 sit against the
+TOP of the band, and the dataset already carries 8 profile images at 56-82 degrees -- the hole
+this whole exercise exists to fill is 22-56, and `halfway` lands at 25-43 and fills it. So the
+ranking moved to a 25-45 target window rather than the generous pass/fail band, and on that
+window it is halfway 13, frame 9, tworef 4, degrees 3.
+
+I also looked at them, which is what actually settled it. At -54 and +53 he is craning his neck
+to look sideways while his shoulders stay square: a near-profile face on a front-facing body.
+At -35 and +28 it reads as an ordinary three-quarter portrait. Training on the first teaches a
+head-to-body relationship that is wrong.
+
+**Two things worth saying plainly rather than burying:**
+
+* In BOTH winning wordings the BODY stays square to the camera and only the HEAD turns. Head yaw
+  is what a face LoRA learns from, so this is the thing that needed fixing -- but "three-quarter"
+  now means a turned head, not a turned body. Turning the body is a separate change and has not
+  been attempted.
+* **The control moved.** Re-rendered with the same wording it had in v1.234, `degrees` went from
+  7 of 16 in band to 3 of 16, wrong-way 4 to 5. Same prompt, different seeds. Run-to-run noise on
+  16 images is worth about +/-4, which is why `frame` at 15 and `halfway` at 13 are not
+  meaningfully apart on count, and why the median and the pictures decided this instead. Every
+  single-run number in this changelog carries that caveat.
+
+`tworef` is the interesting failure. Handing Klein the front base AND the side base pulled it
+toward FRONT -- median 11.4, four rows under 1 degree of yaw. With two references it averages
+them rather than interpolating between them. Kept as an option, recorded as a dead end.
+
+`TQ_DEFAULT` is now `halfway`, so a dataset that never sets `tq_wording` gets the measured winner.
+An explicit `tq_wording` still wins: nothing already chosen moves. `scripts\tq_test.ps1` ranks on
+the target window, and `PUT /datasets/{id}/tq-wording` reports the default and the window it is
+judged against.
+
+Tests: `scripts\patches\test_v1235.py` -- now 44 checks, tracking `TQ_DEFAULT` rather than
+hard-coding a wording, so the default can move again without the test becoming a lie.
+
+## v1.235.0 -- the three-quarter wording becomes a variable, so it can be measured (2026-08-05)
+
+`scripts\angles.ps1` on the live backend reproduced the offline replay exactly -- 40 measured,
+8 misses, 3 unmeasured -- so the route works on real data and the baseline is fixed:
+
+    three_quarter_left    3 of 8 in band   median yaw -18.7   range -22.1 .. +24.2
+    three_quarter_right   4 of 8 in band   median yaw +21.3   range  -9.5 .. +36.8
+    front  10 of 10 measured, all in band     profile  8 of 8      back  4 of 4
+
+    every three-quarter row together: 7 of 16 in band, median |yaw| 20.1, 4 turned the wrong way
+
+Left is consistently under-turned -- every single left row lands between -17.7 and -22.1, so the
+direction is right and the amount never is. Right is bimodal: +21..+37, or -6..-9.5 the wrong way,
+with nothing between.
+
+The prompt says *"his body turned about 45 degrees to his left, **head toward the camera**"*. The
+renders are obeying it. Head yaw is what a face LoRA learns from, so this is a prompt defect, not
+a Klein defect, and the fix belongs in wording rather than in a workflow.
+
+**Four wordings, one option key, default unchanged:**
+
+| key | how it asks |
+|---|---|
+| `degrees` | the current text. The control -- nothing moves unless asked. |
+| `frame` | frame-relative, and the head turns WITH the body. "45 degrees" is a number a diffusion model has no reason to act on; "the left edge of the picture" is a place in the image it can see. |
+| `halfway` | a fraction instead of a number, plus a binary physical test -- "one of his ears is hidden". Klein acts on NAMED objects; that is the same finding that made garment references work. |
+| `tworef` | no adjective at all. The front base AND the side base both go in, and the prompt asks for halfway between two pictures it can see. Most expensive, most likely to land. |
+
+Left and right are expressed as an EDGE OF THE PICTURE, never as his left or his right. Measured:
+negative yaw -- nose toward the left edge -- is what `three_quarter_left` already produces in 7 of
+8 renders, so frame-relative wording agrees with the behaviour that is already correct, and a
+handedness mistake would show up instantly as a sign flip rather than as a silent degradation.
+
+`PUT /datasets/{id}/tq-wording` sets it. It changes the option and nothing else -- the shot list
+is identical, only the sentence differs, which is exactly what makes the comparison clean. No
+re-plan, so no rendered image is at risk. Every rendered image is stamped with the wording that
+produced it, so a dataset holding two variants' output can still be scored.
+
+`tworef` degrades honestly: asked for two references and given one -- because the row already
+starts from the side base, so there is no front/side pair to sit halfway between -- it falls back
+to `halfway` rather than citing an image that is not there.
+
+**New: `scripts\tq_test.ps1`.** Renders the 16 three-quarter rows once per wording (about 64
+renders across both Klein workers) and scores each variant on head yaw: how many land in the
+20-55 degree band, the median |yaw|, and how many turned the wrong way. Ranks the variants, sets
+the dataset to the winner, and writes `scripts\_diag\tq\results.json`. Front, profile and back
+rows measure correct today and are not re-rendered.
+
+Tests: `scripts\patches\test_v1235.py` -- 40 checks through `_render_jobs` and the route rather
+than through `_render_prompt` alone, which is the v1.219 lesson: a planner input wired into one
+caller and silently missed in the other is invisible to a test that calls the inner function.
+
+## v1.234.0 -- angle is a measured number now, not the vision model's opinion (2026-08-05)
+
+`scripts\yaw_probe.bat` ran over all 40 rendered images. buffalo_l ships `landmark_3d_68`, so
+head pose was there the whole time.
+
+**The instrument validates itself on the rows whose angle is not arguable:**
+
+    back            4 images   no face detected, 4 of 4  (a back shot HAS no face -- that
+                               absence IS the measurement, not a failure to measure)
+    front          12 images   yaw  +0.5 .. +5.4   (11 of 12; the outlier at +13.6 carries
+                               det_score 0.57 and is rejected as a bad fit)
+    profile_left    4 images   yaw -60.9 .. -78.3
+    profile_right   4 images   yaw +56.5 .. +82.5
+
+Sign is unambiguous: **negative yaw = his nose toward the LEFT edge of the picture.** A second,
+model-free estimate -- where the nose sits between the two eye keypoints -- tracks it across the
+whole range and never once disagrees on sign. Two independent measures, one conclusion.
+
+**Scored against that, the vision model's `angle_ok` is not a signal:**
+
+    three_quarter_left   said OK  : yaw -22.1, -18.7, -17.7
+                         said MISS: yaw -20.6, -20.1, -19.3, -8.1, +24.2
+                         -> the two groups sit at the SAME angles. Noise.
+
+    three_quarter_right  said OK  : -6.1, +4.3, +21.3    mean |yaw| 10.6
+                         said MISS: -9.5, -8.2, +27.7, +30.8, +36.8   mean |yaw| 22.6
+                         -> it failed the three best-turned images and passed two that are
+                            dead front. Anti-correlated.
+
+It disagreed with the measurement on **16 of 40**.
+
+So QC computes head yaw and decides `angle_ok` from it. The vision model's answer is kept as
+`angle_ok_llm` -- visible, comparable, no longer in charge. An UNMEASURED angle (no face, weak
+fit, no pose model) stays `True` and is counted in its own `angle_unmeasured` bucket: not because
+it passed, but because falling back to a verdict now known to be noise is worse than admitting
+the row was never measured. `angle_method` says which of the three happened, every time.
+
+**New: `POST /datasets/{id}/angles`.** Re-measures every rendered image from head pose alone --
+no Ollama, no ComfyUI, no GPU, no re-render. Seconds on CPU against minutes for a QC pass through
+one Ollama server. That is the loop the three-quarter wording experiments will run in.
+
+**Bands** (`likeness.ANGLE_BANDS`, degrees of yaw): front -15..+15 · three-quarter left -55..-20 ·
+three-quarter right +20..+55 · profile |yaw| >= 50 · back = no face. The three-quarter floor of 20
+is the one judgement call and is labelled as one: I looked at five three-quarter renders before
+measuring them, and -18.7, -17.7 and +4.3 all read as "facing front" to the eye while +21.3 reads
+as turned. The ground truth behind that line is five images. The band is for catching regressions;
+the **median yaw per variant** is the real metric and does not move when the line does.
+
+**What the measurement says about the renders,** now that the number is trustworthy:
+
+* three-quarter left: 3 of 8 reach 20 degrees. Every single one lands between -17.7 and -22.1 --
+  the direction is right, the amount never is. One (+24.2) turned the wrong way entirely.
+* three-quarter right: 4 of 8. Bimodal -- either +21 to +37, or -6 to -9.5, i.e. slightly the
+  WRONG way. Nothing in between.
+* **The dataset has face data at 0-22 degrees and at 56-82, and almost nothing between.** Only one
+  image in forty exceeds 37. That coverage hole is the real defect, and it is not what any
+  previous flag was describing.
+
+The prompt asks for *"his body turned about 45 degrees to his left, **head toward the camera**"*.
+The renders are obeying it: turned body, front-facing head. For a face LoRA that is the wrong
+thing to ask for, which makes this a prompt defect rather than a Klein defect. The wording
+experiment comes next, scored on median yaw.
+
+Tests: `scripts\patches\test_v1234.py` -- 45 checks, replaying all 40 real measurements through
+`angle_verdict` and through the route the way FastAPI calls it, including that an existing QC
+block is edited rather than replaced.
+
+## v1.233.0 -- the ANGLE check is wrong too, and worse than random on the rows that matter (2026-08-05)
+
+Finished looking at all twelve full-body images and scored the checker against my own eyes.
+
+| id | planned | checker said | the picture shows |
+|------|--------------------|--------------|-------------------|
+| 0029 | three_quarter_right | angle OK | genuinely turned -- correct |
+| 0039 | three_quarter_right | angle MISS | genuinely turned -- correct |
+| 0032 | three_quarter_left | angle OK | facing front -- WRONG |
+| 0035 | three_quarter_right | angle OK | facing front -- WRONG |
+| 0037 | three_quarter_left | angle OK | facing front -- WRONG |
+| 0033 | profile_left | angle MISS | a clean left profile -- correct |
+| 0036 | profile_right | angle OK | a clean right profile -- correct |
+| 0038 | back | angle OK | a clean back shot -- correct |
+| 0030 0031 0034 0040 | front | angle OK | correct fronts |
+
+Overall 8 of 12. **On the five three-quarter rows: 1 of 5, and anti-correlated** -- it passed all
+three rows that came out front-facing and failed the one that was properly turned.
+
+That invalidates the measurements taken through it. "14 of 14 three-quarter rows fail" (v1.221)
+and "tq_base=front halves it to 6 of 12" (the A/B) were both read off an instrument that is
+near-random on exactly those rows. The base change may still be right; it is no longer *measured*.
+
+What the pictures do establish, by eye, on this dataset:
+
+* three-quarter rows: **2 of 5 turned, 3 of 5 came out front-facing.** The real defect.
+* front, profile and back rows: **7 of 7 correct.**
+* framing and crop: **7 rows carried a CROP or FRAMINGBAD flag; all 7 are properly framed**, whole
+  body, feet and margins visible. Confirms v1.232 was right to make those advisory.
+* expression: 0034 shows an unmistakable scowl and 0033 an open-mouthed surprise; the checker
+  called both missing. Also unreliable, in the same direction -- it fails toward complaining.
+
+So the vision model is trustworthy for "is there one person" and "are there artifacts", and
+nothing else. Identity already moved to ArcFace in v1.218. Angle should move the same way.
+
+**New: `scripts\yaw_probe.bat`.** buffalo_l -- already installed for identity -- bundles
+`landmark_3d_68`, which fits a 3D face and yields head pose. The probe reports yaw in degrees for
+every rendered image, plus an independent model-free estimate from the detector's five keypoints
+(where the nose sits between the eyes), alongside the vision model's verdict for comparison. It
+changes nothing; it measures. The twelve images above are the ground truth it has to reproduce
+before any threshold gets written into QC.
+
+## v1.232.0 -- the framing/crop checks are wrong more often than right (2026-08-05)
+
+I looked at the actual pictures for the first time, instead of reasoning from the vision model's
+descriptions of them. Four of the twelve full-body rows, against what QC said:
+
+    0030 front     "cropped_badly", "part of the subject cut off by the frame edge"
+                   -> perfect full body, feet and margins clearly visible
+    0035 3/4 right "cropped too tightly, cutting off the lower part of the legs and feet"
+                   -> feet fully visible. (Its ANGLE miss is real -- he faces front.)
+    0038 back      "person's head is not visible", framing_ok false
+                   -> textbook back shot. It wanted a FACE on a back row.
+    0039 3/4 right framing_ok TRUE, yet "shot type mismatch" listed in issues
+                   -> a correct three-quarter view
+
+**Three false positives out of three inspected**, plus a fourth whose prose contradicts its own
+boolean. qwen2.5vl:7b is not reliable at "is this cropped" or "is this the right shot type", and
+it fails toward complaining.
+
+Two consequences upstream:
+
+* **v1.228 was solving a phantom.** The "58% of full-body shots are cropped" that motivated the
+  taller canvas and the margin wording was a checker artifact. The canvas is harmless and the
+  wording is honest, so both stay -- but the premise was wrong and is recorded as wrong here.
+* **These flags were spending GPU time.** `ok` gated on `framing_ok` and `cropped_badly`, so
+  every false positive handed the repair loop an image that was already fine.
+
+Framing and crop are now ADVISORY -- recorded, counted and shown, since a real crop is worth
+seeing, but they no longer fail an image alone. `flagged` now means what has proven trustworthy:
+not him (ArcFace), more than one person, or a visible artifact. The prompt also names the two
+mistakes the checker actually made, and requires `issues` to agree with the booleans above it.
+
+The renders were never the problem here. The measurement was.
+
+## v1.231.0 -- "no run recorded" could not tell you which of two things it meant (2026-08-05)
+
+`_RUNS` is an in-memory dict; it dies with the process. So after a `run.bat` restart the API
+reports no run for a dataset that was fully checked minutes earlier, and both the panel and
+`watch_run.ps1` said "nothing is going on" -- true, and useless, because the question being asked
+was "did my QC actually happen?" and the answer was never in that dict.
+
+The durable evidence was always in the data: every checked item stamps `qc.checked_at`. Nothing
+read it.
+
+`_last_activity(ds)` derives from the dataset itself -- when QC last ran, how many images were in
+that last batch, how long ago, and how many are rendered -- and rides on every `_public()`
+payload. A restart can no longer erase the answer, and "nothing is running right now" is finally
+distinguishable from "nothing has ever happened". `watch_run.ps1` reports it and says plainly
+when a recent completion means the screen was simply stale.
+
+## v1.230.0 -- "checking 12" never went away, so a finished run looked hung (2026-08-05)
+
+`post()` wrote a message and NOTHING ever cleared it. When a run ended the progress banner
+disappeared -- it is gated on `status === 'running'` -- leaving only the message written at the
+moment of the click:
+
+    (R) checking 12
+
+A past-tense fact rendered in the present tense, with the live indicator gone. Indistinguishable
+from stuck, which is how he read it twice in a row. The third UI-feedback bug in three versions,
+all the same root shape: the app knew what was going on and did not say.
+
+  * The run's status TRANSITION is now reported: "QC finished -- 12 checked, 3 flagged", with the
+    run's own error if it failed.
+  * A persistent "last run" line, so there is always an answer to "what happened last?" rather
+    than a message of unknowable age.
+  * In-flight messages carry the spinner, so a note about something happening can never again be
+    mistaken for a result.
+
+## v1.229.0 -- you could see a subset, but you could not act on one (2026-08-05)
+
+"I'm not sure how I'm supposed to do 12 full body rows, no configuration or settings does that
+in the UI." Correct, and it was the third time I answered a UI gap with a one-off script.
+
+The gallery filtered by all / missing / flagged / no-caption, and EVERY bulk button acted on the
+whole dataset. So "re-render the 12 full-body rows" -- exactly what testing the v1.228 crop fix
+needs -- had no path through the app.
+
+  * **Filter by shot type and by angle**, not only by state. Every finding in this whole
+    investigation has been indexed on framing or angle; being unable to slice by them was the
+    real gap. Each chip carries its own counts, with a scissors badge for cropped and a warning
+    badge for flagged / wrong-angle.
+  * **Act on the current selection** -- re-render, QC or caption exactly what is on screen, with
+    the count on the button so it is never ambiguous what is about to happen. Everything else is
+    left alone.
+  * **A `cropped` filter**, because that is now a known failure mode worth isolating.
+  * **A per-shot-type breakdown** in the chip row. The 58% full-body cropping was plain in the
+    raw data and completely invisible in the app.
+
+## v1.228.0 -- full-body shots were cropped 58% of the time (2026-08-05)
+
+Cropping is not spread across the set. It is one framing:
+
+    face        8 shots   0 cropped (  0%)   1024x1024
+    headshot    8 shots   0 cropped (  0%)    896x1152
+    upper      12 shots   1 cropped (  8%)    896x1152
+    full       12 shots   7 cropped ( 58%)    832x1216   <--
+
+and it is most of what remains of `framing_off` (13) -- "part of the subject that this shot type
+needs is cut off by the frame edge", six times, every one on a `full` row.
+
+1. **The canvas was too short.** 832x1216 is 1:1.46. A standing figure with any headroom or
+   footroom wants nearer 1:1.75, and every other framing is already shaped for what it holds.
+   Now 768x1344 -- a standard bucket, 1:1.75, and 2% more pixels, so no quality or speed trade.
+2. **The prompt asked for the subject, not the margins.** "head to feet inside the frame,
+   standing on the ground" describes the person and never asks for space around him, so the model
+   composes him flush to the edges and any drift crops. It now names the margins explicitly, and
+   affirmatively -- Klein has no negative conditioning at cfg=1, so "not cropped" would inject
+   cropped. `upper` gets the same wording (1 of 12).
+
+Existing rows keep their stored size until re-planned; width is not part of the slot key, so a
+re-plan preserves rendered images and only the re-rendered rows pick up the new geometry.
+
+## v1.227.0 -- the panel only polled if it ALREADY knew a run was going (2026-08-05)
+
+    useEffect(() => {
+      if (ds?.run?.status !== 'running') return;   // <- circular
+      const t = setInterval(...)
+    }, [ds?.run?.status, refreshDs, load]);
+
+The single refresh immediately after a POST was the ONLY chance to notice a run had started.
+Miss it once and the panel never polled again: no banner, no progress, no error, indefinitely.
+That is precisely what "it says QC started and I can't tell if anything is happening" looks like.
+
+It was easy to miss, because `refreshDs` swallowed every failure --
+`try { setDs(await j(...)) } catch { /* ignore */ }` -- so a backend that stopped answering was
+indistinguishable from one with nothing to report. And `refreshDs` was keyed on the whole `ds`
+object, so it changed identity on every poll and restarted the interval each tick.
+
+  * Polls whenever a dataset is OPEN, not only once a run is known: 3s while running, 6s idle.
+  * `refreshDs` keyed on the dataset ID, so the interval is stable.
+  * Failed refreshes are counted and shown ("lost contact with the backend"), not eaten.
+  * A heartbeat spinner next to the banner, so "working" is distinguishable from "hung" even
+    before `detail` moves -- which matters when one Ollama server checks 40 images one at a time.
+
+`scripts/watch_run.ps1` reads the same state straight from the API, so "is it running or is it
+hung" can be answered without trusting the UI at all. It also reports how many vision servers
+exist, since one server means a strictly sequential pass measured in minutes.
+
+## v1.226.0 -- "QC pass" looked like it did nothing, because it did nothing (2026-08-05)
+
+The button posted `{}`, so `overwrite` defaulted to false, and the route only targets images with
+no qc yet:
+
+    targets = [... and (body.overwrite or not it.get("qc"))]
+    if not targets: return {"started": False, "note": "nothing to check ..."}
+
+On a set already checked once that is EVERY image, so the call returned instantly having done
+nothing. The explanation was returned -- and rendered at the very top of the page, hundreds of
+pixels above the button, below the fold on a scrolled view. A silent no-op with off-screen
+feedback.
+
+  1. **QC pass re-checks.** That is what the words mean, and what every other button in that bar
+     already did (Caption all has always passed `overwrite: true`).
+  2. **Feedback on the button itself.** An `acting` state disables the bar and swaps the label the
+     moment the request leaves, closing the gap before the progress banner appears.
+  3. **Messages render next to the action bar**, not only at the page header. A reply you cannot
+     see is not feedback. `started: false` is now prefixed and shown inline, because "I had
+     nothing to do" is the single most confusing outcome to receive silently.
+  4. The progress banner never renders blank -- it shows "starting..." and `done/total` before the
+     first per-image result lands.
+
+Also added a **Likeness** button to the same bar: ArcFace scoring is CPU-only, needs no vision
+model and no worker, and until now was reachable only from a script.
+
+## v1.225.0 -- the UI for v1.216 and v1.217 (2026-08-05)
+
+Both shipped backend-only and I buried that at the bottom of long messages, so he went looking
+in Klein 3.0 for the clothing option and found nothing. This is the part that was missing.
+
+**Klein3Panel -- identity source.** A three-way toggle (dressed / stripped / auto) directly above
+the Strip card, with the per-view resolution shown underneath: green where a real reference backs
+that view, amber where it is falling back. `PUT /base-mode` returns `resolves_to`, so the
+consequence is visible BEFORE a render is spent on it. Dressed skips the strip step entirely --
+one less edit per view and one less source of drift.
+
+**LoraPanel -- wardrobe.** Replaces the single "fixed outfit" text box that was causing the
+bake-in problem in the first place:
+  * named vs variety rows, with the live 60/40 split and images-per-outfit
+  * "Suggest variety" reads the character's own reference and proposes NAMED garments, appended
+    for review and never applied silently
+  * a garment reference picker that calls the vision model to name what is in the image, because
+    Klein ignores category words -- picking a reference auto-fills the description
+  * the sizing checkbox, showing the sized-for-this-wardrobe count, and an amber warning below
+    ~8 images per outfit with the measured reason ("some outfits only appear in 2 of the 4 shot
+    types, which trains 'that outfit means that shot'")
+  * a per-dataset identity-source override
+
+Both files compile clean under esbuild in the sandbox (the device VM cannot run vite -- its
+rollup binary is Windows-built).
+
+## v1.224.0 -- the reference image was corrupting the framing verdict (2026-08-05)
+
+Found by reading his raw dump rather than a printed table -- the process change that made this
+findable in one pass instead of five.
+
+`framing_off` came back at **30 of 40**. The model's own words on the failures:
+
+    0002 face      "body build and proportions are different"   -> framing FAILED
+    0009 headshot  "body build differs", "stature differs"      -> framing FAILED
+    0010 headshot  "body proportions are different"             -> framing FAILED
+    0004 face      "extreme close-up shot only shows the face"  -> framing FAILED
+    0008 face      "body not visible", "no hands"               -> framing FAILED
+    0014 headshot  "close-up framing"                           -> framing FAILED
+
+Every one is a complaint about the BODY, on a shot that is a face or head-and-shoulders crop.
+v1.212 began sending the character's reference as image 1 so the model could judge identity --
+and it then judged FRAMING against the reference's framing too. A close-up cannot win that
+comparison. **0004 was failed for being exactly what a `face` shot is.**
+
+v1.218 handed identity to ArcFace and made this pure downside: the reference was still sent,
+`identity_score_llm` was still requested, and the answer was thrown away -- while the framing
+verdict it corrupted was kept.
+
+The vision model now sees **one image**, the shot, and judges only what a single image can
+support: framing, angle, expression, one-person, face-clarity, artifacts, crop, outfit. The
+prompt states explicitly that the shot type is the TARGET rather than a fault ("a close-up
+showing no body is CORRECT for a face shot"), and forbids build/weight/height judgements, which
+a single image cannot support and which ArcFace measures properly. Side effect: half the pixels
+per call, so QC should run noticeably faster.
+
+Nine lora suites pass, md5 dd01bf0ea126416249e8c17b1345395f. Four older suites needed honest
+updates: they asserted the reference WAS passed and that the LLM's identity score was retained,
+both of which were the bug.
+
+## v1.223.0 -- the render path had no write lock (2026-08-05)
+
+**v1.222's explanation was wrong, and this is the real cause.** I said the preset fell back from
+face_heavy to balanced. His original framing counts were face 8 / headshot 8 / upper 12 / full
+12 -- which IS balanced at 40 images. The preset never changed.
+
+`_qc_blocking` guards its read-modify-write with a lock. `_render_blocking` does the SAME
+read-whole-file / mutate / write-whole-file, one thread per worker, and guarded nothing. When two
+renders finish close together the second one's read predates the first one's write, and the first
+update is silently discarded.
+
+The PNG always survives -- `_save_png_bytes` runs before the read -- but everything recorded
+ABOUT it can vanish:
+
+  * `status = "done"`  -> a re-plan treats the row as never rendered and DELETES the file.
+                          **This is how 40 images on disk reported as "7 of 40 rendered".**
+  * `attempts`         -> MAX_ATTEMPTS under-counts, so a stuck image re-rolls past its cap.
+  * `identity`         -> the "which base was used" column -- the data the three-quarter
+                          finding was read from.
+  * `caption`          -> auto-captions quietly missing on some rows.
+
+Fixes: one module-level `_DS_WRITE_LOCK` around every worker-thread mutation, shared by render
+and QC (dataset_repair interleaves both over the same file). `_plan_impact` and the re-plan now
+**trust the filesystem over the status field**, so a row whose status was lost is never deleted.
+And `POST /datasets/{id}/resync` rebuilds status from disk for datasets already scrambled --
+renders nothing, deletes nothing.
+
+Ten lora suites pass, md5 04cf775c2948475b9325b9cfe6af8a48.
+
+## v1.222.0 -- a re-plan destroyed 33 rendered images (2026-08-05)
+
+**What happened.** `ab_tq_base.ps1` set `options.tq_base` by POSTing the dataset's existing
+options back with one key added. `dataset_plan` REPLACED `ds["options"]` wholesale, `preset` did
+not survive the round-trip, and `_plan_opts` fell back to `"balanced"`. His dataset was
+`face_heavy`.
+
+face_heavy vs balanced at 40 images share **exactly 7 of 40 slots** -- which is precisely the
+"images still rendered after re-plan: 7 of 40" he saw. 33 rendered images were deleted, and the
+A/B then measured the wrong rows: of the 14 ids it re-rendered, only 4 were still three-quarter.
+**The reported "14 misses -> 5" is not a valid comparison and has been withdrawn.**
+
+The script was the trigger. The route was the loaded gun.
+
+### Three fixes
+
+1. **`options` MERGES instead of replacing.** Omitting a key now means "leave it alone", which
+   is what every caller already assumed it meant.
+2. **`preset` is sticky.** It lives both at `ds["preset"]` and inside `options`; whichever the
+   caller supplies wins, and if neither does, the stored one survives. It can no longer silently
+   revert to "balanced".
+3. **A destructive re-plan is REFUSED.** `_plan_impact` computes what would be discarded before
+   anything is written; if rendered images would be lost the route 409s with the count, the
+   angle changes, and the likely cause, and requires `force: true`. Deleting GPU time should
+   require saying so out loud.
+
+Plus `POST /datasets/{id}/plan-preview` -- read-only, writes nothing, deletes nothing. The only
+way to find out what a re-plan would do used to be to do it.
+
+`test_v1222.py` reproduces the incident exactly: 40 images planned face_heavy, all rendered, a
+caller sends options back without `preset` -> asserts 33 discarded / 7 kept, then asserts the fix
+brings it to 0 discarded / 40 kept. Nine lora suites pass, md5 f0a0e96471af8ed284d38d8511f7bc36.
+
+### Still unanswered
+
+Whether `tq_base=front` actually fixes three-quarter angles. The evidence so far is suggestive
+but contaminated: of the 4 rows that remained three-quarter, 2 of 4 passed (against 0 of 14
+before), and identity on the re-rendered set rose 0.477 -> 0.646 because most moved to the front
+base. `scripts/repair_dataset.ps1` restores the intended preset and re-runs it cleanly.
+
+## v1.221.0 -- what the first real ArcFace scan actually said (2026-08-05)
+
+40 images of `dorian-v1`, scored against front base + face ref + left ref. Median 0.4774,
+range -0.02 to 0.7377 -- squarely inside Fizgig's stated 0.30-0.70 same-person band. **My
+prediction was wrong**: I said renders off a single base would score HIGH; they land in the
+ordinary same-person range. No threshold tuning needed.
+
+    identity by which BASE was used        angle misses, by planned angle
+      front base   n=5   median 0.705        three_quarter_right   7/7   100%
+      left base    n=14  median 0.477        three_quarter_left    7/7   100%
+      right base   n=13  median 0.436        profile_left          3/7    43%
+      back base    n=4   median 0.125        front                 2/7    29%
+                                             back                  1/6    17%
+    identity by framing                      profile_right         1/6    17%
+      face 0.616 · headshot 0.559 · upper 0.433 · full 0.423
+
+### 1. Three-quarter rows failed 14 of 14, and the ANGLES table says why
+
+`three_quarter_left` draws its base from the **left** view and `three_quarter_right` from the
+**right** -- and those are 90-degree PROFILES. So every three-quarter row asks Klein to rotate a
+profile BACK to 45 degrees, and Klein preserves the reference's orientation: it lands on profile,
+and the checker correctly reports "not a three-quarters view". Profile rows, whose base already
+matches what is asked, miss only 17-43%. This is the same lesson as the back-base bug earlier in
+the project: **never ask a render for something its reference image works against.**
+
+`options.tq_base` = `"side"` (unchanged default) | `"front"`. Front is a 45-degree turn FROM
+front rather than 45 back from profile, and front is also the strongest identity base measured
+(0.705 against 0.436-0.477). Both effects point the same way, which is exactly why it needs to
+be MEASURED rather than assumed -- the default does not change.
+
+### 2. Back rows were being failed for identity, and that is a false positive
+
+All three "not him" images were back-based (0030 at -0.020, 0018 at 0.108, 0024 at 0.125). The
+baselines are frontal, so whatever sliver of face a back shot shows scores low by **geometry**,
+not because the character is wrong. Back rows now keep their score -- it is a genuine "how
+unusual is this look" signal, and that is precisely what Fizgig's `--warmup_look_outliers`
+consumes -- but it no longer fails the image. `identity_scored_against_front: false` records why,
+the issue line says "back shot, frontal baselines, not an identity verdict", and
+`back_low_likeness` counts them separately from `identity_off`.
+
+### Also visible in the data, not yet acted on
+
+- **2 front rows had no detectable face.** With `cropped_badly: 6` and a top issue of "the image
+  is cropped too low, cutting off the subject's head", those are render failures the repair loop
+  already handles -- not an ArcFace problem.
+- **Identity climbs with face pixels** (face 0.616 -> full 0.423), as expected. Nothing to fix.
+- `base_mode` reads `auto` and all four views resolve to stripped bases. He has all five
+  reference tags present (front/back/left/right/face), so switching to `dressed` will resolve
+  cleanly off those references with no strip run -- which is what v1.217 was built for.
+
+All eight lora suites pass, md5 9be6b1f4460b7c56bb4a45e6252236b9. `test_v1218` needed two
+assertions reworded: v1.221 turned the likeness issue line into a template so a back shot can
+carry its caveat.
+
+## v1.220.0 -- ArcFace was freezing the whole app (2026-08-05)
+
+Caught while he was mid-run on the `/likeness` command I gave him. Three `async def` routes did
+CPU work -- and, on first use, a ~300MB model download -- INLINE. FastAPI runs async handlers on
+the event loop, so each one froze **the entire app**, not just its own request.
+
+  * `/datasets/{id}/likeness` -- the scoring loop and the distribution pass.
+  * `/datasets/{id}/qc` -- `_likeness_baselines()` ran BEFORE the work was handed to a thread, so
+    the model load happened on the loop even though the QC pass itself did not. **My own
+    blocking-call scan missed this**: it looked for `_like.*` calls directly (this goes through a
+    helper) and the route contains a `_spawn`, so it read as already-threaded. The second scan
+    keyed on the helper name too.
+  * `/likeness-health` -- `health()` calls `available()` calls `_app()`. A health check that
+    downloads 300MB before answering is not a health check.
+
+All three now use `asyncio.to_thread`, the pattern the caption/enrich path in this same file
+already used. A fresh scan reports no async route left touching `_like.*` or
+`_likeness_baselines` on the loop.
+
+Two practical consequences worth recording: on PowerShell 5.1 `Invoke-RestMethod` times out at
+~100s, so the first `/likeness` call could error client-side while the server carried on and
+saved its results -- re-running returned instantly from cache. And `run.py` sets
+`reload=False`, so patching lora.py under a live process is safe; it takes effect on restart.
+
+All seven lora suites pass, md5 14cd80c4990dd6513194f63ae7232baa.
+
+## v1.219.0 -- AUDIT: four defects, all mine (2026-08-05)
+
+He asked me to audit my own claims after finding no UI for a feature I had described as done.
+This is what the audit found. Every item is something I said or implied that was not true of the
+running code.
+
+### 1. The outfit feature was INERT through the API
+
+`_build_plan` reads `opts["outfits"]`. Neither route put it there: create passed
+`{**(body.options or {}), "preset": body.preset}` and re-plan passed `ds.get("options")`. So
+**every row planned through the API came out with `outfit: None`** and the whole of v1.216 did
+nothing. The dataset stored the wardrobe; the plan ignored it.
+
+`test_v1216` passed the entire time because it called `_build_plan(104, {"outfits": WARDROBE})`
+DIRECTLY -- a dict the route never constructs. **I tested the function and never the wiring**,
+which is precisely the failure the suite existed to catch. `test_v1219` now drives the routes'
+own option assembly and includes a regression proof that the old opts really did produce no
+outfits.
+
+Fix: `_plan_opts(ds)` -- ONE builder, used by both routes, so a new planner input cannot be
+wired into one caller and silently missed in the other.
+
+### 2. The set was never auto-sized
+
+He chose "scale automatically with outfit count". `_suggested_count` was only ever RETURNED by
+the outfits routes and never applied. With the UI's default 40 and eight outfits that is five
+images each -- and measured, outfits then span only **2 of the 4 framings**, which is exactly
+the clumping v1.216 claims to fix. The "every outfit spans all four framings" result I reported
+was measured at 104 and is true there; it is **false at 40 and 60**, and 40 is what the UI sends.
+So in practice the guarantee would not have held.
+
+Fix: `count` is now `Optional` -- omitted means sized from the wardrobe. An explicit count still
+wins, so the existing UI is unchanged. `_plan_warnings` says out loud when a wardrobe is spread
+too thin, naming what goes wrong rather than just that the number is low.
+
+### 3. The no-face counter was dead code
+
+`identity_method` was set to `"arcface"` only when a score came back, while `_flag_summary`
+counted `method == "arcface" AND score is None` -- unreachable by construction. "ArcFace ran and
+found no face" (a back shot, correct) and "ArcFace never ran" (no model) looked identical.
+Fix: the method records whether ArcFace RAN; a `None` score then means no face.
+
+### 4. Same bug in the `/likeness` route
+
+`q["identity_method"] = "arcface" if s is not None else "none"` -- same conflation, same fix.
+
+### Also checked, and clean
+
+- `backend/services/__init__.py` exists, and `likeness.py` imports only stdlib at module level,
+  so `lora.py` imports fine with or without insightface. (Had this been wrong the app would not
+  have started at all.)
+- Every symbol in lora.py and likeness.py is reachable: 22 routed handlers, no unused functions
+  or constants. klein3.py has one pre-existing unused helper, `_run_klein_edit_sync` (line 324),
+  which predates this work.
+- v1.217's `base_mode` IS applied -- stored on the dataset, honoured by `_render_jobs` and by the
+  QC reference.
+- v1.214's export additions are all written into the zip.
+
+### Claims I overstated, corrected here rather than quietly
+
+- I described the helper's test fixtures as "captured nvidia-smi / netstat output". They are
+  **representative samples I wrote**, not captures from his machine. The formats are right; the
+  data is synthetic.
+- **The helper has never run on Windows.** All 60 checks ran on Linux. `netstat -ano` parsing,
+  `taskkill /T`, `CREATE_NEW_PROCESS_GROUP`, `tasklist` and the `.bat` are untested against real
+  Windows and should be treated as unproven until the `--probe` run.
+- v1.214's runner was verified with `--dry-run` against a FAKE Fizgig checkout. Structurally
+  sound; never executed against a real install.
+- v1.216 and v1.217 shipped backend-only. I said so, but at the bottom of long messages rather
+  than up front, which is how he came to look for a UI that was never built.
+
+All seven lora suites pass on the live file, md5 af836a4621edd786d33e9b3873f1761b.
+
+## v1.218.0 -- real ArcFace identity scores (2026-08-05)
+
+He asked whether the identity matching he remembered from the other repos was something we had
+or still had to build. Checking turned up **a bug in what I shipped in v1.213.**
+
+Both reference projects score identity with **InsightFace/ArcFace embeddings**. Fizgig's Look
+Consistency Filter averages each image against the centroid of THREE baselines ("one photo's
+framing bias can't dominate the score"), and its own code documents the scale: *"same person
+across varied photos usually lands 0.30-0.70 vs a single baseline; a different person rarely
+clears 0.25."* lora-dataset-studio does the same -- "InsightFace identity scoring drops
+off-identity shots before they poison training".
+
+**We had the mechanism and the wrong units.** v1.212 asked a vision LLM "same person? score
+0-1". v1.213 then piped those numbers into `fizgig_look_scores.json` using Fizgig's cutoff
+`max(median - 1.5*IQR, 0.25)` -- where 0.25 is an ArcFace COSINE. An LLM rating identity 0-1
+clusters at 0.85-0.95 for anything it likes, so the floor was unreachable, the IQR fence barely
+moved on a tight cluster, and **the file we have been shipping was very nearly inert**:
+`--warmup_look_outliers` had almost nothing to warm up. I matched their formula and inferred
+their units instead of measuring them.
+
+`backend/services/likeness.py` (NEW) -- buffalo_l on CPU, lazy-loaded, embedding cache keyed on
+(path, mtime, size). `ctx_id=-1` is deliberate: identity scoring must never queue behind a
+render or take VRAM from a training run.
+
+**MEASURED, not assumed** (buffalo_l, insightface 1.0.1, against their own bundled samples):
+  * DIFFERENT people, 15 pairs from one group photo:
+        min -0.083 · median +0.026 · max +0.213 -> **0 of 15 cleared the 0.25 floor**
+  * SAME face, varied capture (downscale 40%, brightness x0.6/x1.5, contrast, greyscale,
+    mirrored, rotated): worst **+0.915**, best +1.000
+  * three baselines genuinely average -- a wrong baseline drags a score down, and the result is
+    not merely the minimum
+  * a faceless image scores **None**, never 0.0
+Those same-person figures transform ONE photograph, so they are an upper bound; Fizgig's
+0.30-0.70 is for genuinely different photographs. Our renders all come off one base, so scores
+should land HIGH -- **a prediction, not a measurement**, which is why the new route exists.
+
+- Both checkers now run and each answers only what it is good at. The vision model keeps
+  framing, angle, expression, artifacts, crop and outfit. **ArcFace supplies the number**, and
+  only an ArcFace number may enter `fizgig_look_scores.json`.
+- The LLM's score is retained as `identity_score_llm` for comparison -- expect the two to
+  disagree on some images in both directions.
+- **Only the 0.25 different-person floor FAILS an image.** "Borderline" is surfaced as an issue
+  and left to him: discarding a drifting-but-recognisable render costs a re-render for no
+  certain gain. `no face` is counted, never flagged -- correct for a back shot, and Fizgig never
+  auto-excludes an unscoreable row either.
+- Baselines come from the CHARACTER's references (front base honouring v1.217's base_mode, then
+  face/left/right tags), never from the dataset's own renders -- scoring images against
+  themselves produces a beautiful number that means nothing.
+- `POST /datasets/{id}/likeness` rescores a whole set on CPU with no vision model and no worker,
+  returning the distribution, band counts, the cutoff, the five worst images, and a **sanity
+  line** that calls out a median above 0.90 (suspicious baselines) or below 0.30 (wrong
+  character). This is the measurement v1.213 should have made.
+- `GET /likeness-health` reports availability; a missing dependency is a documented degraded
+  mode, not a failure.
+
+Verified: `test_v1218.py` runs the real model over insightface's bundled images and asserts the
+shipped constants against observed behaviour -- it does not take my word for the bands. On a host
+without insightface it verifies the degraded path instead and says which half it skipped (that is
+what happens in the device VM; the measured half ran in the cloud sandbox). All six lora suites
+pass on the live file, md5 d57a03ff305abb44b748f883d4f45916.
+
+Two suites needed honest updates rather than plumbing: `test_v1213` asserted "a boolean-only
+verdict still yields a score", which **was the bug** -- it now asserts the opposite. pyflakes also
+caught the likeness issue-line referencing `issues` above its own definition, pre-ship.
+
+Deps: `insightface` + `onnxruntime` added to pyproject and requirements as OPTIONAL. numpy,
+Pillow and opencv-python were already present -- they are the heavy half.
+
+## v1.217.0 -- strip is a CHOICE, not a stage (2026-08-04)
+
+"Use our reference base and not a stripped version... in a lot of cases we can just use our
+references we uploaded and the generated missing angles and use that instead of stripping the
+character every time."
+
+Right, and stripping every time costs twice: an extra Klein edit per view, AND the drift that
+edit introduces. When a shot never needed the clothing replaced, that drift bought nothing --
+the uploaded reference IS the better identity image.
+
+**Two real bugs found on the way in, both squarely in the path of this feature.** Neither was
+visible from reading the strip flow; both turned up while tracing what `_base_for_view` could
+actually select.
+
+1. **`ref_copy` base versions never recorded a view.** `_base_for_view` filters versions on
+   `(v.get("view") or "") == view`, and the ref-copy record only ever wrote
+   `{id, kind, source_ref, created_at}`. So a reference copied into the base set could NEVER be
+   matched to an angle -- it was reachable only as the active base. That is precisely the "use
+   my uploaded reference instead of a stripped one" path, and it has never worked per-view.
+   Now records the source ref's tag.
+2. **`upscaled` versions lost their provenance.** The record kept the view but not what it was
+   upscaled FROM -- and `_base_for_view` prefers upscaled first, so a dressed run would have
+   happily picked an upscale of a stripped image. Now records `from_kind` and `from_id`.
+
+**The mode.** `auto` (pre-v1.217 behaviour: newest of that view wins) | `dressed` | `stripped`.
+Set per character (`PUT /characters/{slug}/base-mode`) and overridable per request on
+`/generate`, `/generate-set` and per LoRA dataset.
+
+- **dressed** skips stripped versions and upscales of them, then falls through to the tagged
+  reference tier -- which is inherently clothed, and is also where generated missing views land
+  (`views_generate` writes them as refs with `source: "generated"`). So **a character with no
+  dressed base still works entirely off his uploads and generated views, with no strip run at
+  all.** That is the case he described.
+- **stripped** prefers stripped versions; when a view has none it falls back to the dressed
+  reference and LABELS it `dressed fallback` rather than implying a strip happened.
+- Provenance that is genuinely unknown (a pre-v1.217 upscale) is **used, not dropped**, and
+  labelled `provenance unknown`. Dropping it would repeat the v1.205 `ups or vers` bug, where an
+  empty preferred tier skipped every candidate behind it. Guessing it would be worse.
+
+Every return still LABELS which source won -- `front base (ref_copy)`, `back reference
+(generated)`, `left reference · dressed fallback` -- so the job line, the gallery and the log
+say what actually ran. `PUT /base-mode` returns `resolves_to` for all four views, so the
+consequence of the toggle is visible **before** spending a render.
+
+LoRA datasets carry `base_mode` too, and **QC now compares against the same identity source the
+renders used** -- otherwise a dressed dataset checked against a stripped reference would flag
+his real clothes as "not him" on every image.
+
+Verified: `test_v1217.py` builds a character folder on disk (ref copies, strips, references, a
+generated back view, a version whose file is missing, a legacy upscale) and asks the picker what
+it would choose per mode -- 40 checks, all pass. Both bugs were invisible to a source grep, which
+is why this exercises the picker rather than the text. All 11 suites pass on the live files
+(klein2 v1204/1206/1207/1208, cross v1205/v1217, lora v1209/1210/1213/1214/1216);
+klein3 md5 82a88be0c98ac7d663f628a047b6ced1, lora md5 3824884309d18780639b219012bebbb3.
+`test_v1205` needed its extraction set widened -- `_base_for_view` now calls `_base_mode`.
+
+**Not yet built: the UI.** The Klein 3.0 toggle and the LoRA dataset selector are next, together
+with the v1.216 wardrobe editor. Until then the mode is reachable via the API and the character
+default.
+
+## v1.216.0 -- outfit SETS (2026-08-04)
+
+His question: shouldn't a character be trained in multiple clothing styles? He remembered this
+from older LoRA practice. He is right, and **our code was contradicting our own documentation**
+-- the module docstring has warned since v1.209 that "a narrow dataset bakes its own narrowness
+in (all-bikini dataset -> every render is a bikini)", while `outfit` was ONE string applied to
+all 40 images. One outfit, never varied, gets absorbed into the trigger word along with the
+face. So the clothes become part of the character.
+
+Outfits are now a SET, of two kinds doing two different jobs:
+- **named** -- his actual story wardrobe. What the LoRA has to render well.
+- **variety** -- looks that exist purely so clothing stays DETACHABLE from identity. Without
+  them even three outfits can fuse, because nothing in the data demonstrates that clothing is
+  independent of the person.
+His choices: **60/40 named/variety**, variety **proposed by the vision model from the
+character's own reference** (returned for review, never auto-applied), and the set **sized from
+the wardrobe** (~13 images per outfit -> 3 named + 5 variety = 104, floor 24, cap 120).
+
+**Garment reference images work, and were nearly free.** `REF_TAGS` already had `outfit`, and
+`_run_klein_edit_on` already loads up to 5 refs against `KLEIN_EDIT_ULTRA_WORKFLOW_{n}REF.json`
+-- so base + face + garment fits with room spare. The constraint is the standing rule that
+**Klein ignores category words**: "the clothing in image 3" produces whatever it likes. So a
+garment ref is always paired with NAMED garments -- `POST /characters/{slug}/refs/{id}/garment`
+runs the vision model over the image and returns "a red plaid flannel shirt, dark blue jeans
+and brown leather boots", and `_clean_garment_desc` REJECTS an answer with no garment noun in
+it rather than passing a useless phrase through. The prompt then says "He is wearing <named
+garments>, the exact garments shown in image 3" -- the citation corroborates the naming, it
+never replaces it. And the ref only occupies a slot when the shot can actually show clothes.
+
+**Visibility, same rule that fixed the back-shot expression bug:** never let a caption or a
+prompt name something the image cannot contain. face -> no outfit at all; headshot -> the first
+garment only; waist-up and full -> the whole thing. QC gets an `outfit_ok` key, but only for
+shots where an outfit is visible, defaulting TRUE so a model that omits it cannot fail an image.
+A wrong outfit now flags, and `outfit_off` joins the breakdown.
+
+**DISTRIBUTION -- and the offline suite earned its keep twice here.** The list being right is
+only half of it; how the outfits are dealt is the other half, and the first two attempts were
+measurably wrong:
+1. A plain round-robin down the plan clumped by FRAMING. `rows` is built grouped by framing, so
+   the variety outfits exhausted part-way through the waist-up block and **five of eight never
+   received a single full-body shot** -- a LoRA that learns "the navy hoodie means a waist-up
+   photograph".
+2. Allocating per framing group fixed that and clumped by ANGLE instead: an outfit lands every
+   len(outfits) rows while the angle rotates every len(_ANGLE_MIX) rows, and those share a
+   factor -- **one outfit came out 67% a single angle**, trained as "the red rain jacket, seen
+   from the left". Same class of bug as the v1.209.1 angle clumping.
+The shipped fill is greedy over (framing x angle) CELLS, **rarest cell first**, each slot going
+to whichever outfit is furthest behind on that angle and then that framing. Rarest-first is the
+half that matters: proportional allocation quietly hands small outfits their images out of the
+BIG cells, because that is where the slots are, so the rare angles end up belonging to the
+outfits with the most images. Measured on 104 images / 8 outfits: **every outfit now spans all
+four framings**, and worst angle over-representation fell 2.48x -> 1.86x with no outfit above
+47.6% on any single angle. Named outfits skew front (they get the face-bearing shots), variety
+skew three-quarter -- an acceptable trade, and stated here rather than discovered later.
+
+**A real regression the OLD suite caught, not this version's own.** `_outfit_for` returned None
+for a row planned before v1.216, because those rows carry no outfit id -- so a legacy dataset
+silently dropped its outfit from every caption and every prompt. v1.216's tests missed it (they
+build rows with ids); `test_v1209` failed immediately. A single outfit now falls through to
+every un-tagged row, which is exactly what the pre-v1.216 semantics were. This is the whole
+argument for keeping the old suites runnable.
+
+Also fixed while testing: `_clean_garment_desc` matched garment words as SUBSTRINGS, so "an
+outfit suitable for winter" passed the check -- "suitable" contains "suit". Word boundaries now.
+
+New: `GET/PUT /datasets/{id}/outfits` (with the split and the visibility map),
+`POST /characters/{slug}/wardrobe`, `POST /characters/{slug}/refs/{ref_id}/garment`.
+`_suggested_count`, `NAMED_SHARE`, `IMAGES_PER_OUTFIT`, `_OUTFIT_VIS` are the knobs.
+
+Verified: `test_v1216.py` (63 checks, distribution measured rather than assumed) plus
+v1209/v1210/v1213/v1214 all pass on the live file, md5 069799884ef840fa5dd7be180c052e1a.
+
+**Not yet built: the UI.** The wardrobe editor, the "suggest outfits" button and the garment-ref
+picker in LoraPanel are the next step -- until then the outfit set is reachable only by passing
+`outfits` to POST /datasets or /plan.
+
+## v1.215.0 -- the Worker Helper: something that OWNS the GPU on a worker (2026-08-04)
+
+His idea, and the right one: a small app on the worker that detects ComfyUI and Fizgig, can
+invoke either, gives real debugging, moves data both ways -- "as i dont believe both can be
+running at the same time as they would capture the gpu."
+
+**He is right, and the research says it is worse than that.** Verified against ComfyUI 0.30.0
+and ComfyUI-Manager V3.41 source, not prose:
+- `POST /free` (which our client already calls) sets two queue flags and returns 200 BEFORE
+  anything is freed. It does release model weights, the torch cache and DynamicVRAM's VBAR
+  pages -- but the **CUDA context cannot be released while the process lives** (300-800 MB,
+  per PyTorch's own issue tracker; contexts are per-process and unshareable).
+- Manager's `POST /manager/reboot` is an `os.execv` -- the **pid is preserved**. There is no
+  instant at which the GPU is free. It is not a release path at all.
+- So a 13.1 GB NF4 run on a 16 GB card, against an idle-but-running ComfyUI plus Windows WDDM
+  overhead, has under 1-2 GB of margin -- and **WDDM pages rather than OOMs**, so the failure
+  mode is a run that silently takes 4x as long, not one that errors.
+  -> Decision (his): always hard-stop ComfyUI. Something has to own that. This is it.
+
+**A trap we were one step away from walking into.** `system_stats.devices[].vram_free` is NOT
+free VRAM: `get_free_memory()` returns `cudaMemGetInfo_free + (torch_reserved - torch_active)`,
+i.e. it adds back cache ComfyUI can reclaim and **a second process cannot**. Our client reads
+`/system_stats` today. The helper never uses it for a capacity decision -- every one goes
+through NVML via `nvidia-smi`.
+
+`scripts/worker/rbmn_helper.py` + `rbmn_helper.bat` -- **stdlib only, no install step**, so it
+runs on any python 3.9+ including ComfyUI's `python_embeded`. It serves its own single-file web
+UI on its port (not tkinter: works headless, reachable from his desktop browser).
+- **GPU lease, on disk.** One holder at a time. A helper crash cannot leave the box believing
+  both are stopped, and a run recorded `running` in a state file is re-read as `interrupted` on
+  startup because nothing it spawned survived.
+- **Stopping is proven, not assumed.** `taskkill /T` (the `/T` matters -- ComfyUI spawns
+  children that keep the GPU handle open), escalate to `/F` after 25 s, then poll free VRAM
+  until it clears 13400 MB or 60 s elapse. Process exit is not accepted as proof; WDDM lags.
+  An empty `--query-compute-apps` list proves nothing either -- under WDDM the driver often
+  reports no per-process usage at all, and `/diag` says so in the payload.
+- **The transfer problem is gone.** The app POSTs the v1.214 export zip to `/datasets/{name}`,
+  the helper runs the `fizgig_run.py` that shipped inside it, streams the log back by byte
+  offset, and serves the trained `.safetensors` from `/runs/{id}/artifacts/{file}`.
+- **A failed run still gives the GPU back** -- the ComfyUI restart is in a `finally`.
+- **`/diag`** is one payload with a `blockers` list: missing nvidia-smi, a Fizgig prefs.json
+  whose models are absent (named by key), a ComfyUI listening on a port with no owning pid.
+  Token redacted, because a diag gets pasted into a chat.
+- `/health` is deliberately unauthenticated -- it is how the app discovers a helper exists.
+
+Two security details that are not theatre: `zipfile.extractall` does not protect you, so every
+member is checked for absolute paths, `..` and drive letters before extraction; and the netstat
+PID match requires the LISTENING **local** address to end in exactly `:port`, so a foreign
+address does not win and `:8188` does not match `:18188`.
+
+Verified: `test_helper_v1215.py` starts the REAL server on a random port and drives it over
+HTTP -- parser fixtures from captured nvidia-smi/netstat output, a fake Fizgig checkout, a real
+export zip, a run that succeeds, a run that exits 3, a traversing zip, a stranded-lease
+restart, artifact download. 60 checks, no GPU needed, all pass on the live file
+(md5 6276997d52ae43674f742aab29c71d72).
+
+**Left on the table deliberately, with the notes to do it later:** ComfyUI-Manager's queue is
+two-phase (`/manager/queue/install` only enqueues; nothing runs until `/manager/queue/start`,
+then poll `/manager/queue/status`, then `/manager/reboot`); at the default
+`security_level = normal` a git-URL or pip node install **403s** and needs `weak`; and Manager
+snapshots cover custom nodes + pip but **not models**, so model parity needs its own path.
+Also noted: ComfyUI has an **undocumented `--vram-headroom GB`** flag whose help text claims it
+holds VRAM free "even counting VRAM from other apps" -- absent from the official docs, unproven
+at 13 GB. If coexistence is ever worth testing, that is the flag and `comfy.manage=false` is
+the switch.
+
+Not yet wired: the app-side button. That comes next, once his `--probe` output says what his
+box actually reports.
+
+## v1.214.0 -- the export now RUNS itself against Fizgig (2026-08-04)
+
+"So can we not send the dataset from our app to Fizgig? Is it something we need to do by hand?"
+
+Checked the source rather than guessing. Fizgig has **no HTTP API and no server** -- I grepped
+for fastapi/flask/uvicorn/gradio/http.server across the whole tree and the only hit was
+`lora_trainer_gui.py`, which is tkinter. So it cannot be queued through our ComfyUI dispatcher
+like a workflow. But **nothing about it needs the GUI**: `src/fizgig/` imports tkinter nowhere,
+and the three `krea2_*` scripts are plain argparse. Their own docs/CLI.md says it outright --
+"the GUI is a front-end that builds these exact commands and runs them as subprocesses."
+Headless is the first-class path, not a fallback.
+
+So: **the zip is now self-running.** New in every krea2 export --
+- **`fizgig_run.py`** -- resolves the four model paths out of *your Fizgig folder's own
+  `prefs.json`* (fetch_models.py writes absolute paths there under `krea2_raw_dit` /
+  `krea2_text_encoder` / `krea2_vae` / `krea2_turbo_dit`), validates the dataset, then runs
+  cache_latents -> cache_text -> train as subprocesses with `PYTHONPATH=<fizgig>/src` and
+  `cwd=<fizgig>`. Flags: `--dry-run`, `--skip-cache`, `--quant nf4|int8|fp8`,
+  `--blocks-to-swap`, `--epochs`, and per-model overrides.
+- **`train_krea2_fizgig.bat`** (CRLF, double-clickable; one `set FIZGIG=` line to edit) and
+  **`train_krea2_fizgig.sh`** (`FIZGIG=/workspace/Fizgig ./train_krea2_fizgig.sh`). Both prefer
+  Fizgig's venv python so torch/CUDA are the ones it was installed with.
+- It **stops before spending GPU time** on: an image with no caption .txt, a `--fizgig` path
+  that is not a checkout, a model it cannot find (with the fix spelled out, not a traceback),
+  and **NF4 + `--blocks-to-swap`**, which the trainer force-zeroes under 4-bit.
+
+**A real bug this turn found.** The command sheet has been passing
+`--sample_prompts sample_prompts.txt` since v1.213 -- and the zip has never contained that file.
+Fizgig guards it with `if args.sample_prompts and os.path.exists(...)`, so it did not error: it
+just trained with **no previews at all**, which is also where the plateau banner and the
+best-checkpoint estimate come from. Now shipped:
+- **`sample_prompts.txt`** -- five plain prompts (Krea 2 takes no kohya `--w/--h/--d`
+  overrides; geometry comes from `--sample_width/--sample_height`), deliberately the shots a
+  character LoRA fails on first: close portrait, full body, 3/4, profile, hard side light.
+- **`sample_ref.png`** -- the character's front base, wired to `--sample_ref_image` (the
+  Qwen3-VL vision path). Previews are now driven by the same reference our QC judges against.
+
+**Two model paths in the sheet were invented.** It said `/models/qwen3vl_4b_bf16.safetensors`
+et al. Wrong twice: `fetch_models.py` FLATTENS every weight into `<fizgig>/models/` (relative to
+the checkout, not `/`), and it downloads `qwen3vl_4b_fp8_scaled`, not the bf16 file docs/CLI.md
+names. Both work; which one you have depends on how you got it -- which is exactly why the
+runner reads the pref instead of guessing. The sheet now shows placeholders plus the prefs key.
+
+Verified, not asserted: `test_v1214.py` GENERATES `fizgig_run.py`, builds a fake Fizgig checkout
+and a fake unzipped export in a tmpdir, and **executes the runner** with `--dry-run` to read the
+exact commands it would issue -- then re-runs it with a caption deleted, with `prefs.json`
+deleted, with NF4+swap, with `--skip-cache`, and against a non-Fizgig folder. 62 checks, all
+pass; v1209/v1210/v1213 still pass on the live file (md5 2fe5a2064a5bf04d78d777fa37753b57).
+
+Still by hand: getting the zip onto the training box, and installing Fizgig there. Wiring that
+end (a worker agent, or Fizgig on the app box driven by subprocess) is the next fork.
+
+## v1.213.1 -- which card can actually train Krea 2, from Fizgig's measured planner (2026-08-04)
+
+He asked "can I run it on one of my 12 GB cards?" Answered by running THEIR OWN recommender
+(`src/fizgig/utils/capabilities.py`, constants measured 28 Jul 2026 on a 5090) rather than
+trusting anyone's prose -- including their README's "fits 10-12 GB cards", which is the KLEIN 9B
+figure, not Krea 2's.
+    NF4 peak 11.4 GB · INT8 16.2 · fp8 18.7 · headroom 1.5 · swap -0.42 GB/block (26 max)
+    resolution +0.25 GB/MP · batch +2.4 GB per EXTRA image · rank +15 MB
+    "the budget is FREE VRAM, not the number on the box"
+At our shape (1024 buckets, rank 16) NF4 needs ~11.6 + 1.5 = **13.1 GB free**:
+  · **12 GB (~11 free): NF4 does NOT fit**, and NF4 CANNOT block-swap (weights live in
+    `_nf4_packed`; the trainer force-zeroes swap under 4-bit) -> their planner falls to
+    fp8 + ~23 swapped blocks, the ~4x slower path. Runs, but painfully.
+  · **16 GB (~14.8 free): NF4, no swap -- the good tier** (~0.70 s/it class).
+  · 24 GB+: INT8 W8A8, no swap -- fastest measured AND ~7x more accurate than NF4.
+Measured speed that makes swapping worth avoiding: fp8 no-swap 0.85 s/it / 20.1 GB · fp8 swap-20
+3.09 s/it / 12.3 GB · NF4 no-swap 0.70 s/it / 13.8 GB.
+- A REAL CORRECTION to our own advice: the musubi sheet told him to drop resolution when tight.
+  Their measurements say 0.25 -> 1.05 MP costs about 0.15 GB (gradient checkpointing absorbs it)
+  while one extra BATCH image costs 2.4 GB. **Resolution is not the VRAM lever** -- quantisation
+  and batch are. Both sheets corrected.
+- The Fizgig sheet now COMPUTES a per-card plan from those constants at the dataset's actual
+  shape instead of quoting a tier ladder, and carries the NF4-cannot-swap warning, the measured
+  speed table and the free-VRAM rule.
+Test extended (+13 checks): constants match their planner, the 12 GB / 16 GB verdicts, resolution
+cheap vs batch expensive, and the sheet's new content.
+
+## v1.213.0 -- read the Fizgig source he supplied; took what it proves (2026-08-04)
+
+He dropped Fizgig-master.zip in KREA2V2/. Read the CODE and docs/CLI.md rather than the landing
+page, and three questions closed:
+- **Fizgig is FULLY HEADLESS** -- "the GUI is a front-end that builds these exact commands and
+  runs them as subprocesses": krea2_cache_latents.py / krea2_cache_text.py / krea2_train.py, all
+  argparse, Windows and Linux. That settles the in-app training backend question -- it is
+  drivable exactly like our worker jobs, and unlike musubi it carries the intelligent-trainer
+  features (per-image loss watch w/ PLATEAU BANNER + best-checkpoint estimate, per-image LR,
+  Qwen3-VL auto-recaption, look-outlier warm-up).
+- **Quantise before you swap** -- their words: "Swapping is the slow path (4.4x the time, 4x the
+  CPU): quantise first, and only swap when even NF4 will not fit." `--quantize_4bit` = ~5.6 GB
+  resident, swap forced off; the fp8 ladder is 32->0, 24->12, **16->20**, 10-14->26;
+  `--quant_int8 bf16` is ~18.6 GB but the fastest measured (0.637 s/it vs NF4 0.709 on a 5090)
+  and ~7x more accurate in forward error.
+- **A caption rule we were breaking:** "if the subject isn't actually recognizable in a shot
+  (back of head, extreme distance), consider leaving the trigger out of that caption." Our back
+  rows carried the trigger -- binding it to the back of a head teaches it the back of a head.
+  **Back rows now caption with the class word only**, in both literal and [trigger] modes.
+- Their "likeness at 0.25 MP" note (a face inside a full-body shot reaches the model as ~10x10
+  latent pixels; a face crop is ~40x the face area) is the MECHANISM behind our face_heavy
+  preset -- now stated as such instead of asserted.
+NEW in a krea2 export:
+- `dataset_fizgig.toml` (their TOML: num_repeats + bucket_no_upscale in [general], per-dataset
+  cache_directory because a shared one mixes datasets) and `train_krea2_fizgig.txt` -- the three
+  headless commands with every intelligence flag, the full VRAM ladder, the quantise-first rule,
+  the LoKr factor-8 note and the pause-file trick.
+- **`images/fizgig_look_scores.json`, generated by us.** Their docs say "There's no headless
+  generator for it yet -- run the Look Filter once in the GUI". Our QC already compares every
+  image to the character's reference, so we write it: exact schema and IQR cutoff
+  `max(median - 1.5*(q3-q1), 0.25)` lifted from lora_trainer_gui.py's writer and verified
+  against krea2/trainer.py's reader (keys = basenames WITHOUT extension, and they must be the
+  EXPORT filenames, so the stem map is threaded through). QC now returns `identity_score` 0-1
+  alongside the boolean to fill it, clamped, with a boolean fallback and null for unchecked
+  images.
+Verified offline: new 55-check test (scripts/patches/test_v1213.py) covering the trigger rule in
+both caption modes, the look-score schema/keys/cutoff against their formula by hand, the <4-score
+guard, the TOML fields, every flag in the command sheet, and the wiring. v1.209 + v1.210 suites
+still pass. NOTE: the creator's YouTube walkthrough was rate-limited when I tried to fetch it --
+worth a second pass, though the source and CLI docs are the stronger evidence.
+
+## v1.212.0 -- adopt what lora-dataset-studio and Fizgig already solved (2026-08-04)
+
+He pointed at two adjacent projects. Read both; three things were worth taking, and one was a
+real hole in ours.
+- **IDENTITY CHECK -- the hole.** QC asked whether the framing, angle, expression and anatomy
+  were right, and never asked *is this still him*. For a character LoRA that is the one failure
+  that cannot be survived: an off-identity image teaches the trigger word the wrong face. Both
+  reference tools already do this (lora-dataset-studio: InsightFace similarity + green/orange
+  triage; Fizgig: a "Look Consistency Filter" against three references). Ours now sends the
+  character's front reference as IMAGE 1 and the render as IMAGE 2 in the SAME vision call and
+  asks for `same_person` + an `identity_note`, judging "build and proportions as carefully as
+  the face -- a slimmer or taller version of him is a different person for this purpose"
+  (his exact drift complaint from the Klein lane, now machine-checked). A miss fails the image,
+  is written into its issues as "identity: much slimmer", counted separately in the breakdown as
+  "not him", and picked up by the repair loop like any other flag. No new dependency --
+  InsightFace would be more precise but needs VS Build Tools on Windows, and the vision model is
+  already running.
+- **FACE-HEAVY PRESET.** lora-dataset-studio targets 12 face / 6 bust / 6 body / 1 back
+  (~48/24/24/4) against our 20/20/30/30; Fizgig's likeness tooling leans the same way. Shipped as
+  a PRESET, not a silent change: `balanced` (ours) vs `face_heavy` (~45/25/15/15 with half the
+  back rows). Measured: 40 images -> 18/10/6/6 with 2 back. Build one of each and compare.
+- **RANK.** Fizgig defaults to rank 8-16 and says so explicitly against "prior rank-16
+  assumptions on 9B-scale models"; our notes said 16-32. Corrected to 16 default, 32 only for a
+  very distinctive face.
+- Recorded for the training step: **Fizgig trains Krea 2 at ~8.3 GB with NF4 4-bit and ~14 GB
+  with fp8, NO block swap** -- better than the musubi block-swap route on a 16 GB card, since
+  nothing is bottlenecked on PCIe. It also has per-image adaptive LR, loss-tracked problem-image
+  detection, Qwen3-VL auto-recaptioning of stuck images, outlier warm-up at x0.4 LR, and plateau
+  detection that names the best checkpoint -- all worth revisiting when we wire training.
+Test extended (+18 checks): preset allocation and fallback, back-row thinning, identity in the
+verdict, the reference passed as image 1, QC still working without a reference, both callers
+handing it over, the breakdown counting identity misses, and the corrected rank line.
+
+## v1.211.0 -- the verified 12-16 GB Krea 2 recipe ships with the dataset (2026-08-04)
+
+He said he had seen people training Krea 2 on 12-16 GB and asked for deep research. They are,
+and it flips the trainer choice I gave in v1.209.1:
+- **kohya-ss/musubi-tuner has official (experimental) Krea 2 support** -- `krea2_train_network.py`,
+  `networks.lora_krea2`, `krea2_cache_latents.py`, `krea2_cache_text_encoder_outputs.py`. That is
+  the route that fits a small card. ai-toolkit trains Krea 2 too but is HEAVIER (~18-20 GB at 768
+  for LoKr; the community Krea2Trainer wrapper targets 24 GB). ComfyUI-FluxTrainer still cannot
+  train it at all.
+- WHY 12 GB works: pre-caching latents AND text-encoder outputs removes the ~8 GB Qwen3-VL
+  encoder from the training loop; `--fp8_base --fp8_scaled` (K2 accepts SCALED fp8 only, plain
+  fp8 is rejected to avoid norm casting) shrinks the DiT; `--blocks_to_swap N` parks up to 26 of
+  28 blocks in CPU RAM. MEASURED: RTX 3060 12 GB -> peak ~10.5 GB, 7.2-7.8 s/step @512, rank 16,
+  swap 22. RTX 4070 12 GB -> rank 32, swap 26, ~2 h / 2000 steps, 48 GB system RAM.
+- ⚠ The requirement people miss is SYSTEM RAM (32-64 GB), because swapped blocks live there --
+  and step time then depends on PCIe bandwidth rather than the GPU.
+- Krea 2 export now also contains **dataset_musubi.toml** (musubi's own format --
+  image_directory / cache_directory / [general] resolution -- NOT the kohya layout) and
+  **train_krea2_musubi.txt**: the three commands with flags set, the block-swap ladder to move
+  on OOM or spare VRAM, timestep guidance (krea2_shift for our mixed-aspect sets, or
+  shift + discrete_flow_shift 2.5 at one fixed size), step count scaled to the set, and
+  "save every 250 and pick by eye" instead of taking the last checkpoint.
+- README notes rewritten to lead with musubi and the measured numbers; the old "plan for >=24 GB,
+  your 16 GB fleet is under the bar" line is retracted -- 16 GB is comfortable on this route.
+Test extended (+20 checks): musubi TOML is musubi's format and buckets, the command sheet caches
+both latents and TE outputs, uses scaled fp8 + block swap + gradient checkpointing, trains RAW
+only, warns about system RAM, scales steps, and the notes carry the measured 12 GB numbers.
+
+## v1.210.1 -- back rows were asking for a face the back base cannot show (2026-08-04)
+
+Lorenzo, after the repair loop took 15 flags to 6: "most of them use the back base -- is it
+possible these generated non-back-facing scenes with the back base?" MEASURED on the real plan,
+and yes, three compounding faults:
+- 6 of 40 rows were back-angle (15%), and **2 of those were `headshot`** -- a close-up portrait
+  of the back of a head. Unpassable QC, useless as training data.
+- Their prompt read "photographed as a close-up portrait, head and shoulders ... seen from
+  directly behind, his back to the camera, **with a thoughtful expression**. **His face** ...
+  exactly the ones in image 1" -- while image 1 IS the back base, which contains no face.
+  Asked for an expression it cannot show and a face it cannot see, the model fills the gap and
+  swings the body round: front-facing renders off the back base, exactly what he saw.
+- QC then flagged them for an unclear face, which was correct-by-accident for the wrong reason.
+Fixed in the PLAN so nothing downstream compensates:
+- `_BACK_OK = {upper, full}` -- only shots that show the body may face away; a face/headshot row
+  that draws 'back' swaps with a body row (counts stay as dealt, with a front fallback).
+- Angles are now WEIGHTED via `_ANGLE_MIX` -- front-heavy, 'back' ~1 in 10 instead of 1 in 6,
+  because a character LoRA lives on face-bearing data. Measured after: 4/40 back, all body shots.
+- A back row carries **no expression** at plan time; the render prompt names hair, hair colour,
+  skin, clothing, build and proportions INSTEAD of the face and states affirmatively that the
+  camera sees the back of his head; the caption omits the expression (captioning what the image
+  cannot show teaches a word it can never satisfy); the QC prompt tells the checker the face is
+  hidden BY DESIGN and to judge only framing/angle/artifacts.
+- Backward compatible: rows planned before this still carry an expression string, so the caption
+  and prompt branch on the ANGLE, not on the field -- verified against a legacy headshot+back row.
+Tests updated to assert the intent rather than evenness (back 2-5 of 40, front most common,
+face-bearing angles >=85%, no face/headshot faces away, back rows have no expression, back
+prompts never say "His face"). v1.210 suite still passes.
+
+## v1.210.0 -- re-render flagged + an auto-repair loop that stops itself (2026-08-04)
+
+His first QC pass: **15 of 40 flagged**. Asked for a "re-render all flagged" button and a loop
+that repeats render->QC until nothing is flagged.
+- `POST /datasets/{id}/repair` {rounds, qc_after, include_stuck}: re-render every flagged image
+  with FRESH seeds (a re-render on the same seed reproduces the same picture), re-check them,
+  repeat. Early-exits the moment the set is clean; live `round n/N · phase` and a per-round
+  history (`round 1: 15 re-rendered -> 6 flagged`).
+- TWO BRAKES, because a loop spends his GPU time unattended: the round cap (1-6, default 3,
+  clamped server-side) and a per-image ATTEMPT counter (MAX_ATTEMPTS=3). An image that fails
+  three renders is a bad PLAN ROW, not bad luck -- it is parked as "stuck", counted separately
+  and skipped in later rounds unless `include_stuck`. Attempts increment where renders land, so
+  the cap cannot be bypassed by a different entry point.
+- MEASURE, don't guess, on the 15: `_flag_summary()` breaks flags down by cause (artifacts /
+  bad crop / wrong framing / wrong angle / wrong expression / not one person / face unclear /
+  stuck) and ranks the vision model's own issue phrases. The split is the diagnosis --
+  artifacts + crops mean the RENDERS need fixing, framing/angle/expression misses usually mean
+  the CHECKER is stricter than the shot list. Exposed on every dataset payload and rendered
+  above the two buttons.
+- Refactor: `_render_jobs()` / `_render_blocking()` / `_qc_blocking()` are now shared, so
+  /generate, /qc and /repair run identical code paths (they were inline duplicates).
+- UI: flag breakdown + top issue phrases, 🔁 Re-render flagged (N), ♻️ Repair until clean with a
+  round picker and a "retry stuck" toggle, per-round history line, a stuck-image explanation,
+  and an ×N attempt badge on any tile rendered more than once.
+Verified offline: 30-check test (scripts/patches/test_v1210.py) built on HIS 15-of-40 shape --
+breakdown maths, issue ranking, flagged selection, the stuck-skip and its override, plus
+source-level assertions that the loop clamps rounds, exits early, re-seeds, refuses to overlap
+another run, logs each round and shares the helpers. v1.209 suite still passes; py_compile +
+pyflakes clean; esbuild clean.
+
+## v1.209.1 -- Krea 2 is NOT Flux: target-aware trainer configs (2026-08-04)
+
+He said "I believe KREA2 is Flux family but you need to verify online." Verified -- and it is
+not, so the v1.209.0 export was emitting a wrong `is_flux: true` for his actual target.
+- **Krea 2 is a from-scratch 12.9B DiT by Krea AI** (single-stream blocks, grouped-query +
+  sigmoid-gated attention) that borrows a **Qwen3-VL 4B text encoder** and the **Qwen-Image
+  VAE**. Two independent sources agree, and so does HIS OWN REPO: every `workflows/KREA2_*.json`
+  loads `krea2_turbo_mxfp8.safetensors` + `qwen3vl_4b_fp8_scaled.safetensors` +
+  `qwen_image_vae.safetensors`. Flux uses T5-XXL + CLIP-L and the Flux VAE; this is not that.
+- ai-toolkit YAML is now written PER TARGET: flux keeps `is_flux: true`, sdxl gets `is_xl`,
+  krea2 gets a Krea-2 block with the verified companions -- and its `arch` key deliberately left
+  BLANK with a "paste ai-toolkit's own model block here" marker, because that exact field name
+  could not be verified. Naming an unverified config key is the guessing the rules forbid.
+- `dataset_kohya.toml` is now labelled FLUX/SDXL only -- ComfyUI-FluxTrainer cannot train Krea 2.
+- README gains a Krea 2 section: trainer = ostris/ai-toolkit (or diffusers); **RAW is the
+  un-distilled checkpoint you fine-tune, TURBO is the 8-step one you generate with, and Krea's
+  own LoRAs train on Raw then apply to Turbo**; to train ON Turbo use ostris'
+  `krea2_turbo_training_adapter` (de-distillation layer, removed at inference) or the
+  distillation degrades during training; and the measured cost -- **~22 GB VRAM, ~6 h for 20
+  images**, against a 16 GB fleet. That last figure decides where training can run at all, so it
+  is in the notes before a single training feature gets built.
+- docs/LORA_DATASET.md carries all of it plus the split route: Krea 2 -> ai-toolkit,
+  Flux/SDXL -> ComfyUI-FluxTrainer (which fits our dispatcher as just another queued workflow).
+Test extended to 70 checks: no is_flux in a krea2 config, is_flux/is_xl still correct for their
+targets, the arch key stays unguessed, and the Krea 2 notes carry trainer + Raw/Turbo + adapter
++ VRAM. py_compile + pyflakes clean.
+
+## v1.209.0 -- 🎓 LORA DATASET GEN: the fifth mode, researched end to end (2026-08-04)
+
+His ask: a new mode beside Create / Clothes / Emotions / Pose Library that uses the same
+reference system and Klein to build an OPTIMAL LoRA dataset -- gallery + captions to review,
+a vision-model consistency check, a list of past datasets, and a zip for an external trainer.
+RESEARCHED FIRST (sources listed in docs/LORA_DATASET.md, nothing here is guessed):
+- 30-100 images for a character; VARIETY is what buys flexibility and a narrow dataset bakes
+  its narrowness in. Default 40, slider 16-120.
+- Cover framing / angle / expression / pose / lighting / background; >=1024px, mixed aspect
+  ratios are fine because trainers bucket.
+- **Caption what VARIES, never the identity** -- whatever a caption names becomes a knob the
+  trainer can turn; whatever it omits is absorbed by the trigger word. That single rule is the
+  mechanism behind an on-model character LoRA.
+- Captions as `<image stem>.txt` beside the image (what ai-toolkit AND kohya/FluxTrainer read);
+  `[trigger]` is ai-toolkit's placeholder, so exports can be literal or placeholder.
+
+NEW backend/api/lora.py (`/api/lora`) + LoraPanel.tsx + a 5th mode button:
+- PLAN (free, no renders): framing allocated by weight (face 20 / headshot 20 / upper 30 /
+  full 30), every other attribute dealt in strict ROTATION so nothing clumps -- an angle that
+  appears twice as often is trained twice as hard. Deterministic: same count -> same plan, so a
+  re-plan is diffable and rendered rows survive. Two rules it enforces itself: a face crop
+  carries NO pose (a word the crop can never satisfy), and a face row that draws 'back' SWAPS
+  with a body row so the angle counts stay exactly even.
+- RENDER: one Klein edit per row against the character's ANGLE-MATCHED base (`_base_for_view`,
+  the same picker Klein 3.0 uses), close-ups also fed the face-tagged ref, fanned across every
+  klein worker with live per-image worker/status. Prompts affirmative throughout (cfg=1, no
+  negative node -- [[klein-prompt-no-negatives]]).
+- CAPTION: composed from the plan, so wording is identical across the set; optional vision pass
+  adds the clothing/background actually visible (and is told to say nothing about face, hair,
+  build, age or sex).
+- QC: vision model per image -- framing/angle/expression fidelity, one person, face clear,
+  artifacts, bad crop -> JSON stored per image, flagged in the gallery AND held out of the zip
+  unless explicitly included. One thread per Ollama server.
+- REVIEW: gallery of image + caption with per-item edit / re-render / re-check / delete, filters
+  (all / not rendered / flagged / no caption), and a dataset list with progress counts.
+- EXPORT: zip with images + txt captions + `dataset_aitoolkit.yaml` (trigger_word wired) +
+  `dataset_kohya.toml` + `manifest.json` (what each image was planned to be + its QC) +
+  README.md whose suggested settings scale with the set (~40 steps/image clamped 1000-3000,
+  rank 16-32, lr 1e-4 adamw8bit, buckets 512/768/1024) and whose loudest line is "train against
+  the SAME base checkpoint you will generate with".
+- docs/LORA_DATASET.md: the rules, the sources, and the two surveyed routes for in-app TRAINING
+  next -- ComfyUI-FluxTrainer (fits our dispatcher exactly: it is just another queued workflow)
+  vs ostris/ai-toolkit (richer, needs a side-service). The zip is deliberately valid for both.
+Verified offline: 60-check test (scripts/patches/test_v1209.py) over plan allocation at 5 sizes,
+angle spread, the face/pose and face/back rules, determinism, clamping, subset filters, caption
+content (every variable named, ZERO identity words, placeholder mode, extras, no-outfit case),
+render prompts (identity pinned, negation-free) and both trainer configs; py_compile + pyflakes
+clean; esbuild clean on the panel AND the 459KB page; route parity on every panel call.
+NOT yet run on a worker.
+
+## v1.208.1 -- pose CONTACT beats pose geometry (2026-08-04)
+
+Lorenzo: "in some images his hand presses into his stomach instead of being on his hips -- like
+the pose is being taken too strictly and he isn't allowed to place his hands more freely."
+Correct diagnosis: image 2's arms are as long as image 2's body is wide, so copying the arm
+angle literally lands the hand on a wider man's belly. New `_POSE_CONTACT` clause ships with
+BRIEF as well as FULL (so it is always present when the pose is described): the hand lands on
+the NAMED body part of HIS body -- hands on the hips settle on his own hip bones at the sides of
+his waist, level with the top of his pelvis, fingers wrapping toward his back -- and "his arms
+reach as far as they need to and his elbows swing as wide as they need to for his own width;
+the contact point is what matters, and the arm angle follows it." Affirmative, negation-free,
+test-guarded.
+
+## v1.208.0 -- affirmative prompts (the negations were the problem) + BODY-MATCHED pose mannequins (2026-08-04)
+
+Lorenzo, still seeing it: "it's like it's trying to match the body a bit more than it should...
+unless the pose prompt contains words that may be causing this." He was right on both counts.
+MEASURED, not guessed -- printed the exact prompt we were sending and read the workflow:
+- **The Klein graph has NO negative-prompt node and runs at cfg=1** (KLEIN_EDIT_ULTRA_WORKFLOW_
+  2REF: CFGGuider cfg 1, negative wired to empty conditioning; the workflow.py docstring says
+  so explicitly). Every guard v1.207 shipped -- "do NOT slim him down, do NOT make him taller,
+  thinner, younger, more athletic" -- had nothing behind it and just fed *thinner/taller/
+  athletic* to the text encoder. My v1.207 lock was probably making the drift WORSE.
+  Every fixed clause is now AFFIRMATIVE ("the body in the result is the body from image 1: the
+  same weight, the same width at..."); a test asserts no negation token survives in any of them.
+- **The exclusion never named the body.** It read "ignore image 2's appearance, material, style
+  and background" -- category words, which this model ignores (his own standing rule). It now
+  names them: "Image 2's own build, weight, height and limb thickness belong to image 2 alone;
+  his body is the body in image 1", and image 2 is narrowed to "the joint angles, the direction
+  each arm and leg points, and which way the body faces". The word "slimness" was dropped from
+  even that attributed list -- at cfg=1 a mention is a mention.
+- **The pose DESCRIPTION carried build words** (his hunch): "a slim gray mannequin standing..."
+  went straight into the render prompt. `_clean_pose_desc()` now strips physique words -- strong
+  ones anywhere (slim, slender, athletic, muscular, lean, toned, stocky, well-proportioned...),
+  weaker ones only in front of a subject noun ("a thin figure" -> "a figure", "a thin gap"
+  survives) -- and swaps mannequin/dummy/statue -> person. The STORED description is untouched
+  (the editor still shows what was written); the scrub happens at injection, and 🔎 Preview
+  shows the scrubbed text. The vision describe pass is also told never to produce build words,
+  and its output is scrubbed before storage.
+- **🧍 BODY-MATCHED POSE MANNEQUINS -- Lorenzo's idea, and the structural fix.** Instead of
+  arguing with image 2 in words, reshape it first: `POST /characters/{slug}/posefit` runs a
+  Klein 2-ref edit (image 1 = the mannequin, image 2 = his angle-matched base) that redraws the
+  mannequin with his weight, belly, shoulder/waist/hip width, limb thickness and stature while
+  holding the pose, framing and facing, and stays a featureless gray mannequin. Cached at
+  `chars/<slug>/posefit/<pose_id>.png` -- one render per character+pose, reused forever after.
+  Fanned across all klein workers with per-pose worker/status, 40 per run, already-fitted poses
+  skipped unless overwrite. `pose_source: library|bodyfit` on /generate, /generate-set and
+  /preview-prompt; a missing fitted image falls back to the library one and the gen records
+  which ran. UI: pose-image selector with a ready count, "🧍 Fit pose(s) to his body" (single /
+  set / tag selection), side-by-side library-vs-fitted compare with 🔁 re-fit and 🗑, and a
+  "🧍 body-matched pose" marker in the live line.
+Verified offline: 60-check test (scripts/patches/test_v1208.py) -- negation-free assertions on
+every prompt fragment, the named-exclusion checks, 20+ scrub cases (removals AND survivals,
+"weight on the front foot" kept), bodyfit note gating, posefit prompt content, cache path, and
+all the wiring; py_compile + pyflakes clean; esbuild clean; 37/37 route parity; v1.204-v1.207
+suites still pass (v1.206/v1.207 assertions updated to guard the AFFIRMATIVE wording).
+NOT yet run on a worker. run.bat + hard refresh.
+
+## v1.207.0 -- body-drift controls: prompt composition, body lock, identity boost, free prompt preview (2026-08-04)
+
+Lorenzo on the v1.206 hands-on-hips run: "very close, but the body changes a bit too much --
+almost like he got slimmer and taller." MEASURED FIRST: the Klein edit graph
+(KLEIN_EDIT_ULTRA_WORKFLOW_2REF) builds from an EmptyFlux2Latent -- there is NO denoise or
+structure-lock knob to hold the body; every pixel is redrawn. So the only real levers are the
+PROMPT and the REFERENCES, and this release exposes both instead of guessing.
+- ROOT-CAUSE HYPOTHESIS (his to confirm): v1.206 appended a ~90-word paragraph AFTER the
+  identity clauses, so the freshest text in the prompt was about the pose, not about him.
+  Prompt order is now explicit: identity opener -> (diagram note) -> pose in words -> his own
+  build -> the user's extra -> BODY LOCK last.
+- `_compose_prompt()` is now the ONE builder, shared by /generate, /generate-set and the new
+  `POST /preview-prompt` -- so what the panel previews is literally what runs.
+- 🗒 pose_text: off | brief | FULL, default BRIEF (one line). Full keeps the v1.206
+  limb-placement reconciliation for cases where limbs land on the wrong body part.
+- 🧍 body_lock (default on): TERMINAL clause naming the drift he reported -- same weight,
+  same width at shoulders/chest/belly/waist/hips, same limb thickness, same height, same
+  head-to-body proportion; do NOT slim, make taller, thinner, younger, more athletic or more
+  idealized; do not lengthen legs, narrow the waist or flatten the stomach. The user's extra
+  prompt is inserted BEFORE it so nothing outranks the lock.
+- 📋 body_words (default on): injects his OWN body/height fields ("Remember his physique: his
+  build is very heavy, large belly...") -- named attributes hold a build better than "same as
+  image 1" alone (the standing named-objects rule, applied to anatomy).
+- 👥 identity_boost (default off): a SECOND image of him as image 3 (front base -> face ref ->
+  front ref, never the image already used as image 1); ref count auto-selects
+  KLEIN_EDIT_ULTRA_WORKFLOW_3REF and the prompt states images 1 and 3 are the same person.
+  Recorded per gen and shown as "👥 3-ref" in the live line.
+- 🔎 Preview prompt button: exact prompt text, word count, and the reference list
+  ("image 1: left base (upscaled) · image 2: pose · image 3: second identity view") BEFORE
+  spending a run. Zero worker time.
+Verified offline: 40-check test (scripts/patches/test_v1207.py) over composition order (lock
+IS last, even after the user's extra), each switch independently, upload/diagram handling, the
+empty-description case, the boost picker's priority + never-reuse rule, and source wiring of
+all three callers; py_compile + pyflakes clean; esbuild clean; 35/35 route parity; the v1.204,
+v1.205 and v1.206 suites still pass (v1.206's note assertions updated for the split).
+NOT yet run on a worker -- the A/B is his. run.bat + hard refresh.
+
+## v1.206.0 -- the pose travels as TEXT too; vision-LLM descriptions for image-only poses (2026-08-04)
+
+Lorenzo: his very heavy character, given a prompt-made "hands on hips" mannequin pose, came
+back with the hands on his BELLY. Root cause is not the pose image -- it is that the mannequin
+is a different build, so copying image 2's geometry literally puts limbs on the wrong body
+parts. Fix: send the pose in WORDS alongside the image, and give image-only poses a way to get
+words at all.
+- `_pose_desc(rec)`: a pose's description = its stored `desc`, else its own prompt with the
+  mannequin STYLE WRAPPER stripped back off (`_POSE_STYLE` prefix/suffix) -- prompt poses
+  already carried their description, it was just buried in studio-photo boilerplate. Raw-flag
+  prompts pass through unchanged. Exposed as `desc`/`desc_source` on every pose.
+- klein3 `_POSE_TEXT_NOTE` appended to the render prompt when text exists: states the pose,
+  then instructs Klein to put it on the person from image 1 USING HIS OWN BODY -- "image 2's
+  figure is only a diagram and may be a completely different build", "hands on the hips means
+  the hands rest on this person's own hip bones at the sides of his waist, not on his stomach
+  or chest" -- while keeping limb angles, balance and facing from image 2. Named body parts,
+  per the standing named-objects rule. `describe_pose` (default true) on /generate and
+  /generate-set; the text is recorded on the gen so the gallery can show what was sent.
+- `POST /poses/describe` {ids|category, overwrite, set_view}: vision-LLM pass over pose
+  IMAGES using the SAME Ollama vision path as the character analyze wizard
+  (`_ollama_cfg` + `wizards.ollama_chat_sync`, prose mode). Structured reply (POST: / FACING:)
+  parsed tolerantly -- prose-only replies still yield a description; an ambiguous facing
+  yields NOTHING rather than a guess. It also fills an EMPTY dominant angle from the same
+  look (never overwrites yours). Background, one thread per configured Ollama server, live
+  per-pose {server,status} in GET /poses.desc_run, errors per pose instead of a dead run.
+  Poses that already have words are skipped unless overwrite.
+- UI: ✏️ editor gained the description (editable, "from prompt/llm/manual", 🔍 Describe with
+  LLM per pose) · header "🔍 Describe missing (N)" scoped to the open set with a live line ·
+  "auto-describe imports" checkbox chains a describe pass onto pack/single uploads · 🗒 badge
+  on every tile (text or "—") · generate box shows the exact description that will be sent
+  (or "12/20 poses have a description") with a switch to turn it off.
+- LLM guide (both the download and docs/POSE_SET_LLM_GUIDE.md): new rule that the prompt is
+  used TWICE -- to render the mannequin AND as the written pose description at render time --
+  so it must name the body landmarks each hand and foot touches ("hands resting on the hip
+  bones at the sides of the waist") instead of vague placement.
+Verified offline: 27-check test (scripts/patches/test_v1206.py) over wrapper stripping, the
+vision-reply parser (format, prose fallback, ambiguous facing, truncation, case) and the
+prompt assembly in both endpoints; py_compile + pyflakes clean; esbuild clean; 34/34 route
+parity; v1.204 + v1.205 tests still pass on the patched files. Needs the Ollama VISION model
+configured in Settings. run.bat + hard refresh.
+
+## v1.205.0 -- POSE DOMINANT ANGLE: poses carry a facing, identity is matched to it (2026-08-04)
+
+Lorenzo: "if I use a side base image for a front facing pose it loses a lot of consistency" --
+so poses now state which way the body faces, and generation hands each pose the base view that
+matches. Same mechanism as the verified clay-lane result (a -124 deg pose went 0.744 -> 0.901
+once it was given the LEFT base instead of the front one).
+- POSE MODEL: `view` on every pose -- front|back|left|right, or empty (= any). `_norm_view()`
+  accepts words (front/rear/behind/profile left/3-4 right), and DEGREES on the calibrated
+  convention front 0 / right +90 / left -90 / back 180 with ties breaking toward FRONT
+  (|a|<=45 front, >=135 back, else the side). Ambiguous words ('side', 'profile') return
+  EMPTY on purpose -- guessing the wrong side costs more than leaving it unset.
+- WHERE ANGLES COME FROM: the `view` (or angle/dominant_angle/facing/direction) column of a
+  JSON/CSV import, a form-level default for a whole import, filename tokens on pack imports
+  (`pose_back_03`, `openpose-left-12` -- word-boundary only, so 'backflip' is NOT back), the
+  per-pose ✏️ editor dropdown, or ☑ Select -> 🧭 Set angle in bulk
+  (`POST /poses/bulk-view`). Built-in Defaults are seeded with their angles.
+- GENERATION (the payoff): `_base_for_view()` picks the identity image -- upscaled base of
+  that view -> any base version of that view -> a reference tagged with that view -> the
+  active base -- and returns a LABEL naming the winner, carried into the gen record, the
+  gallery, the API response and the log line (`klein3 generate[..] view=left
+  identity=left base (upscaled)`), so "which identity actually ran" is one grep, never an
+  inference. Set/tag runs resolve it PER POSE and log the tally. `match_angle` (default true)
+  on /generate and /generate-set turns it off.
+- Upscaled base versions now inherit the view they were made from -- previously an upscale
+  dropped the label, which would have silently disabled angle matching after every upscale.
+- UI: angle badge on every pose tile · 🧭 angle filter chips (incl. "unset") above the grid ·
+  angle dropdown in the ✏️ editor (shows the identity it resolves to) · bulk 🧭 Set angle ·
+  "🧭 Match identity to the pose's dominant angle" checkbox in the generate box that PREDICTS
+  the identity source per pose before the run (client mirror of the backend priority), and
+  for a set/tag run shows the whole tally ("12x front base (upscaled) - 6x left base ...").
+- LLM GUIDE UPDATED (his ask): the downloadable pose_set_llm_instructions.md +
+  docs/POSE_SET_LLM_GUIDE.md now teach the `view` field -- the four allowed values, judge by
+  CHEST AND HIPS not the head, the degree bands, "omit rather than guess", make the prompt
+  AGREE with the view, CSV header gains the column, and the 3-pose example now demonstrates
+  front/left/back.
+Verified offline: 55-check test (scripts/patches/test_v1205.py) over the synonym/degree table,
+filename inference and the full _base_for_view priority incl. missing-file fallthrough and the
+empty-character case; py_compile + pyflakes clean; esbuild clean; 33/33 route parity; v1.204
+test still passes on the patched file. NOT yet run on a worker. run.bat + hard refresh.
+
+## v1.204.0 -- pose TAGS are editable and poses MOVE between SETS (2026-08-03)
+
+Closing the two gaps left open by the v1.203.0 sets-vs-tags redesign: tags could only arrive
+through an import file, and a pose could never leave the set it landed in.
+- REAL BUG FOUND while wiring it: `/poses/{pid}/update` wrote only `category` -- which
+  `_read_poses()` re-mirrors from `set` on every read, so the write was silently undone. A
+  pose could not be moved through the API at all. `PoseUpdateIn` now takes `set` (with
+  `category` kept as the legacy alias) and `tags`, writes BOTH fields, and registers the
+  target set.
+- NEW shared-library routes (klein2.py, so every mode benefits):
+  `POST /poses/bulk-move` {ids, set, copy} -- move, or COPY (record + rendered image
+  duplicated, so both sets stay self-contained). Name clashes inside the target set are
+  disambiguated ("Side chest (2)"), never dropped; same-set is a no-op, missing ids are
+  counted, not fatal.
+  `POST /poses/bulk-tags` {ids, add|remove|replace} · `POST /poses/bulk-delete` {ids}.
+- `_norm_tags()` is now the single tag normaliser (list OR comma/semicolon string, trim,
+  case-insensitive dedupe keeping the first spelling, 8 tags x 32 chars) -- used by update,
+  the bulk route AND the import route, which previously had its own uncapped splitter.
+- UI (Klein3Panel pose modal): the ✏️ editor gained a 📦 set dropdown + 🏷 tag chips (✕ to
+  drop, + field autocompletes from all known tags via a shared datalist) and a
+  "💾 Save set + tags" button that does NOT touch the prompt -- so uploaded/promptless poses
+  are organisable. Header gained ☑ Select: the grid becomes multi-select (image-less tiles
+  selectable too) with a bulk bar -- ➡ Move / ⧉ Copy to a target set, ＋/− tag, 🗑 delete,
+  "all shown" honouring the current set+tag filter. Tiles now show their tags under the name.
+Verified offline before shipping: 43-check mock test of the extracted route logic (move,
+copy incl. image bytes, collisions, same-set no-op, missing ids, add/remove/replace tags,
+bulk delete + file unlink, 400 guards, tag normalisation), py_compile + pyflakes clean,
+esbuild clean, 32/32 frontend->backend route parity. Patch scripts + test kept in
+scripts/patches/. run.bat restart + hard refresh.
+
+## v1.203.1 -- documentation + handover refresh for session continuity (2026-08-03)
+
+Session handover (this chat got long). Updated so a fresh session can proceed without
+archaeology:
+- HANDOVER_PROMPT.md fully rewritten for the current era: three-era summary (Klein 1.0
+  parked / 2.0 pinned w/ postmortem / 3.0 ACTIVE), Lorenzo's 5 standing rules verbatim
+  (worker visibility+threading, named-garment prompts, version+changelog discipline,
+  sets-vs-tags UX lesson, live-patch mechanics), full Klein 3.0 feature map, open items,
+  pending verdicts, shipping mechanics. Reading order updated (klein3 memory first).
+- docs/KLEIN3.md created: complete mode doc (character workflow, pose library sets/tags
+  model, imports incl. openpose rendering, generation modes, status-visibility rule, audit
+  flags, history pointers).
+- README.md: Klein 3.0 + Klein 2.0 bullets added to the feature list.
+- Project memory refreshed throughout the session (klein3 file = v1.203.0 state incl.
+  standing rules + audit gaps; klein2 file = pinned + postmortem pointer; MEMORY.md index
+  updated). CHANGELOG v1.200.0->v1.203.0 is the authoritative decision log of this arc.
+
+## v1.203.0 -- Pose Library redesign: SETS are containers, TAGS are filters (2026-08-03)
+
+Lorenzo's usability review: "very lazily done" -- sets and tags were conflated (sets were
+just the store's category strings, so empty sets couldn't exist and import-file categories
+hijacked set names). Proper model now:
+- SETS: user-named containers with their OWN registry (poses/sets.json) -- created explicitly
+  (POST /pose-sets, 409 on dupe), exist EMPTY, persist across sessions, renamed/deleted
+  through the registry. Creating a set opens its screen immediately.
+- TAGS: pose records gain tags[] -- import-file 'category'/'tags' fields become TAGS on each
+  pose, never the set name (the set is always the one the user has open; imports/packs now
+  REQUIRE an open set, 400 otherwise). One-time migration: pre-v1.203 poses get
+  set=old-category AND that category as a tag; 'category' stays mirrored to set for the
+  pinned Klein 2.0 panel.
+- GET /poses returns sets[{name,count,rendered}] + distinct tags. Defaults seed into a
+  'Defaults' set with themes as tags. generate-missing scoped by set.
+- klein3 /generate-set: runs a SET or an ANY-match TAG selection across all sets
+  ("all Standing poses at once" -- his ask), label carried into job + gallery.
+- UI: modal is now two-pane -- sets sidebar (new-set input, All poses, per-set
+  rendered/count) + set screen (header actions, TAG filter chips, imports/create scoped to
+  the open set and hidden on All, grid, editor). "▶ Use N tagged poses" button on tag
+  selection; main screen shows set (📦 blue) or tag (🏷 purple) selection cards; 🚀 button
+  adapts.
+Verified offline with HIS bodybuilding file: empty-set persistence, dupe-set 409, 20 poses ->
+set Bodybuilding + tags{Standing,Kneeling}, no-set import 400, legacy migration, tag-based
+selection; esbuild + pyflakes + py_compile clean. run.bat restart + hard refresh.
+
+## v1.202.1 -- import precedence bug: row categories beat the OPEN SET (2026-08-03)
+
+Lorenzo's live repro (bodybuilding_pose_set.json, 20 poses w/ per-row Standing/Kneeling
+categories): create set -> import -> "🎨 no image-less prompt poses to generate". Root cause
+measured with HIS exact file: rows' own category fields WON over the set he had open, so
+poses landed in Standing/Kneeling while 🎨 was scoped to his empty new set.
+Fixes (all reproduced-then-verified against his file):
+- Precedence flipped: the OPEN SET (form category) WINS over per-row categories ("import
+  INTO this set" is the intent); row categories only apply on "All".
+- Name-dupes now scoped PER SET (was global) -- so the corrective re-import into the right
+  set isn't silently skipped, and the same pose name may exist in two sets. Re-import into
+  the SAME set still skips.
+- 🧹 "purge image-less" button in the modal header (open set) -- one click removes stray
+  imports without touching rendered poses. Import success message now names the target set.
+His cleanup path: re-import the file with the Bodybuilding set open (imports cleanly now),
+then open Standing / Kneeling and 🧹 the 20 strays.
+
+## v1.202.0 -- Pose Library becomes a MODAL with first-class SETS + whole-set generation (2026-08-03)
+
+Lorenzo: the library UI was buttons cluttering the main screen; sets should be the unit --
+import a running set, SELECT the set, generate the whole set for a character; sets stored
+globally for reuse. Design: SETS = the store's existing categories, formalized (zero
+migration -- every existing pose/import already has one).
+- klein2.py: POST /poses/set-rename + /poses/set-delete (removes records+files);
+  /poses/import gains a category form field (import INTO an open set; rows' own category
+  wins); /poses/generate-missing gains a category filter.
+- klein3.py: POST /generate-set -- one gen record PER POSE (each lands in the 📚 gallery
+  pre-linked to its pose + set, visible immediately as running), all fanned across workers
+  via _parallel_klein_edits under the character's 'set' job (live per-pose name@worker).
+  40-pose cap per run. _gen_public carries 'set'.
+- UI: main screen is now just [🕺 Open Pose Library (N poses · M sets)] + selection card +
+  generate box. The library lives in a full-screen modal: set chips w/ ▶ Use set / ✏️ rename /
+  🗑 delete-set / ➕ new set (target for imports), all import+create+render tools scoped to
+  the OPEN set, pose grid + prompt editor. Selecting a pose clears set mode and vice versa;
+  set mode locks count to 1/pose and renames the button to 🚀 Generate SET; set-run progress
+  line with per-pose workers; gallery live-refreshes during set runs.
+Verified offline: esbuild, 18+10 route parity, set rename/delete round-trip (files unlinked),
+set-generation pose selection (rendered-only, per-set).
+
+## v1.201.10 -- 📦 pose PACK import: image zips + OpenPose JSON rendering (2026-08-03)
+
+Lorenzo: community pose packs come as openpose/depth/DWpose files -- nail importing those and
+"we have an almost unlimited array of pose sets". Two tiers, both shipped in the shared
+library backend:
+- POST /poses/import-pack: .zip of control IMAGES (openpose skeleton renders, depth maps,
+  DWpose renders -- any image already works as image 2) -> each becomes an upload-type pose
+  named from its filename, category from the pack name; junk (__MACOSX, dotfiles, non-image)
+  filtered; 400-entry read cap / 200 import cap; case-insensitive dupe skip.
+- OpenPose keypoint JSONs (in the zip or as a bare .json): rendered SERVER-SIDE to the
+  canonical skeleton image with PIL -- classic 18-color rainbow limbs, COCO-18 and BODY_25
+  orders, official {people:[{pose_keypoints_2d}]} + editor {canvas_width/height} + bare
+  {keypoints} variants, pixel or normalized coords (normalized -> 832x1216). No worker, no
+  custom nodes. Non-openpose JSON degrades to a per-entry error, not a crash.
+- UI: 📦 Import pack button next to 📥/📄. Generate prompt's pose-diagram note applies to all
+  pack poses automatically (source=upload).
+Offline tests: COCO-18 canvas render (400x560, skeleton pixels verified), BODY_25 normalized
+(832x1216), zip end-to-end (png + rendered json, junk filtered, dupe re-import, bare json).
+Test also CAUGHT a real bug pre-ship (_save_png undefined -> _save_pose_png helper).
+DWpose note: DWpose outputs openpose-style skeletons, so its image packs just work; exotic
+binary formats (.pose etc) are NOT parsed -- honest limit.
+
+## v1.201.9 -- 📄 LLM guide button for pose-set imports (2026-08-03)
+
+Next to 📥 Import set: a "📄 LLM guide" button that downloads
+pose_set_llm_instructions.md -- a self-contained prompt doc for ANY LLM: user says "I want a
+set of XYZ poses", pastes the doc, gets back exactly our import format. The doc teaches:
+JSON-array-only output (CSV alt), pose-description-ONLY prompts (explicit limb positions,
+single figure, full body; NO identity/clothing/scene/style words -- the app's mannequin
+wrapper handles those), naming/category rules, count+variety defaults, and a 3-pose example
+(example validated as parseable by our importer). Mirrored to docs/POSE_SET_LLM_GUIDE.md.
+Client-side blob download, no backend change.
+
+## v1.201.8 -- pose library: batch import (JSON/CSV) + generate-missing fan-out (2026-08-03)
+
+Lorenzo: import a whole pose set at once (it's just name+prompt), batch-render the images,
+then curate with the existing regen/delete. Added to the SHARED Pose Library 2.0 backend
+(klein2.py) so all modes benefit:
+- POST /poses/import (multipart): JSON array/{poses:[...]} or CSV with
+  name,prompt[,category][,raw] headers (delimiter-sniffed, BOM-safe). Creates records
+  WITHOUT images (has_image=false now exposed per pose); per-row raw=true (or raw_all form
+  flag) skips the gray-mannequin wrapper; duplicate names skipped case-insensitively.
+- POST /poses/generate-missing: renders every image-less prompt pose, fanned across ALL
+  klein workers (queue + pinned threads, per the standing worker-visibility rule) with live
+  per-pose {worker,status} in _BATCH_RUN, exposed via GET /poses.batch_run.
+- Klein3Panel: 📥 Import set button (format in tooltip), 🎨 Generate missing (N) with live
+  "name @ worker ⏳" progress line, dashed "no image yet" placeholder tiles (not selectable
+  until rendered; ✏️ edit/regen/delete still available on them).
+Offline-verified: JSON+CSV parsing, dupe skipping, raw wrapper bypass, missing-target
+selection, has_image flag. Note: Klein2Panel (pinned) will show broken thumbs for imported
+poses until rendered -- accepted, klein2 is pinned.
+
+## v1.201.7 -- 📚 saved results gallery, pose-linked (2026-08-03)
+
+Lorenzo: outputs vanished from the UI when switching poses (they persisted on disk in
+_libraries/klein3/_gen but only the latest batch rendered), and results should be linked to
+their poses for later reuse. Now:
+- GET /characters/{slug}/gens: every saved batch for the character, newest first, each
+  carrying pose_id + pose name + created_at + refs + images (gen status now stamps
+  created_at; live batches merge from _GEN_LIVE). POST /gen/{gid}/delete (blocked while
+  running) for cleanup.
+- UI: "📚 Saved results" section under Generate -- per-batch card with pose name, timestamp,
+  the small dashed exact-ref thumbs, output thumbs (lightbox), "use pose" (re-selects that
+  batch's pose in the library) and 🗑. "this pose" filter chip narrows the gallery to the
+  currently selected pose. Gallery refreshes on character switch and whenever a running
+  batch completes. Pose library itself was already persistent (shared 2.0 store) -- the gap
+  was results visibility. Gallery logic + 17-route parity verified offline.
+
+## v1.201.6 -- Klein 3.0: lightbox everywhere (2026-08-03)
+
+Images opened in new tabs; Lorenzo wants the app's standard lightbox. Reused the shared
+ImageLightbox from CharacterStudio/p2Shared (found by grep, not reinvented). Now click-to-
+lightbox with zoom-in cursor on: reference thumbnails, active base (both spots), pose preview
+in the generate box, the exact-refs strip, and generated outputs. Zero remaining
+target=_blank links in the panel. Pose grid tiles still SELECT on click (✏️ for the prompt);
+version tiles still ACTIVATE on click.
+
+## v1.201.5 -- base versions: 🗑 delete + 🔁 single-view regenerate (2026-08-03)
+
+Lorenzo's cleanup asks after his pre-slot-fix runs left 6 duplicate versions:
+- 🗑 on every base-version tile: POST /characters/{slug}/base/{vid}/delete removes the
+  version + its file; if it was active, active clears (falls back to the front-tagged ref).
+- 🔁 on every stripped tile: re-strips JUST that view in its mode (StripIn.view param, slot
+  replacement keeps the list tidy); single-view 🔁 keeps the current active pointer while
+  full-set runs still default-activate the front. Version thumbs cache-bust on created_at.
+Route parity re-verified (15 frontend calls, 0 unmatched).
+
+## v1.201.4 -- stripped views are a SET (slot replacement); shirt-removal prompt fix (2026-08-03)
+
+Lorenzo's live feedback round 2: sandals GONE (v1.201.3 prompt worked) but the SHIRT survives
+in all underwear strips, and regenerating strips should not grow an endless version list.
+- SET semantics: each view (front/back/left/right) owns ONE stripped slot -- a regenerate
+  REPLACES the slot in place (same list position), deletes the old image file, and the active
+  pointer follows its slot. Mock-verified: two strip rounds -> still 2 versions, new ids,
+  active follows front, old file unlinked.
+- Shirt fix: 'every other piece of clothing removed' was too soft. _strip_prompt() now names
+  every garment class explicitly ('the shirt, t-shirt, top, jacket and EVERY piece of
+  upper-body clothing is completely REMOVED, showing bare skin on the chest, stomach, back
+  and arms...') and is SEX-AWARE from the character fields: male/unknown -> gray boxer briefs
+  + bare chest; female -> gray sports bra + briefs. Nude mode equally explicit.
+Backend restart to pick up.
+
+## v1.201.3 -- strip the WHOLE view set (parallel), selectable stripped base; footwear fix (2026-08-02)
+
+FIRST LIVE Klein 3.0 VERDICT from Lorenzo: front strip "looks great" -- the pure-2D recipe
+works. Two asks:
+- Full-set stripping: default strip now takes the newest ref of EACH tagged view
+  (front/back/left/right) and strips them ALL in parallel across workers (per-view
+  worker+status in the job line), so the whole standing set is ready as stripped reference
+  material. Each result is a base VERSION labeled with its view; the FRONT one auto-activates
+  and any version is click-to-activate for pose generation (his "choose which one" selector).
+  Single-ref strip stays via the source dropdown. Logic mock-verified (3 views -> 3 versions,
+  parallel across 2 workers, front active, active-base path resolves).
+- Sandals leak: strip prompts now explicitly demand "completely BAREFOOT: no shoes, no
+  sandals, no boots, no socks, no accessories" in both underwear and nude modes.
+
+## v1.201.2 -- Klein 3.0: multi-worker fan-out + ALWAYS-visible worker status; big Analyze button (2026-08-02)
+
+Lorenzo's standing rule, now baked in: "always make it so we can see what worker is running,
+and if renders can be threaded to our workers we should always do this... when we don't show
+status it's easy to let it sit when it's really crashed."
+- _klein_workers_all(): enumerates EVERY healthy klein-capable (non-runpod) worker straight
+  from dispatcher.workers (capabilities/healthy/is_runpod/in_flight -- introspected from
+  dispatcher.py source, not guessed).
+- _parallel_klein_edits(): shared job queue + one pinned thread per worker = true fan-out.
+  Live per-job status in st['tasks'][key]={worker,status queued|running|done|error,error};
+  on_result runs under a lock (also fixes the char.json thread-write edge from v1.201.1).
+  VERIFIED by mock test: 4 jobs across 2 workers, both used, all attributed.
+- Wired into: generate batches (per-image "img 2 @ w2:8188 ⏳" lines while running, live via
+  _GEN_LIVE dict so status.json lag doesn't hide progress) and missing-view generation
+  (per-view worker+status in the job line). Strip + upscale record their worker too.
+- /api/klein3/health now returns the full worker table; the panel shows a workers bar
+  (url, klein cap, healthy, in_flight) refreshed every 30s.
+- 🪄 Analyze made PROMINENT (Lorenzo couldn't find the tiny per-thumbnail button): big purple
+  "Analyze references (LLM) -> fill description" button in the Description section, now
+  MULTI-IMAGE (up to 4 refs, front+face first) through the same clone-analyze wizard;
+  per-thumbnail 🪄 kept for single-ref analysis.
+
+## v1.201.1 -- Klein 3.0 pre-flight review (requested): 1 real bug + parity checks (2026-08-02)
+
+Lorenzo asked for a double-check before first runs ("we usually [have issues] the first
+couple runs"). Systematic pass:
+- VERIFIED clean: all 6 klein2 helper imports exist; all 14 frontend->backend routes match
+  the klein3 router (regex parity check); all 5 shared pose calls match klein2's routes;
+  module-load smoke test passes (20 routes, prefix /api/klein3, slugify/prompt helpers);
+  pyflakes + esbuild clean.
+- REAL BUG FOUND+FIXED: ref_upload loaded char.json BEFORE `await file.read()` -- the UI
+  uploads multiple files in parallel, so two requests could read the same state at the await
+  and the second save clobbered the first's index entry (orphaned image). Fix: await first
+  (mutation section now yield-free = atomic on the event loop) + the UI now uploads
+  multi-file selections SEQUENTIALLY.
+- Cosmetic: CharT.updated_at added to the TS interface (used for cache-busting; vite build
+  skips tsc so it never broke, but now it's honest).
+- Known acceptable edge (documented, not fixed): bg jobs (strip/views/upscale) write
+  char.json from worker threads; a user retagging at the exact save instant could lose one
+  tag edit. Whole-file JSON write, rare, self-healing on retry.
+
+## v1.201.0 -- 🎯 KLEIN 3.0: pure Klein reference mode; 3D lane PINNED w/ postmortem (2026-08-02)
+
+Lorenzo pinned the 3D statue lane (final upscaled-source run came out chrome/untextured --
+undiagnosed, documented) and called the pivot: NO 3D. docs/KLEIN2_3D_POSTMORTEM.md is the
+re-entry map (everything built stays live behind the 🚀 tab; issue list, why pinned, where 3D
+may still earn its keep, the never-run A/B).
+
+NEW: backend/api/klein3.py + Klein3Panel.tsx + "🎯 Klein 3.0" engine sub-tab. Character =
+tagged 2D refs + ONE active base; generation = image1(base) + image2(pose) -> Klein 2REF.
+All assembled from proven machinery:
+- refs: upload/tag (front/back/left/right/face/outfit/other), delete, serve; front-tagged ref
+  is the DEFAULT base (his spec); ⭐ promote any ref to base.
+- 🪄 Analyze: frontend reuses the existing /api/studio/vnccs/upload + wizard/clone-analyze
+  vision endpoints to fill the 11 creator-style description fields (editable + saved).
+- 🧭 Missing views: Klein N-ref edits (identity refs + per-view prompts), auto-tagged as
+  front/back/left/right refs. No SAM3D, no 3D.
+- 👙 Strip -> base: underwear | nude (his requested option), any source ref (default front),
+  Klein 1REF edit w/ identity/pose/framing-preserving prompt; result auto-activates as base.
+- ⬆ Upscale: proven STUDIO_UPSCALE.json GAN graph via prepare_studio_upscale_workflow;
+  upscaled version auto-becomes active (his spec). Base versions strip w/ click-to-activate.
+- Poses: SHARED Pose Library 2.0 (same /api/klein2/poses endpoints + store) -- prompt-
+  generated w/ stored/editable/regenerable prompts, uploads (photo/openpose/depth), defaults
+  seeding. Generate prompt appends a pose-diagram note for uploaded/promptless poses.
+- Generate: 2-ref Klein, batches under _libraries/klein3/_gen with the EXACT refs saved and
+  shown (compare built in). /api/klein3/health preflight.
+Klein 1.0/2.0/Qwen untouched. Wiring: createEngine 'klein3', engine-row button, standalone
+branch. Backend restart + frontend rebuild (run.bat) + hard refresh.
+
+## v1.200.15 -- statue #4 verdict: structure FIXED; face/hands = source-resolution limit (2026-08-02)
+
+Preprocessing fix (v1.200.14) VERIFIED by eyeball: Duke statue #4 has correct proportions, 3D
+hair, separated fingers, strong skin texture -- holes and garbage shapes gone. Remaining:
+smeared face, odd finger detail. Root cause is signal, not pipeline: in a full-body turnaround
+the face is ~100px, and conditioning the whole body at ~1024 leaves almost no face pixels
+(hands same). Levers shipped:
+- High preset (generate mode) now runs pipeline_type=1536_cascade (higher voxel tier = better
+  face/finger geometry; tiled decoder + FP8 give 16GB a real shot, OOM fails clean);
+- preprocess max_size 1024->2048 so Lorenzo's upscaled base sets aren't discarded at the door
+  (he suggested upscaling the T-pose set -- yes, helps the conditioning signal).
+Also the design bet worth remembering: the generate flow sends the PHOTOREAL front base as
+image 3 for face likeness -- the statue's face may not need to be great. Next measurement is
+one 2-3-ref generation batch with the current statue before more statue polish.
+
+## v1.200.14 -- views must be PREPROCESSED: bg removal + object crop (2026-08-02)
+
+Duke statue #3 (first 'generate' mode): holes, wrong proportions, weird face/limbs -- but 3D
+hair and separated hands (TRELLIS geometry itself clearly capable). MEASURED against the
+pack's own example workflow (MeshWithTexturing_MultiView.json): the intended input path is
+LoadImageWithTransparency -> Trellis2PreProcessImage -> generators. We fed RAW plate renders
+(solid backgrounds, full-frame) straight in, so DINOv3 conditioned on background + wrong
+framing -- classic holes/garbage-shape territory.
+Fix: _wire_views_with_preprocess() -- every view now runs through the pack's
+Trellis2PreProcessImage (remove_background=True via worker rembg, padding 10, max_size 1024 --
+the example's values) in BOTH statue modes (generate + texture), with clean fallback when the
+class is absent. Mock-verified 6/6 (pre nodes exist, wired img->pre->generator, texture mode
+too, fallback). Backend restart -> re-run 🧊 Full statue.
+
+## v1.200.13 -- 🧊 FULL-STATUE MODE: TRELLIS generates its own geometry (2026-08-02)
+
+Lorenzo's diagnosis question ("does trellis do the mesh or are we supplying it?") hit the
+root: WE supply the Hunyuan-2 rig mesh, TRELLIS only paints it -- the bizarre face and
+welded-together hands are the RIG MESH's geometry (Hunyuan fuses close geometry; faces soft
+at our octree res). No texture can fix missing geometry.
+Key insight: the statue is only a SNAPSHOT REFERENCE -- nothing downstream depends on its
+geometry matching the rig. So new default statue mode 'generate': TRELLIS.2's own image->3D
+multi-view generation from the same turnaround views -- geometry (faces! fingers!) AND
+texture in one run. Chain (all node specs measured from pack source):
+Trellis2LoadModel -> Trellis2MeshWithVoxelMultiViewGenerator (named front/back/left/right
+inputs, 1024_cascade, use_tiled_decoder=True for VRAM) -> Trellis2OvoxelExportToGLB (bake,
+texture_size dial, target_face_num 500k -- 2M default chokes the browser) ->
+Trellis2ExportMesh -> GLB. Old lane kept as mode 'texture' (paint rig mesh). UI: statue mode
+select (Full statue default | Paint rig mesh), works even for characters with NO rig mesh.
+Refactors: _make_model_loader_inputs + _type_matched_saver shared by both builders.
+Mock-verified 16/16 on the generate graph + texture regression. quality/guidance overrides
+apply to the gen stage; 'high' -> texture_size 4096 on the ovoxel bake.
+Backend restart + frontend rebuild (run.bat) + hard refresh.
+
+## v1.200.12 -- Hunyuan-offload question answered; High preset gains guidance 2.5 (2026-08-02)
+
+Lorenzo asked why ComfyUI's dynamic RAM offload + quantization don't rescue Hunyuan3D 2.1
+paint on 16GB. Researched (sources in transcript): (1) core ComfyUI ships only the 2.1 SHAPE
+model -- paint exists solely in wrapper packs that build a diffusers pipeline OUTSIDE
+comfy.model_management, so smart offload never sees it; (2) the 21GB is ACTIVATIONS not
+weights (paint UNet is only 2B/~4GB): 6-view cross-attention diffusion + DINOv2-giant +
+RealESRGAN + 2048 render/4096 bake buffers -- weight offload can't shrink that; (3) NO
+GGUF/FP8/NF4 paint checkpoint exists on HF at all. The one real 16GB route is mmgp 8-bit
+runtime offload, packaged in YanWenKun/Hunyuan3D-2-WinPortable (standalone Gradio, outside
+ComfyUI, 24-32GB+ system RAM, slow) -- a manual experiment, not a pipeline lane.
+Useful side-find: TRELLIS dark textures are a KNOWN albedo trait; community fix = texture
+guidance ~2.5 (node default 3.0 runs hot) + bright refs + proper PBR viewer. High preset now
+also sets texture_guidance_strength=2.5 (+ explicit override field on StatueIn).
+
+## v1.200.11 -- FIRST STATUE COMPLETED; quality pass: viewer env + hi-DPI + quality dial (2026-08-02)
+
+MILESTONE: the full statue pipeline ran end-to-end on a real 16GB worker. Lorenzo's verdict:
+texture "very very close" but dark and low-rez ("PS1"). Two of those are likely OUR VIEWER,
+not TRELLIS: (1) no environment map -- PBR GLBs render dark/dead in three.js without IBL;
+added RoomEnvironment via PMREM + ACESFilmic tone mapping (exposure 1.15), lights rebalanced;
+(2) pixelRatio was locked to 1 -- blurry/blocky on hi-DPI; now min(devicePixelRatio,2), with
+the snapshot pinning ratio 1 so captures stay deterministic 832x1216.
+Third factor is real: our 16GB guard clamps texture_size to 2048 (pack default 4096). Added a
+statue Quality selector: Standard (2048/1024) | High (4096 + conditioning 1536 + 24 steps,
+may OOM 16GB) -- backend StatueIn accepts quality/texture_size/texture_steps/resolution and
+build_trellis_graph applies explicit overrides AFTER the VRAM guards (mock-verified both).
+Hunyuan3D-2.1 paint stays ruled out for these workers (>=21GB official requirement).
+Also worth remembering: the statue is a REFERENCE for Klein, not a final render -- Klein
+repaints photoreal; identity fidelity matters most. Frontend rebuild via run.bat.
+
+## v1.200.10 -- worker installer is now the COMPLETE one-shot (models included) (2026-08-02)
+
+Lorenzo: one script per worker, no per-machine fiddling. install_trellis2 now also
+pre-downloads AND REPAIRS all models with resumable huggingface_hub calls (TRELLIS.2-4B-FP8
+8.1GB incl the pipeline_fp8.json sanity check, DINOv3 from the ungated mirror,
+TRELLIS-image-large ss decoder) -- this permanently kills the interrupted-first-run partial
+snapshot failure class, because re-running the installer is the repair. --no-models flag
+skips it. Full per-worker story is now: copy 2 files -> run the .bat -> restart ComfyUI.
+Everything discovered this session is baked in: Manager bypass, open3d optional, nested
+CUDA wheel sets, triton-windows + python include/libs bundle, reconviagen dir, model
+pre-seed/repair, import verification. docs/KLEIN2.md worker section rewritten to lead with
+the one-script story (manual steps demoted to reference). hub call signatures verified
+against current huggingface_hub.
+
+## v1.200.9 -- triton on portable python: missing C headers (Python.h) (2026-08-02)
+
+Deepest run yet: conditioning on GPU OK, mesh->dual-grid OK, shape encoder loaded, first
+flex_gemm sparse-conv kernel LAUNCHED -- then triton's one-time CUDA driver-stub compile
+failed: 'Python.h not found'. Known ComfyUI-portable issue: python_embeded ships without
+include/ and libs/. Fix = woct0rdho/triton-windows include+libs bundle extracted into
+python_embeded (minor version must match, patch may differ; 3.13.2 bundle covers 3.13.11).
+Lorenzo given the direct URL + extract steps; installer now auto-detects missing Python.h and
+downloads the matching bundle (3.11/3.12/3.13 URLs verified HTTP 200). ComfyUI restart needed
+after adding the folders (triton caches the libs check per process). No backend changes.
+
+## v1.200.8 -- graph builder bug: combo defaults ignored -> device=cpu (2026-08-02)
+
+Statue run got all the way INTO the texture pipeline (models downloaded, DINOv3 image-cond
+loaded) then died: 'Input type (torch.cuda.FloatTensor) and weight type (torch.FloatTensor)'.
+MEASURED root cause in OUR builder, not the pack: _fill_defaults picks a combo's FIRST option,
+discarding the {'default': ...} config. Trellis2LoadModel.device options are [cpu, cuda] with
+default cuda -> we sent device='cpu'; the pipeline then kept the DINOv3 model on CPU while the
+extractor .cuda()'s its inputs. The SAME bug was sending conv_backend='spconv' (default is
+flex_gemm -- the wheel we actually install), which would have been the very next crash.
+Fix: _input_spec now moves a combo's declared default to the front, so fill-defaults honors it
+for EVERY combo; plus an explicit device->cuda preference on the model loader. 11/11 mock-graph
+assertions pass (device cuda, conv_backend flex_gemm, and all previous wiring intact).
+Backend restart required. ('mmgp not installed' in the log is a harmless Pixal3D-only patch
+notice -- measured in pack source, not our problem.)
+
+## v1.200.7 -- pack bug workaround: FP8 model path never creates models/microsoft/TRELLIS.2-4B (2026-08-02)
+
+v1.200.6 graph VALIDATED and EXECUTED on the worker (the type-matched exporter fix is
+confirmed working) -- then died 0.35s in, inside Trellis2LoadModel: FileNotFoundError copying
+reconviagen_pipeline.json to models/microsoft/TRELLIS.2-4B/. MEASURED in the pack source
+(nodes.py ~388): the loader unconditionally copies <pack>/reconviagen_pipeline.json into the
+MICROSOFT model folder, but selecting the FP8 model only ever creates models/visualbruno/...
+-- so on a fresh FP8-only install the destination dir doesn't exist. Upstream pack bug.
+Fix: pre-create the folder + place the file (2 commands on the current worker; installer now
+does it automatically for future workers). No backend changes.
+
+## v1.200.6 -- statue graph: TYPE-MATCHED exporter; fail-fast validation; output fetch (2026-08-01)
+
+First real statue submission got everything right up to the LAST wire: ComfyUI rejected the
+graph with return_type_mismatch -- the saver I name-matched (Trellis2OvoxelExportToGLB) wants
+MESHWITHVOXEL but the texturing node outputs TRIMESH. MEASURED in the pack source: the right
+node is Trellis2ExportMesh (trimesh: TRIMESH + file_format combo incl 'glb', OUTPUT_NODE that
+returns STRING paths with NO ui files in history; saves <prefix>_<counter:05>_.glb).
+
+klein2.py fixes, all verified against a mock /object_info replicated from the pack's REAL
+INPUT_TYPES (15/15 graph-wiring assertions pass):
+- plan/save: saver now TYPE-MATCHED against the texture node's output types (link input, tex
+  output INDEX, and glb format combo all resolved from object_info); health shows the pick.
+- Trellis2LoadModel: also force sparse_backend=xformers (options are xformers|flash_attn and
+  we never install flash-attn).
+- queue_prompt result checked for node_errors/error -> instant readable failure instead of a
+  60-min timeout (klein2's queue path logged the validation error but still polled).
+- wait loop breaks on status.completed even with empty outputs; when history reports no files
+  (Trellis2ExportMesh's case) the GLB is fetched by its DETERMINISTIC name
+  (statue_<token>_00001_.glb in rbmn_klein2/).
+Backend restart (run.bat) required. Possible next runtime snag, called out in advance: if the
+worker has neither xformers nor flash-attn importable, texturing may fail at attention time ->
+pip install xformers with the embedded python.
+
+## v1.200.5 -- Klein 2.0 moved INSIDE Create, next to the engine toggles (Lorenzo) (2026-08-01)
+
+Lorenzo: "the klein 2.0 tab should be a child of Create mode, next to the klein mode toggle we
+already have" -- not a top-level tab. Rewired VNCCSNativePage: Tab union reverted (no 'klein2'
+top-level), createEngine grows to 'klein'|'qwen'|'klein2', third engine button "🚀 Klein 2.0"
+sits after 🧪 Klein / 🟣 Qwen in the Create sub-tab row, and when selected the whole create
+grid is replaced by <Klein2Panel/> with its own copy of the sub-tab row (New/Clone jump back to
+the klein engine). kleinCreate derivations are safe: the grid never renders while klein2 is
+active, so no qwen/klein UI leaks. esbuild-verified on the patched file.
+
+Also diagnosed why the tab wasn't showing at all: run.bat builds the frontend SILENTLY
+(npx vite build >nul) and falls back to the previous dist on failure -- with `three` not yet
+npm-installed the build fails and the OLD UI serves. npm install in frontend/ is required once.
+
+## v1.200.4 -- installer: cp313 wheels live in the NESTED 'Torch2100/CUDA 13.1' folder (2026-08-01)
+
+Second worker run (py3.13/torch2.10.0+cu13.0) failed with 'no cp313 wheels in Torch2100
+(available: cp311, cp312)'. MEASURED against the cloned repo: the pack's cp313 wheels exist
+ONLY inside the SUBFOLDER Torch2100/CUDA 13.1 (full set there: cumesh, custom_rasterizer,
+flex_gemm, nvdiffrast, nvdiffrec_render, o_voxel + natten) -- the top-level Torch2100 dir
+stops at cp312, and Torch280 nests a natten-only 'Blackwell' dir. pick_wheel_dir rewritten:
+scans one level of subfolders, candidates must actually CONTAIN usable wheels for this cp tag
+(natten/flash excluded first, so natten-only dirs drop out), CUDA-tagged subfolders preferred
+iff their major matches torch's CUDA major, [WARN] when a CUDA-mismatched set is the only
+option. Verified against the real wheel tree: (2.10.0,cu13.0,cp313)->Torch2100/CUDA 13.1;
+(2.10.0,cu12.8,cp312)->Torch2100; (2.10.0,cu13.0,cp312)->CUDA 13.1; (2.7.0,cp311)->Torch270;
+(2.8.1,cp312)->Torch280; cp310 fails with the tag inventory named.
+
+## v1.200.3 -- installer: open3d is OPTIONAL (no cp313 wheels exist) (2026-08-01)
+
+First real worker run of install_trellis2 (py3.13.11 portable, torch 2.10.0+cu13.0) died on
+`open3d` -- MEASURED: PyPI has no open3d build for cp313 AT ALL (0.19.0 tops out at cp312;
+open3d-cpu too), and the cloned pack imports open3d LAZILY in exactly two places (nodes.py
+1020 / 3713): Trellis2PostProcessMesh's merge-vertices/NaN options and
+Trellis2LaplacianSmoothingWithOpen3d -- neither is in the RBMN texturing graph. Installer now
+installs requirements.txt PER PACKAGE and treats open3d as skippable with a [WARN] naming
+exactly what's lost; every other dep stays hard-required. Parse loop verified against the
+pack's real requirements.txt. Everything else in Lorenzo's log was healthy (repo cloned,
+Torch2100 wheel set will apply).
+
+## v1.200.2 -- worker installer script for ComfyUI-Trellis2 (2026-08-01)
+
+ComfyUI-Manager failed to install visualbruno/ComfyUI-Trellis2 on Lorenzo's portable build
+(Manager registry bug: KeyError 'files' -- the catalog entry has no repo info), so:
+`scripts/worker/install_trellis2.bat` + `.py` -- copy both to the portable root (or ComfyUI\)
+on a worker and run the .bat. It finds the EMBEDDED python, clones the repo (ZIP fallback when
+git is missing), installs requirements.txt, auto-picks the bundled wheel set matching THIS
+python+torch (cp tag + TorchXXX folder, CUDA-13 set preferred iff torch is cu13x; natten and
+flash-attn deliberately excluded -- graphs use sdpa), adds triton-windows (imported by the
+pack but unlisted), then VERIFIES each native module imports (cumesh/nvdiffrast/flex_gemm/
+o_voxel/triton) with an OK/FAIL summary. Models still auto-download on first statue run.
+Selection logic unit-tested offline (torch 2.7/2.8/2.10 x cp-tags x CUDA-13 preference).
+
+## v1.200.1 -- Klein 2.0: 16GB-VRAM hardening of the statue texture graph (2026-08-01)
+
+Lorenzo: workers are 16GB cards. Fresh research (2026-08-01, sourced in docs/KLEIN2.md):
+TRELLIS.2 MESH TEXTURING fits 16GB -- it loads only ~3.3GB of weights in FP8 and skips the
+heavy shape-gen/dual-contouring stages -- BUT the pack's default texture_size=4096 needs
+~16GB for the UV bake alone and would OOM. Also learned the real node names
+(Trellis2LoadModel / Trellis2LoadMesh / Trellis2MeshTexturingMultiView with NAMED
+front/back/left/right image inputs) and that the DINOv3 encoder auto-downloads from an
+UNGATED mirror (no Meta license dance).
+
+klein2.py build_trellis_graph hardened accordingly:
+- wires the model-loader link the first version left dangling (Trellis2LoadModel-style;
+  would have failed on first run) -- prefers the FP8 checkpoint option, low_vram=True,
+  backend=sdpa (pack ships no flash-attn wheel);
+- per-view IMAGE inputs now wired BY NAME (front_image/back_image/...) instead of dict
+  order, batch-chain fallback kept for single-IMAGE nodes;
+- 16GB guards on the texture node: texture_size clamped <=2048, resolution 1024,
+  low_vram=True. plan (and /api/klein2/health) now reports model_loader too.
+docs/KLEIN2.md worker section rewritten as the 16GB edition: 5 wheels (cumesh, nvdiffrast,
+nvdiffrec_render, flex_gemm, o_voxel) + triton-windows gotcha, full auto-download model
+manifest (~9.6GB), Hunyuan3D-2.0-paint (kijai) as the 16GB fallback, 2.1 paint ruled out
+(needs >=21GB). Still ZERO worker runs spent; nothing claimed verified.
+
+## v1.200.0 -- KLEIN 2.0: statue-reference posing, a separate lane (2026-08-01)
+
+Lorenzo's new direction, built alongside the classic pipeline (which is UNTOUCHED): stop driving
+pose with depth/normal control maps and hand Klein two ordinary reference IMAGES instead --
+"the person from image 1 (the character rendered at EXACTLY the needed angle) in the pose from
+image 2 (a plain picture of the pose)".
+
+New, all self-contained:
+- `backend/api/klein2.py` (prefix /api/klein2, mounted in main.py). Statue texturing job:
+  existing Hunyuan mesh (`mesh3d/<id>/character.glb`) + the real turnaround views -> TRELLIS.2
+  multi-view texture nodes on a worker -> `mesh3d/<id>/statue.glb`. The texture graph is built
+  DEFENSIVELY from /object_info (same approach as the UniRig graph -- third-party names drift);
+  the exact graph is dumped to `statue_graph.json`, and `workflows/KLEIN2_TRELLIS2_TEXTURE.json`
+  (placeholders %MESH% %VIEW_*% %PREFIX%) overrides the auto-builder when present.
+  GET /api/klein2/health = zero-cost preflight: per-worker TRELLIS scan + the full wiring plan.
+- Pose Library 2.0 (`_libraries/klein2/poses/`): poses are IMAGES. Klein-t2i generated poses
+  STORE THEIR PROMPT -- view/edit/regenerate in the library UI; uploads allowed; 16 seedable
+  defaults in a neutral gray-mannequin style (no identity/clothing to bleed). Seated/crouched
+  poses -- impossible in the rotation-only clay system -- are just images here.
+- Generate: 2-3-ref Klein edit (KLEIN_EDIT_ULTRA_WORKFLOW_{2,3}REF) -- image 1 = viewer
+  snapshot at the chosen angle, image 2 = pose image, optional image 3 = photoreal front base
+  (face likeness + fights the statue-material look). Baked role-assignment prompt with
+  "photorealistic skin and fabric"; user text appended. Every batch saves the EXACT refs it was
+  given (`ref_identity.png`/`ref_pose.png`) and the UI shows them under the results --
+  compare-output-to-input is built into the surface.
+- `frontend/.../Klein2Panel.tsx` + a new top-level "🚀 Klein 2.0" tab on the Klein page
+  (VNCCSNativePage: Tab union + button + render branch -- 4 anchored edits, nothing else
+  touched). three.js viewer (new `three` dep -- run `npm install` in frontend/): orbit the
+  statue, "📸 Use this angle" does a deterministic fixed-res (832x1216) render-then-read
+  snapshot. Falls back to the UNTEXTURED mesh so the whole loop works before TRELLIS is installed.
+- `docs/KLEIN2.md`: concept, worker install (ComfyUI-Trellis2 + wheels + gated DINOv3 +
+  TRELLIS.2-4B), the template escape hatch, M2 plan (pose-file -> SDXL-mannequin lane).
+
+NOT yet verified (nothing claimed): no statue has been textured, no 2-ref generation has run.
+First measurements: /api/klein2/health after worker install; open statue.glb by eye; one
+default-pose seed batch; one 2-ref generation vs its saved refs.
+
+## v1.199.146 -- the shoulders, the same way the arms were fixed: ONE bone (2026-08-01)
+
+Lorenzo after the revert: *"some are decent and some still have the shoulder overexageration."*
+Expected -- v145 restored the arm-only correction and left the clavicle mismatch in place.
+
+Measured rest, degrees from vertical: **clavicle 84.3 (rig) vs 77.9 (mannequin) = +6.4 deg**, so
+every pose renders with the shoulders ~6 deg shrugged.
+
+Fixed the way the arm was, and deliberately NOT the way v144 was: **one bone, one scalar, no chain
+composition.**  The upper arm hangs off the clavicle and inherits its rotation, so the arm offset
+is reduced by the same 6.4 deg -- otherwise the arm gets corrected twice and drops too far.
+
+**Feet left alone on purpose** (rig 47.0 vs mannequin 61.9 = -15 deg).  The ankle axis sign is
+unverified, and a wrong guess there is worse than the 15 deg it would fix.  It needs either a
+Blender check on the rig or the proper parent-relative retarget.
+
+## v1.199.145 -- RETRACTED: the v144 per-bone alignment is WRONG.  Back to v143. (2026-08-01)
+
+Field result: mangled clay -- twisted head, arm stubs, a distorted torso.  Lorenzo: *"did a set and
+they are bizarre."*
+
+**Why it is wrong, and it is a plain error on my part:** v144 composed the alignment **per bone in
+WORLD space, ignoring the chain**.  Bones inherit their parent's rotation, so aligning the spine
+already rotates everything beneath it -- and then each child's own alignment applies the same
+correction a second time.  Down a spine -> neck -> head chain that compounds into exactly the
+mangling seen.  The neck/head numbers (177 deg vs 159) made it worst there, which matches the
+render.
+
+The upper-arm-only offset (v143) survived precisely because it corrected ONE bone and let the
+chain alone.  So: reverted to v143 behaviour, which was verified good (arm angle 62.6 -> 28.3 deg,
+mean IoU 0.814 -> 0.871).  The v144 code is left in place behind `_ALIGN_ENABLED = False` together
+with the measured `MANNEQUIN_REST_DIR` table, so the next attempt starts from the measurements
+instead of from scratch.
+
+**What a correct version needs:** work in each bone's PARENT-RELATIVE frame -- a real retarget --
+so the chain is corrected once, not once per level.  The measurements stand (clavicle +6 deg, thigh
++10, foot -15); only the composition was wrong.
+
+**Still true and still unfixed:** shoulders ride ~6 deg high, stance ~10 deg wide, ankle ~15 deg
+off.  Those are cosmetic next to a mangled render, so v143 behaviour is the right floor to stand on.
+
+## v1.199.144 -- FULL skeleton rest alignment + pose set v3 (categories, not arm positions) (2026-07-31)
+
+### (a) Every bone, not one chain
+v143 aligned the upper arms and left the rest.  Lorenzo, after that batch: *"the shoulders are a
+bit over exaggerated and it looks like he's standing on his heels instead of flat on his feet."*
+Measured every bone in both frames -- degrees from vertical, mannequin vs Duke's rig:
+
+| bone | mannequin | rig | mismatch |
+|---|---|---|---|
+| upper arm | 42.2 | 85.4 | +43 (fixed in v143) |
+| **clavicle** | 77.9 | 84.3 | **+6** -> shoulders ride shrugged |
+| **thigh** | 6.4 | 15.9 | **+10** -> stance too wide |
+| **foot** | 61.9 | 47.0 | **-15** -> the weight-on-heels look |
+| calf | 8.2 | 7.5 | -1 (fine) |
+
+`clay_driver` now carries `MANNEQUIN_REST_DIR` (16 bone directions, measured from
+`pose_render._apply_pose` with `return_joints`) and composes, per bone,
+`Rw @ A` where `A` rotates the RIG's rest direction onto the MANNEQUIN's -- applied even to bones
+the pose does not touch, or an unposed ankle keeps the mismatch.  The v143 upper-arm offset is
+superseded and removed.
+
+**Verified numerically in Blender before shipping** (`/tmp/align_check.py` on the real rigged.fbx):
+after alignment every bone reads the mannequin value exactly -- upperarm 85.3 -> 42.2, clavicle
+86.1 -> 77.9, thigh 15.9 -> 6.4, foot 45.5 -> 61.9.  Logs `CLAY_LOG rest alignment (N bones): ...`.
+
+### (b) Pose set v3 -- variation from the whole body
+Lorenzo: *"they are so similar... merely be changes in arm position."*  A character sheet spans
+categories (neutral, locomotion, weight/attitude, key action, interaction), so:
+Neutral reference · Contrapposto · Walking contact step · Running · Braced wide stance · Leaning
+back · Turning look back · Recoiling surprised · Celebrating arms up · Hands on hips leaning in ·
+Waving · Talking one hand.
+
+**A REAL LIMIT, found by rendering:** this pose format is rotation-only with a FIXED ROOT, so a
+crouch or a seated pose cannot lower the body -- the legs just fold up into the torso and the
+figure floats.  Both were authored, rendered, and **dropped rather than shipped broken**.  Two more
+(bent-forward-hands-on-knees, reaching-out) put the arms up by the head on the render and were also
+dropped; the two v2 poses that verified clean took their slots.  Level changes need pelvis
+translation in the pose format -- a separate piece of work.
+
+## v1.199.143 VERIFIED -- the rest-offset fixed the arms, whole library (2026-07-31)
+
+`CLAY_LOG` does not reach `rbmn.log`, so the fix was verified where it counts -- **in the clay
+control itself**, by measuring the arm angle:
+
+| control | before | after |
+|---|---|---|
+| Stand - arms at sides | 62.6 deg | **28.3 deg** |
+| Weight on one leg | 63.2 deg | **28.7 deg** |
+| Looking down - thinking | 66.3 deg | **30.9 deg** |
+
+The arms came down ~34 deg (0 = hanging, 90 = horizontal T).  The controls now show a man standing
+with his arms at his sides, and so do the renders.
+
+**Scores, same 12 poses, pairing verified (all diagonal):**
+
+| | before | after |
+|---|---|---|
+| mean | 0.814 | **0.871** |
+| min | 0.295 | **0.767** |
+| Arms behind back | 0.531 | **0.890** (+0.359) |
+| Turning - look back | 0.295 | **0.860** (+0.565) |
+
+The two poses that were outright broken are fixed, and nine of the other ten moved by less than the
++-0.03 that run-to-run noise covers.  Two dipped: **Pointing to the side 0.873 -> 0.767** and
+**Waving 0.897 -> 0.842** -- the only two poses that RAISE an arm, and therefore the two whose arm
+moved furthest when the offset landed.  They are now authored 43 deg lower than they render best
+at; re-author those two rather than touch the offset.
+
+**What this closes:** "the poses look weird on Duke" was never the pose data.  It was a 43 deg
+frame mismatch between the mannequin every pose is authored on and the T-posed rig the clay is
+rendered from -- introduced by our own v120 canonicalization and invisible to every pose-set
+rewrite.  It applies to the ENTIRE VNCCS library, not just the RBMN set.
+
+## v1.199.143 -- THE SCARECROW WAS NEVER THE POSES: mannequin rest 42 deg vs rigged rest 85 deg (2026-07-31)
+
+The v2 pose set rendered, 12/12, and the arms came out splayed AGAIN -- after I had specifically
+authored them hanging at the sides and verified that on the mannequin.  So the poses were not the
+problem, and neither was the previous set.
+
+**Measured, both ends:**
+| | upper-arm rest, degrees from vertical |
+|---|---|
+| MANNEQUIN (`pose_render._apply_pose` joints, bones {}) | **42.2** |
+| RIGGED MESH (Duke's own `rigged.fbx`, Blender 4.2.9, bone head->tail) | **85.3 / 85.6** |
+
+**Every authored pose -- the whole VNCCS library and both RBMN sets -- is written against a
+mannequin resting in a 42 deg A-pose, and then applied to a rig resting in a T-pose.  In clay mode
+every arm therefore sits ~43 deg too HIGH.**  End-to-end confirmation: authoring
+`upperarm z = -25` produced a clay control whose arm measured **62.6 deg** from vertical
+(85 - 25 = 60, not 42 - 25 = 17).
+
+This is a consequence of our OWN v120 T-pose canonicalization -- before it the mesh rested
+arms-down and the same mismatch pushed poses too LOW instead.  It has been there the whole time,
+in one direction or the other, which is why "the poses look weird on Duke" survived every pose-set
+rewrite.
+
+**Fix (`clay_driver`, v143):** measure the rig's own rest arm angle from the armature and adduct
+every pose by `rig_rest - 42.2` before applying it, so a pose value of 0 means the same stance in
+both systems.  Computed per rig, so an old arms-down mesh gets a small NEGATIVE offset instead of a
+big positive one; skipped entirely under 0.5 deg.  Logs
+`CLAY_LOG rest offset: rig arms 85.4 deg from vertical vs mannequin 42.2 -> adducting poses by 43.2 deg`.
+
+**This should fix the ENTIRE pose library at once, not just the RBMN set** -- every VNCCS pose has
+been rendering with its arms 43 deg high in clay mode.
+
+### The v2 batch, scored (12 poses, pairing verified)
+mean 0.814 · 10 of 12 between 0.862 and 0.922 · two failures: **Arms behind back 0.531** and
+**Turning - look back 0.295** (the two whose controls also mispaired, i.e. the render did not
+follow the pose at all).  Both are worth re-judging AFTER the rest offset -- they are the two
+poses whose arms sit furthest from the T-rest, so they were the most distorted by it.
+
+## v1.199.142 -- RBMN pose set v2: the v1 poses were SCARECROWS.  My error, measured and fixed (2026-07-31)
+
+Lorenzo, on the first real batch: *"a lot of the poses you chose are pretty similar and not
+natural... they should be standard default poses and don't all need to be T-pose."*  He is right,
+the outputs prove it -- nine renders, every one of them with both arms held straight out to the
+sides.
+
+**The mistake, named exactly:** the mannequin's REST stance already holds the arms **~40 deg out**
+from the body.  Every pose in v1 was written as `upperarm z = +14 .. +40`, which ADDED to that.
+So "arms a little away from the body" rendered as arms at 55-80 deg -- a scarecrow -- and twelve
+different poses all collapsed into one silhouette.
+
+Worse, I imported a constraint that did not belong: **arm CLEARANCE is a requirement of the BASE
+SET** (arms must be clear of the flank or the reconstructed mesh fuses them).  For a POSE render
+the mesh already exists.  Arms can and should rest against the body like a real person's.  I
+optimised a pose set against the wrong objective.
+
+**Measured ladder** (`_diag/_wcal/adduct_sheet_f1.png`), on a Duke-proportioned mannequin:
+
+| upperarm z | result |
+|---|---|
+| 0 (rest) | arms already ~40 deg out |
+| **-20 to -28** | **arms hang naturally at the sides** |
+| -36 and beyond | the arm presses into the flank / disappears |
+
+**Neutral is z = -25.**  Two more findings that shaped v2:
+- On this belly a forearm brought forward (`lowerarm x`) BURIES into the gut unless the upper arm
+  swings forward too (`upperarm x` 25-40) to carry the elbow clear.
+- Variety comes from LEGS, WEIGHT, LEAN, TWIST and HEAD.  Splaying arms does not make poses
+  different, it makes them identical.
+
+**The v2 set** (`workflows/vnccs/RBMN_POSES.json`, same endpoints, still the default grid):
+Stand - arms at sides · Stand - weight on one leg · Hand on hip · Talking - one hand · Waving ·
+Pointing to the side · Hand to back of neck · Arms behind back · Walking - mid stride · Turning -
+look back over shoulder · Three-quarter - talking · Looking down - thinking.
+
+Ten hold the arms down or close to the body; only Waving and Pointing lift one arm, and never
+both.  Facings: nine within +-7 deg, three at +32/+52 (the look-back is the widest and is exactly
+what the v139 view-aware identity exists for -- it gets the RIGHT base view, 38 deg off).
+
+One more sign corrected against a render: `upperarm x` POSITIVE swings the arm BACK, so
+"arms behind back" first came out with both hands in front giving a thumbs-up.
+
+## v1.199.141 -- the RBMN set IS the default pose grid now, silhouettes and all (2026-07-31)
+
+Lorenzo: *"can we make the new set the default with the silhouettes? it's tedious removing and
+adding each pose."*  Fair -- shipping a better set behind a manual add/remove chore is not
+shipping it.
+
+`/pose-defaults` now serves the RBMN pack instead of the vendored VNCCS twelve, so the pose grid
+arrives **pre-selected with rendered silhouettes and real names** ("Waving - hand raised" rather
+than "Pose 5") and a run needs no picking at all.  The thumbnail pass renders whatever is being
+served (`pd["poses"] = poses`) -- verified: 12/12 silhouettes, correct poses, names intact.
+
+Escape hatches, because a default is not a lock-in:
+- `GET /pose-defaults?source=vnccs` returns the old twelve.
+- Delete or rename `workflows/vnccs/RBMN_POSES.json` and the endpoint falls back on its own.
+- The response carries `"source": "rbmn" | "vnccs"`, and the log line
+  `pose-defaults: serving 12 RBMN poses` says which ran.
+
+Every RBMN pose also still appears in the pose library modal under "RBMN Defaults" (v140), so
+mixing them with worker poses stays possible.
+
+## v1.199.140 -- RBMN default pose set: 12 poses authored for REAL, heavy bodies (2026-07-31)
+
+Lorenzo: *"the default poses are kind of extreme... they are centered around visual novels given
+that's VNCCS's initial purpose... meant for skinny anime characters."*  Correct -- and it shows in
+the failures: the shipped library twists the torso past 120 deg and drops the arms flat against the
+flank, which is exactly where a 480lb build breaks.
+
+**`workflows/vnccs/RBMN_POSES.json`** -- 12 standing/gesture poses, served by `/pose-library`
+alongside the worker library (category "RBMN Defaults").  Plain JSON, edit a number to tune a pose,
+no rebuild.  Survives an unreachable worker (it lives in this repo).
+
+Every pose was **rendered on a Duke-proportioned mannequin (body_width 1.4, belly 1.5) before it
+shipped** and its facing measured with `pose_render.body_facing_deg`:
+
+| | facing |
+|---|---|
+| 9 poses | within +-10 deg of front |
+| 2 poses | +-34 deg (three-quarter) |
+| 0 poses | beyond 40 deg |
+
+That is deliberate: 0-40 deg measured **0.94-0.96 IoU** against the control on 2026-07-31, and the
+one pose beyond it (-124 deg) needed the whole view-aware-identity fix to reach 0.90.  A default
+set should live where the pipeline is strongest.
+
+Set: Stand - neutral · Stand - weight on one leg · Talking - both hands open · Talking - one hand
+up · Waving - hand raised · Pointing to the side · Shrug · Arms open - presenting · Hand to chest ·
+Three-quarter - talking · Three-quarter - other side · Looking off - arms at side.
+
+**Bone axis map, MEASURED (`_diag/_wcal/axes_sheet.png`), not guessed:**
+`upperarm z` = abduct (raise sideways, +left / -right) · `upperarm x` = swing forward ·
+`lowerarm z` = elbow bend in the FRONTAL plane (up) · `lowerarm x` = forearm forward ·
+`spine_0N y` = torso twist · `spine_0N x` = lean · `thigh x` = leg forward · `thigh z` = stance
+width · `head y` = head turn.
+
+**Three authoring passes, each corrected against a render, not an opinion:**
+1. Elbows bent with `lowerarm z` gave cactus arms -- forearms come forward on `lowerarm x`.
+2. A wave needs BOTH (`upperarm z` to raise + `lowerarm z` to bend up); `lowerarm x` alone
+   flattens it to "arm out sideways".
+3. Forward pointing does not read in a front view (pure foreshortening) -> points to the SIDE.
+   "Hands clasped low in front" could not be closed over this belly -> replaced with hand-to-chest.
+
+## v1.199.139 VERIFIED -- view-aware identity fixes the turned pose (2026-07-31)
+
+Log confirms the code ran, once, on exactly the pose it should have:
+`klein pose identity: body faces -124 deg -> LEFT base view (34 deg off) as identity, front kept
+as 2nd ref`.
+
+Pairing re-verified by full control-vs-output matrix (diagonal wins every row).
+
+| pose | body facing | batch 1 | batch 2 | **batch 3 (v139 live)** |
+|---|---|---|---|---|
+| 1 | -36.2 deg | 0.863 | 0.925 | 0.938 |
+| 2 | -38.6 deg | 0.867 | 0.944 | 0.953 |
+| 3 | -5.5 deg | 0.871 | 0.963 | 0.960 |
+| 4 | +3.3 deg | 0.913 | 0.954 | 0.957 |
+| **5** | **-123.9 deg** | **0.753** | **0.744** | **0.901** |
+
+**Pose 5: 0.753 / 0.744 -> 0.901.**  +0.157, against a measured run-to-run noise band of ~0.09,
+on the ONLY pose the fix touches.  The other four -- the control group, still on the front
+identity -- sit inside their previous band (0.925-0.963 -> 0.938-0.960), so nothing else moved.
+Single variable, clean result.
+
+Confirmed by eye too: the output now stands turned, with the far arm behind the body, matching the
+control instead of straightening to face the camera.
+
+**The full arc of this failure, for the record:** identity beats the pose control on facing.  It
+cost four separate rounds -- derived base views coming back front-facing (v134), the back view
+flipping to a front body (v135/136), and turned poses straightening (v138/139) -- and every one
+was the same sentence with a different subject.  When an output disagrees with its control, check
+what the IDENTITY reference is showing.
+
+**Remaining, in order:** crude hands; forearms slightly thin vs the control; then wire
+IoU-vs-control into `pose_audit` as an automatic gate (0.86-0.96 = followed, <0.80 = not).
+
+## v1.199.139 -- v138 WAS INERT: pose runs go through the QUEUE, not the endpoint I patched (2026-07-31)
+
+**Caught by grep, not by argument:** a full 5-pose run produced **zero** `klein pose identity`
+lines.  `generate_queue` enqueues `studio_pose` jobs and `dispatcher._process_studio_pose_job`
+resolves the identity and calls `_klein_submit` -- the `/generate` path patched in v138 never
+executes for a pose run.  This is the v116-118 lesson repeating verbatim: **grep the log to
+confirm WHICH code path a flow takes before patching it.**  The v138 helpers were correct; they
+were simply wired into the wrong door.  v139 wires them into `dispatcher.py` (same gate: only when
+the identity is a single lock-base reference and the active base has 2+ views).
+
+### The batch itself, scored (pairing verified, not assumed)
+
+Every control was matched against every output; the diagonal wins by a wide margin in both
+batches, so the pairing is right.
+
+| pose | body facing | batch 1 IoU | batch 2 IoU |
+|---|---|---|---|
+| 1 | -36.2 deg | 0.863 | 0.925 |
+| 2 | -38.6 deg | 0.867 | 0.944 |
+| 3 | -5.5 deg | 0.871 | 0.963 |
+| 4 | +3.3 deg | 0.913 | 0.954 |
+| **5** | **-123.9 deg** | **0.753** | **0.744** |
+
+**Two things this says, and one caution:**
+1. **Run-to-run variance on the near-front poses is large** -- +0.06 to +0.09 between two batches of
+   the same poses with no effective code change (different seed).  So a single-run IoU difference
+   under ~0.09 is NOISE.  Recorded here so nobody reads a small movement as a result.
+2. **Pose 5 is stable and low across both runs** (0.753, 0.744) while everything within 40 deg of
+   front sits at 0.86-0.96.  That is a systematic failure, not variance -- exactly what the
+   facing-conflict diagnosis predicts.
+3. **Therefore the v139 verdict rests on pose 5 alone**: it must clear ~0.85.  Movement in poses
+   1-4 (which keep the front identity and are unchanged by the fix) is noise unless it exceeds the
+   band above.
+
+## v1.199.138 -- VIEW-AWARE POSE IDENTITY: hand each pose a reference that already faces the right way (2026-07-31)
+
+**The relationship, measured.**  Five poses, clean clay controls, IoU of each OUTPUT against the
+CONTROL IT WAS GIVEN, next to how far that pose turns the body:
+
+| pose | body facing | IoU vs its control |
+|---|---|---|
+| 20260730_232849 | +3.3 deg | 0.913 |
+| 20260730_232430 | -5.5 deg | 0.871 |
+| 20260730_232352 | -38.6 deg | 0.867 |
+| 20260730_232314 | -36.2 deg | 0.863 |
+| **20260730_232928** | **-123.9 deg** | **0.753** |
+
+Monotonic.  The identity reference was the FRONT base view in all five, and identity beats the
+pose control on facing -- the same mechanism that made every derived base view come back
+front-facing on 2026-07-29.  A pose that turns the body 124 degrees is being fought by its own
+reference.
+
+**Two wrong instruments, both retracted before they cost a run:**
+1. `modelRotation` is NOT the body's turn for library poses.  `clay_driver` reads it as DEGREES and
+   the library stores ~-0.9 there (i.e. nothing).  The turn lives in the SPINE/HIP bones.
+2. Averaging the clay normal map's nx/nz over the torso read **+3 deg on the -124 deg pose** -- a
+   big convex belly averages toward the camera whatever the yaw.  Discarded.
+
+**The instrument that works: `pose_render.body_facing_deg(pose_data)`** -- poses the skeleton and
+takes the yaw of the POSED shoulder axis.  Exact, unit-free, independent of how the pose was
+authored.  `_apply_pose` gained `return_joints=True` to expose posed joint positions.
+**Calibrated, not assumed:** rest = 0.0, modelRotation +90 = +90.0, -90 = -90.0, 180 = +180.0.
+(The first sign I tried read -180 on the rest pose; it was fixed against the calibration, not
+argued about.)
+
+**The change:** `_identity_for_pose()` picks the base-set view whose facing is nearest the pose's
+(front 0 / right +90 / left -90 / back 180), passes it as the FIRST reference and keeps the front
+as the second (face + likeness).  Front-facing poses are untouched -- the front already is the
+reference.  Gated to un-costumed runs off a single lock-base reference, so clone refs and dressed
+costume references are never swapped.  Logs
+`klein pose identity: body faces -124 deg -> LEFT base view (34 deg off) as identity`.
+
+**On this batch exactly ONE of the five changes** (the -124 deg pose gets LEFT, 34 deg off instead
+of 124).  The other four keep the front and act as the control group -- so re-running the same five
+is a genuine single-variable test, and the four unchanged IoUs must not move.
+
+Cost note: the first `body_facing_deg` call loads the MakeHuman solver (~6-14s) if a clay run has
+not already loaded `pose_render`; once per process.
+
+## POSE DIAGNOSIS (2026-07-31) -- SAME BUG, NEW STAGE: a FRONT identity flattens every turned pose
+
+Five poses, 2026-07-30 23:23-23:29, correct recipe (`normal (clay=True)`, refcontrol_normal @1.00,
+cfg 5.0, steps 20).  With retention raised to 32 the controls survived, so every output could be
+compared against the control it was actually given.
+
+| pose | silhouette IoU vs its control | body yaw the control asked for |
+|---|---|---|
+| 1 | 0.863 | -58 deg |
+| 2 | 0.867 | turned |
+| 3 | 0.871 | turned |
+| 4 | 0.913 | turned |
+| **5** | **0.753** | **-49.5 deg** |
+
+**Every pose in this batch asks for a TURNED body.  The renders come back essentially
+front-facing.**  Pose 5 is the clearest: the control shows the figure turned ~50 deg with one arm
+raised and the far arm behind the body; the output is a front-facing man with the far arm
+improvised across his chest.
+
+**Root cause -- the identity reference is the FRONT base view.**  Opened
+`_diag/last_pose_run/20260730_232928/identity_00.png`: the front T-pose.  Identity says
+front-facing, the clay control says turned 50 deg, **and identity wins on facing** -- the exact
+mechanism measured on 2026-07-29 when deriving side/back views from a T-posed front returned four
+front-facing images.  Same bug, different stage.  It is not the mesh, not the clay, not the LoRA:
+the clay controls are clean and correctly built in all five.
+
+**The fix has a precedent that already worked once: give it an identity whose facing matches.**  A
+mesh-ready base set now exists with four correct views (front / right / left / back at 0 / +90 /
+-90 / 180).  Pick the view(s) nearest the pose's body yaw and use them as the identity reference
+instead of always the front -- for a -50 deg pose that is the LEFT view (40 deg away) over the
+front (50 deg away); passing the two nearest as refs (Klein accepts up to 4) gives facing AND
+identity.  NOT yet implemented.
+
+**Secondary, unchanged:** hands are crude on several poses (known Klein weakness, independent of
+facing) and forearms render slightly thin against the control.  Both should be re-judged AFTER the
+identity fix -- a body fighting its own reference degrades everything downstream of it.
+
+**IoU vs the control is a usable automatic gate:** 0.86-0.91 = the render followed the pose,
+0.75 = it did not.  Worth wiring into pose_audit.
+
+## v1.199.137 -- POSE VERDICT: the deformation is CLEAN; what is left is the Klein render (2026-07-31)
+
+Six poses run 2026-07-30 22:18-22:24 on the new mesh with the correct recipe (log confirms
+`klein pose input: normal (clay=True)`, `refcontrol_normal @ 1.00`, cfg 5.0, steps 20,
+`pose_clay[Duke]: rendered 1 normal capture(s)`).  Lorenzo: *"a lot of the poses look weird."*
+
+**The geometry is exonerated -- I opened the CONTROL.**  `mesh3d/<id>/clay_last/pose_000.png` is
+the normal map rendered from the newly posed mesh: **arms cleanly separated, an open armpit even
+with an arm raised behind the head, correct belly and leg mass, no webbing, no membrane, no
+stretched fan.**  The mesh poses properly.  That closes the question the last two weeks were
+actually about.
+
+**What IS wrong is downstream of a clean control:**
+1. **Occluded/far arms sometimes merge into the torso** (worst on the 3/4 turned pose) -- the far
+   arm is clearly present and separate in the control and does not survive the render.
+2. **Hands are crude** on several poses -- Klein's known weakness, not geometry.
+3. **Proportion drift on some poses** -- head reads small / body squat relative to the control.
+
+All three are Klein-stage, and all three are measurable the way the mannequin bug was measured:
+compare each OUTPUT against the CONTROL IT WAS GIVEN.
+
+**Which is why the diagnostics retention was the real bug here.**  `_diag/last_pose_run` kept the
+**last 3** dirs.  A pose batch fans out across workers in parallel, so a 6-pose run creates 6+
+dirs and the controls for all but the last two are deleted before anyone can look.  When these six
+came back weird there was nothing left to compare them to -- the one thing this whole session has
+shown to work.  **Retention raised 3 -> 32.**
+
+**Noted, NOT changed:** `mesh_fit` now returns `body_width=2.12` (ceiling 2.2) for MANNEQUIN pose
+runs, since the scan is finally fat and the fit is no longer circular.  That is the same
+pinned-at-the-ceiling signature that exposed the depth-only bug in v132, and it is well beyond the
+1.0-1.6 range validated by render.  It does NOT affect clay runs (3D body ON), which is the
+recommended recipe -- so it is recorded, not patched.  Fitting geometry-to-geometry against a
+render-space target remains the underlying flaw.
+
+## MESH VERDICT (2026-07-31) -- the mesh is T-POSED, ARMS FREE, and carries the build at 1.02x
+
+Mesh `de21a9a4` rebuilt from set `base_85e92097ddf1` (hunyuan3d-dit-v2-mv, mia rig, 227k verts).
+Pulled `character.glb` into the cloud sandbox and rendered it from four angles (zero worker runs,
+zero usage).
+
+**Arms are free.** Clear background under both arms, anatomically normal armpit creases, no
+webbing, no membrane, no fused flank. The failure mode that defined this entire saga does not
+occur on this mesh -- and cannot, because the geometry never fused in the first place.
+
+**The build survived photo -> set -> scan intact.**  Front silhouette, width / figure-height,
+mesh vs the base image it was built from:
+
+| band | base image | MESH | ratio |
+|---|---|---|---|
+| 0.62 | 0.337 | 0.337 | 1.00 |
+| 0.66 | 0.320 | 0.323 | 1.01 |
+| 0.70 | 0.294 | 0.308 | 1.05 |
+| 0.74 | 0.294 | 0.292 | 0.99 |
+| 0.78 | 0.307 | 0.307 | 1.00 |
+| 0.86 | 0.286 | 0.302 | 1.06 |
+
+**clean-band mean ratio 1.02.**  For contrast, the number that started this: the old pipeline's
+render carried 72% of the reference and the mannequin re-pose was throwing away 41% of the side
+depth.  End to end -- photo, turnaround, T-pose, mesh -- the body now arrives unchanged.
+
+**The 3/4 side-view angle did NOT hurt the mesh.**  `meta.json` lists views back/front/left/right
+and the reconstruction is clean and symmetric from every angle; no skew, no doubled silhouette.
+Lorenzo's preference for the slightly rotated side views stands -- more of the character per view,
+no measurable cost.
+
+**Note on instruments:** a horizontal cross-section island count was tried and DISCARDED as
+meaningless for a T-pose -- with the arms horizontal, a horizontal slice passes through the
+shoulder, where arm and torso are legitimately continuous.  That is the third weld metric to fail;
+the render remains the honest instrument.  Not shipped, not recorded as a number.
+
+**Still unverified:** how this mesh DEFORMS when posed (skinning quality, especially the
+hand/wrist fan seen on the previous mesh).  Geometry that never fused cannot produce membranes, so
+what remains is weights, not topology.
+
+## v1.199.136 FIELD RESULT -- ALL FOUR VIEWS CORRECT, ZERO BUILD LOSS (2026-07-30)
+
+Set `base_85e92097ddf1` (run `bs_6353c4d2d3`, engine=edit, v136 back prompt) + one
+`tpose_retry.bat back`.  Opened everything.
+
+**All four views are right.** Front: clean T-pose, full build.  Right/left: 3/4-to-profile, arms
+out, opposite sides.  **Back: a true back view** -- back of head, shoulder blades, spine, seat of
+the underwear, backs of the legs; no face, chest or navel anywhere.
+
+**The build is preserved EXACTLY.**  Identity in vs output, leg/hip bands (arm-free, so
+comparable across the arm change):
+
+| view | 0.66 | 0.74 | 0.78 | 0.86 |
+|---|---|---|---|---|
+| front IN | 0.317 | 0.295 | 0.303 | 0.285 |
+| front OUT | **0.318** | **0.295** | **0.304** | **0.286** |
+| back IN | 0.290 | 0.282 | 0.305 | 0.293 |
+| back OUT | **0.292** | **0.282** | **0.305** | **0.302** |
+
+Identical to the third decimal.  Compare the mannequin path it replaced: -14% front, **-41% side
+depth**.  The pure image edit changes the arms and nothing else -- which is the whole point.
+
+**Correction to the v135 diagnosis, on the record:** I blamed the T-pose edit for flipping the back
+view to front-facing.  The retry's saved input proves otherwise -- **the TURNAROUND's own back view
+was already a front-bodied / back-headed hybrid** before the T-pose edit ever ran.  The edit was
+carrying an existing defect through, not creating one.  The v136 back prompt is stronger than
+expected as a result: it does not merely preserve a good back view, it **repairs a broken one**
+(chest + navel in, correct back out).  Worth remembering if back views misbehave elsewhere -- the
+turnaround stage produces this hybrid intermittently.
+
+**Still open (judge on the MESH, not the images):** the side views sit at a slight 3/4 angle rather
+than a strict 90deg profile.  Lorenzo prefers it -- more of the character per view.  Whether
+Hunyuan cares depends on whether the mesh step assumes fixed azimuths; unverified.
+
+## v1.199.136 -- back-view fix + the T-pose edit becomes a ONE-IMAGE loop (2026-07-29)
+
+**v135 field result (set `base_b164f62f92f5`, engine=edit): the first set with the arms up AND the
+build intact.** Front, right and left all correct -- Lorenzo: *"this is the closest I've seen."*
+Measured: right vs MIRRORED left silhouette IoU 0.863 (vs 0.734 unmirrored) and the belly-centre
+offset flips sign between them (-14px / +9.5px), so they are genuinely OPPOSITE profiles, not two
+copies of one side. No mannequin in the path, no build loss.
+
+**The one failure: the BACK view flipped to a FRONT-facing body** (chest, nipples, navel visible)
+while keeping the back of the head. "Person with arms out" is overwhelmingly a front view in the
+prior, and the generic "do not turn the body" clause could not hold it.
+
+**Fix:** the edit prompt moved to `klein_poses.tpose_edit_prompt(label)` -- one text, shared by
+production and the retry tool -- and the back view now ENUMERATES the visible surfaces (back of
+head/hair, neck, shoulder blades, spine, lower back, seat of the underwear, backs of thighs and
+calves, heels) and forbids the front ones by name (face, eyes, mouth, chest, nipples, stomach,
+belly, navel, fronts of legs and feet) plus "do not rotate the person to face the camera".
+
+**And the loop got 8x cheaper.** Every T-pose edit now saves its input/output pair to
+`_diag/tpose/<run>_<view>/` (in.png, out.png, prompt.txt), and **`tpose_retry.bat <view>`** replays
+the edit for ONE view against a real worker: `tpose_retry.bat back`, `--prompt-file p.txt` to try
+different wording, `--n 3` for three seeds, `--in <file>` for an explicit input. Iterating the
+back-view text now costs 1 image instead of a whole mesh-ready set (8).
+
+**Open question, deliberately not "fixed":** the side views came out at a slight 3/4 angle rather
+than a strict 90deg profile. Lorenzo prefers it (more of the character visible per view). Whether
+Hunyuan cares depends on whether the mesh step assumes fixed azimuths per view -- unverified.
+Judge it on the MESH, not the images.
+
+## v1.199.135 -- NO MANNEQUIN: the T-pose is now a pure Klein image edit (2026-07-29)
+
+Lorenzo, on seeing the v134 numbers: *"we shouldn't need a mannequin to get the T-pose perfect if
+Klein can give us the T-pose versions of the references... garbage in, garbage out."*  He is right,
+and it is measured.  Per view, comparing each re-pose OUTPUT against the identity image that same
+re-pose was handed (side view, width / figure-height):
+
+| y | identity (true build) | re-pose output | mannequin control |
+|---|---|---|---|
+| 0.42 | **0.339** | 0.214 | 0.195 |
+| 0.50 | 0.343 | 0.203 | 0.211 |
+| 0.66 | 0.202 | 0.137 | 0.102 |
+| 0.74 | 0.172 | 0.102 | 0.093 |
+
+The output lands on the CONTROL, within ~0.02 -- not on the character.  41% of the body's depth is
+thrown away, and MatchingPose is the thing throwing it.  The turnaround images already carry the
+correct build; the only thing missing from them is the arm position.
+
+**So the T-pose pass no longer uses a mannequin.**  Default engine is now
+`_klein_edit_rotate` -- the SAME pure image-edit graph that generates the missing reference
+perspectives (the ones Lorenzo confirms come out with the body right).  Reference image in, edit
+instruction in, image out.  No pose reference, no MatchingPose LoRA, no pose_render capture, so
+there is no generic body in the pipeline to copy.  The prompt asks for the arms and explicitly
+forbids everything else ("same height, same weight, same belly, same wide torso, same thick legs...
+do not slim, shrink, idealize or reshape"), and holds the camera ("do not turn, rotate or
+re-orient the body").  Side/back views get a view-specific arm clause: from a side angle a T-pose's
+arms point toward and away from the camera and must read as foreshortened, which is what v134's
+right view got wrong (it drew them in the IMAGE plane instead).
+
+`klein_mesh_tpose_engine=matchpose` restores the v120-v134 mannequin path.  Kept because the
+v116-117 prompt-only rounds landed at 10-30deg -- but those ran WITH an arms-down pose reference
+fighting the prompt, which this path does not have at all, so that verdict does not transfer.
+Log line now names the engine: `T-POSE pass [engine=edit]`.
+
+**Also shipped (unused by the edit path, kept for the matchpose fallback):**
+`pose_render._apply_depth(verts, body_depth)` -- the third missing morph axis, anterior-posterior
+torso depth, mirroring v132's `_apply_width`.  Arm verts are excluded by their own skin weight so a
+deeper torso cannot thicken the arms; head faded with the same smoothstep; `body_depth=1.0` is an
+exact no-op.  Measured need, if the mannequin is ever used again: **body_width ~= 1.37** (lateral
+sweep hits the identity's leg/hip bands at 1.4 -> ratio 1.03) and depth well beyond what `belly`
+can reach -- `belly` 1.5 -> 4.5 only closes 59% -> 80% of the side profile AND puts it all in one
+low bulge (0.198 at y=0.38 vs a 0.324 target), because this body is deep through the CHEST too.
+
+## v1.199.134 FIELD RESULT -- rotation UNLOCKED (2 of 3), and the re-pose is where the BUILD dies (2026-07-29 20:53)
+
+Set `base_b883d5f47560`, in-place mode confirmed in the log. Opened all four, plus the identity
+image each re-pose actually received (`_diag/last_pose_run/*/identity_00.png`).
+
+**Rotation: the in-place identity works.** After four identical FRONT views under the derive:
+- **front** clean T-pose. **back** a true back view with arms out. **right** a true profile.
+- **left** still came back near-frontal (~3/4) -- and its identity input WAS a correct left
+  profile, so this one is the model, not the input.
+- **right's arms are in the WRONG PLANE**: spread in the image plane (one forward, one back)
+  instead of pointing at/away from the camera. "Arms straight out to the sides" is being read in
+  IMAGE space, not body space. A T-pose seen from the side is inherently end-on and ambiguous --
+  see the A-pose option below.
+
+**THE BUILD IS DESTROYED BY THE RE-POSE, and the output is the MANNEQUIN's silhouette.**
+Measured width/figure-height, identity (turnaround, correct build) vs output (after re-pose):
+
+| band | ID front | OUT front | ID right | OUT right | mannequin control (rendered) |
+|---|---|---|---|---|---|
+| 0.42 belly | 0.488* | 0.258 | **0.339** | **0.214** | **0.195** |
+| 0.50 | 0.486* | 0.278 | 0.343 | 0.203 | 0.211 |
+| 0.66 hips | 0.309 | 0.253 | 0.202 | 0.137 | 0.102 |
+| 0.74 legs | 0.297 | 0.256 | 0.172 | 0.102 | 0.093 |
+
+(*front torso rows include arms-at-side; legs are the comparable rows.) Front legs survive at 86%;
+the SIDE loses 41% of its depth -- and every OUT-right number lands on the MANNEQUIN's own profile
+(within ~0.02), not on Duke's. **MatchingPose is copying the generic mannequin's build into the
+output.** The turnaround stage is fine: its images carry Duke's real belly.
+
+**So the width work was aimed too low.** body_width ~= 1.20 was derived from a scan-vs-photo
+comparison; against the turnaround images the mannequin needs roughly **+38% lateral (front) and
++74% anterior (side depth)** -- and `belly` is already at 1.5.
+
+**Next (v135 proposal): fit the mannequin to the TURNAROUND IMAGES, not the scan.** At re-pose
+time those four images are already in memory, correct-build, naked, same canvas as the output.
+Measure the FRONT view's width profile and the SIDE view's depth profile, then solve `body_width`
+(lateral) and `belly` (anterior) so the RENDERED mannequin matches those two silhouettes -- a few
+offline renders per set (~1s each, zero worker cost), and the whole loop closes inside one run.
+This replaces `mesh_fit`'s scan target, which is circular (the scan is a copy of a thin render).
+
+**Also worth deciding: T-pose vs wide A-pose.** A 45deg A-pose is unambiguous from every angle,
+much easier for Klein to draw in side/back views, and the sandbox showed the mesh separates as
+long as the arms are clear of the flank -- it does not have to be a strict T.
+
+## v1.199.134 -- IN-PLACE T-pose: each view is re-posed off its OWN turnaround view (2026-07-29)
+
+Direct consequence of the v133 field result (all four views front-facing).  The T-pose pass keeps
+its shape -- turnaround first, then re-pose -- but the sides/back no longer derive from the
+T-posed FRONT:
+
+| | identity reference | pose reference |
+|---|---|---|
+| v120-v133 (derive) | the T-posed FRONT image, for every view | mannequin T at that view's yaw |
+| **v134 (in-place, default)** | **that view's OWN turnaround image** | mannequin T at that view's yaw |
+
+Identity and pose reference now agree about facing, so the only edit requested is the arms --
+which is the single conflict the front already resolves correctly.  This restores the
+v1.199.64-69 rule the derive breaks: SAME REAL IMAGE AS BOTH IDENTITY AND POSE, PER VIEW.
+
+The mesh_ready prompt gains an explicit facing clause in in-place mode ("Keep the body facing
+EXACTLY the same direction as the reference image -- do NOT turn, rotate or re-orient the body;
+change ONLY the arms"), because the measured failure mode is the model drifting the body back to
+front-facing.
+
+`klein_mesh_tpose_inplace=off` restores the v120 derive.  The log line now names which mode ran:
+`T-POSE pass -- front re-pose, then T-pose each view IN PLACE off its own turnaround view`.
+The FRONT re-pose is untouched (it was already identity=its own view, and it works).
+
+**Prior art, stated honestly:** v119 re-posed every view independently and failed with double
+arms, front-facing sides and a different face per view.  That ran with the SIGN-INVERTED bones
+(v133) -- an armless mannequin as the control -- and without v120's explicit "RAISE the arms,
+exactly ONE pair" instruction.  Both are fixed, so this is a new experiment, not a repeat.  What
+to check on the images: sides genuinely side-facing, ONE pair of arms, background visible below
+both arms, same face across all four.
+
+## v1.199.133 FIELD RESULT -- T-pose CORRECT, rotation DEAD: all four views came back front-facing (2026-07-29 02:26)
+
+Set `base_7e7e371b27f0`, run with the v133 sign-corrected bones (log confirms all four views +
+`mannequin (clay=False)`, no `auto-enabling the 3D body`).  Opened the images.
+
+- **FRONT: correct.** Real T-pose, arms horizontal at shoulder height, clear air under both arms,
+  build and likeness intact.  Measured: peak span 0.950 at y=0.18 (was 0.871 at y=0.22 with the
+  armless control).
+- **RIGHT / LEFT / BACK: all four images are FRONT views.**  The derive did not rotate the body
+  at all, even though the mannequin control WAS a correct T at yaw +-90/180 (verified by opening
+  `_diag/last_pose_run/20260729_022621/ref_00.png`).
+
+**Mechanism:** in the derive, `identity_00.png` for the right/left/back runs is the T-posed FRONT
+image -- measured, its width profile is identical to the front output to 3 decimals.  Identity
+and pose reference disagree about facing, and identity wins outright.  This is the same "sides
+facing front" symptom v119 hit; it was blamed on the parallel design, but it survives the
+sequential design AND a correct control, so the cause is the identity source, not the ordering.
+
+**Implication:** deriving side/back from a single front image cannot work.  The proven principle
+(v1.199.64-69 turnaround, "PERFECT") is SAME REAL PHOTO AS BOTH IDENTITY AND POSE, PER VIEW.  The
+derive breaks it.  Next experiment (Lorenzo's proposal, now the measured next step): T-pose each
+view IN PLACE -- identity = that view's own turnaround image, pose reference = the mannequin T at
+that view's yaw -- instead of rotating one T-posed front.  Cheapest decisive test is ONE view
+(right) before any UI is built.
+
+**Build, unchanged:** bare-leg band 0.260/0.272 vs reference 0.313/0.299 = 83%/91%.  The width
+solver logged `WIDTH axis -- scan thigh 0.274, mannequin 0.274 -> body_width=1.00`: it compares
+GEOMETRY to GEOMETRY, but Klein only ever sees the RENDER, which the node camera makes ~15%
+narrower (0.215 vs 0.256 at the leg band), and the scan is itself a copy of a thin render -- so
+fitting to the scan is circular and will always return 1.00.  The target must be the REFERENCE
+PHOTO measured in RENDERED space: rendered control leg band is 0.215 at body_width 1.0, 0.284 at
+1.3, 0.353 at 1.6, and Klein renders 1.16-1.21x its control (two measured pairs) -> **body_width
+~= 1.20** for Duke.  Not yet implemented.
+
+## v1.199.133 -- MEASURED: the T-pose bones were SIGN-INVERTED; the pose control for 3 of 4 base views was an armless blob (2026-07-29)
+
+Zero worker runs.  Re-rendered the EXACT saved `pose_data` of the 01:04 base-set run
+(`_diag/last_pose_run/20260729_010459/params.json`) with the production renderer offline --
+`pose_render` is pure python+numpy, so it loads standalone -- and got the saved `ref_00.png`
+back pixel-for-pixel.  Then looked at it.
+
+**The pose reference Klein received for the right / left / back views is a mannequin whose arms
+are folded INTO the torso**, hands poking out at the hips, i.e. effectively armless.  The
+T-pose bones ARE in the blob (`upperarm_l [0,0,-84]`, `upperarm_r [0,0,84]`) -- they are simply
+the wrong sign, and the wrong size:
+
+| upperarm_l / _r (z deg) | what the renderer actually draws |
+|---|---|
+| `-84 / +84` (shipped since v118) | arms crushed into the torso, silhouette NARROWER than rest |
+| `+84 / -84` | arms straight UP alongside the head |
+| **`+45 / -45` (v133)** | **clean T: span 1.006 of figure height, hands at 0.201 = shoulder height, air under both arms** |
+
+**Independent confirmation from authored data:** all 12 poses in the vendored VNCCS creator
+graph (`workflows/vnccs/STEP1_CREATOR.json`) are arms-down variants and every one carries
+upperarm_l NEGATIVE z (-26 to -69) with upperarm_r POSITIVE.  Negative-left IS the arms-down
+direction; v118 asked for arms-down at maximum force and called it a T-pose.  The magnitude was
+wrong too -- the mannequin rest stance is already a wide A-pose, so +-45 (not 84) reaches
+horizontal.
+
+Fixed at both base-set builders in `backend/api/vnccs_native.py` (`_MESH_T_BONES` in the 4-view
+path, and the `mesh_ready` override in `_matchpose_derive_view`), plus a log line
+`base-set T-POSE bones (v133 sign-corrected)` so the next run can be verified by grep.
+
+**What this explains:** every "T-pose canonicalization" round since v118 was steered by an
+armless control on 3 of the 4 views.  The front survived because it is re-posed by prompt with
+the T-posed identity image, not by the mannequin -- which is exactly why the FRONT looked right
+while the sides and back kept coming back wrong.
+
+**SUSPECT, NOT VERIFIED, DO NOT PATCH BLIND:** `clay_driver.apply_pose` auto-abduction uses the
+same inverted convention (`("upperarm_l", -1.0), ("upperarm_r", 1.0)`, comment: "upperarm_l
+raises with a NEGATIVE z").  On the mannequin that sign ADDUCTS.  The clay path runs on the FBX
+rig through `Rl = Q^-1 @ Rw @ Q`, so it needs its own render before anyone touches it -- if it
+is also inverted, auto-abduction has been pushing arms deeper into the torso, i.e. making the
+exact problem it was written to fix worse.  Test: one clay render at `arm_abduct_deg=+30` vs
+`-30`, look at the image.
+
+### Also: `body_match` was measuring against a PROFILE photo (instrument fix)
+
+The 2026-07-29 01:12 run reported "hips/legs vs reference: 105%" and the 23:49 run 72% -- for
+the same character, hours apart.  Cause: `_find_ref_photo` picked "newest large portrait", and a
+turnaround caches front, both sides and back as 1024x1536 portraits within the same second, so
+the pick was arbitrary.  At 01:12 it picked the SIDE view.  A width-over-height signature
+measured against a profile is meaningless.
+
+`_axial_frac()` added: fraction of rows in the legs band that show a gap BETWEEN TWO LEGS --
+present in a front or back view, absent in either profile (measured: front 0.24, back 0.69,
+profile 0.01).  Candidates are now tested in recency order and the first axial one wins; the
+test result is printed for every candidate.  **The valid number is the 23:49 one: the v123 base
+render carries ~85% of the reference at the bare-leg band (0.251/0.260 vs 0.313/0.299) and ~72%
+if the shorts-covered rows are included -- those rows compare loose shorts against a naked
+render and should not be read as build.**
+
+## v1.199.132 -- ROOT CAUSE of the thin body: the fit only ever measured DEPTH (2026-07-29)
+
+Found on the device with no worker runs, by driving `pose_render` directly (it is pure
+python+numpy and `vnccs-utils/CharacterData` is in the repo, so the mannequin can be rendered and
+measured offline).
+
+**1. `weight` is not a width lever.** Measured front silhouette, width / figure-height:
+
+| mannequin | y=0.34 chest | y=0.50 | y=0.66 hips | y=0.74 legs |
+|---|---|---|---|---|
+| weight 0.5, belly 0 | 0.149 | 0.187 | 0.172 | 0.179 |
+| weight 1.0, belly 0 | 0.161 | 0.197 | 0.180 | 0.188 |
+| weight 1.0, belly 1.5 (production) | 0.161 | 0.198 | 0.180 | 0.188 |
+| **Duke's scan (target)** | **0.256** | **0.290** | **0.268** | **0.256** |
+
+Driving weight from neutral to its maximum buys 5-8% of width. `belly` displaces along the
+ANTERIOR axis, so frontally it produces a single bulge band (0.355 at y=0.42) and nothing
+either side of it -- which is exactly the "uniform column with one bulge" shape body_match
+measured in the render. The maxed mannequin is 63-68% of the scan.
+
+**2. Why the solver never noticed: `mesh_fit.depth_profile` measures DEPTH ONLY** --
+`d = verts[m, dep]`, front-to-back extent over height. Every fit this module has ever made
+optimised the one dimension the control image cannot show. Klein is handed a FRONT view, i.e. a
+WIDTH silhouette. So the pipeline was tuning depth and leaving width entirely unconstrained,
+while reporting a confident `weight=1.00 belly=1.50` fit -- both pinned at their ceilings,
+because that is what happens when a solver chases a target its parameters cannot reach.
+
+**Fixes:**
+- **`pose_render._apply_width(base_verts, width)`** -- the missing lateral axis. Scales the body
+  about the mid-sagittal plane; verts beyond the shoulder joint TRANSLATE by the boundary's
+  displacement instead of scaling, so torso and thighs widen while arm length and girth are
+  untouched (scaling X globally would stretch the arms along their own axis in a T-pose). Head
+  faded out via smoothstep. `body_width = 1.0` is an exact no-op, so nothing changes until the
+  fit asks for it.
+- **`mesh_fit.width_profile()`** -- lateral width over height, sampled at 0.24-0.36 of standing
+  height (thighs): arm-free in a T-pose AND in an arms-down rest pose, so scan and mannequin are
+  comparable without posing the mannequin. Same band body_match flags "clean".
+- **`fit_weight_belly` now solves `body_width`** against that width target after weight/belly,
+  and `_mannequin_profile` runs the same vert pipeline as the renderer (without that it scored
+  every candidate identically and always returned 1.0 -- caught in testing, not in the field).
+- meshfit cache bumped `_v2` -> `_v3`; every cached fit predates the width axis.
+
+**Validated offline** (mannequin thigh width by body_width): 1.00 -> 0.248, 1.30 -> 0.303,
+1.60 -> 0.358, 1.90 -> 0.414, monotonic. Solving against Duke's scan gives body_width 1.08;
+against the reference photo's bare-leg width, 1.30.
+
+**Caveat, stated because it decides the next step:** these are RAW GEOMETRY widths. The rendered
+mannequin measures narrower than its geometry (0.188 vs 0.248 at the leg band) because of the
+node camera's perspective, and Klein then renders ~1.35x wider than the mannequin it is given
+(measured on one pair: mannequin 0.180 -> render 0.251 at y=0.66). One real run calibrates that
+transfer; do not add a magic constant before measuring it.
+
+## v1.199.131 -- GROUND TRUTH: the weld is GONE. Canonicalization worked. (2026-07-29)
+
+Ran the uploaded `rigged.fbx` in the cloud sandbox on real Blender 4.2.9 (bpy module crashes on
+glog double-init in this container -- use the standalone binary, `blender --background --python`).
+Zero worker runs, zero usage. Rendered, not scored:
+
+1. **The T-posed mesh has fully separated arms.** Clear air under both, an anatomically normal
+   armpit crease. No webbing, no membrane. The v129 `WELDED` verdict was an artifact.
+2. **Posing the arms DOWN 45 deg and 75 deg produces a clean shoulder/armpit deformation.** No
+   membranes, no "wings". The artifact that defined this entire saga does not occur on this mesh.
+   Applied with the EXACT production math (`clay_driver.apply_pose` v1.199.70,
+   `Rl = Q^-1 @ Rw @ Q`), so this is what production deformation will do.
+3. Remaining artifact is at the **HAND/WRIST only** -- a fan of stretched faces where part of the
+   hand stayed behind. That is a SKINNING-WEIGHT problem (what `prototypes/pose_lab/voxel_skin.py`
+   was built for), not topology, and production's clay renderer already culls smear faces
+   (`keep_smear` in pose_clay). Verify against a production clay render before acting on it.
+
+**RIG GEOMETRY NOTE, cost two wrong attempts:** the imported armature is internally **Y-up** with
+an object transform of scale 0.01 plus an axis swap
+(`matrix_world` rows `(0.01,0,0,0) (0,0,-0.01,0) (0,0.01,0,0)`), while the MESH object is Z-up in
+world space. So a rotation authored in armature space about Y is a YAW, not a lowering; the arm
+swings horizontally and nothing looks wrong except that it did not move. Lowering an arm =
+rotation about armature-space **Z** (left arm negative, right arm positive). This is the same
+axis confusion that produced the invalid gap-test probe.
+
+**Status of the two-week problem: SOLVED, by v120 canonicalization + the v122 hijack fix.**
+What remains is a separate, well-localised problem: the BUILD is 72% of the reference because the
+generic MakeHuman mannequin controls the T-pose derive. Next lever (untested): pose-ref release
+(`pose_ref_end`, 0.85) via `worker_run.bat --sweep` on the graph already in `_diag/last_pose_run/`.
+
+## v1.199.130 -- RETRACTED: the gap test is INVALID; every weld number since v121 is void (2026-07-28)
+
+The v129 per-sample output made the defect visible:
+
+```
+GAP_L_SAMPLES LeftArm@0.2=0.000 @0.4=0.000 @0.6=0.000 @0.8=0.000 @1.0=0.038
+GAP_R_SAMPLES RightArm@0.2=0.000 @0.4=0.000 @0.6=0.000 @0.8=0.020 @1.0=0.052
+```
+
+Gaps that are EXACTLY 0.000 for four consecutive stations and then jump to 0.038 is not what
+fused geometry looks like; it is what a probe that found nothing looks like. Two defects, both
+plain in `tools/gap_test.py`, both conclusive without any simulation:
+
+1. **The probe is not horizontal.** The bone-angle line treats Z as the vertical axis
+   (`ang = degrees(asin(abs(d.z)))`, printed as `deg_from_vertical`) while the ray direction is
+   built as `Vector((axis_p.x - p.x, 0.0, axis_p.z - p.z))` -- zeroing **Y**. The same function
+   cannot have both Y and Z as up. The ray fires diagonally, not across the arm-torso gap.
+2. **"Found nothing" is scored as "fused".**
+   `crossings[1] - crossings[0] if len(crossings) >= 2 else 0.0`. A probe that exits the arm and
+   hits no second surface has flown into FREE SPACE -- the most open result possible -- and is
+   recorded as gap 0.0, the most welded. And this defect gets systematically WORSE as the arms
+   rise, because a raised arm's probes stop crossing the torso: exactly the variable we have been
+   changing every round.
+
+**Consequences, stated plainly:**
+- The `WELDED` verdict on the current mesh is VOID. We do not know whether the T-posed mesh's
+  arms are fused. It may well be fine.
+- The whole weld history is VOID -- original 7/15, round 1 6&4/15, round 2 6&8/15, round 3
+  7&4/15, v122/123 4&3/15. Those numbers were produced by this probe and cannot be compared,
+  including across rounds where arm elevation changed, which is every round.
+- What survives: the T-pose itself. `GAP_BONE ... 74deg_from_vertical` comes from the bone
+  transform, not the probe, and is corroborated by body_match's silhouette (arm band 0.86-0.90
+  width/height in both render and scan). Canonicalization demonstrably reaches the geometry.
+- This is the SECOND discredited weld metric, after "2,886 crossing edges" (v121). Same failure
+  mode: a scalar accepted because it looked plausible, never tested against geometry with a
+  known answer.
+
+**Not shipping a replacement until it is validated against known-good and known-fused geometry.**
+A synthetic harness (`prototypes/pose_lab/`) is the way, but the honest ground truth is simpler
+and needs no new metric at all: render the mesh, pose an arm down, and LOOK at whether membranes
+appear. That is the property we actually care about, and it can run in the cloud sandbox on an
+uploaded `rigged.fbx` -- zero worker runs, zero usage.
+
+**DO NOT regenerate the mesh on the strength of the WELDED verdict.**
+
+## v1.199.129 -- gap test result + the instrument could not answer the real question (2026-07-28)
+
+First gap test on a mesh built from a genuine T-pose set:
+
+| round | arm angle from vertical | welded L | welded R | total |
+|---|---|---|---|---|
+| original (arms-down scan) | ~0 deg | 7/15 | 7/15 | 14 |
+| round 1 (30 deg prompts) | ~10-15 deg | 6/15 | 4/15 | 10 |
+| round 2 (45 deg prompts, v117) | ~10-20 deg | 6/15 | 8/15 | 14 |
+| round 3 (v118 bone injection) | ~30 deg | 7/15 | 4/15 | 11 |
+| **v122/123 canonicalization** | **74 deg** | **4/15** | **3/15** | **7** |
+
+Two facts, kept separate: the arm ANGLE is finally a real T (74 deg from vertical = 16 deg off
+horizontal, against 10-30 deg for every prior round) -- canonicalization demonstrably works on
+the mesh. The weld count is the lowest measured, but prior rounds scattered 10-14 with no
+angle change, so 7 is an improvement of uncertain size, not a solution. Verdict printed WELDED.
+All remaining fusion is on the upper-arm bone; median gap on the OPEN samples is 0.183 / 0.170,
+so where it is open it is open by a wide margin.
+
+**The instrument could not answer the question that decides what to do next.** The sampler walks
+t = 0.2 .. 1.0 from shoulder to elbow but only reported bone NAMES, so "4 welded on LeftArm"
+could equally mean the armpit crevice (t<=0.4) or the arm bonded to the flank down its length
+(t>=0.6). Those demand opposite responses. On a body this heavy the armpit is a closed crevice
+in a real T-pose too -- flesh against flesh -- so SDF fusion there is anatomically faithful
+rather than a defect, and that region barely moves relative to the torso when posing. Fusion at
+t>=0.6 is the thing that tears membranes.
+
+**v129 fix:** `gap_test.py` now records the sample POSITION, prints a per-sample line
+(`GAP_L_SAMPLES LeftArm@0.2=0.000 LeftArm@0.4=0.031 ...`), and splits the verdict three ways --
+CLEAN / **ARMPIT-ONLY** (no upper-arm fusion at t>=0.6) / WELDED (fusion beyond the armpit).
+Re-run costs nothing: it reads the FBX already on disk.
+
+## v1.199.128 -- CORRECTION: the mesh is faithful; the base set is the only lever (2026-07-28)
+
+New T-posed set `bs_c00caa58db` (23:28) -> new mesh + MIA rig (23:43-23:47) -> `body_match`
+re-run against matched inputs for the first time:
+
+| band | reference | render (base_d540d83c58c7) | scan (rebuilt) | scan / render |
+|---|---|---|---|---|
+| arm band 0.14 | -- | 0.860 | 0.903 | 1.05 |
+| torso 0.30-0.54 | -- | 0.236-0.273 | 0.256-0.298 | 1.05-1.08 |
+| bare legs 0.74/0.78 | 0.313 / 0.299 | 0.250 / 0.262 | 0.256 / 0.274 | 1.02-1.05 |
+| "same build" score | 100% | **72%** | **76%** | |
+
+**RETRACTION.** v1.199.127 concluded "the build survives photo -> scan largely intact and is
+thrown away at scan -> render", from scan 83% vs render 72%. Those were MISMATCHED inputs: that
+scan came from the v119 set, the render from v123. With the scan rebuilt from the same set the
+render belongs to, scan and render agree within 2-8% at every band. **Hunyuan reproduces
+whatever the base set shows.** Mesh generation adds nothing and loses nothing; the base set is
+the single point of control for the body.
+
+**What the old 83% actually showed, and it matters:** the v119 set was generated under the
+hijacked recipe whose control map was clay from Duke's OWN mesh -- and it carried 83% of the
+reference build. The v122/v123 sets are controlled by the generic MakeHuman mannequin and carry
+72%. Same pipeline, different control source, 11 points of build. That is the mechanism, stated
+as a comparison of two measured runs rather than a theory.
+
+**Consequence for the convergence idea (v127):** using the new T-posed mesh's clay as the next
+set's control would PRESERVE its build, not RESTORE it -- the new mesh is already thin (76%), so
+that loop converges on thin. Restoring the missing width needs a control that is both T-posed
+AND correctly built. Cheapest untested lever: the pose-ref release (`pose_ref_end`, currently
+0.85) -- release the mannequin earlier so the identity photo, which has the right build, governs
+the silhouette. Testable with `worker_run.bat --sweep` on the graph already in
+`_diag/last_pose_run/`, no new set required.
+
+**Still unmeasured, and it gates everything:** `gap_test.bat Duke` has not been run on this mesh
+(no gap output in `_diag/`, nothing in the log). The arm band now reads 0.86-0.90 width/height
+in BOTH render and scan, so the arms are geometrically out -- but "arms out" is not "arms
+unwelded". Only the ray-cast gap test answers that.
+
+## v1.199.127 -- MEASURED: the build is lost in the RENDER, not in mesh generation (2026-07-28)
+
+First full `body_match.bat --char Duke` run. All three inputs resolved automatically
+(ref photo, `base_c9a0cb634b3d_front.png`, scan `de21a9a4`). Numbers, width / figure-height:
+
+| band | reference | scan | render | render vs scan |
+|---|---|---|---|---|
+| chest/upper torso 0.30-0.38 | 0.473-0.495* | 0.353-0.416 | 0.231-0.259 | **60-71%** |
+| hips/legs 0.62-0.78 (no arms anywhere) | 0.299-0.404 | 0.275-0.330 | 0.245-0.277 | |
+| bare legs 0.74-0.78 (no arms, no clothing) | 0.313 / 0.299 | 0.275 / 0.282 | 0.245 / 0.260 | |
+| headline "same build" score | 100% | **83%** | **72%** | |
+
+*the reference is arms-down, so rows above ~0.60 include both arms against the torso; only the
+scan-vs-render columns are apples-to-apples there (both have arms out).
+
+**Verdict: mesh generation is not the problem.** On bare legs -- no clothing, no arms, the
+cleanest comparison available -- the scan keeps 88-94% of the reference's width while the render
+keeps 78-87%, and through the chest the render is only 60-71% of the scan. The build survives
+the photo -> scan step largely intact and is then thrown away in the scan -> render step. That
+is the MatchingPose LoRA copying the generic MakeHuman mannequin, which is pinned at its ceiling
+(`weight=1.00 belly=1.50`) and cannot represent this body.
+
+**CAVEAT, recorded so it is not forgotten:** scan `de21a9a4` was last rebuilt 2026-07-28 16:00,
+i.e. from the **v119 failed T-pose set** (double arms / wrong facings) -- NOT from the good v123
+set. Its arm band (0.897 at y=0.22) shows arms partly out, consistent with that origin. So the
+83% figure is indicative, not final. Re-run body_match after the mesh is rebuilt from the v123
+set; the number should hold or improve.
+
+**Hypothesis for the next fix (NOT implemented, needs the gap test first):** the chicken-and-egg
+that forced `mesh3d_pose: False` (v1.189.2 -- never derive a base set from an existing mesh) was
+correct while every mesh was arms-down and welded. Once a mesh is built FROM a T-posed set, its
+clay carries BOTH the right pose and the right build, and becomes the correct control for the
+next set -- one convergence iteration: mannequin-controlled set (thin, but T-posed) -> mesh ->
+that mesh's clay controls set #2 -> correct build AND correct pose. Cheaper alternative to test
+first: lower the pose-ref release (currently 0.85) so less of the mannequin's build leaks in.
+Decide after `gap_test.bat Duke`.
+
+## v1.199.126 -- body_match --glb fixes (2026-07-28)
+
+Path resolution worked first try (reference photo + `D:\RBMN-Projects\<project>\assets\vnccs\
+Duke\base\base_c9a0cb634b3d_front.png`); the scan branch had two bugs, both now fixed and both
+verified end-to-end on a synthetic multi-primitive GLB (numpy 2.4.4 / trimesh 4.12.2):
+
+1. **`AttributeError: 'numpy.ndarray' object has no attribute 'ptp'`** -- numpy 2 removed the
+   `ndarray.ptp()` METHOD (the `np.ptp(x)` function is still there). Fixed.
+2. **Hollow silhouette** -- the rasteriser splatted the VERTEX LIST, so any mesh with large flat
+   triangles came out as an outline with nothing inside and the width profile read 0.0 through
+   the torso. Caught by the synthetic test before it reached Lorenzo. Now splats 400k
+   area-weighted SURFACE samples (`mesh.sample`), closes and fills, and keeps the largest
+   component. Test asserts head < torso > legs on a box-and-sphere figure. Also loads with
+   `force="mesh"` so multi-primitive Hunyuan GLBs concatenate instead of arriving as a Scene.
+
+Reminder recorded here because it cost a round trip: the app venv already has
+`opencv-python 5.0.0.93` and `cv2.pyd` is locked while the backend runs -- installing
+`opencv-python-headless` fails with WinError 5 AND would collide with the real opencv. Nothing
+needs installing for this tool.
+
+## v1.199.125 -- body_match resolves its own inputs (`--char`) (2026-07-28)
+
+No more hand-typed paths. `body_match.bat --char Duke` now finds all three inputs itself:
+
+- **reference photo** from `runtime/klein_ref_cache/`. Cache files are `sha256(name)[:24].png`
+  so the original filename is gone; picked by recency first (the refs of the character being
+  worked on are re-cached every run), then pixel area, then byte size to break exact ties.
+  Verified against this machine's cache: resolves `23c25a56ecd90513037b5015.png` =
+  "ChatGPT Image Jul 16, 2026, 01_25_17 AM.png", 1024x1536, 2,318,034B -- byte-identical to the
+  reference Lorenzo sent in chat.
+- **generated front** by globbing `<project_dir>/*/assets/vnccs/<safe name>/base/base_*_front.png`
+  (the layout `ingest.save_base_preview` writes) and taking the newest by mtime. project_dir
+  comes from the DB (`app_settings.project_dir` = D:\RBMN-Projects), never from `.env`.
+- **scan** via the existing `character.glb` lookup under `<project_dir>/mesh3d/`.
+
+Every resolved path is printed before the measurement, so a wrong pick is visible rather than
+silent, and an explicit path on the command line always wins. A miss prints exactly which
+directory and glob were searched.
+
+Note on dependencies: opencv is ALREADY in the app venv (`opencv-python 5.0.0.93`, installed
+during the PuLID work) and `cv2.pyd` is locked while the backend runs -- do NOT install
+`opencv-python-headless`, it collides with the real opencv. scipy, matplotlib and numpy are
+present; `trimesh 4.12.2` installed cleanly (252/252 files, GLTF loader included) before that
+error, so nothing further is needed.
+
+## v1.199.124 -- body_match tool; the mesh_fit change did NOT restore the build (2026-07-28)
+
+**Retraction first:** v123 predicted that feeding the T-pose derive the same scan body fit the
+turnaround uses would bring the chest/torso mass back. Measured on Lorenzo's v123 render, it did
+not. Hips/upper-legs width relative to figure height: **v122 = 74% of the reference photo,
+v123 = 72%**. Inside the noise. The body-fit mismatch was real and worth closing, but it is not
+the lever.
+
+**NEW `body_match.bat` / `tools/body_match.py`** -- the instrument that says so. Extracts each
+figure's silhouette (alpha when present, GrabCut + shadow-bridge cut for studio backdrops) and
+reports WIDTH / FIGURE-HEIGHT at fixed height fractions: a scale-free shape signature that is
+blind to canvas size, crop and zoom. Rows 0.62-0.80 (hips/upper legs) are flagged `<- clean`:
+no arms in the silhouette in ANY pose, so they compare a T-pose render against an arms-down
+photo honestly. Rows 0.14-0.28 are flagged `<- arms` and mean nothing across poses. Optional
+`--glb <char|path>` measures the SCAN's front-orthographic silhouette in the same units, so the
+build can be traced photo -> scan -> render and the loss located.
+
+  body_match.bat reference.png generated.png [--glb Duke]
+
+Writes `_diag/body_match/<stamp>/` (numbers.txt + profile.png).
+
+**What it already shows** (reference photo vs v123 base):
+- hips/legs: the render is 72% of the reference's width-for-height
+- the render is a near-uniform column -- width 0.23-0.28 from chest to ankle -- while the
+  reference goes 0.50 at the belly, 0.40 at the hips, 0.30 at the calves. The generated body
+  has almost no belly bulge RELATIVE to its legs; it is not merely thinner, it is a different
+  shape.
+- the clothed reference adds some width (loose shirt, shorts), but not 30% at the thighs.
+
+**Where that points:** `mesh_fit` already fits at its ceiling (`weight=1.00 belly=1.50`,
+err=0.03) and reports the SCAN's own profile as hip 0.313 / navel 0.301 / chest 0.264 -- while
+the rendered image measures ~0.25-0.28 there. So width is potentially lost TWICE (photo -> scan,
+scan -> render). Running body_match with `--glb Duke` separates those two cases in one command
+and zero worker runs. That measurement decides the next change; do not patch before it.
+
+## v1.199.123 -- T-pose CONFIRMED working; fixes for the two things it exposed (2026-07-28)
+
+Lorenzo ran the v122 set. **The T-pose itself worked** -- horizontal arms, one pair, clear
+background under both arms, correct face. That is the first honest run of the v120 sequential
+design and the first time canonicalization produced a real T. Two problems came with it, both
+measured in the same log window, both now fixed.
+
+### 1. LEFT and RIGHT views errored -- a first-use RACE, not geometry
+```
+16:51:41.695  all four turnaround views submit (parallel)
+16:51:47.089  turnaround view left  failed: app-side pose renderer unavailable
+16:51:47.495  turnaround view right failed: app-side pose renderer unavailable
+16:51:48.976  vnccs pose_render: MakeHuman data loaded (570 targets, 13378 faces)
+16:51:53.9    front and back render normally
+```
+The two views that failed are simply the two that asked while the ~6s MakeHuman load was still
+running. `pose_render._ensure_loaded()` set `_STATE["loaded"] = True` **before** the load, and
+its fast path returns on `loaded` **without taking the lock** -- so concurrent first-callers
+read `loaded=True, ok=False` and got "renderer unavailable". Classic broken double-checked
+locking, latent since this module was written; it only surfaced now because v122 moved base
+sets off `pose_clay` and back onto this renderer. **Fix:** set the flag in a `finally`, so late
+callers block on `_LOCK` until the load truly finishes (a FAILED load still latches -- no
+repeated 6s retries). Only ever bites the first parallel render after a restart.
+
+### 2. Chest/torso came back too small -- the two stages described two different bodies
+Same run, same set:
+```
+16:51:52  (turnaround) mesh_fit[Duke]: scan profile {'hip':0.313,'navel':0.301,'chest':0.264}
+16:51:52  (turnaround) klein pose run: 3D-scan body fit applied {'weight':1.0,'belly':1.5,...}
+16:57:30  (T-pose derive) ... no body-fit line at all
+```
+`_matchpose_derive_view` passes `skip_meshfit: True` (v1.189.2), so the T-pose mannequin was
+built generic while the turnaround's was fitted to Duke's measured scan. That mismatch was
+harmless until v122 -- because until v122 the MatchingPose LoRA was being silently replaced by
+the RefControl one, so the mannequin's BUILD was not actually driving the output. Restoring the
+rotation LoRA also restored its body copying, and the generic build came with it. **Fix:** drop
+`skip_meshfit` for mesh-ready derives so both stages of one set describe the same body.
+`mesh_fit` reads the SCAN's torso profile (character.glb) and returns scalars only -- it is not
+a render of the rigged/posed mesh, so the v1.189.2 rule (mesh3d_pose stays False, no feedback
+from an existing RIG) is untouched.
+
+### Verify on the next run
+- All FOUR turnaround views complete -- no "pose renderer unavailable".
+- The T-pose derive window now logs `3D-scan body fit applied {'weight':1.0,'belly':1.5,...}`,
+  matching the turnaround stage.
+- Then judge the image: chest/shoulder mass back to the reference, arms still horizontal.
+
+### Known remaining deviation from the 2026-07-23 validated set (NOT changed -- Lorenzo's call)
+The turnaround now resolves `klein pose LoRA: refcontrol_v2_poses.safetensors @ 0.80`; the
+validated 2026-07-23 set ran `VNCCS_PoseStudioKlein9b_V1 @ 0.70`. That is a saved
+`klein_pose_lora` setting, not a code path, so it was left alone.
+
+## v1.199.122 -- MEASURED: a GLOBAL setting had hijacked base-set generation (2026-07-28)
+
+**This is why v119 failed, and it would have made v120 fail the same way.** Nothing about the
+sequential design was wrong; the recipe underneath it was.
+
+`klein_pose_input` ("Pose input") is a GLOBAL studio setting. Lorenzo switched it to
+🟪 Normal in v1.199.115 -- correctly, it is the verified-better POSE mode. But
+`_klein_submit` resolves the RefControl recipe from that same global setting, so from v115
+onward it also took over BASE-SET generation, which is a completely different job.
+
+Measured in `logs/rbmn.log`, same code path, two dates:
+
+| | 2026-07-23 04:20 (set Lorenzo validated PERFECT) | 2026-07-28 14:54 (v119 run) |
+|---|---|---|
+| pose input | `mannequin (clay=False)` | `normal (clay=True)` |
+| pose LoRA | `VNCCS_PoseStudioKlein9b_V1 @ 0.70` | `flux2_klein_9b_refcontrol_normal @ 1.00` |
+| cfg / steps | `1.50 / 12` | `5.00 / 20` + "RefControl DEPTH trigger prepended" |
+| unet | default klein 9B | `flux-2-klein-base-9b-fp8` |
+
+Two independent consequences, both confirmed by log lines in the v119 run:
+
+1. **The turnaround fed a REAL PHOTO to a LoRA trained to obey a NORMAL MAP.** The SAM3D block
+   still did its job (`klein: view right uses the REAL photo (no mesh render)`) -- but the
+   graph around it was the RefControl-normal recipe with the normal trigger prepended. That is
+   a mislabelled control signal; v115's own guard calls exactly this "convincing garbage". The
+   sacred turnaround was never edited -- it was regressed by a setting, which is why no code
+   review found it.
+2. **The T-pose re-pose ran off the character's EXISTING WELDED MESH.** `_matchpose_derive_view`
+   sets `mesh3d_pose: False` on purpose (v1.189.2: base sets must NEVER feed back from an
+   existing mesh). The v1.199.92 auto-enable overrode it --
+   `klein pose run: depth mode -- auto-enabling the 3D body (rigged mesh found; 'Use 3D body'
+   was off)` -> `pose_clay[Duke]: rendered 1 normal capture(s)`. So the control map for
+   "canonicalize this character to a T-pose" was a render of the welded, arms-fused geometry
+   the pass exists to replace. A closed loop: it could not escape the weld because it was
+   being handed the weld. And the MatchingPose LoRA -- the entire rotation mechanism -- was
+   replaced by the RefControl one, which plausibly explains the front-facing side views.
+
+**Fix (2 lines, both call sites of the base-set builders):** pin `klein_pose_input="mannequin"`
+in the `settings_overrides` of `_turnaround_view_bytes` and `_matchpose_derive_view`. Base-set
+building is not a pose run. Pose runs are untouched -- 🟪 Normal remains the pose mode,
+and the `_klein_submit` SAM3D block itself is not modified.
+
+**Verification for the next run** -- grep `logs/rbmn.log` and expect, for every base-set view:
+`klein pose input: mannequin (clay=False)` + `klein pose LoRA: ...PoseStudio... @ 0.70` +
+`klein cleanup: cfg=1.50 steps=12`, and NO `auto-enabling the 3D body` line inside the base-set
+window. If those match 2026-07-23, the recipe is restored; then judge the images.
+
+NOT yet verified: whether v120's sequential T-pose pass produces a clean T-posed set once it is
+running on the right recipe. That still needs one real run.
+
+## v1.199.121 -- Handover: full documentation of the v115-120 session (2026-07-28)
+
+Documentation + tooling only; no pipeline behaviour changes.
+
+- **HANDOVER_PROMPT.md rewritten** as the primary artifact: cost warning (Lorenzo spent two
+  weeks of usage on this problem -- measure before claiming, verify code paths via the log,
+  use the cloud sandbox before spending device runs), the five-layer causal chain with every
+  measurement, verified-vs-unverified state, why three canonicalization rounds failed, the
+  v120 sequential design awaiting its first run, immediate next steps, and FUTURE OPTIONS
+  (Make-It-Poseable watch, CharacterGen/PoseMaster, parametric proxy, Qwen lane, or shipping
+  the current working recommended-pose flow and waiting).
+- **NEW `gap_test.bat` / `tools/gap_test.py`** -- the weld measurement (ray-cast air gap per
+  arm sample, runs the bpy payload in the MIA venv). Run after EVERY mesh regeneration.
+- **NEW `prototypes/pose_lab/`** -- the sandbox prototypes rescued to disk: `voxel_skin.py`
+  (free geodesic voxel skinning, measured: 4s/241k verts, zero orphans, rest pose perfect),
+  `clay_ik_dev.py` (clay_driver + voxel hook + BVH/IK clearance pass, measured 54.6->14.3%
+  penetration on the worst pose), and a README with the cloud-sandbox reproduction recipe.
+- docs/KLEIN_DEPTH_POSE.md addendum (Normal mode verified, welded-mesh root cause, T-pose
+  canonicalization status) + README pose-system status section.
+- Project memory updated throughout the session; MEMORY.md re-indexed.
+
+## v1.199.120 -- T-pose pass rebuilt SEQUENTIAL after v119 field results (2026-07-28)
+
+Lorenzo ran the v119 mesh set and reported: front view with TWO sets of arms, right/left views
+FRONT-facing, and a slightly different face per image. Each maps to a wiring flaw in the v119
+per-view parallel re-pose: arms-down identity vs arms-up pose refs fighting (Klein drew both),
+independent per-view re-poses giving contradictory angle signals, and four independent
+generations rolling four faces.
+
+Rebuilt: (1) re-pose the FRONT turnaround view once -- its mesh_ready prompt now carries an
+explicit EDIT instruction ("if the reference shows the arms lowered, RAISE both arms into the
+T-pose -- exactly ONE pair of arms, no extra arms or leftover lowered arms"); (2) derive
+right/left/back FROM the T-posed front via the same _matchpose_derive_view machinery (its
+designed use: rotate an anchor, body-locked, T bones per yaw since v118) -- one conflict point,
+one face source, consistent facing. Per-view fallback to the arms-down turnaround view with loud
+warnings; front-failure keeps the whole arms-down set. `klein_mesh_tpose=off` unchanged.
+
+Loop: restart run.bat -> regenerate mesh set -> eyeball (T arms, ONE pair, sides actually
+side-facing, same face) -> 3D body + rig -> sandbox ray-gap test + battery.
+
+## v1.199.119 -- Mesh sets: T-POSE actually enforced (turnaround + re-pose pass) (2026-07-27)
+
+Round-3 mesh (from the v118 "T-pose" set) measured in the sandbox: arm bones at ~30deg from
+vertical, L 7/15 R 4/15 samples still WELDED. Root cause found in the logs: the mesh-ready set
+runs through the TURNAROUND path ("MESH-READY via TURNAROUND path (_klein_submit SAM3D per
+view)"), whose winning principle is "the SAME real photo as BOTH identity AND pose" -- so the
+pose reference for every mesh view is the ARMS-DOWN photo. All three prompt rounds (30deg /
+45deg / T-pose text) and the v118 bone injection were inert on this path: v118 patched the
+derived-view and matchpose paths, not the turnaround path Lorenzo's flow actually takes.
+
+FIX (scoped; the sacred _klein_submit SAM3D block is untouched): a T-POSE RE-POSE PASS after
+the turnaround -- keep the turnaround views for identity (they are the likeness gold standard),
+then re-pose EACH view to a strict T via the PROVEN _matchpose_derive_view path (mannequin +
+MatchingPose, mesh3d_pose OFF, skip_meshfit, and since v118 its mesh_ready branch carries REAL
+T-pose bones: clavicle +/-6, upperarm +/-84, forearms zeroed). Identity ref = the SAME-ANGLE
+turnaround view, pose ref = T-posed mannequin at that yaw -- the model only has to raise the
+arms. Runs per view in parallel across workers; per-view fallback to the arms-down view on
+failure (loud warning: mesh would weld again). Setting `klein_mesh_tpose` (default on;
+"off" restores v118 behaviour). Costs 4 extra generations per mesh set.
+
+Verification loop: restart run.bat -> regenerate the mesh-ready set -> EYEBALL horizontal arms
+with background visible below them -> 3D body + rig -> sandbox ray-gap test + pose battery.
+
+## v1.199.118 -- Mesh sets go T-POSE, forced by BONES not prose (2026-07-27)
+
+Round-2 mesh (45deg prompts) measured in the sandbox: median open gap widened (0.062-0.067 wu)
+but 6/15 L + 8/15 R arm samples STILL welded -- every welded sample on the UPPER arm. The rest
+render shows Klein delivered ~10-20deg again: prompt text cannot reliably raise a heavy man's
+arms. Lorenzo asked "would a T-pose be better?" -- yes, and it is now FORCED:
+
+- Mesh-ready views inject REAL T-pose rotations into the pose reference (clavicle +/-6,
+  upperarm +/-84, lowerarm/hand zeroed) in BOTH paths: the derived-view path (which had
+  bones={} = prompt-only) and the matchpose/SAM3D neutral path (which kept the baseline's bent
+  arms). The reference image Klein copies now HAS horizontal arms -- the pose system's own
+  premise applied to the mesh set.
+- All five stance prompts now say T-POSE ("like the letter T", palms down, background visible
+  between and BELOW each arm).
+- T-pose trade-offs accepted knowingly: slightly more shoulder deformation when posing arms
+  fully down from a T bind (voxel weights + corrective smooth handle it; downward poses press
+  INTO the body, which renders fine in control maps -- it is separation that fused meshes
+  cannot do), and slightly lower torso pixel density in the square crop. Both minor vs welds.
+
+Verification loop unchanged: regenerate mesh set (EYEBALL: horizontal arms, clear background
+under both), 3D body + rig, sandbox ray-gap test + pose battery on the new rigged.fbx.
+
+## v1.199.117 -- WELDED-ARMS root cause: A-pose widened to 45deg for mesh sets (2026-07-27)
+
+MEASURED on both of Duke's rigged meshes (sandbox, ray-cast gap test: rays from inside the arm
+toward the torso axis, air-gap between arm exit and torso entry):
+- OLD mesh (arms-down source): 7/15 arm samples per side have ZERO air gap -- arms topologically
+  fused to the flanks. Posing fused geometry stretches MEMBRANES (the week's wings/webbing).
+- NEW mesh (30deg A-pose set): forearms opened (visible gaps) but 4-7/15 samples still welded --
+  Klein rendered the "about 30 degrees" instruction as ~10-15deg on this heavy body, and the upper
+  arms still rest in the flank fat. Posed test renders still grow membranes (smaller).
+- (The earlier "2,886 crossing edges" metric measured classifier boundaries, not welds -- retracted;
+  the ray-gap test is the valid instrument.)
+
+FIX: all four mesh-ready A-pose prompt sites (KP rotate stance, KP parts, KP clothed stance,
+API derived-view + SAM3D neutral) now demand ~45 degrees -- "halfway between hanging down and
+horizontal" -- with "a WIDE, clearly visible strip of empty background between each arm and the
+torso from armpit to wrist; even on a heavy build the arms must NOT touch the body".
+
+Also this session (sandbox, not yet shipped): FREE geodesic voxel skinning module (voxel_skin.py,
+numpy/scipy, 4s for 240k verts, fat-torso-seed trick, Laplacian weight smoothing) -- replaces the
+planned $30 addon because app users must not need paid tools; plus the IK clearance prototype.
+Both land in mia_local AFTER a genuinely arms-clear mesh verifies clean.
+
+NEXT: regenerate the mesh-ready set (v117 prompts), EYEBALL the four views for real arm gaps,
+regenerate 3D body + rig, re-run the sandbox gap test + pose battery on the new rigged.fbx.
+
+## v1.199.116 -- depth_test was NOT testing production config; arms are BURIED, not missing (2026-07-27)
+
+Lorenzo reviewed the depth_test PNGs and read them as "missing arms / maybe the rig is broken".
+Verified against his actual rigged.fbx by running the UNMODIFIED clay_driver.py in the cloud sandbox
+(bpy 5.0.1) with the same 4 library poses -- penetration numbers reproduced bit-for-bit
+(57.1/48.2/32.4/31.6%). Findings, all measured:
+
+- **The rig is fine.** REST pose renders (front + side) show both arms intact, cleanly separated,
+  hanging naturally. 24 bones mapped, 40k+ arm vertices present in every pose.
+- **The arms are not missing -- they are INSIDE the body.** Multi-angle renders (front/45/90) of the
+  POSED mesh show the library rotations driving the arms into the fat torso: what the depth map shows
+  as "no arm" is an arm buried in the flank/belly. Exactly the measured v1.199.100 root cause, seen
+  from the side for the first time.
+- **depth_test ran a NON-PRODUCTION config**: reskin="off" + fixed weld_dist=0.001 (merges ONE vertex
+  on this ~200-unit mesh), while the app has shipped reskin="blender" + scale-relative weld since
+  v113. Measured difference on the same rig/poses: maxstretch 390-1064 -> 4-12.5, auto-abduction
+  60deg-clamped -> max 47.9deg, penetration 57.1/48.2/32.4/31.6 -> 54.6/49.2/28.7/18.5%. The tool was
+  under-reporting production quality. FIXED: run_clay defaults now match pose_clay.
+- **depth_test sampled library poses 0-3; poses 0 and 1 are known-rejected for wide bodies**
+  (49-57% arm-in-torso even in production config -- they are NOT in the recommended set). The tool now
+  prefers `_diag/pose_audit/report.json` recommended_poses when present, and the battery_source label
+  bug (always claimed "synthetic") is fixed.
+- v1.199.115 NORMAL mode verified working at the render level: matcap found (check_normal+y.exr),
+  rc 0, coverage 37%, healthy R/G spread -- the normal maps in _diag/depth_test are real normal maps.
+
+Files: tools/depth_test.py. App pipeline unchanged (tool + docs only).
+Contact sheet evidence: sandbox render, delivered in chat 2026-07-27.
+
+## v1.199.115 -- Pose input = NORMAL (RefControl normal LoRA) + ref_end A/B path (2026-07-27)
+
+Phase 1 of the pose research plan (POSE_RESEARCH_2026-07-27.md). Two levers at the remaining
+tucked-arm defect; NEITHER is verified yet -- both need a real run + contact sheet.
+
+- **NEW Pose input = 🟪 Normal.** Renders a camera-space SURFACE NORMAL map of the posed rigged
+  mesh (Workbench `check_normal+y` matcap, Standard view transform -- the DSINE convention the LoRA
+  was trained on) and drives `flux2_klein_9b_refcontrol_normal.safetensors` (thedeoxen, same family
+  as the depth LoRA). Rationale: an arm tucked against the torso is near-invisible in depth (near-zero
+  tonal separation -- measured, and only half-fixed by the 16-bit percentile re-stretch) but keeps a
+  hard surface-ORIENTATION discontinuity in a normal map. Champ (ECCV 2024) ablations back
+  depth+normal over depth alone for exactly this contact case.
+  - Reuses the ENTIRE depth machinery via `resolve_depth_recipe` returning `mode: depth|normal`:
+    same undistilled base UNET, cfg 5 / 20 steps preset, trigger `refcontrol`, clay auto-enable,
+    keep-smear, structure-lock compatibility. New settings: `klein_normal_lora`,
+    `klein_normal_lora_strength` (falls back to the depth strength settings).
+  - clay_driver: `render_mode=normal` -> matcap render, cavity off, fill_holes on (a hole would read
+    as background mid-body, same failure as depth). pose_clay: no depth re-norm; composites onto flat
+    facing-camera (128,128,255) so the backdrop reads as a wall, not a void.
+  - The MANNEQUIN renderer has no normal mode, so normal + no usable clay FAILS LOUDLY
+    (VNCCSError) instead of silently feeding a shaded mannequin to the normal LoRA.
+  - UI: 🟪 Normal segment in Pose input, notices widened, Varitest can sweep
+    mannequin/skeleton/depth/normal.
+  - **Requires `flux2_klein_9b_refcontrol_normal.safetensors` on all three workers** (models/loras;
+    from huggingface.co/thedeoxen/refcontrol-FLUX.2-klein-9B-reference-normal-lora). Verify with
+    `worker_probe.bat` -- the run falls back to the previous pose input if it is missing.
+- **ref_end A/B (no code -- do this first):** `klein_pose_ref_end` (default 0.85) applies in depth
+  mode too, so the ONLY spatial binding is released for the last 15% of denoising -- exactly when
+  fine limb boundaries resolve. `worker_run.bat --set ref_end=1.0` replays the stored depth graph
+  holding the reference the whole run. If the tucked arm improves, make 1.0 the depth-mode default.
+- Research context, sources and the full phase plan: **POSE_RESEARCH_2026-07-27.md** (repo root) and
+  project memory `research_pose_control_2026_07_27.md`.
+
+UNVERIFIED: no worker has the normal LoRA yet; no normal-mode render has been produced. The matcap
+name lookup logs `CLAY_LOG normal matcap:` and hard-fails (rc 5) if no normal matcap exists in the
+bundled Blender. Depth mode is byte-for-byte unchanged except the shared log line now prints
+DEPTH/NORMAL.
+
+## v1.199.114 -- Handover: full documentation of the depth-pose work (2026-07-27)
+
+Documentation-only. Session closing; everything needed to resume in a fresh chat is written down.
+
+- **HANDOVER_PROMPT.md rewritten** as the primary artifact: the working recipe, the four measured root
+  causes, what is STILL BROKEN, a table of **everything tried that did NOT work** (so none of it is
+  redone), the agreed direction, the tools built, and a TRAPS section covering the ~10 rounds this
+  session lost to bad metrics, misread renders, a synthetic test pose that exists in no library, silent
+  zero-result code paths and version skew between the subprocess driver and the imported backend.
+- **NEW `docs/KLEIN_DEPTH_POSE.md`** — the technical reference: why ReferenceLatent could never bind
+  the pose, the full pipeline diagram, every setting with its default and rationale, how auto-abduction
+  derives clearance from the character's own torso profile, and the known limits.
+- **README.md** gains a Klein DEPTH pose control entry alongside the earlier pose-quality saga.
+- **Project memory** updated: `project_depth_pose_control.md` is the START-HERE with the traps list,
+  `feedback_measure_dont_infer.md` carries Lorenzo's standing rules (no guessing; build a tool; never
+  claim "fixed" without measuring), and MEMORY.md is re-indexed with both at the top.
+
+State at handover -- worker-confirmed WORKING: body mass, likeness, colour, pose fidelity, near arm.
+STILL BROKEN: far arm tucked against the torso; anterior (belly) clearance; face likeness untuned and
+deliberately untouched. Recommended poses for Duke: [2, 3, 4, 6, 8, 9, 10].
+Files: HANDOVER_PROMPT.md, docs/KLEIN_DEPTH_POSE.md (new), README.md.
+
+## v1.199.113 -- Re-skin + abduction together: best result yet. Re-skin ON by default (2026-07-27)
+
+With the parent-transform bug fixed, the full 12-pose audit for Duke. `reskin world bbox extents
+X=1.05 Y=0.78 Z=2.00 -> tallest axis Z` confirms the figure is upright, and penetration now MEASURES in
+the re-skin pass (torso_verts was zero purely because the profile is built from `matrix_world`
+vertices and the transform was wrong -- one bug, two symptoms).
+
+      pose   plain   abduct   +reskin      stretch: abduct -> +reskin
+        0     76.7    57.0     54.6            31.4 -> 12.5
+        1     75.4    48.2     49.2            13.7 ->  4.1
+        2     53.1    32.4     28.7            25.1 -> 11.1
+        3     59.6    31.5     18.5            33.2 -> 12.3
+        4     47.2    60.0     16.6            39.5 -> 14.6
+        5     61.0    30.8     36.7            28.8 ->  9.7
+        6     63.6    37.1     20.1            24.3 ->  9.6
+        7     57.9    55.9     37.5            34.4 -> 13.3
+        8     82.6    30.8     25.8            26.2 ->  5.5
+        9     61.8    28.7     22.0            22.2 ->  6.8
+       10     51.6    56.7     25.5            35.2 -> 13.6
+       11     91.1    96.2     63.5            34.6 -> 13.4
+
+Penetration lower on 9/12 vs abduction alone, peak stretch lower on **12/12**, and pose #4 -- which
+abduction ALONE made worse (47.2 -> 60.0) -- lands at 16.6%, the best in the set. `recommended_poses`
+(pen <= 35 AND stretch <= 30) goes from 5 to **7 of 12**: [2, 3, 4, 6, 8, 9, 10].
+
+Contact sheet reviewed, not just the table: twelve upright figures with Duke's real build, arms
+VISIBLE in most poses where they were previously buried or merged. Residual ghosting on #0 and #6;
+#11 (the rear pose with the forearm across the belly) remains the known anterior-clearance case.
+
+So both failure modes now have a working fix, and they compose. `clay_reskin` defaults to `blender`
+(`"off"` reverts to MIA's binding).
+
+Measured: penetration and stretch across 12 poses, plus visual review. NOT yet verified: an actual
+Klein render. The next check is a worker run -- does Duke come out with arms.
+Files: pose_clay.py.
+
+## v1.199.112 -- Lorenzo: the re-skin renders are viewed from UNDERNEATH. He is right; I wrote it off wrongly (2026-07-27)
+
+Lorenzo on the v1.199.110 contact sheet: "it shows all the poses from under the body, like if a person
+was standing on glass and someone was taking a picture underneath of them."
+
+He is right, and it overturns v1.199.111. Re-reading the renders with that in mind: the two bright
+elongated shapes in each tile are the LEGS AND FEET nearest the camera, with the body receding behind
+-- near=white is exactly what a depth map of a worm's-eye view looks like. The mesh was never
+destroyed. The camera was under it, and I declared "twelve unrecognisable blobs, no human form" from a
+misread. Second wrong call in two versions on the same feature, both from interpreting an image
+instead of measuring the geometry.
+
+CAUSE: a skinned FBX parents its meshes TO THE ARMATURE. The re-skin did `_m.parent = None` directly,
+which drops the relationship WITHOUT compensating, so each mesh jumps by the old parent-inverse -- the
+importer's -90 X rotation. `keep_transform=True` on the subsequent `parent_set` then faithfully
+preserved the already-wrong transform. Fixed by capturing `matrix_world` across the unparent and
+restoring it, plus a `view_layer.update()` before re-parenting.
+
+CONSEQUENCE, and this is the important part: **the 10-15x maxstretch reduction may be real after all**
+(31.4 -> 2.1, 39.5 -> 2.5, 35.2 -> 5.4). Edge length is rotation-invariant, so those numbers were never
+affected by the orientation bug -- only my reading of the renders was. If the deformation is correct
+once the camera is right, the re-skin is the SMEAR fix, which is the remaining blocker on the whole
+pose set. v1.199.111's "maxstretch rewards collapse" reasoning was built on the misread and is
+withdrawn; the caution itself still stands, but it is not what happened here.
+
+Added so orientation can never again be judged by eye: clay_driver logs the re-skinned world bbox
+extents and names the tallest axis (expect Z upright). pose_audit keeps the CLAY_LOG lines and the
+re-skin pass is restored.
+
+Still unknown: whether `torso_verts=0` under re-skin was also a consequence of this (the profile is
+built from `matrix_world`-transformed vertices, so a bad transform corrupts it) or a separate weighting
+problem. The retained logs will say.
+Files: mia_local/clay_driver.py, tools/pose_audit.py.
+
+## v1.199.111 -- Re-skin DISPROVEN by the contact sheet; maxstretch rewards collapse (2026-07-27)
+
+The three-way audit produced a striking table -- maxstretch fell 10-15x on EVERY pose with the Blender
+heat-weight re-skin (31.4 -> 2.1, 39.5 -> 2.5, 35.2 -> 5.4) -- and a contact sheet showing **twelve
+unrecognisable blobs with no human form at all.**
+
+So the v1.199.99 "17x better" conclusion was wrong, and wrong in an instructive way: `maxstretch`
+measures how far edges are pulled, so a mesh that COLLAPSES uniformly scores beautifully. Blender's
+`ARMATURE_AUTO` bone-heat fails on this scanned mesh and produces weights that barely resemble a
+skeleton binding; the deformation is gentle and completely incorrect. That also explains the
+`torso_verts=0` classification failure that has dogged every re-skin run since v1.199.103 -- no vertex
+is dominated by a spine bone because the weights are garbage. Two symptoms, one cause, and I had been
+treating them as unrelated.
+
+A low maxstretch is NECESSARY BUT NOT SUFFICIENT. Had I shipped on that number this would have looked
+like a triumph and destroyed every pose. This is the second time the contact sheet has overturned a
+scalar (the first: v1.199.88 "the arms raise correctly").
+
+Re-skin is now removed from the audit entirely (it already defaulted off in the runtime path since
+v1.199.103, so production was never exposed). MIA's weights, imperfect as they are, remain the only
+working binding.
+Files: tools/pose_audit.py.
+
+## v1.199.110 -- Full library audited: abduction helps 8/12, but SMEAR is a second, independent failure (2026-07-27)
+
+First measurement across the whole 12-pose library for Duke, with the contact sheet reviewed rather
+than just the table:
+
+      pose   plain%  abduct%        pose   plain%  abduct%
+        0     76.7 -> 57.0            6     63.6 -> 37.1
+        1     75.4 -> 48.2            7     57.9 -> 55.9
+        2     53.1 -> 32.4            8     82.6 -> 30.8
+        3     59.6 -> 31.5            9     61.8 -> 28.7
+        4     47.2 -> 60.0  WORSE    10     51.6 -> 56.7  WORSE
+        5     61.0 -> 30.8           11     91.1 -> 96.2  WORSE
+
+Findings:
+1. **The problem is systemic, not a few bad poses.** EVERY pose sits at 47-91% penetration untreated.
+   The pose library is simply not usable as-authored on a body this wide.
+2. **Abduction helps 8 of 12**, several dramatically (82.6 -> 30.8, 61.8 -> 28.7). It hurts 3, all of
+   which are arm-across-the-body poses where the obstruction is the belly in the ANTERIOR axis --
+   consistent with v1.199.108 and not a new failure.
+3. **Penetration alone is NOT a sufficient quality gate.** Poses #3 and #5 score 31-32% -- inside the
+   "recommended" band -- yet render visibly smeared, and #0/#1/#6/#10 show ghosted ribbon artifacts.
+   Arm burial and armpit SMEAR are two independent failure modes and only one was being measured. By
+   eye roughly 3 of 12 (#2, #8, #9) are genuinely clean, not the 5 the metric nominated.
+
+So the curated set is real but currently too small to be useful, and the limiting factor is now smear,
+not burial. The Blender heat-weight re-skin measured 17x lower peak stretch at v1.199.99 and was parked
+at v1.199.103 only to cut variables while abduction was being proven -- abduction is now proven, so it
+is time to put them together.
+
+pose_audit is now THREE-WAY (plain / abduct / abduct+reskin), records **maxstretch per pose** alongside
+penetration, gates `recommended_poses` on BOTH (pen <= 35 AND stretch <= 30), and labels the contact
+sheet with both numbers. One run now answers whether the two fixes together produce a usable set.
+Files: tools/pose_audit.py.
+
+## v1.199.109 -- pose_audit: score EVERY library pose, not a sample of one (2026-07-27)
+
+Lorenzo: "is there some reason you're picking that same pose -- it's got to be the worst pose to test
+as it's a back-facing pose." Correct, and it is a methodology error, not a preference. `depth_test
+--last` (made the default in v1.199.107) pulls from the newest `last_pose_run` dump, which happened to
+contain exactly ONE pose, rear-facing -- the least informative case available. Six rounds were graded
+against a synthetic pose that does not exist in any library, then one round against a sample of one.
+
+NEW `pose_audit.bat` / `tools/pose_audit.py`: runs the FULL vendored pose library (12 baseline poses)
+through the clay driver for a given character, twice -- auto-abduction ON and OFF -- and reports
+per-pose arm-inside-torso penetration, a ranked table, a `recommended_poses` list (<=35% with
+abduction) and a labelled CONTACT SHEET so the ranking can be eyeballed rather than just read. Renders
+at 512x768 since this is a screening pass.
+
+This is exactly the measurement the chosen direction needs: "curate the pose set" stops being an
+opinion and becomes a sorted list, per character, from the character's own geometry. It is also the
+same signal a runtime filter would use to auto-skip poses a given body cannot hold -- which keeps bulk
+character creation zero-input.
+
+`depth_test` default battery changed to the first 4 real library poses (`--last` still forces the dump
+for reproducing a specific failure, `--synthetic` the old battery).
+Files: tools/pose_audit.py (new), pose_audit.bat (new), tools/depth_test.py.
+
+## v1.199.108 -- Real pose: the obstruction is the BELLY (depth), not the torso width (2026-07-27)
+
+First test against the REAL production pose instead of the synthetic battery:
+
+      real pose (yawed 3/4 rear, forearm across the abdomen)
+        no abduct  91.1% of arm vertices inside the torso
+        abduct     96.2%   (WORSE; angles -41.6 / +11.1, asymmetric)
+
+The shaded ground truth explains why lateral abduction cannot win here. The pose folds the forearm
+ACROSS the abdomen. On an average build the arm rests in front of the belly with clearance in DEPTH.
+On Duke the belly protrudes so far anteriorly that the forearm ends up inside it -- and swinging the
+arm sideways in the frontal plane does nothing about an obstruction that is in FRONT of the arm. Worse,
+on a pose whose intent is "arm across the body", abducting fights the pose and pushes the forearm
+further into the gut, which is exactly the 91.1 -> 96.2% regression.
+
+The render also shows a large TEAR in the torso where the arm meets it -- the arm surface pulled inside
+the body, exposing the mesh interior. So on this pose the two failures compound: penetration from
+body-agnostic pose angles, and armpit smear from the auto-rig.
+
+CONCLUSION, evidenced: the pose library assumes average proportions in BOTH width and depth. v1.199.100
+-107 solved only the width half. Lateral abduction is correct and visibly works where the arm hangs
+beside the torso (synthetic yaw45: 66.8 -> 39.8%, arm clearly separated in the render) and is the WRONG
+tool where the arm crosses in front of a protruding belly. A general fix needs clearance solved in the
+anterior axis too -- rotation about the lateral axis (shoulder flexion) to bring the arm forward of the
+belly -- i.e. 3D collision-aware retargeting rather than a single-axis correction.
+
+Not implemented pending a direction decision: this is now a materially bigger job than a clearance
+tweak, and there is a cheaper path (curating the pose set to poses that suit heavy builds) that may
+make it unnecessary for the actual use cases -- LoRA dataset generation and scene images.
+Files: none (measurement + analysis only).
+
+## v1.199.107 -- Abduction works on real poses; my synthetic test pose was the problem (2026-07-27)
+
+      pose        no abduct   v106
+      rest          19.9%       19.9%   (correctly untouched)
+      arms-up       78.8%       43.8%
+      yaw45         66.8%       39.8%
+
+**Looked at the pixels rather than stopping at the numbers, and they disagree with each other.**
+- yaw45: GENUINE FIX. The near arm now reads as a distinct limb with a hand at the hip, separated from
+  the torso by a real tonal edge. Without abduction the same arm is a merged blob with no boundary.
+- arms-up: the arms are TORN INTO RIBBONS -- thin blades running from above the head past the hips.
+  43.8% "improved" while the render got much worse. Exactly the trap that produced the v1.199.88 "the
+  arms raise correctly" mistake, caught this time because the image was checked.
+
+Two causes, both mine:
+(1) **The synthetic test pose is not real.** `{"upperarm_l": [0,0,-120]}` -- arms straight up -- is not
+in any library and is not what fails for Lorenzo. Add 60deg of abduction and the shoulder is driven
+~180deg, past anatomical range, so of course it tears. depth_test now uses the REAL poses from the
+newest `last_pose_run` dump BY DEFAULT (`--synthetic` forces the old battery). Six rounds were spent
+tuning against a pose that does not occur.
+(2) **The metric over-reports on raised arms.** Burial only happens when an arm hangs DOWN beside a
+wide torso; once the elbow reaches shoulder height the arm is clear by construction, and the deltoid
+overlaps the torso's own bbox by anatomy, not by error. That phantom penetration is what drove the
+correction to the clamp. Abduction is now gated on the elbow being below the shoulder, and the
+penetration metric excludes clavicle/shoulder-dominant vertices.
+
+So the mechanism is sound and, on the pose class that actually fails, it works and is visible. What
+was broken was the test, and the metric it was optimising.
+Files: mia_local/clay_driver.py, tools/depth_test.py.
+
+## v1.199.106 -- Post-rotation PROVEN (yaw45 66.8 -> 39.8%); sign bug found by unit test before shipping (2026-07-27)
+
+v1.199.105 result -- the mechanism is right and the direction was half wrong:
+
+      pose        no abduct   v105 post-rotation
+      rest          19.9%       19.9%   (correctly untouched)
+      yaw45         66.8%       39.8%   BIG improvement -- post-rotation works
+      arms-up       78.8%       80.0%   slightly worse, and the sign had FLIPPED
+
+Same code, opposite outcomes, splitting exactly on arm ELEVATION -- which points at the angle solver,
+not the application. Cause: `asin` only covers [-90, 90], so for an arm raised above horizontal it
+cannot distinguish "swing further out" from "swing back across the body". Replaced with
+`atan2` + BOTH `asin` branches, choosing the smaller rotation.
+
+**Then the unit test caught a second bug before it shipped.** Exercised the solver over six geometries
+(arm down / raised ~120deg / forward, on both sides, plus an already-clear arm) and it passed 1/6: the
+correction was moving |x| from 0.200 to 0.016 -- driving the arm deeper INTO the torso. Convention
+clash: `phi = atan2(x, y)` measures from +Y, while `Matrix.Rotation(t, 'Z')` is standard right-handed
+(`x' = x cos t - y sin t`), which increases `atan2(y, x)` and therefore DECREASES `atan2(x, y)`. The
+two run in opposite directions. Negated: **6/6**, every case landing exactly on the torso half-width.
+Un-negated is what shipped in v105, which is precisely why arms-up flipped sign.
+
+This is the first bug this session caught before a test round rather than after one. Worth keeping the
+habit: the solver is pure geometry, so it is unit-testable in the sandbox with no Blender, no worker
+and no user in the loop.
+
+Verified: the solver, in isolation, over six geometries. NOT verified: end-to-end penetration numbers,
+and no pixels looked at yet. The `have >= want` guard is confirmed present, so an arm that already
+clears the torso is never pulled inward.
+Files: mia_local/clay_driver.py.
+
+## v1.199.105 -- Abduction was being composed INSIDE the pose rotation; now a post-rotation (2026-07-27)
+
+Frame fix helped but did not close it:
+
+      pose        no abduct   v104 (armature-space measurement)
+      rest          19.9%       19.9%
+      arms-up       78.8%       43.8%   (was 51.9% at v103 -- better, still saturating the clamp)
+      yaw45         66.8%       75.8%   (was 79.0% -- better, but STILL WORSE than doing nothing)
+
+A correction that makes a pose worse is not a tuning problem, so I stopped raising the clamp and looked
+at how the angle is applied. Found it: the correction was injected into the bone's **euler Z component**
+and then composed by `rot_xyz(rx, ry, rz)`. That puts the extra rotation INSIDE the pose's own
+rotation, so its axis is whatever the preceding rotations leave it as. For an arm already flexed
+forward it stops being abduction at all -- which is precisely why the yawed pose regressed while the
+front-facing one improved, and why arms-up needed 60 degrees and still saturated: much of the angle was
+going somewhere other than sideways.
+
+Now applied as a POST-ROTATION in armature space about the forward axis Z (X lateral, Y up), i.e.
+`Rw = Rz(theta) @ Rw`, so it swings the arm in the frontal plane regardless of how the pose already
+rotated it. Two supporting fixes: (1) the bone loop no longer SKIPS a bone with no pose rotation --
+an arm hanging straight down is exactly the case that ends up inside a wide torso, and it was being
+skipped outright; (2) the needed angle is now SIGNED from the geometry rather than multiplied by an
+assumed per-side constant, so a mirrored or unusually oriented rig cannot push both arms the same way.
+
+Verified in code, NOT yet in results: this changes where the rotation acts, and the last three rounds
+show that reasoning about that without measuring is unreliable. The number to watch is yaw45 -- if the
+post-rotation is right it should fall BELOW its 66.8% baseline rather than above it.
+Files: mia_local/clay_driver.py.
+
+## v1.199.104 -- Abduction fires and works on the front pose; wrong reference frame broke the yawed one (2026-07-27)
+
+Instrumentation finally complete, and the machinery runs end to end: torso profile 97,970 vertices,
+half-width max 0.38 / median 0.33, `auto-abduct` firing with derived angles, `ortho_scale` back to the
+correct world-space 2.224 (from 262.634). First real result:
+
+      pose            no abduct   auto-abduct
+      rest              19.9%       19.9%   (untouched, correct -- no correction needed)
+      arms-up           78.8%       51.9%   IMPROVED, and it hit the 40deg clamp on BOTH arms
+      yaw45             66.8%       79.0%   WORSE
+
+Partial success plus one clear regression, and the regression names the bug: the clearance test ran in
+WORLD axes while `modelRotation` yaws the whole body at pose time. On the front-facing pose world X is
+the character's lateral axis, so the correction pushed the arm the right way; on the yawed pose world X
+no longer points sideways on the body, so it pushed the arm INTO the torso. The torso profile had the
+same flaw -- measured once at rest in world axes, then compared against a rotated body.
+
+Fixed by moving the whole calculation into ARMATURE space (Y-up here, per the driver's own
+`armature up axis: Y` detection): the profile is built with `arm.matrix_world.inverted() @
+mesh.matrix_world`, and joint positions are read as raw `pose_bone.head/tail` with no world matrix, so
+neither side sees `modelRotation`. The penetration audit already grades in mesh-local coordinates
+(height Y, lateral X), so all three now share one frame -- grading in world axes while correcting in
+armature axes would have scored the fix against different geometry than it changed. Clamp raised
+40 -> 60 degrees since the front pose saturated it.
+
+Honest status: abduction is now PROVEN to fire and to move the number in the right direction on the
+pose where its frame happened to be valid. Whether the frame fix carries the yawed pose, and whether
+51.9% falls near the 19.9% rest-pose floor, is NOT yet known.
+Files: mia_local/clay_driver.py.
+
+## v1.199.103 -- Classifier keyed off our own bone map; re-skin defaulted back OFF to cut variables (2026-07-27)
+
+`arm_verts=10707 torso_verts=0 deform_groups=22` -- 22 vertex groups existed and matched bone names,
+yet the torso classifier found nothing, so both the torso profile and the penetration test skipped and
+auto-abduction never had a profile to work from. Cause: the classifier string-matched Mixamo names it
+had guessed at. Replaced with role sets derived from **MH2MIX, the MakeHuman->Mixamo map this file
+owns** (torso = pelvis / spine_01-03 / neck_01 / root; arm = clavicle / upperarm / lowerarm / hand),
+plus a dominant-group histogram that prints whenever the profile still comes up short, so a zero can
+never again be mistaken for "did not run".
+
+`keep_transform=True` on the re-parent: manually restoring `matrix_world` after `parent_set` did NOT
+take (ortho_scale stayed at the local-space 262.634 instead of the world-space 2.202).
+
+**Re-skin defaulted back to OFF.** It measured 17x lower peak stretch at v99, but it (a) broke the
+object world transform, (b) changed the weight distribution drastically -- arm-dominant vertices fell
+49,251 -> 10,707, which suggests bone-heat did a poor job on parts of this mesh rather than a better
+one, and (c) does not address the measured root cause, which is arms buried inside the torso. Three
+uncontrolled variables at once, chasing a symptom, is how the last several rounds were lost. It stays
+available as `clay_reskin="blender"` for a clean A/B once abduction is proven. Next run is therefore
+the KNOWN-GOOD weight state (MIA, where penetration measured cleanly at 49,251 arm verts) plus the one
+change under test.
+
+Still unverified: auto-abduction has not executed once. The 78.8% penetration measurement (v100)
+remains the only thing established about this failure, and it is not in doubt.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.102 -- Re-skin was silently destroying the object transform; instrumenting the silent paths (2026-07-27)
+
+The v1.199.101 auto-abduction did not run: no torso-profile line, no CLAY_PENETRATION, no auto-abduct
+line, and the two passes produced BYTE-IDENTICAL PNGs. The code is in the file and the run was fresh
+(01:36-01:39 against a 01:33 patch), so it is reachable but finding nothing -- and both the torso
+profile and the penetration test only print INSIDE their success branches, so a zero-result path says
+nothing at all. That is a diagnostic design fault; both now print unconditionally, including the
+counts that would explain a zero.
+
+REAL BUG FOUND while reading the log rather than the code: `uniform ortho_scale` jumped **2.202 ->
+262.634**. The mesh is ~200 units in LOCAL space and ~2 in WORLD space (the FBX importer parks a 0.01
+scale on the object), so framing had switched from world to local units. Cause: the v1.199.99 re-skin
+calls `bpy.ops.object.parent_set(type="ARMATURE_AUTO")`, which re-parents the mesh to the armature and
+REBUILDS its world transform, discarding that 0.01 scale. Symptom: the figure renders tiny --
+background 60.8% -> 87.9% of frame. Worse, the v1.199.99 percentile-bbox change was introduced to
+"fix" exactly this framing shrink, which I had attributed to a flung vertex; it was treating a symptom
+of a bug I had just added. The re-skin now captures and restores each mesh's world matrix around the
+re-parent, and logs the vertex-group counts it produced.
+
+Sequencing lesson recorded: the previous round also mixed versions (clay_driver v100 + depth_test v99
+still resident), so an A/B silently ran the wrong control. When a tool and the code it drives are both
+edited, both must be re-launched before the results mean anything.
+
+STILL UNVERIFIED: auto-abduction has never actually executed, so v1.199.101 remains untested. The
+78.8%-arm-inside-torso measurement stands on its own (v100) and is not in doubt.
+Files: mia_local/clay_driver.py.
+
+## v1.199.101 -- CONFIRMED: 79% of the arm is INSIDE the torso. Auto-abduction from the character's own width (2026-07-27)
+
+Lorenzo called it, and the measurement is not close:
+
+      CLAY_PENETRATION  rest pose      9,778 / 49,251 arm verts inside torso  (19.9%)
+                        arms-up pose  38,805 / 49,251                          (78.8%)
+                        yaw45 pose    32,916 / 49,251                          (66.8%)
+
+Rest (his scan's own natural stance) is the ~20% baseline of a wide torso touching its own arms. Under
+LIBRARY poses it is two-thirds to four-fifths. The arm is not being destroyed -- it is inside him, and
+an occluded arm contributes nothing to a depth silhouette, so Klein renders a man with no arms,
+correctly. Note this run already used the v99 Blender heat weights, so **re-skinning does not fix
+this**, exactly as predicted: better weights deform the arm cleanly and leave it just as buried.
+
+Cause: the VNCCS pose library stores BONE ANGLES authored against an average-width mannequin. Bone
+angles are not body-aware, so "arms at the side" on a torso Duke's width puts the upper arm through
+the chest. This also explains why the defect tracks how heavy the character is -- something no
+skinning explanation predicts.
+
+FIX -- auto-abduction, derived per character from its own geometry, zero input:
+- Build a TORSO HALF-WIDTH PROFILE once from the rest mesh (40 height bins, 97th percentile of |x| per
+  bin so strays cannot inflate it; world axes X=width, Y=depth, Z=height).
+- Per pose, after applying the rotations, read the elbow/wrist positions off the ARMATURE (cheap -- no
+  mesh evaluation) and compute the extra frontal-plane angle needed for each arm to clear its own
+  torso at that height, times a 1.06 margin, clamped to 40 degrees.
+- Re-apply the pose once with the correction folded in (guarded against recursion).
+It is zero for a slim character and grows only as far as THIS body needs, so it stays a no-input step
+suitable for bulk character creation. `clay_auto_abduct` (default on) can disable it;
+`clay_arm_abduct` remains as a manual additive override.
+
+Housekeeping: the previous run mixed versions -- clay_driver was v100 (penetration audit present) while
+depth_test was still v99 in memory (so the 5th pass ran the old MIA-weights control and the abduction
+A/B never executed). The measurement survived that; the A/B did not. depth_test's 5th pass is now
+auto-abduct OFF as the control.
+
+NOT YET VERIFIED: that the arms appear in the render. The cause is now measured rather than inferred
+and the fix targets it directly, but I have not seen the pixels.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.100 -- Lorenzo's hypothesis: the arms are INSIDE the torso (pose authored for a slim body) (2026-07-27)
+
+Lorenzo, on the worker_run comparison: "the arm literally is going inside his body. Almost like the
+poses are trying to fit to a skinny body and can't adjust to a larger wider body."
+
+This is a mechanism nobody in this session had considered, and it fits the specific symptom better
+than anything I proposed. The VNCCS pose library stores BONE ROTATIONS authored against an
+average-width mannequin. Bone angles are not body-aware: on a torso as wide as Duke's, the same
+"arms hanging at the side" rotation places the upper arm geometrically INSIDE the chest. An occluded
+arm contributes nothing to the depth silhouette, so it simply is not there -- and Klein then renders a
+man with no arms, faithfully. Critically this would SURVIVE the v1.199.99 re-skin: better weights
+deform the arm cleanly and leave it just as buried. It also explains why the defect scales with how
+heavy the character is, which no skinning explanation does.
+
+Measured, not assumed -- `CLAY_PENETRATION` counts ARM-dominant vertices that land inside the torso's
+own cross-section at their own height (3-unit height band, tested in both the width and depth axes;
+local axes taken from the measured bbox: Y height ~200, X width ~105, Z depth ~78).
+
+Candidate fix behind a flag, so one run measures the cause AND tests the remedy: `arm_abduct_deg`
+(`export["clay_arm_abduct"]`, default 0 = off) adds extra shoulder abduction, swinging the upper arms
+outward to restore the clearance the pose author assumed. Sign convention taken from the pose data
+itself (upperarm_l raises on negative z, upperarm_r on positive). depth_test's 5th pass is now
+abduction 20deg vs the 0deg default.
+
+If the penetration numbers confirm it, the permanent form should be AUTO-derived per character --
+measure the torso half-width at shoulder height from the character's own mesh and abduct only as much
+as that body needs -- so it stays a zero-input step for bulk character creation rather than another
+slider. Not built yet: measure first.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.99 -- MIA's weights ARE the limb bug: Blender heat weights cut peak stretch 17x (2026-07-27)
+
+Absolute-displacement instrumentation settled it in one run.
+
+**The mesh is ~200 world units tall, not ~2** (`CLAY_DISP` bbox extent 200.14). Everything reasoned
+about "units" before this was on a 100x-wrong scale -- which is exactly why v1.199.97's fixed
+`weld_dist=0.001` merged ONE vertex: it was 0.0005% of body height. Weld is now SCALE-RELATIVE
+(`weld_rel`, default 0.0005 of the mesh extent = ~0.1 units here).
+
+**Re-skinning with Blender's heat-diffusion automatic weights over MIA's own skeleton, A/B, nothing
+else changed:**
+      unweighted verts   4818  ->  0
+      maxstretch pose 2  1781  ->  106.65     (17x)
+      maxstretch pose 3   363  ->   31.26     (12x)
+      max vertex travel   122.2 -> 37.7 units  and  30.6 -> 9.4
+So MIA's weights were the cause of the limb destruction. Not the bind (v85), not orphan verts alone
+(v87), not the smear cut (v93), not armpit weight bleed (v95) -- all four now formally closed as
+wrong. `reskin` defaults to `blender` with a loud fallback to MIA's weights if bone-heat fails.
+
+**Third finding, from the same data:** with re-skinning the background jumped 66.5% -> 92.5% of frame,
+i.e. the character rendered TINY. Cause: uniform framing took absolute min/max of the posed mesh, so
+one still-flung vertex (37.7 units) inflated the bbox and the ortho scale zoomed out to contain it.
+`bbox_of` now uses the 0.5/99.5 percentile per axis -- immune to a handful of strays, identical on a
+clean mesh. Without this the re-skin would have looked like a regression.
+
+NOT YET VERIFIED: that the arms are actually present in the render. Peak stretch is down 17x and the
+framing bug is fixed, which is necessary but I have not seen the pixels. The next depth_test A/Bs the
+new default against MIA's weights as the control.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.98 -- Weld was not enough; measuring ABSOLUTE displacement and A/B-ing the weights (2026-07-27)
+
+Weld result, measured: edges 727752 -> 727749. It removed exactly 3, including the 0.00047
+`LeftArm<->LeftArm` edge it was aimed at (that entry is gone from the welded audit and still present
+in the control). So exact duplicates existed but were a handful, not the bulk. **maxstretch is
+unchanged at 1781**, now owned by `RightUpLeg<->RightUpLeg` at restlen 0.00539 -- five times the weld
+threshold, so raising the threshold is not obviously right either: without knowing the median edge
+length, 0.00539 may be an ordinary small edge rather than a defect. v1.199.97's mechanism was real but
+NOT sufficient, and I am not claiming otherwise.
+
+What the number implies is the useful part: 0.00539 x 1781 = **9.6 world units of travel** on a body
+roughly 2 units tall. Bone transforms here are pure rotations about bone heads, so linear blend
+skinning cannot move a vertex five body-heights unless something about that vertex's weights or
+position is wildly out of range. That is a fact worth pinning down directly rather than inferring.
+
+(1) **CLAY_DISP**: per pose, the maximum ABSOLUTE vertex displacement in world units, the vertex
+index, and the posed bounding box. Every ratio-based metric in this file has misled at least once
+(three wrong diagnoses came from `maxstretch`); "how far did the vertex actually move, and did the
+body's bbox explode" cannot be misread the same way.
+
+(2) **`reskin: blender`**: strips MIA's vertex groups and re-parents with `ARMATURE_AUTO`, Blender's
+heat-diffusion automatic weights, over the SAME skeleton -- an A/B of the weights alone with nothing
+else changed. Falls back to MIA's weights, loudly, if bone-heat fails (it does on non-manifold
+meshes). depth_test's 5th pass is now this A/B. Also: depth_test keeps the WHOLE clay log -- the -30
+tail was silently eating the weld count and rest-edge histogram printed at startup, i.e. the exact
+lines this version needed.
+
+Unchanged and still true: Klein reproduces the depth reference faithfully (worker_run proved it -- no
+arms in the reference, no arms in the output), so the model side needs no tuning and face/likeness
+work stays deferred until the body is right.
+Files: mia_local/clay_driver.py, tools/depth_test.py.
+
+## v1.199.97 -- MEASURED: degenerate scan geometry is tearing the limbs; parametric mannequin ruled OUT (2026-07-27)
+
+Two questions answered with numbers instead of opinion.
+
+**1. Can we escape the auto-rig by posing the clean parametric mannequin instead? NO -- measured.**
+This was the obvious "more solid" alternative (perfect topology, perfect weights, arms proven never to
+smear) and it is not viable. Width profile of Duke's clay silhouette vs the mannequin at its MAXIMUM
+fitted settings (weight 1.0 / belly 1.5), as fraction of standing height, on regions below the arms so
+the A-pose cannot confound them:
+      waist  0.460 vs 0.249   (mannequin = 54%)
+      hip    0.440 vs 0.209   (48%)
+      thigh  0.228 vs 0.150   (66%)
+      calf   0.133 vs 0.063   (47%)
+      bulk index (area/H^2)  0.324 vs 0.192   (59%)
+Maxed out, the mannequin is roughly HALF Duke's width through the torso and legs. The MakeHuman morph
+range simply does not reach him, and no solver fix closes a 2x gap. The rigged scan MUST stay the
+posing object. (Also corrected: the "every mannequin renders 60-75% child" claim from the v83 audit is
+true only at the DEFAULT age 25. Recomputed for Duke's age 45: child = 0.019. The age-curve bug is
+real but nearly irrelevant here -- it was propagated without being checked.)
+
+**2. What is actually tearing the limbs?** The v95 audit named the dominant bone at BOTH ends of every
+exploding edge, and they are the SAME bone -- `LeftArm<->LeftArm` 2841x, `RightUpLeg<->RightUpLeg`
+1781x, `RightArm<->RightArm` 761x. **A rigid rotation cannot separate two vertices driven by one
+bone**, so the armpit weight-bleed hypothesis (v95) is dead. What those edges share is a near-zero
+rest length: 0.00047, 0.00475, 0.00539 in a mesh ~2 units tall whose average edge is ~0.01. They are
+duplicate / degenerate vertices from the Hunyuan3D reconstruction; near-coincident verts landing in
+even slightly different weight blends fly apart under deformation, and 0.00047 x 2841 = 1.33 units of
+travel -- over half a body height, which is exactly the "arm shredded into invisible sheets" result.
+
+FIX: weld duplicate vertices (`bmesh.ops.remove_doubles`, `weld_dist` default 0.001 -- ~10x below the
+average edge, so real detail is untouched) immediately after FBX import, before weights are read.
+clay_driver now logs the merge count and a rest-edge histogram (`min`, `p50`, `under_0.002`) so the
+degeneracy can be watched leaving. depth_test's 5th pass is now weld ON vs OFF.
+
+NOT YET VERIFIED: that welding fixes the rendered limbs. The mechanism is measured and the fix targets
+it directly, but the next depth_test is what confirms it. Corrective Smooth (v95) is kept -- it did
+reduce peak stretch 2841 -> 1781 -- but it treats the symptom.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py, tools/worker_run.py (crash report).
+
+## v1.199.96 -- CLOSED LOOP: replay real Klein jobs against the real fleet (2026-07-26)
+
+Standing instruction from Lorenzo: no guessing -- get hard facts, and if a fact needs a tool, build
+the tool. Fair. Every wrong call in this session (stale bind, orphan verts, smear cut, "the arms
+raised") came from inferring instead of measuring, and the model-side questions were the worst because
+this session could render clay locally but could not run the fleet -- so "does cfg 5 hurt likeness?"
+had to be relayed through a human describing pictures. That is now fixed.
+
+`_klein_submit` dumps the EXACT submitted graph (`graph.json`) plus `replay.json` (host, seed, per-role
+upload filenames, prompts, negative, models) and the identity/init reference bytes alongside the pose
+refs it already saved.
+
+NEW `worker_run.bat` / `tools/worker_run.py` re-submits that graph to a real worker with ONE variable
+changed, waits for completion, downloads the outputs to `_diag/worker_run/` and writes a report:
+  worker_run.bat --set cfg=1.5
+  worker_run.bat --sweep cfg=1.5,2.5,3.5,5.0
+  worker_run.bat --set lora=0.8 --set ref_end=1.0
+  worker_run.bat --run <ts> / --host <url> / --list
+Overrides map onto node classes (cfg -> CFGGuider, steps -> Flux2Scheduler, lora ->
+LoraLoaderModelOnly, seed -> RandomNoise, unet -> UNETLoader, denoise -> SplitSigmasDenoise, ref_end ->
+the ConditioningSetTimestepRange pair). It reports how many nodes each override touched and WARNS
+loudly when an override matched zero nodes -- a silent no-op override would fabricate a conclusion,
+which is the exact failure mode this tool exists to prevent. Input images are re-uploaded from the
+dump; any not present are reported rather than assumed.
+
+This makes the remaining open questions -- face likeness vs cfg/LoRA strength/PuLID, and whether
+Corrective Smooth (v95) fixes the shredded upper arms -- answerable by measurement in one pass.
+Files: backend/api/vnccs_native.py, tools/worker_run.py (new), worker_run.bat (new).
+
+## v1.199.95 -- The upper arms really are being destroyed: Corrective Smooth + a stretch audit (2026-07-26)
+
+Lorenzo, on the depth render I had just called good: "has no arms." He is right and I was wrong to
+call it a win. The HANDS are up, which is what I looked at, but the UPPER ARMS are shredded into thin
+sheets that vanish in the render -- visible in the shaded clay too. That is real geometry destruction,
+which means the 2841x maxstretch was NOT purely the degenerate-edge artifact v1.199.88 wrote it off
+as. Both things are true: the number is inflated by tiny rest edges AND something is genuinely
+tearing. Dismissing the whole metric was an overcorrection.
+
+Note the arms survive with `dropped=0` under keep-all, so nothing is being CUT away -- the faces are
+present but stretched so thin they render as nothing. That is the signature of noisy skin weights at
+the armpit, where the arm surface nearly touches the torso and the auto-rig bleeds torso weights onto
+the arm: rotate the arm 120 degrees and the surface between them is pulled apart.
+
+(1) **Corrective Smooth modifier** after the armature deform (`LENGTH_WEIGHTED`, factor 1.0, 20
+iterations, `clay_corrective_smooth` / `clay_corrective_iters`, in the cache key). This modifier
+exists for precisely this failure -- it relaxes deformation artefacts while leaving the rest pose
+alone -- and needs no re-rig, so it stays automatable. depth_test A/Bs it ON vs OFF.
+
+(2) **Stretch audit** (`CLAY_STRETCH` lines, `audit` flag): for the worst edges it now names the
+DOMINANT BONE at each end. Arm-vs-torso pairs mean armpit weight bleed; same-bone pairs mean something
+else. Three wrong diagnoses in a row came from inferring this instead of measuring it, so it is
+measured now.
+
+If Corrective Smooth is not enough, the escalation is weight repair at rig time (re-skin with
+Blender's heat-diffusion automatic weights over MIA's skeleton, or smooth the deform groups) -- but
+run the A/B first.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.94 -- depth_test was lying; the real fix is the v93 erosion (2026-07-26)
+
+depth_test reported `spread 0.0`, every body pixel 255, `flat_warning` on all three poses -- which
+reads as a total collapse of the depth pass. It was the TOOL. Since v1.199.90 clay_driver writes depth
+as a **16-bit** Z render and the 8-bit map Klein receives is produced by `pose_clay._renorm_depth`;
+depth_test copied the raw file and read it with `.convert("L")`, which CLIPS everything above 255, so
+a 0..65535 render became a pure-white silhouette. Fixed: depth_test now runs the real
+`_renorm_depth` before saving, and `stats()` scales 16-bit instead of clipping. A diagnostic that does
+not reproduce the production conversion is worse than no diagnostic -- it manufactures emergencies.
+
+Re-running the actual conversion against a real 16-bit Blender render (in the sandbox, so it is
+verified rather than asserted): **median 137, only 20% of body pixels above 200** -- versus the
+production ref measured at median 212 / 65% above 200. So the v1.199.93 2px erosion IS the fix, and my
+earlier "erosion changes nothing" test was invalid: I ran it on an already-renormalised 8-BIT ref where
+the information had already been destroyed. On the raw 16-bit the eroded 1st percentile lands at 40187
+of 65535 instead of ~0, because the near-zero samples really were silhouette antialiasing after all.
+The resulting map has proper contrast end to end -- belly nearest, legs receding, arms clearly separate
+from the torso, no voids.
+
+CORRECTION to v1.199.93: the keep-all vs cut-4.0 A/B is now measured and shows **no meaningful
+difference** (fraction of dark body pixels 0.156 vs 0.157) -- so the smear cut was NOT what produced
+the production chest void, and that part of the v93 rationale was wrong. Keep-all is retained anyway
+(a fringe cannot become a void, and it costs nothing measurable) but it is not the fix. The washed-out
+contrast was: an arm folded against the torso had almost no tonal separation from it, which is exactly
+the "arms behind the body / contorted" failure.
+Files: tools/depth_test.py.
+
+## v1.199.93 -- The chest VOID is the arm bug: reverting the v85 smear cut (2026-07-26)
+
+First run with clay + full-contrast depth + gray backdrop all true at once. Body likeness much closer
+(Lorenzo), colour fixed -- but arms go behind the body / contort, and face likeness dropped.
+
+MEASURED, not guessed: the depth ref Klein received has a large BLACK VOID in the chest/armpit region,
+and 65% of body pixels sit above 200 with a median of 212 on a map whose nominal spread is 254. So the
+v90 re-normalise IS running, but its low anchor is being set by that void rather than by geometry, and
+the real surface still occupies the top quarter of the range. Eroding the mask 2px before taking
+percentiles was tried and changed nothing (p1 stays at 1 on the interior), which rules out silhouette
+antialiasing and proves the dark pixels are genuine interior samples -- i.e. a HOLE, through which the
+far interior wall of the mesh is visible.
+
+ROOT CAUSE = v1.199.85's own "middle ground" `smear_stretch=4.0`, which was reasoning rather than
+measurement. Cutting faces punches holes; holes_fill does not reliably close the large ragged boundary
+the armpit cut leaves. The evidence was already on disk and I did not check it: EVERY clean depth
+render in depth_test used `1e6` (keep all) and every production ref with a black chest void used 4.0.
+A ragged fringe is cosmetic; a void is structural -- Klein reads it as "nothing is here" and bends the
+arm around it. Depth reverts to keep-all (overridable via `export["clay_smear_stretch"]`, in the cache
+key). This is the second time a "sensible middle ground" invented at the desk beat the measurement on
+disk; prefer the measurement.
+
+Also: `depth_test.bat --last` now renders the EXACT poses from the newest `_diag/last_pose_run` dump
+instead of the synthetic battery -- the failing library poses carry large body yaw and folded arms,
+precisely the regime where smear/hole behaviour differs, so a synthetic arms-up test could never have
+reproduced this. The 5th pass is now keep-all vs cut-4.0 A/B (the orphan question is closed).
+
+FACE LIKENESS (open, not yet changed): depth mode raised cfg 1.5 -> 5.0 and runs the depth LoRA at
+1.0, so spatial control is much stronger and the identity reference latents are proportionally
+diluted. PuLID is currently OFF for pose runs (`klein_pose_pulid=off`) -- it is the purpose-built
+identity lever and is independent of the depth control. Untouched deliberately: fixing the void first
+avoids tuning against a broken reference.
+Files: pose_clay.py, tools/depth_test.py.
+
+## v1.199.92 -- "Way skinny" was the 3D-body toggle silently resetting, not a regression (2026-07-26)
+
+Colour fixed (v91 confirmed good by Lorenzo) but the body went thin and generic. NOT the v90 depth
+re-normalise and NOT the v91 backdrop change: params.json and the log both show `clay_used=False` /
+`klein pose input: depth (clay=False)` / `3D-scan body fit applied` on every run from 03:21 onward.
+The depth map was rendered from the **generic parametric mannequin**, not from Duke's rigged mesh --
+so it faithfully described the wrong body, and Klein rendered that wrong body very convincingly.
+
+WHY: 🧊 "Use 3D body" (`mesh3d_pose`) is PER-RUN UI state with no persistence anywhere -- there is no
+`mesh3d_*` key in studio_vnccs_settings at all. The run.bat restart needed to pick up v90/v91 reloaded
+the page, the toggle reset to off, and nothing logged a warning because "mesh3d_pose not set" is a
+perfectly normal state. A silent, invisible regression triggered by following our own instructions.
+
+Three fixes so this cannot recur:
+(1) **Depth mode implies the 3D body.** If pose input is depth and the character HAS a rigged mesh,
+the clay path is used whether or not the toggle is on ("depth mode -- auto-enabling the 3D body").
+The whole premise of depth control is the character's OWN geometry; a depth map of the generic
+mannequin is not a degraded version of that, it is a different character.
+(2) **The fallback is now a WARNING in depth mode**, naming the consequence ("the depth map will
+describe the wrong body"), instead of an INFO line that reads as routine. params.json gains
+`want_clay` and a plain-language `body_source` ("rigged mesh (clay)" vs "GENERIC MANNEQUIN -- not this
+character's body") so a diag can never be ambiguous about this again.
+(3) **The toggle persists** to localStorage, and the UI shows an amber warning when Pose input = Depth
+while "Use 3D body" is off.
+Files: backend/api/vnccs_native.py, VNCCSNativePage.tsx.
+
+## v1.199.91 -- Green cast root-caused: the pose prompt still asks for a CHROMA GREEN backdrop (2026-07-26)
+
+Lorenzo's samples: body shape is now "a lot closer" (the depth path is doing its job), but the whole
+character carries a green-yellow hue that the BASE image does not. That comparison is the tell -- same
+character, same model, same identity refs, one is clean and one is tinted, so the difference is in the
+prompt.
+
+ROOT CAUSE: `klein_pose_prompt` still hardcodes `background or "Green"` and asks for a "solid flat
+green background". A green backdrop was a CHROMA-KEY requirement and stopped being one the moment
+worker-side RMBG-2.0 took over the cut-out -- RMBG is a learned matting model, it does not care what
+colour is behind the subject. But a full-frame green backdrop makes the model paint green BOUNCE LIGHT
+onto the subject, worst on white and pale surfaces: hence the white briefs going vividly green and the
+pale skin going yellow-green. The BASE path already moved to "neutral gray" (klein_poses.py L2405/
+2438/2635) -- the pose path was simply never updated with it, which is exactly why the base is clean.
+
+FIX: `klein_pose_prompt(rmbg_active=...)` -- when RMBG is doing the keying and the backdrop is the
+default green, ask for "neutral gray" instead, so the spill has no source. Explicitly-chosen non-green
+backdrops are respected, and the app-side chroma-key path (RMBG off) still gets green. `resolve_rmbg`
+moved ahead of the prompt loop in _klein_submit since the prompt now depends on it. Verified in the
+sandbox across all four combinations.
+
+STILL OPEN -- arm/hand degradation (arms fusing into the torso, malformed hands) in those same
+samples. Strong suspect is the v1.199.90 problem, which those runs PREDATE: the depth reference was
+squeezed into the top few 8-bit levels, so an arm held against the torso had almost no depth
+separation from it and the model could not tell them apart. The 16-bit + percentile re-normalise
+should restore exactly that separation. Re-test before chasing it further; residual shoulder smear
+fringe in the clay is the second suspect.
+Files: klein_poses.py, backend/api/vnccs_native.py.
+
+## v1.199.90 -- ✅ DEPTH POSING WORKS ON REAL OUTPUT + depth-ref contrast fix (2026-07-26)
+
+**THE SAGA IS OVER.** First real depth run, hardest available case -- a yawed 3/4-rear pose, head
+turned back over the shoulder, arm down at the hip, weight on one leg -- and the output is DUKE: his
+real mass, his real build, his likeness, the pose matching the depth reference limb for limb. No
+stretching, no tall-lean drift, no phantom twin, no extra limbs. A front standing pose from the same
+session (pre-depth, 02:03) was already acceptable because the identity refs alone can carry a
+near-base pose; the yawed pose is the case that has failed for a week, and it now holds.
+
+Confirmed unrelated: a GREEN colour cast over the lower body appears in the pre-depth 02:03 output as
+well, so it is pre-existing and not caused by any of this. Almost certainly chroma spill from the
+VNCCS green sprite background surviving VNCCS_RMBG2. Logged as the next thing to chase; it does not
+touch pose or body.
+
+DEPTH-REF CONTRAST FIX (real quality loss found by eyeballing the production ref): clay_driver maps
+the Z pass across the pose's FULL BBOX depth. That is safe -- nothing can ever clip -- but
+conservative, because you only ever SEE the front slice of a body. On a heavily yawed pose the visible
+surface squeezed into the top handful of 8-bit levels and the reference came out near-uniform white,
+throwing away most of the volume information the whole approach depends on. Fix: render depth as
+**16-bit BW** and re-normalise in pose_clay over the 1st/99th percentile of the VISIBLE (non-
+background) pixels -- the identical encoding pose_render's mannequin depth already used, so both
+renderers now hand the LoRA the same scaling. 16 bits means the re-stretch has no banding to give
+away. Falls back to a plain 8-bit convert on any surprise.
+Files: mia_local/clay_driver.py, pose_clay.py.
+
+## v1.199.89 -- DEPTH PATH CONFIRMED LIVE on a real run; pose_diag finds sprites by mtime (2026-07-26)
+
+First real worker run with Pose input = Depth. Every element of the recipe fired exactly as designed,
+verified in both the log and params.json:
+
+    clay_used=True   pose_input=depth   export.render_mode=depth
+    lora  = flux2_klein_9b_refcontrol_depth.safetensors @ 1.00
+    unet  = flux-2-klein-base-9b-fp8.safetensors        (undistilled base picked up)
+    cfg   = 5.0      steps = 20      neg = True         (negatives finally have bite)
+    "klein pose input: RefControl DEPTH trigger prepended"
+    "pose_clay[Duke]: rendered 1 depth capture(s) at 1024x1216"
+    "klein pose run: using 3D-body CLAY pose references (1)"
+
+No errors, no exceptions, no fallback. The rigged mesh is driving a depth map, the depth map is
+driving the depth-trained LoRA on the checkpoint it was trained for.
+
+pose_diag fix: `sprites_copied=0`. The `<project_uuid>/<rel_path>` arithmetic fails because the uuid in
+the assets table is dash-STRIPPED (ba5c1d8fbee647dc947da4de233748ba) while the folder on disk keeps its
+dashes -- and single-pose preview runs may never be ingested as assets at all. Rather than patch the
+uuid formatting, pose_diag now falls back to sweeping the data dir for `**/sprites/*.png` and taking
+the 12 newest by mtime, which is what "show me the last run's output" actually means. Writes
+outputs_source.txt with the resolved paths + timestamps.
+Files: tools/pose_diag.py.
+
+## v1.199.88 -- CORRECTION + local validation COMPLETE: the clay depth path is good (2026-07-26)
+
+CORRECTION to v1.199.87, which overclaimed. Orphan repair ran on all 4,818 verts
+(`orphans_repaired=4818`) and **maxstretch did not move at all** -- 2841.35 with the repair, 2841.35
+without it, identical to two decimals. So the unweighted verts were NOT the arm blow-up either.
+
+**`maxstretch` is a bad metric and should not be chased again.** It is a RATIO against the rest edge
+length, gated only by `rl > 1e-6`, so a near-degenerate rest edge of ~1e-5 that moves a normal 0.03
+units reports ~3000x. The number is dominated by a handful of tiny degenerate edges in the Hunyuan3D
+mesh and says nothing about whether the pose is good. Judge these renders by LOOKING at them; the
+useful scalars are the dropped-face count and the depth `spread`.
+
+WHAT THE RENDERS ACTUALLY SHOW (v1.199.87 code, Duke): **the arms raise correctly and the body is
+right.** rerig_all DID fix the bind back in v1.199.85 -- the earlier "arms never moved" reading was
+mine, misread off a low-contrast depth PNG. Remaining artifact is ordinary shoulder/armpit and hip-
+crease smear webbing: in SHADED mode the 2.0 cut punches visible stipple/holes in the upper arms, but
+in DEPTH mode (4.0 cut + keep-islands >=1% + holes_fill, v83/v85) the body comes out COMPLETE, with
+correct silhouette, no holes, and only small ragged fringes at the shoulders and hips. Good enough to
+drive the LoRA; depth is tolerant of fringe in a way DWPose keypoints are not.
+
+Orphan repair is KEPT (v87): it is principled, deterministic, ~1s, measurably moves pixels
+(body_mean 118.0 vs 118.2), and genuinely unweighted verts WOULD pin under rotation. It is simply not
+the dramatic fix v87 claimed. preserve_volume stays OFF (measured 2841 vs 3769 -- better, and DQ
+skinning has no defensible behaviour on zero-weight verts).
+
+LOCAL VALIDATION IS NOW COMPLETE: mannequin depth OK, clay depth OK (real body, real pose, complete),
+graph builds and every link resolves, recipe resolves with exact-name matches, and all three workers
+carry both the depth LoRA and flux-2-klein-base-9b-fp8. Next step is the first real worker run:
+🧊 Use 3D body ON + Pose input = Depth + structure lock OFF.
+Files: CHANGELOG only (no code change).
+
+## v1.199.87 -- CONFIRMED: 4,818 unweighted vertices were the arm blow-up; orphan-weight repair (2026-07-26)
+
+The audit added in v1.199.86 answered it outright: **`unweighted_verts=4818`** on Duke (of ~241k).
+Make-It-Animatable leaves a slice of vertices with NO armature weight at all. Under any rotation those
+verts stay pinned at their bind position while every neighbour swings away with the bone, so the edges
+between them stretch by the FULL travel of the limb -- an arm rotating 120 degrees across a ~0.001-unit
+edge is precisely the 2841x/3769x maxstretch we kept measuring. It explains every observation at once:
+rest is always clean (rotation is identity, nothing to pin against), only large limb rotations trigger
+it, a full re-rig barely helped (MIA reproduces the same gap every time), and the damage concentrates
+in shoulder/armpit webbing where auto-rig coverage is thinnest. The v1.199.85 "stale bind" call was
+wrong -- rerig_all had already run.
+
+FIX: clay_driver now repairs orphans before posing -- each unweighted vertex inherits the weights of
+its nearest WEIGHTED vertex via a mathutils KDTree (the same nearest-bone fallback pose_render already
+uses for the mannequin). Deterministic, ~1s, needs no rig-side change and no per-character input, so
+the pipeline stays automatable. Job flag `fix_orphan_weights` (default ON, exposed as
+`export["clay_fix_orphans"]`, in the pose_clay cache key); logs `orphans_repaired=N`.
+
+Secondary result from the v86 A/B: preserve_volume OFF measured BETTER than ON (2841 vs 3769
+maxstretch), consistent with DQ skinning dividing by a ~zero weight sum on those same orphans. It stays
+defaulted OFF. depth_test's 5th pass is now orphan-repair OFF as the control instead.
+
+Worker fleet: all three hosts (.163/.202/.224) now carry both the depth LoRA and
+flux-2-klein-base-9b-fp8 -- verified by worker_probe. No silent-fallback risk remains.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.86 -- The arm blow-up is dual-quaternion skinning, not the bind (2026-07-26)
+
+rerig_all ran (rigged_prev_reset.fbx present, rigged.fbx re-dated 2026-07-26 01:22) and maxstretch on
+the arms-up pose only fell 19100 -> 3769. A stale `reset_to_rest` bind would have been FIXED by that
+re-rig, so the bind is not the culprit. New hypothesis, and it fits every observation:
+**`use_deform_preserve_volume`** -- dual-quaternion skinning, hardcoded ON since v1.199.71 and noted
+even then as having "no visible effect". DQ skinning normalises by the SUM OF WEIGHTS, so any vertex
+the auto-rig left unweighted divides by ~0 and is flung thousands of units. That explains why rest is
+always clean (rotation is identity, nothing to blow up), why only big arm rotations trigger it, why a
+re-rig barely helped, and why the damage is localised to shoulder/armpit webbing where auto-rig weights
+are thinnest.
+
+Changes: `preserve_volume` is now a job flag **defaulting to OFF** (exposed as
+`export["clay_preserve_volume"]`, in the pose_clay cache key). clay_driver additionally audits and logs
+`unweighted_verts` -- if that count is non-zero, the hypothesis is confirmed outright and the real fix
+is weight cleanup at rig time, not a skinning flag. depth_test now runs the clay depth battery TWICE,
+preserve_volume OFF vs ON, and prints both maxstretch lines side by side, so one run settles it.
+
+Also NOTE from worker_probe (DB-driven now, all three hosts): the depth LoRA is on **.224 ONLY**.
+.163 and .202 have `flux-2-klein-base-9b-fp8.safetensors` but NOT
+`flux2_klein_9b_refcontrol_depth.safetensors`, so any pose job dispatched to them silently falls back
+to the previous pose input -- a half-good, very confusing result. Copy the LoRA to all three before the
+first real depth run.
+Files: mia_local/clay_driver.py, pose_clay.py, tools/depth_test.py.
+
+## v1.199.85 -- CLAY DEPTH VALIDATED; the remaining blocker is a stale rig, not the pipeline (2026-07-26)
+
+depth_test with the project dir fixed: **the clay depth path works.** Duke's rest-pose depth map is his
+REAL body off his own rigged mesh -- heavy, short-limbed, correct silhouette, clean edges, pure black
+background (spread 247/247/247, bg 36-39%). Blender's Z pass DOES fire under Workbench, so no EEVEE
+switch is needed. This is the signal that was missing for the entire saga: a DWPose skeleton of that
+same pose is a stick figure indistinguishable from a thin person's.
+
+BUT the arms-up pose exposed a separate, pre-existing problem: **the arms do not move at all** and the
+shoulders tear into shards -- `CLAY_POSE 2/3 maxstretch=19100.35` (and 38,586 faces dropped in shaded
+mode). A 19,000x edge stretch is not LBS smear, it is a broken bind: Duke's `rigged.fbx` is still the
+pre-v1.199.70 `reset_to_rest=True` rig, whose arms were sheared into the bind during rigging.
+`rerig_all.bat` (--no-rest --use-normal, backs up to rigged_prev_reset.fbx) has been listed as pending
+since v1.199.70 and was never run. Note `maxstretch=1.00` at the rest pose proves nothing -- the ratio
+is measured against rest, so it is 1.00 by construction. ACTION: run rerig_all.bat once. It resolves
+the data dir via app_settings.project_dir, so it will find the rigs on D:.
+
+Fixes in this version: (1) depth mode now uses a MIDDLE-GROUND smear cut, `smear_stretch=4.0`, instead
+of keeping all smear (1e6). Keeping everything let 19000x shards spike the depth map; the old 2.0 cut
+amputated limbs. At 4.0 only egregious shards go, every island >=1% survives (v83) and holes_fill seals
+the cut -- a complete, spike-free body either way. (2) clay_driver unhooks the compositor before exit:
+depth renders were returning 0xC0000005 ACCESS_VIOLATION at teardown. Harmless (all PNGs written,
+CLAY_DONE printed, and that is what pose_clay checks) but it made the return code lie.
+Files: pose_clay.py, mia_local/clay_driver.py.
+
+## v1.199.84 -- depth_test finds rigs on the real project dir + worker probe + tolerant model matching (2026-07-26)
+
+First depth_test run: the MANNEQUIN depth path is confirmed working (spread 162-171 across rest /
+arms-up / yaw45; belly and hands correctly read as the nearest surfaces, clean silhouette, pure black
+background). The CLAY half silently skipped -- `rigged_fbx: None` -- because a standalone tool does not
+get the app's startup Project-Directory override: Lorenzo's data lives on D:\RBMN-Projects while the DB
+stays on C:, so `backend.config.settings.project_dir` resolved to the default and found no mesh3d/.
+depth_test.py now reads `app_settings.project_dir` out of the DB the same way the app and the other
+tools do, and reports `data_dir` so the failure can never be silent again.
+
+Also: (1) NEW `worker_probe.bat` / `tools/worker_probe.py` -- asks each ComfyUI worker's /object_info
+directly and dumps node presence + FULL model lists (unet, lora, vae, clip, ControlNetLoader,
+DepthAnythingV2, DWPose detectors, upscale, PuLID) to `_diag/worker_probe/`. The app only ever
+enumerated the few categories it uses, so "which models are actually on the fleet" has never been
+answerable from the repo -- this closes that permanently. (2) `resolve_depth_recipe` now tolerates
+renamed / subfolder-prefixed model files (the `qwen/VNCCS/` prefix precedent): falls back to any LoRA
+matching refcontrol+depth and any UNETLoader entry matching klein+base, and the "not found" warnings
+now print how many candidates the worker offered. A .gguf base is deliberately NOT matched -- the pose
+graph uses UNETLoader, not UnetLoaderGGUF -- and says so.
+Files: tools/depth_test.py, tools/worker_probe.py (new), worker_probe.bat (new), klein_poses.py.
+
+## v1.199.83 -- DEPTH pose control: the rigged mesh finally drives the body (2026-07-26)
+
+ROOT CAUSE of the whole multi-day "poses come out the wrong body size / stretched" saga, found by
+tracing the graph rather than tuning it: **nothing in the Klein pose path ever bound the output
+spatially.** The pose image has always been attached as a `ReferenceLatent` -- the SAME channel as the
+identity references -- which is advisory, token-level conditioning with no tie to the output latent
+grid. There is no ControlNet anywhere in the Klein path, and none exists for FLUX.2 klein (the only
+FLUX.2 ControlNet, alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union, is dev-only and community-confirmed
+incompatible). So the final body was always a negotiation between the pose ref, the identity refs, the
+pose LoRA's prior and the prompt -- and the prior won. Ref-release, LoRA strength, clay-vs-mannequin,
+smear cleanup and framing were all downstream of that; none of them could have fixed it.
+
+Compounding it: `refcontrol_v2_poses.safetensors` is trained on **DWPose skeletons**, and its author
+states plainly that it "works best when the pose map has similar proportions and scale to the
+reference" -- it ASSUMES the body already matches and cannot transfer mass. A skeleton carries zero
+volume, so the v1.199.80-82 clay->skeleton path was structurally incapable of holding a heavy build no
+matter how clean the clay got.
+
+THE FIX -- feed a signal that carries volume, to a LoRA trained to obey it:
+
+(1) **True DEPTH renders from the character's own geometry.** `pose_render` gains a depth mode that
+reuses the z-buffer the node-faithful rasterizer already computes (1st/99th-percentile normalisation,
+near=white / far=black / background=0, matching DepthAnythingV2 -- what the LoRA saw in training).
+`clay_driver` gains a Blender Z-pass path (compositor Map Range + Invert, view transform forced to
+Standard, per-pose near/far from the real bbox) so the depth comes off the RIGGED MESH: pose, volume,
+height and silhouette in one channel. Single source of truth for both renderers is
+`export["render_mode"]`.
+
+(2) **RefControl DEPTH recipe, as one preset.** `klein_pose_input = "depth"` auto-resolves
+`flux2_klein_9b_refcontrol_depth.safetensors`, the undistilled `flux-2-klein-base-9b-fp8` checkpoint,
+cfg 5, 20 steps, strength 1.0 and the `refcontrol` trigger -- the author's reference workflow verbatim.
+Nothing to dial per character (the app normally runs the 4-step distilled model at cfg 1.5, which also
+left the anatomy negatives nearly inert -- a second, independent reason they never bit). Falls back to
+the previous pose input with a loud log line if the LoRA is not installed. A depth-specific prompt
+guard tells the model to take height/build/weight/belly/silhouette FROM image 1, the opposite of the
+skeleton and mannequin guards, because the depth map is the one reference that legitimately carries
+body shape.
+
+(3) **Structure lock (opt-in, `klein_pose_structure_lock`).** The hard backstop: VAE-encode the pose
+render as the STARTING latent and denoise only the tail via `SplitSigmasDenoise` (low_sigmas), so the
+silhouette is physically in the initial pixels and cannot drift. Reference latents are advisory; a
+starting latent is not. Deliberately seeded from the SHADED render even in depth mode -- initialising
+from a grey depth map would bake the grey into the skin -- so a second same-camera render is made when
+the lock is on. Off by default; 0.7-0.8 repaints texture while holding proportions.
+
+(4) **Clay island-cull fix.** "Keep only the largest connected island" is what amputated the head and
+both arms whenever the smear cut isolated them -- the headless armless torso that broke v1.199.82. Now
+keeps EVERY island above `min_island` (1% of faces), and depth mode seals the leftover boundaries with
+`holes_fill` (a hole in a depth map reads as infinitely-far mid-torso, far worse than a smeared
+shoulder).
+
+Also: `depth_test.bat` / `tools/depth_test.py` renders the battery four ways (clay/mannequin x
+shaded/depth) with pixel statistics, so the depth pass can be validated locally with NO ComfyUI worker
+-- `spread < 10` means the Z pass did not render. UI: Pose input gains "Depth (3D body)", a Structure
+lock row, and a RefControl (depth) LoRA option. NOTE (known, unrelated, now moot on the depth path):
+`pose_render._solve_base_verts` maps age linearly onto MakeHuman's piecewise macro-age, so every
+mannequin renders ~60-75% child-proportioned, and the ideal/uncommon proportions targets are summed at
+full weight instead of blended -- why "weight 1.0 / belly 1.5" looked so underwhelming.
+REQUIRES: the two model downloads above on each worker, then a run.bat restart.
+Files: pose_render.py, pose_clay.py, mia_local/clay_driver.py, klein_poses.py,
+backend/api/vnccs_native.py, VNCCSNativePage.tsx, tools/depth_test.py (new), depth_test.bat (new).
+
+## v1.199.82 -- Clay-skeleton unblocked: no smear amputation for DWPose + RefControl selectable (2026-07-25)
+
+Second pose_diag harvest, first REAL clay-skeleton attempt -- and the dumped clay ref explains the
+result: a HEADLESS, ARMLESS torso blob. The v1.199.71/72 smear cleanup (drop stretched faces + keep
+largest island) amputated the head and arms at this pose, and DWPose cannot find a person in that.
+Also the recipe was only 2/3 applied: the Pose LoRA was still VNCCS PoseStudio because the UI HID the
+RefControl option whenever "Use 3D body" was on (a leftover from when clay+skeleton was impossible).
+Fixes: (1) pose_clay.render_pose_clay_captures(keep_smear=True) disables the smear-face removal
+(smear_stretch=1e6) whenever klein_pose_input=skeleton -- keypoint detection needs a COMPLETE body
+far more than a clean one, and DWPose is exactly the consumer that tolerates smear; cache key gains
+"ks". (2) RefControl is now always selectable in the Pose LoRA row. (3) pose_diag sprite query
+broadened (rel_path too) + dumps the newest asset rows to asset_sample.txt when nothing matches.
+Optional improvement for clay quality overall: run rerig_all.bat once to re-rig live characters with
+--use-normal (big smear reduction; live rigs are still no-rest only). Files: pose_clay.py,
+backend/api/vnccs_native.py, VNCCSNativePage.tsx, tools/pose_diag.py.
+
+## v1.199.81 -- Diag findings: fill light kills the dark "second body"; clay-skeleton still untested (2026-07-25)
+
+First pose_diag harvest. (1) The three captured runs all ran the OLD recipe -- mannequin input,
+VNCCS PoseStudio LoRA @ 0.8, clay=False: the v1.199.80 clay-skeleton path has not been tested yet.
+(2) The production refs showed a ghostly "person behind the person": reproduced exactly in the
+sandbox -- NOT two bodies, but the single fixed model-space key light leaving the far side of
+yawed poses pitch black (ambient 0.3). _render_pose_node now adds a camera-following fill light
+(0.35 * max(0, n . view_dir)); every camera-facing surface is readably lit, verified on the worst
+pose. (3) KNOWN REMAINING QUIRK (parked): some library poses carry large body-yaw in their BONES;
+under our pose math a fat body renders lean-looking from behind at those angles -- compare against
+the three.js viewer ground truth if the clay-skeleton path also disappoints; moot for skeleton
+input (DWPose reads joints only). Also: params.json now includes the full poses array (exact
+repro), pose_diag queries the correct `assets` table (output sprites were silently skipped) and
+writes report.txt. Files: pose_render.py, backend/api/vnccs_native.py, tools/pose_diag.py.
+
+## v1.199.80 -- Rigged-mesh posing path (clay -> DWPose skeleton) + hands-off pose diagnostics (2026-07-24)
+
+Analysis of Lorenzo's last three runs (log-verified: pose-ref release OFF i.e. FULL HOLD, LoRA 0.80,
+cfg 1.5) closed the stretch investigation: with the reference held for 100% of sampling and a
+measured ref that is proportionally WIDER than the base (ref H/W 1.24 vs base 1.95), the output still
+came out NARROWER than both (2.18) -- the VNCCS PoseStudio LoRA imposes its trained tall-lean body at
+any usable strength, and raising strength/hold makes the pull stronger, not weaker. Dial-turning
+cannot beat a prior. Two changes:
+
+(1) RIGGED-MESH POSING PATH: clay + skeleton is now allowed (the v1.177 skip is removed). With
+"Use 3D body" ON and Pose input = Skeleton, DWPose runs over the CLAY render of the character's own
+rigged mesh -- extracting a stick figure with HIS real bone proportions (short legs, stance, reach),
+immune to clay surface smear (keypoints don't care) and with no limb-count ambiguity -- and the
+RefControl LoRA (purpose-trained for photoreal pose transfer from skeletons, no mannequin body prior)
+renders the pose while identity/body ride on the reference images, which are the one asset chain
+confirmed perfect. Recipe: Use 3D body ON + Pose input Skeleton + Pose LoRA RefControl + release
+0.85. UI texts updated (pose-input choice no longer hidden when clay is on).
+
+(2) HANDS-OFF DIAGNOSTICS: every Klein pose run now auto-dumps its EXACT refs + full parameters
+(mesh, lora, strength, ref_end, cfg, steps, export) to _diag/last_pose_run/<timestamp>/ (last 3 runs
+kept). New pose_diag.bat (tools/pose_diag.py) collects those dumps + the newest 12 output sprites
+(from the asset DB) + a pose-relevant log excerpt into _diag/pose_diag/ -- Claude reads it through
+the connected folder, so debugging a bad run is: run pose_diag.bat, say "diag done". Base mesh /
+turnaround path untouched. Files: backend/api/vnccs_native.py, VNCCSNativePage.tsx,
+tools/pose_diag.py (new), pose_diag.bat (new).
+
+## v1.199.79 -- NODE-FAITHFUL pose capture: fixed perspective camera + z-buffer renderer (2026-07-24)
+
+Root-cause fix after verifying the VNCCS Pose Studio node UI source (vnccs-utils/web). The node
+renders captures with a FIXED PerspectiveCamera (fov 30, distance 45, aimed at the mesh bbox center;
+cam_zoom scales the frustum, cam_offset pans, cam_yaw/pitch orbit) through a real WebGL DEPTH BUFFER
+-- and the pose LoRA was trained on those captures. Our headless stand-in was orthographic +
+fit-to-frame + painter's-algorithm, which (a) cancelled the height/size sliders back out (why height
+changes never showed: fit-to-frame re-normalized every body to the same on-screen size) and (b)
+garbled interpenetrating limbs on dynamic poses (why Klein produced extra/missing limbs: it copied
+the garble). All of v1.199.76-78's framing surgery was treating symptoms of that one mismatch.
+
+pose_render now has a node-faithful path (export.node_camera, set ONLY by the Klein pose path in
+_klein_submit): exact camera math port of updateCaptureCamera (fov 30 / dist 45 / zoom / offset /
+yaw-pitch 'YXZ' orbit), NO fit-to-frame (short renders short, wide renders wide), and a numpy
+per-pixel z-buffer rasterizer (backface cull vs the real view direction, flat shading with the same
+light aggregation; ~0.7s/pose at 512px). The vendored blob's tuned cam_zoom (~1.39) is honored again
+-- it was correct for this camera all along; the ortho-era cam_zoom=1.0 / height_anchor /
+top_headroom overrides are superseded. Safety: if the widest pose would spill past ~96% of the
+canvas, the whole SET zooms out uniformly (mimics a user zooming out in the panel). Validated on the
+full 12-pose production battery with Duke's fitted mesh (weight 1.0 / belly 1.5 / height 0.278): the
+previously-garbled dance poses now occlude correctly, the gut shows in every pose, and the figure is
+genuinely shorter in-frame. Qwen flows / silhouettes / thumbnails keep the classic renderer
+unchanged. Files: pose_render.py, backend/api/vnccs_native.py.
+
+## v1.199.78 -- Ghost-figure fix: keep pose refs inside the pose LoRA's training distribution (2026-07-24)
+
+Setting a real height (v1.199.77) produced a "person inside the person" -- a ghost second figure
+growing out of the body. Root cause: the v1.199.76 height-anchored framing shrank the pose-ref figure
+well below the identity reference's scale, and the VNCCS PoseStudio LoRA -- trained exclusively on a
+FULL-FRAME (~96% fill) tall mannequin -- goes out-of-distribution when the two references disagree on
+scale; Klein reconciles by drawing BOTH figures. Lorenzo's hypothesis ("limitation of the posing
+LoRA... maybe it can't get that short") is essentially correct: absolute in-frame shortness has a hard
+LoRA budget. Fix: the anchored shrink is now CAPPED at ~10% below the character's own fit
+(ref_ext_y = min(anchor_ext, own_ext*1.10)) and the Klein pose path renders at near-trained fill
+(top_headroom 0.05 ~= 91%). Shortness is expressed primarily through PROPORTIONS (sex-relative
+stature morph, short legs, head ratio) plus at most a 10% fill reduction. Escalation levers if more
+shortness is needed: MatchingPose LoRA (trained for mannequin->character transfer), klein_pose_input=
+skeleton, or lower pose LoRA strength. NOTE: on the mannequin path the rigged 3D scan is BY DESIGN not
+the posing object (its auto-rig smears extreme arm poses -- the original phantom source); it supplies
+measurements only. Files: pose_render.py, backend/api/vnccs_native.py.
+
+## v1.199.77 -- Height field made real: sex-relative stature + base-panel height inputs (2026-07-24)
+
+Lorenzo looked for the "stature descriptor" the wizard hint mentioned -- there isn't one, because the
+NUMBER is the input; but the number barely did anything: the cm ladder was sex-blind and anchored near
+~167cm, mapping a 5'6" (168cm) MAN to stature 0.45 (~average) and 170-177cm to 0.6. Now sex-relative:
+stature = 0.5 + (cm - sex_avg)/45, avg 178cm male / 165cm female, clamped 0.08-0.92 -- so 5'6" male ->
+~0.28, visibly short under the v1.199.76 height-anchored framing. UI: the Klein base panel's
+"Character & build" section now has Height ft/in + cm inputs (synced, writing character_info.height as
+"<N> cm") so EXISTING characters can be set without the clone wizard; wizard hint text corrected.
+Files: klein_poses.py, VNCCSNativePage.tsx.
+
+## v1.199.76 -- Height for real: zoom rail + height-anchored framing + leg-length signal restored (2026-07-24)
+
+Post-.75 runs (log-verified on new code) still read tall with extra limbs. Three more findings.
+(1) ZOOM RAIL: the vendored baseline export carries cam_zoom~1.39, which railed the uniform framing
+to the 96% per-pose clamp -- every character rendered head-pinned-to-frame-top regardless of headroom
+("raised to match the pose"). The Klein pose path now forces cam_zoom=1.0. (2) HEIGHT-ANCHORED
+framing (export.height_anchor, Klein pose path only): the world->pixel scale is fixed to a
+NEUTRAL-height version of the character and captures are BOTTOM-ALIGNED to a shared floor line, so a
+character with a below-average height field genuinely renders shorter in-frame instead of every height
+filling the same canvas. (3) LEG SIGNAL RESTORED: v1.199.75's flat +-7% limb clamp was throwing away
+SAM3D's consistent stocky-legs measurement (raw shins 0.85-0.90x railed at the floor in the _c2
+cache) -- exactly the "legs too long" complaint. Per-segment clamps now: arms hard (0.45-0.55, the
+claw/extra-limb guard tightened further), legs 0.36-0.55, spine 0.42-0.55; autofit cache bumped *_c3.
+Extra limbs: anatomy negative confirmed ACTIVE on his runs (cfg=1.5); next levers if they persist =
+klein_pose_input=skeleton (DWPose stick-figure refs, already built, needs DWPreprocessor on the
+worker) and pruning the garble-prone extreme baseline poses. Qwen paths untouched (no height_anchor,
+zoom unchanged there). Files: pose_render.py, mesh_autofit.py, backend/api/vnccs_native.py.
+
+## v1.199.75 -- Tall-template leak + claw-arm clamp (extra limbs / height regression) (2026-07-24)
+
+Lorenzo's first v1.199.74 Klein run still showed extra limbs and a too-tall Duke. Reproducing the
+EXACT production pose refs (real baseline pose set x his logged final mesh) in a headless render
+exposed two more deterministic input bugs. (1) TALL TEMPLATE LEAK: the vendored VNCCS creator
+baseline pose blob ships `mesh.height = 0.85` (the template author's TALL mannequin); characters
+whose height field derives nothing ("average height") inherited it through the merge -- Duke rendered
+on a stretched tall body with long legs, which ALSO diluted his weight-1.0 roundness. body_mesh_params
+now ALWAYS sets height (default 0.5). (2) CLAW ARMS: the SAM3D image auto-fit limb-length sliders were
+unclamped; joint-measurement noise gave Duke 1.10x forearms, rendering elongated claw-armed mannequins
+whose garbled limbs Klein (holding the ref to 0.85) reproduced as extra limbs. _slider_from_scale now
+clamps to +-7% of neutral. Cache bumps force refits: mesh_autofit *_c -> *_c2, mesh_fit *_v2 (the
+v1.199.74 scan fits were computed against the tall-leaked mannequin profile and overfit belly=1.5).
+Verified by re-rendering the full 12-pose production grid with the fixed mesh: shorter, round, gut in
+every pose, no elongated arms. Note: remaining garble in the template's extreme dance poses is
+inherent to the painter's-algorithm renderer; the anatomy negative (with_anatomy_negative) already
+guards those. Files: klein_poses.py, mesh_autofit.py, mesh_fit.py.
+
+## v1.199.74 -- DEEP AUDIT: automatic body fit from the character's own 3D scan (2026-07-24)
+
+Fresh-eyes audit of why the pose mannequin never matched heavy characters. THREE stacked root causes
+found with Duke's real description ("robust, large, rounder, broad shoulders, prominent chest,
+noticeable belly, less defined waist, larger hips", height "average height", wearing "shorts"):
+(1) the text-keyword ladder missed his entire vocabulary -> weight fell to 0.5 AVERAGE, "broad
+shoulders" set muscle 0.75 ATHLETIC, no belly; (2) "dark gray shorts" in the clothing details
+substring-matched "short" -> stature 0.22 PETITE (stature now matches the HEIGHT field only);
+(3) the image-derived coarse build (SAM3D shape params -> weight/muscle) existed in mesh_autofit but
+was never requested (include_coarse=False) and would have been overridden by the text values anyway
+(merge order put text above measurement). So Klein was shown a short lean athletic mannequin for Duke
+regardless of every pose knob -- the drift previous sessions fought was primarily a WRONG-INPUT
+problem, not a LoRA-strength problem.
+
+FIX -- measure, don't describe. New precedence chain, applied consistently: text keywords (fallback)
+< SAM3D image auto-fit incl. coarse weight/muscle/belly (now requested; cache files bumped to *_c)
+< NEW mesh_fit.py 3D-SCAN BODY FIT < explicit UI sliders (via new klein_poses.explicit_mesh_overrides,
+now the single source of truth for body_weight/muscle/height/breast/belly).
+mesh_fit.py: reads the character's own mesh3d/character.glb (minimal pure-python GLB parser, node
+transforms applied), auto-detects orientation, measures the TORSO DEPTH PROFILE (hip/navel/chest
+front-to-back thickness / standing height -- depth-only so arms at the sides can't pollute the
+measurement), then grid-fits mannequin weight+belly until the mannequin's profile matches the scan's
+(~1s, cached per character+glb-mtime under runtime/mesh_fit/). A fat fit also caps text-derived
+"athletic" muscle at 0.6. Round-trip validated: a synthetic fat scan (w.9/b1.1) recovers w1.0/b1.22;
+a lean scan recovers w.3/b0 (no false fat). Wired in _klein_submit just before the mannequin render;
+SKIPPED (skip_meshfit) for base-set derivation runs so base sets never feed back from an existing
+mesh (v1.189.2 rule); clay path, SAM3D turnaround/base generation and Qwen paths untouched.
+Also broadened the fallback keyword ladders (robust/portly/rounder/large/burly/beefy/barrel; plain
+"belly"/"gut" tiers incl. "slight belly" 0.5). Validation tool: meshfit_test.bat [character] ->
+_diag/meshfit_test/ (profile + fitted params + text-vs-fit render). Files: mesh_fit.py (new),
+klein_poses.py, mesh_autofit.py, backend/api/vnccs_native.py, tools/meshfit_test.py (new).
+
+## v1.199.73 -- Fat mannequin: DIRECTIONAL belly + per-character Belly wiring (2026-07-24)
+
+The fat-parametric-mannequin pose path is now built end to end. pose_render's procedural belly is no
+longer an isotropic lower-torso bone scale (which ballooned sideways into a flying-saucer disc): a new
+`_apply_belly` displaces the lower-torso BASE verts along the ANTERIOR axis (+Z at rest -- verified via
+toe direction, torso z-skew and the renderer's viewer-at-+Z backface cull) with a smooth asymmetric
+vertical falloff peaked at navel level, slight downward sag, lateral roundness falloff and a small
+love-handle widening, so it reads as a natural forward-hanging gut in front/3-4/side views. Applied
+BEFORE skinning so the gut follows the torso through every pose; only 'body' face-group verts move
+(MakeHuman helper/joint-cube verts are untouched, so joints/arms/legs are exactly as before -- arms
+stay perfectly clean, no smear, no phantom). Wiring: klein_poses.body_mesh_params now derives
+mesh['belly'] from the body text (obese 1.30 / beer-pot-big belly 1.15 / overweight-fat-heavy 0.90 /
+curvy-soft 0.40) and honors a new explicit `body_belly` override (0..100 -> 0..1.5); the Klein base
+panel's manual-build box gains a Belly slider next to Weight/Muscle/Height. To USE the mannequin path:
+turn "Use 3D body" OFF and hold Pose ref release at 0.85 (the mannequin never smears, so proportions
+stick with no drift and no phantom). Clay + ref 0.70 remains the fallback. Validated headless via the
+mannequin_test battery (belly sweep 0/0.6/1.0/1.5 x front/3-4/side + arms poses). Files:
+pose_render.py (_apply_belly, _body_vert_indices), klein_poses.py (body_mesh_params),
+VNCCSNativePage.tsx, vnccsNativeApi.ts.
+
+## v1.199.71/72 — Clay smear cleanup (WIP) + fat-mannequin pivot (2026-07-24)
+
+WIP toward clean Klein "Use 3D body" poses. After the v1.199.70 bind fix, extreme-arm poses still
+smeared the arms (auto-rig can't deform a heavily-scanned arm swung ~130deg). Reduced with MIA
+`--use-normal` skinning (rerig_all/rerig_test/usenormal_test pass it) + dual-quaternion
+`use_deform_preserve_volume` (no visible effect) + SMEAR-FACE removal in clay_driver.py: per pose, bake
+the posed mesh to a temp object and DROP faces with an edge stretched > STRETCH_TH (2.0) vs REST length
+(keyed by VERTEX index; edge index is reshuffled by the evaluated mesh) + keep only the largest
+connected island. Killed the "wooden plank" artifacts; a residual shoulder blob on arms-up poses still
+makes Klein hallucinate a phantom twin at Pose ref release 0.85 (mostly gone at 0.70, but 0.70 lets the
+pose LoRA drift the body tall/lean). Because that push-pull is the scanned-clay's ceiling, PIVOTED to a
+FAT PARAMETRIC MANNEQUIN: pose_render already runs a MakeHuman morph solver (weight/height); its
+`weight=1.0` is only mildly chubby so added a procedural `mesh["belly"]` (isotropic lower-torso scale)
+— but isotropic balloons into a flying-saucer disc. NEXT: directional (anterior, forward-hanging)
+belly, then wire weight/height/belly per character and switch the pose path to the (fat) mannequin held
+at 0.85. Arms are already PROVEN clean on the mannequin. Files: clay_driver.py, mia_rig.py,
+pose_render.py; diagnostics under tools/ (mannequin_test, usenormal_test, rerig_all, ...). Usable
+poses now = clay + Pose ref release 0.70. Full detail: memory `project_clay_pose_deformation_bug.md`.
+
+## v1.199.70 — Clay pose fix: clean rig bind (no-rest) + rest-frame pose math
+
+The "Use 3D body" clay pose references came out with the arms SHEARED into fans (broken even in
+the rest pose), so Klein got garbage references and fell back to reproducing the base -> every pose
+looked identical. ROOT CAUSE: MIA rigged with reset_to_rest=True, which force-reposes the mesh from
+its natural stance to a T-pose during rigging; on a heavy organic mesh the arm straightening (~90deg)
+smears the arms into the baked bind. Weights were fine (audit: 22/22 groups map, avg 3.5 influences);
+the pose math was fine (legs posed cleanly). FIX: mia_rig.run_rig now defaults reset_to_rest=False
+and passes driver.py --no-rest, binding the mesh as-is -> clean arms at rest and real posing. We apply
+our own pose rotations for clay, so the T-rest (only useful for Mixamo anim retarget) buys nothing.
+Also rewrote clay_driver.py apply_pose to rotate each bone in its OWN rest frame
+(pose_bone.matrix_basis = Q^-1 @ Rw @ Q, Blender FK) instead of the world-axis/translation-only
+accumulation that ignored bone rest orientation. Validated on Duke: rest pose clean, single-bone
+poses (arm/elbow/thigh at 15/45/90) deform correctly (minor residual candy-wrapper at extreme joints
+= normal LBS, fine for a pose reference). ACTION: restart the app and RE-RIG characters (Generate 3D
+body / re-rig) to replace the old reset_to_rest FBX bind; existing rigged.fbx files are still the old
+sheared bind until re-rigged. Diagnostics added under tools/: rbmn_diag, clay_selftest, rerig_test.
+
+## v1.199.69 — Suppress double belly button + leaking socks on the base
+
+DOUBLE NAVEL: recurring (intermittent) artifact where Flux duplicates the navel on a heavy belly.
+Added "two belly buttons / double navel / extra navel / two navels / second belly button / ..." to
+KLEIN_ANATOMY_NEGATIVE (rides on every strip/base run via with_anatomy_negative), plus a POSITIVE
+anchor in _base_body_state (_keep_weight): "exactly ONE navel -- a single natural belly button ...
+never two." SOCKS: the reference's socks leaked through the strip on some views -- reinforced
+KLEIN_STRIP_NEGATIVE with "white socks, ankle socks, crew socks, tube socks, sock cuffs, stockings".
+Note: these negatives only bite at cfg > 1.0 (strip/cleanup mode = the base case). They lower the
+frequency; if the double navel still appears occasionally, set Cleanup = strong (cfg 1.5) or regen
+that one view.
+## v1.199.68 — Front-only-taller fix + form-fitting briefs
+
+FRONT-TALLER: once an active base existed, lock-base collapsed identity_bytes to [base]; the front
+view then used that (taller / drifted) base render as its reference while the side/back views used
+their real photos -- so ONLY the front came out taller. Fix (in _klein_submit's SAM3D block): the
+front now prefers the REAL front photo exactly like the sides/back (positional when aligned, else
+by-name cache); the base render is a last resort only when there's no front photo. Also fixes the
+standalone turnaround when an active base is present.
+
+BRIEFS: the male strip base wore loose WHITE boxers, whose leg length rendered inconsistently front
+vs side/back. Switched _base_body_state(male) to plain WHITE FORM-FITTING briefs ("same snug short
+shape from EVERY angle", explicitly NOT loose boxers/shorts), and added boxer terms to
+KLEIN_STRIP_NEGATIVE to steer away from them. More consistent across views and shows the true body
+shape for the mesh. (This is the briefs change from 1.199.58, reverted then to isolate the
+turnaround regression, now re-applied on the stable turnaround.)
+## v1.199.67 — Generate Mesh-ready Set now RUNS the turnaround path (+ front auto-active base)
+
+"Generate Mesh-ready Set" was a separate, weaker generator (refbase/derive) that never got the
+turnaround fixes -- it still bled the front onto the back and could produce identical sides. Now
+the mesh-ready base is built the EXACT way the perfect 🧊 Mesh turnaround is: each view (front/
+right/left/back) is generated through `_klein_submit`'s SAM3D real-photo path (same real photo as
+reference AND pose, identity-per-view v1.199.64, opposite-side mirror, KLEIN_EDIT back inference),
+then the FRONT is auto-set as the ACTIVE base (make_active=True) so "Generate 3D body" consumes it.
+
+Implementation (backend only, one source of truth): new `_turnaround_view_bytes` helper drives one
+mesh-turnaround view via `_klein_submit` with `settings_overrides={klein_pose_source: sam3d}` and
+the same camera yaws as the FE addMeshTurnaround preset (front 0/right 90/left -90/back 180). A
+scoped branch in `_base_set_run` (mesh_ready + references only) runs it per view across workers,
+recenters (v1.199.66), and saves via save_base_preview(make_active=True). The 4-view and single
+base paths are untouched. The existing base-set FE runner streams per-view and picks up the new
+active base automatically -- no frontend change. So the old promote-turnaround button and this both
+now yield the identical perfect base; Generate Mesh-ready Set is a true one-click.
+## v1.199.66 — Center the mesh-turnaround subject (was landing left)
+
+The generator sometimes lands the turnaround subject off-center (usually toward the LEFT), so the
+turnaround images -- and the base promoted from them -- looked shifted. New `recenter_subject_h`
+(cutout.py): shifts the subject's alpha bbox to horizontal center on the SAME-size canvas, leaving
+scale + vertical position + proportions untouched (safe for 3D-mesh input; also better ALIGNS the
+4 views for multi-view reconstruction). Applied (a) at ingest, scoped to 🧊 Mesh views by pose_name
+(only touches turnaround sprites), and (b) as a safety net in /base/promote-turnaround so bases
+built from older off-center sprites are centered too. Best-effort; RGB (no-alpha) sprites pass
+through unchanged. Needs app restart; re-run the turnaround (or re-promote) to see centered output.
+## v1.199.65 — Promote Mesh-turnaround → active base (front) for the 3D mesh
+
+The 🧊 Mesh turnaround is a POSE run: its 4 perfect real-photo-accurate views are cataloged as
+sprites, NOT a base version, so the front never became the active base and mesh3d/generate (which
+reads the ACTIVE base version's views) couldn't consume the turnaround output. New:
+
+Backend `POST /base/promote-turnaround` — takes the character + the 4 view→asset_id pairs (or
+auto-discovers the latest sprite per view by pose_name "... Mesh <view>"), loads the sprite bytes,
+and saves them as a base version FRONT-first via `save_base_preview(make_active=True)` → front
+becomes the ACTIVE base. Front-only is enough; missing side/back are filled by auto-discovery.
+
+Frontend: `promoteTurnaround()` API + a "⬆ Use Mesh-turnaround as base" button in the 🧊 3D body
+panel (Create tab). It finds the 4 mesh sprites in the character's outputs by pose_name, posts them,
+then refreshes the base panel + active base + 3D status. Flow: run 🧊 Mesh turnaround → ⬆ promote →
+🧊 Generate 3D body (now fed the perfect views). Idempotent-ish: re-promote after a new turnaround
+to replace the active base.
+
+No change to _klein_submit / the perfect turnaround path.
+## v1.199.64 — Turnaround identity-bleed fix (front features on the back)
+
+Confirmed second, independent cause of a bad turnaround view (Lorenzo's diagnosis was correct):
+lock-base is ON by default, so once a base is approved the run uses that base (the FRONT-derived
+render) as the SINGLE identity latent for EVERY view. The per-view pose capture was already the
+correct real photo (e.g. the real back), but the identity latent stayed the front base, so Klein
+bled FRONT features onto the back ("some of the front is on the back"). Verified in logs:
+every recent run logged "LOCK-BASE -> approved base version is the body reference".
+
+Fix (scoped to the SAM3D real-photo turnaround block only): drive each real-photo view's identity
+latent from its OWN photo instead of the front base -- the proven Image-Workshop rule "same image
+for reference AND pose = spot on". Runtime submits one view per call, so a single-view batch sets
+identity to that view's photo; a multi-view batch uses the collected angle photos. Mesh-fallback
+views and all normal pose runs are untouched, and the face crop still sources from cloner_images
+so likeness is unaffected. Note: PuLID face injection (if on) still crops from the front/face ref;
+if a face appears on the back of the head, that path is disabled for back views next.
+
+## v1.199.63 — Turnaround reference alignment guard (intermittent wrong-view fix)
+
+Root cause of the intermittent "back renders a front / left grows an extra arm" turnaround defect:
+`_klein_identity_bytes` builds `identity_bytes` by iterating `cloner_images` and SKIPPING any
+reference whose worker fetch throws (a known intermittent worker-locality failure). But
+`_klein_submit._idx_of` counts EVERY named reference, so a single dropped fetch shifted every
+later positional index — feeding a view the WRONG real photo while still logging
+"view X uses the REAL photo". That is why it was perfect on most runs and wrong on some
+("took 3-4 tries"), with the reference images themselves verified correct.
+
+Fix: `_ib` now trusts the positional index ONLY when `identity_bytes` lines up 1:1 with the
+named references (`_ib_aligned`); otherwise each view resolves its OWN photo by name through the
+robust disk/mem cache (`_ref_cached(_pick(pred))`). When aligned (the common all-fetches-OK case)
+behavior is byte-identical to the perfect 1.199.51 path; lock-base single-reference behavior
+(front = approved base) is also preserved. No change to the strip prompt, mirror logic, or
+back-inference path.
+
 # Changelog
+
+## [1.199.62] - 2026-07-23
+### Revert the briefs/strip-negative change -> turnaround strip prompt is byte-identical to the perfect version
+- The turnaround pose logic was never touched (still BUILD=1.199.51), but v1.199.58 edited the SHARED strip
+  prompt (_base_body_state boxers->briefs) + KLEIN_STRIP_NEGATIVE. Reverted both so the turnaround's prompt is
+  exactly what it was when the sets were perfect. Removes the only recent variable in the turnaround path.
+- Briefs/form-fit will be re-applied later scoped to the base ONLY, not the shared strip prompt.
+
+## [1.199.61] - 2026-07-23
+### REVERT v1.199.60 -- base-set turnaround injection was buggy (extra limbs, empty-anchor error)
+- v1.199.60 re-ran the turnaround from inside the base-set; it produced extra limbs (pose mismatch vs the real
+  turnaround) and an empty anchor (anchor_bytes=b"") that made a 0-byte rbmn_baseset_*_front.png -> ComfyUI
+  "Invalid data" on load. Reverted both edits; base-set is back to the 1.199.59 anchor/derive path.
+- The actual Mesh Turnaround (pose set via _klein_submit) was NOT modified by 56-61; the only shared change is
+  the underwear wording (boxers->briefs), pure prompt text. Turnaround logic is exactly as when it was confirmed
+  perfect. Next: reuse the real turnaround OUTPUT as the base instead of re-running it.
+
+## [1.199.60] - 2026-07-23
+### Mesh-ready base = the EXACT turnaround process (Lorenzo's ask), threaded across workers
+- Stop reinventing the base. For a MESH-READY clone, the base-set now generates all 4 views by calling
+  `_klein_submit` per view -- the identical mechanism that produces the perfect Mesh Turnaround (real photos +
+  SAM3D real-photo override + mirror + strip), instead of the anchor/derive/T2I path that drifted thin + kept
+  the shirt.
+- Each view runs on host_i (round-robin), so the set now THREADS across workers like the turnaround does
+  (identity fetched once from pinned; _klein_submit re-uploads + pulls side/back refs from the durable cache).
+- The 4 views save as the base version (front = the base image), so Generate 3D body finally reads a correct,
+  stripped, form-fit, right-proportioned 4-view base. Pairs with 1.199.58/59 (briefs, ref-loading, fresh-force).
+
+## [1.199.59] - 2026-07-23
+### base-set loads saved refs -> Mesh-ready base built from the real photos even if the button omits them
+- Root of the "still shirt/boxers + wrong body": the Mesh-ready request often carries NO cloner_images (only the
+  clone-flow button sends them), so the base-set had nothing to build from and rotated the approved clothed base.
+- **Fix**: base_set_start now loads the character's SAVED clone refs (manifest.vnccs.clone.refs) when the request
+  has none. Combined with v1.199.58 (mesh-ready forces fresh-from-refs), the Mesh-ready base is now generated
+  from the real reference photos -- the same source as the turnaround front.
+
+## [1.199.58] - 2026-07-23
+### Mesh-ready base now built from REAL reference photos (was rotating the clothed base)
+- Log showed the Mesh-ready set anchoring on the approved single clothed base ("approved base ... padded anchor")
+  and DERIVING all 4 views from it -> thinner (can't recover the body from one image) + keeps the shirt.
+- **Fix**: when base_mode=mesh AND references are present, force use_base=False -> generate the front FRESH from
+  the reference photos (clone/SAM3D path) and use the tagged side/back photos for the other views. Same
+  reference-driven mechanism that made the turnaround perfect. Also: male base underwear -> form-fitting briefs
+  (v1.199.58 pairs with the klein_poses briefs change).
+- UI equivalent: the base-set anchor toggle "A fresh front" vs "★ approved base" -- fresh is now enforced for
+  mesh-ready clones regardless of the toggle.
+
+## [1.199.57] - 2026-07-23
+### Fix NameError blocking Mesh-ready / 4-view base-set generation
+- "Generate 🧊 Mesh-ready set" 500'd: `NameError: name '_BASE_VIEW_SPEC' is not defined` in base_set_start.
+- The name was referenced in 6 places (generate_preview set branch + /base-set endpoints) but DEFINED NOWHERE,
+  even in git HEAD -- a latent bug that only fires on the base-set path (the perfected turnaround uses a
+  different path, _klein_submit, so it never hit this).
+- **Fix**: defined `_BASE_VIEW_SPEC` = [(front),(right),(left),(back)] (label, description) at module level,
+  matching the local BASE_VIEWS labels and the 2-tuple unpacking the code expects. run.bat restart, then
+  "Generate 🧊 Mesh-ready set" should run -> 4-view stripped base version -> active -> feeds the 3D body.
+
+## [1.199.56] - 2026-07-23
+### Mesh-ready sets auto-force STRONG strip cleanup (no more shirt bleed-through)
+- A shirt surviving the strip in even one of the four mesh views corrupts the Hunyuan3D body (loose fabric reads
+  as body volume). The strip negative already lists shirts but only bites at cfg>1, and the default 'gentle'
+  (cfg 1.2) was too weak -> Lorenzo had to re-roll 3-4x per view.
+- **Fix**: when generating a 🧊 Mesh-ready set (strip mode), klein_cleanup is forced to 'strong' (cfg 1.5) unless
+  the user explicitly set a cleanup mode for that run. Consistent, shirt-free views on the first pass.
+
+## [1.199.55] - 2026-07-23
+### Fix 422 on 3D body generate -- decorator was attached to the wrong function
+- v1.199.54 inserted _pad_square_bytes BETWEEN @router.post("/mesh3d/generate") and mesh3d_generate, so the
+  route bound to the helper (which takes 'data') -> every generate 422'd.
+- **Fix**: moved the padding helper ABOVE the decorator; the route is on mesh3d_generate again. Padding logic
+  unchanged. run.bat restart, then regenerate the 3D body.
+
+## [1.199.54] - 2026-07-23
+### 3D body: pad views to square (fixes the squashed/stretched proportions)
+- v1.199.53 restored the head+feet by switching CLIP crop to "none", but that square-resizes the 832x1216
+  portrait -> the mesh came out squashed in height / stretched wide.
+- **Fix**: pad each view to a SQUARE (letterbox with the plate color) before upload, and set crop back to
+  "center" (a no-op on a square). Keeps the full head-to-feet figure AND the true proportions. Regenerate the
+  3D body after a run.bat restart.
+
+## [1.199.53] - 2026-07-23
+### 3D body: stop center-cropping the head & feet off the Hunyuan3D conditioning
+- Symptom: even from a clean Mesh-ready set, the mesh domed off at the shoulders (no head) with stubby legs
+  (no feet) -- belly/arms/torso fine.
+- Cause: build_hunyuan3d_graph's CLIPVisionEncode used crop="center" on the 832x1216 PORTRAIT views, which
+  square-crops away the top (~head) and bottom (~feet). Hunyuan3D never saw them.
+- **Fix**: crop="none" so the full figure conditions the mesh; octree_resolution 256 -> 384 (overridable via
+  models.octree_res) for a bit more small-feature detail (hands). Regenerate the 3D body after a run.bat restart.
+
+## [1.199.52] - 2026-07-23
+### NEW: "Generate missing views" button -- complete the reference set from what you have
+- Lorenzo's idea, productized: a button by the clone references that uses Klein image-edit to generate the
+  standard turnaround views you're MISSING (back / left / right) from the references you DO have, then adds each
+  to the set tagged with its angle -- so you can eyeball them and the turnaround then uses them DIRECTLY (like a
+  real photo), no inference needed.
+- Backend: `/generate-ref-view` endpoint + `_klein_edit_rotate` helper (reuses the KLEIN_EDIT_*REF workflows,
+  durable-cache aware, persists the result). Frontend: `generateRefView` API + `genMissingViews` handler + the
+  "✨ Generate missing views" button next to "clear all".
+- Deploy: backend (run.bat) + frontend refresh.
+
+## [1.199.51] - 2026-07-23
+### Back edit: feed the ORIGINAL clothed references (Lorenzo's two-stage model)
+- KLEIN_EDIT was finally running (BUILD=1.199.50) but fed the STRIPPED base render as the "front" ref (lock-base
+  identity_bytes[0]) mixed with the CLOTHED side photo -> inconsistent refs -> confused, non-back result.
+- **Fix** (matches how it worked in the Workshop): the back edit now uses the original CLOTHED front photo
+  (_ref_cached of the front-tagged ref) + the clothed side photo, so Klein makes a clean clothed back that
+  matches the references. That back then feeds the turnaround as the back's reference and gets stripped exactly
+  like the side photo does -- reference-completion first, strip second. Marker BUILD=1.199.51.
+
+## [1.199.50] - 2026-07-23
+### Back KLEIN_EDIT: fix the client method (it was throwing every time -> silent mesh fallback)
+- Log showed: "back edit failed ('VNCCSClient' object has no attribute 'queue_prompt') -- mesh fallback".
+  I copied image_workshop's client calls (queue_prompt/get_full_history), but this path uses VNCCSClient, which
+  exposes submit_prompt/get_history instead. So the KLEIN_EDIT back NEVER ran -- it errored and used the mesh
+  (still too tall) every time.
+- **Fix**: submit the prepared KLEIN_EDIT workflow via VNCCSClient.submit_prompt and wait with
+  _klein_wait_first_image (the helper the rest of this file uses). Workflow is API-format, which submit_prompt
+  accepts. Now the back is actually generated by Klein rotate-to-back. Marker BUILD=1.199.50.
+
+## [1.199.49] - 2026-07-23
+### Back: use the KLEIN_EDIT image-edit graph ("rotate to back") -- the Workshop path that WORKS
+- Lorenzo proved in the Image Workshop that Klein 9B, given the front+side refs and "Rotate this character so
+  we can see him in standing back pose", produces perfect backs (3/4). My refbase attempts used the wrong Klein
+  mode (empty-canvas generate) which can't turn the character around.
+- **Fix**: back inference now reuses the Workshop's exact mechanism -- prepare_klein_workflow on
+  KLEIN_EDIT_ULTRA_WORKFLOW_{n}REF.json with the real front+side refs and the "rotate to back" prompt, submitted
+  via queue_prompt + get_full_history (mirrors image_workshop). Falls back to the mesh only if it fails.
+- This is also the foundation for the broader idea: generate MISSING reference views (back/side) from what we
+  have, via Klein image-edit, before building the mesh. Marker BUILD=1.199.49.
+
+## [1.199.48] - 2026-07-23
+### Back: revert to the mesh (a real rear view) with heavy side fusion; refbase can't flip orientation
+- Confirmed twice: refbase draws the FRONT for the back view -- the front/side references dominate and Klein's
+  "from behind" prompt can't override them at cfg=1. No strength value fixes it (high=front-locked, low=tall/lean).
+- **Decision**: a slightly-tall REAL back (mesh) beats a front-pose-labelled-back. Back now routes to the SAM3D
+  mesh again, but with side fusion forced to >=0.85 so it leans on the side reconstruction's correct proportions.
+- Guaranteed-perfect path remains a real back photo tagged Back (used directly like the sides). Marker BUILD=1.199.48.
+
+## [1.199.47] - 2026-07-23
+### Back orientation fix: lower refbase strength so "from behind" actually flips the view
+- Regression from .46: raising refbase strength to 1.35 locked Klein onto the front/side references (which show
+  the FRONT), so the back rendered as a front view. Higher strength = adhere to the (front) refs = wrong way.
+- **Fix**: strength 1.35 -> 1.10 so the "directly from behind" prompt has room to flip orientation (1.15 already
+  produced a real back in .45; 1.10 for a cleaner rear). Proportions held via the prompt ("exact same height and
+  body proportions as the reference images") rather than by over-cranking strength. Marker BUILD=1.199.47.
+
+## [1.199.46] - 2026-07-22
+### Back inference tuning: straighter rear orientation + hold reference proportions
+- Back was very close but slightly turned and legs a touch long. Two tweaks to _infer_back:
+  (1) prompt pins the orientation harder -- "directly from behind, symmetric rear view, facing completely away,
+  both shoulders equally visible, not turned or angled"; (2) refbase strength 1.15 -> 1.35 so Klein holds the
+  reference proportions (height/leg length) tighter and stops elongating. Marker BUILD=1.199.46.
+
+## [1.199.45] - 2026-07-22
+### Back view: infer from front+side references (refbase, no mesh) instead of the averaged mesh
+- The back was the last view still on the SAM3D mesh -> too tall / wrong proportions (SAM3D's average bias).
+- **Fix** (Lorenzo's idea): for a back view with no back photo, Klein now draws the back FROM the real front+side
+  references via build_klein_refbase_graph (reference-driven, NO pose mannequin), prompted "from behind" + the
+  character's build text. Correct proportions come from the references; rear orientation from the prompt. The
+  result becomes the back pose reference (reproduced like the side photos are). Falls back to the mesh on any
+  failure, so no regression. Marker BUILD=1.199.45.
+- Sides unchanged (real photo + mirror for the opposite side). Only the no-photo back changed.
+
+## [1.199.44] - 2026-07-22
+### Turnaround: mirror the profile for the OPPOSITE side (left != right anymore)
+- With v1.199.43 the side finally renders the correct build -- but both side views used the one tagged profile,
+  so left and right came out as identical copies.
+- **Fix**: the view whose side is opposite the tagged profile (e.g. a Left view when you tagged Right) now uses a
+  horizontal MIRROR of the profile, giving a proper opposite-side view. Same-side view uses it as-is. Both sides
+  still come from the real photo (no mesh). Marker BUILD=1.199.44.
+
+## [1.199.43] - 2026-07-22
+### Durable reference cache -> side photo survives worker/app restarts (the real root cause)
+- **Root cause, log-proven**: v1.199.42 logged sides as "0/1 real photo, 1 need mesh" -- the side fetch failed
+  CONSISTENTLY (not intermittently). Reason: `upload_reference` only stores refs on the worker's transient input
+  folder; nothing persists them. The front survives restarts because it's a durable DB asset (base render); the
+  side photo's worker file was cleared on restart, so it became unfetchable.
+- **Fix**: disk-backed reference cache under runtime/klein_ref_cache/, keyed by upload name.
+  (1) `upload_reference` now persists the bytes to disk the moment you upload. (2) The turnaround falls back to
+  the disk copy when the worker fetch fails, and persists any successful fetch. So once a reference is uploaded
+  or fetched even once, it survives worker/app restarts and the side view keeps using the real photo.
+- ACTION: re-upload the side profile once so it lands in the durable cache under the new code; from then on it
+  sticks. Marker BUILD=1.199.43.
+
+## [1.199.42] - 2026-07-22
+### Turnaround: decide source FIRST -> real photos skip the mesh entirely (bulletproof + faster)
+- Restructured the SAM3D turnaround block. Each view's source is resolved ONCE up front:
+  front <- front ref / base (in-memory), side <- profile photo (in-memory identity if present, else cached+retried
+  fetch reused across every per-view job), back <- back photo if tagged.
+- **Speed**: a view that has a real photo is used DIRECTLY and SKIPS the expensive SAM3D reconstruction. Only
+  no-photo views (typically just the back) run the mesh -> front + both sides no longer pay for a render they
+  were only going to throw away. For a front+side character that's ~3 of 4 views skipping SAM3D.
+- **Robustness**: side bytes come from in-memory identity_bytes when available, else the cross-job cache, so the
+  intermittent per-job view_image fetch can no longer drop the side. Marker BUILD=1.199.42.
+
+## [1.199.41] - 2026-07-22
+### Turnaround side: cache the side-photo bytes (fixes intermittent per-job fetch)
+- **Root cause, log-proven**: BUILD=1.199.40 WAS live, yet the same instant showed "fusing side profile" (bytes
+  fetched) AND "view left -> averaged mesh". Those are different concurrent per-view jobs -- the view_image fetch
+  of the side photo is INTERMITTENT (succeeds on some jobs, silently fails on others), so some jobs had no side
+  bytes to use.
+- **Fix**: (1) retry the fetch 3x; (2) module-level cache keyed by upload name -- the first job to fetch the side
+  photo caches it, and every other job reuses the cached bytes instead of re-fetching. So one success is enough.
+- Logs now show "side ref fetched + cached" / "reused from cache" / "fetch FAILED", and the mesh-fallback line
+  prints side_bytes/ib/side_im state. Marker BUILD=1.199.41.
+
+## [1.199.40] - 2026-07-22
+### Build marker to confirm the side fix is actually loaded
+- v1.199.39's side fix ("_rb = _ib(side) or _side_bytes") is correct and on disk, but the log proved the RUNNING
+  server was still the pre-fix code: the same job logged "fusing side profile" (side bytes fetched) yet still
+  "view left -> averaged mesh", which is only possible on the old path -> the backend hadn't reloaded.
+- Added a per-run log line "klein SAM3D real-photo override BUILD=1.199.40" so we can SEE whether the new code
+  is live after a run.bat restart. If that line is absent, the backend didn't reload; if present, the side uses
+  the real profile bytes.
+
+## [1.199.39] - 2026-07-22
+### Turnaround side FIXED: reuse the fusion-fetched profile bytes (lock-base safe)
+- **Final root cause, log-proven**: the run is LOCK-BASE, so identity_bytes = [single base render] (length 1).
+  The side ref is correctly found at index 1, but index 1 is out of range -> fell to mesh. Meanwhile the mesh
+  fusion had ALREADY fetched the side profile successfully ("fusing side profile (w=0.50)").
+- **Fix**: side views now use `_ib(side) or _side_bytes` -- when identity_bytes is the lone base render, reuse the
+  profile bytes already in hand from the fusion fetch. No dependence on identity_bytes length or a second fetch.
+- Front (base render) and side (real profile) now both come from real imagery; back still mesh pending inference.
+
+## [1.199.38] - 2026-07-22
+### Turnaround side: use in-memory identity_bytes (the real cause: view_image re-fetch was failing)
+- **Log-confirmed**: v1.199.37 still logged "view left/right -> averaged mesh". Labels WERE exact left/right and
+  the tag WAS present -- so the miss was the lookup: the side path re-fetched the photo via view_image at
+  override time, which was silently failing (wrong type/subfolder or input already cleaned). The FRONT only
+  worked because it used the in-memory identity_bytes[0] fallback, never view_image.
+- **Fix**: the override now pulls every view's photo from identity_bytes by INDEX (front/side/back), the exact
+  same in-memory source that makes the front correct -- no re-fetch. identity_bytes is built from cloner_images
+  skipping name-less entries in order, so we index it identically to line photo<->ref up.
+- Log now prints "ref idx: front=.. side=.. back=.. (identity_bytes=N)" so the mapping is fully visible.
+
+## [1.199.37] - 2026-07-22
+### Turnaround: profile photo now covers ALL turned views; per-view label logging
+- **Diagnosis confirmed from the new log**: the side TAG reaches the backend fine
+  (refs seen: [full, {angle:right,role:body}, face]). The miss was the POSE label -- the side pose maps to a
+  diagonal (front_right/back_right), not an exact left/right, so it fell through to the averaged mesh.
+- **Fix**: any turned view (pure sides AND diagonals) now uses the profile photo; only exact 'front' uses the
+  front photo and exact 'back' uses a back ref (else mesh, pending back-inference). Proportions are correct even
+  when the exact yaw differs.
+- Added per-view fallback log ("view X -> averaged mesh") so every view's source is visible for the record.
+
+## [1.199.36] - 2026-07-22
+### Turnaround side view: one profile photo now covers EITHER side pose
+- **Symptom**: front matched perfectly (real photo) but the side stayed averaged even with a side ref tagged.
+  Log proof: front logged "1 real-photo override", the side job logged "0 real-photo override".
+- **Cause**: side matching required the pose's computed side (left/right) to EXACTLY equal the tagged side.
+  With a single profile photo, the opposite-side pose never matched -> fell back to the mesh.
+- **Fix**: any Left/Right- (or role side/profile-) tagged photo now drives BOTH left and right side poses; a
+  Back-tagged photo drives the back. Added "klein SAM3D refs seen: [...]" log so we can confirm exactly which
+  angle/role tags reached the backend (catches a tag that never propagated from the UI).
+
+## [1.199.35] - 2026-07-22
+### SAM3D TURNAROUND (the path you actually run) now uses your real photos + side fusion
+- **Found via logs**: the turnaround runs `_klein_submit` (klein_pose_source=sam3d), NOT the base-clone helper
+  `_klein_sam3d_base_views` where v1.199.32-34 landed. Log proof: "klein SAM3D base:" appeared 0 times while
+  the mesh body-views rendered many times. So the real-photo / fusion fixes never executed for the turnaround.
+  This is the wrong-path miss, now corrected.
+- **Fix** (backend, `_klein_submit` SAM3D block):
+  - **Real-photo per view**: front pose now uses your real FRONT body photo directly (zero config); a view you
+    tagged Left/Right (or role side/profile) uses that photo; back uses a Back-tagged photo. Mesh only fills the
+    rest. At cfg=1 the pose-reference IMAGE is what Klein reproduces, so a real photo beats the averaged mesh.
+  - **Side fusion**: the fallback mesh now fuses a Left/Right/side reference (depth+height) when you have one.
+  - Verifiable in logs: grep 'uses the REAL photo' and 'real-photo override'.
+- **Known tradeoff**: front (from your photo) vs back (from the averaged mesh) can differ in build until the
+  mesh is corrected or a back photo exists -- see the direction question.
+
+## [1.199.34] - 2026-07-22
+### SAM3D base: inject the character's BUILD + HEIGHT into the base prompt (fix taller/thinner)
+- **Root cause of the persistent height/fatness miss**: the SAM3D base-clone prompt was body-blind --
+  "Draw character from image2, full body, white background" with NO build description. Klein is a
+  text-to-image model with a strong prior toward an AVERAGE build, so with nothing in the prompt to say
+  otherwise it renders him taller & slimmer regardless of the reference latch. The pose SETS already inject
+  `klein_body_text` (build + height); the base clone never did.
+- **Fix** (backend): `_klein_sam3d_base_views` now appends `klein_body_text(character_info)` to every base
+  view prompt -- e.g. "...wearing plain white underwear, short heavy-set build with large protruding belly,
+  5'6\", full body...". Empty Body field -> no-op (unchanged), so no regression.
+- **Requires**: the character's **Body** description field carries the build words (short / very overweight /
+  large belly / short legs). That text is what now drives the rendered proportions -- the reference images
+  carry face + identity, the Body text carries build.
+
+## [1.199.33] - 2026-07-22
+### SAM3D base: use the real photo for any view you have one (mesh only fills the gaps)
+- **Why**: side output came out taller, longer-legged, flatter-bellied than the real person. Root cause is
+  structural -- SAM3D's parametric body regresses toward an AVERAGE build, so extreme short-legs / large
+  protruding-belly proportions get compressed toward the mean, and blending two reconstructions stays inside
+  that same ceiling. Confirmed on Lorenzo's ref: the raw mesh render itself was too tall BEFORE Klein.
+- **Fix** (backend): `_klein_sam3d_base_views` now drives each view from the user's OWN angle-tagged photo when
+  one exists (his proven "same image as pose = spot on") -- front from a plain full/front ref, side from a
+  ref tagged Left/Right (or role side/profile), back from a ref tagged Back. The SAM3D mesh render is kept
+  only as the fallback for views with no real photo. Front+side fusion (v1.199.32) still improves that fallback.
+- **Usage**: upload your side-profile photo as a reference and tag it ◀ Left or Right ▶; that view now uses the
+  real proportions directly instead of a normalized mesh.
+
+## [1.199.32] - 2026-07-22
+### SAM3D body: front+side mesh fusion (depth/height normalization)
+- **Why**: a single front image can only GUESS depth (belly/back projection) and under-reads true height, so
+  clones drifted taller & thinner than the person. A side profile MEASURES that depth and height.
+- **Fusion** (node): `RBMN_SAM3D_BodyViews` gains optional `side_image` + `side_weight` (0..1, def 0.5). It runs
+  SAM3D on both images and blends shape_params + scale_params per component: `fused = front + w*(side - front)`.
+  Omit the side image -> unchanged front-only behavior. New `_fuse_body_json` helper.
+- **Backend**: `mesh_autofit.render_sam3d_body_views` accepts `side_bytes`/`side_weight` and wires a 2nd LoadImage
+  into the graph. `_klein_sam3d_base_views` auto-picks a side reference tagged **role side/profile OR angle Left/Right**
+  (reuses the existing angle tag -- no new UI) and passes it through. Weight overridable via `klein_sam3d_side_weight`.
+- **Usage**: upload your side-profile photo as a reference and tag it ◀ Left or Right ▶; the base clone fuses it.
+
+## [1.199.31] - 2026-07-21
+### SAM3D body: full reconstruction + upright pose + side views fixed
+- **Full body** (node): render the FULL SAM3D reconstruction (all 45 shape comps + scale) via mhr_forward +
+  the vendored software renderer, instead of the preset render node which ZEROES shape[9:] + scale (its own
+  comment: "predicted shape ... intentionally ignored"). That 9-of-45 truncation was the "generic fat, not
+  his frame" bug. Now his actual mass renders.
+- **Upright** (node): render REST pose (zero body_pose) not the detected posture -> no forward lean on the base.
+- **Side views** (backend): `_klein_sam3d_base_views` now uploads the reference photo AS the Klein identity, so
+  it no longer bails when the derive (right/left/back) calls omit the cloner name -> every view renders from
+  the mesh (true rotation) instead of the front-derive hack.
+Honest: single-image reconstruction; the side/back depth (belly/butt) is approximate. Multi-image (front+side
+reference to normalize the mesh depth) is the next step -- Lorenzo asked for it; SAM3D is single-image so it
+needs a fuse step.
+
+## [1.199.30] - 2026-07-21
+### Base clone now USES the SAM3D reconstructed body (right path this time)
+Root cause of "likeness on a generic doll, body not forced": the base clone runs `generate_preview`'s
+REFBASE path, whose own docstring says it uses NO mesh -- it infers the body from 2D photos and eases the
+front reference to fake rotation (the `_derive` strength hacks = the "fighting"). The SAM3D wiring in
+v1.199.29 was in `_klein_submit` (pose sets), which the base clone never calls. Fixed:
+- New `_klein_sam3d_base_views()` + hook in `generate_preview`: when `klein_pose_source=sam3d`, each base/
+  turnaround view is a RENDER of the character's SAM3D-reconstructed body (front/side/back) with the
+  character drawn onto it via `build_klein_pose_graph` (pose image = the real body, identity = the photo,
+  prompt = "draw character from image2") -- the node's proven recipe. This FORCES the body shape and gives
+  TRUE rotations (rotate a 3D mesh) instead of the refbase derive-hacks. Uses the best full-body ('full'/
+  'body') reference. Opt-in; graceful fallback to refbase. (Confirmed by Lorenzo's Pose Studio screenshot:
+  same method → near-perfect side view of the character with HIS body.)
+Honest scope: single-image reconstruction (front is good per Lorenzo; sides approximate). Multi-image mesh
+refinement (front+side to nail the back/butt) is a follow-up -- SAM3D is single-image, needs a merge step.
+
+## [1.199.29] - 2026-07-21
+### Klein pose source = SAM3D reconstructed-body render (node-faithful) — wired
+- Fixed the tensor-boolean crash in the SAM3D node (`... or zsh` -> explicit `is None`).
+- **Wired**: `klein_pose_source=sam3d` (UI: "Pose reference body -> SAM3D reconstructed body") makes the
+  Klein pose reference a RENDER of the character's SAM3D-reconstructed body (front/side/back), replacing the
+  Hunyuan3D clay / parametric mannequin. `_klein_submit` maps each view's model-rotation to a camera yaw,
+  fetches the renders via `mesh_autofit.render_sam3d_body_views` (RBMN SAM3D Body Views node), and uses them
+  as the pose captures. Opt-in; graceful fallback to clay/mannequin if the node/model is unavailable.
+- Frontend toggle added (load/serialize klein_pose_source). tsc clean.
+- PROOF (from a real obese-character run): SAM3D reads body_params fat=3.03 (large), muscle=0.08 (NOT
+  muscular), leg=0.96 (not long). The "muscular/long-legs" body was the OLD clay/mannequin path, not SAM3D.
+
+## [1.199.28] - 2026-07-21
+### SAM3D body-view render node + pure-mode step
+- **RBMN SAM3D Body Views** node (`tools/comfy_nodes/rbmn_sam3d_proportions/`): reconstructs the body
+  from ONE image and renders clean views (front/right/left/back) of it WITH the detected shape, headless,
+  reusing the vendored SAM3D nodes (LoadSAM3DBodyModel -> SAM3DBodyProcessToJson ->
+  SAM3DBodyRenderFromPoseAndBodyPresetJson). Builds the body_preset from the detected shape (9 axes from
+  shape_params) + bone_lengths (personalized/canonical joint ratios). These renders ARE the character's real
+  body -- the intended replacement for the Hunyuan3D clay / parametric mannequin as the Klein pose reference.
+- Backend `mesh_autofit.render_sam3d_body_views()` fetches those renders from the worker.
+- Pure-mode: `klein_face_refine` default auto -> **off** (FaceDetailer is not in the VNCCS Klein workflow and
+  is a striping-artifact source; Klein renders faces cleanly on its own).
+
+## [1.199.27] - 2026-07-21
+### Klein pose artifacts — re-enable pose-ref release (bare-validation fix)
+Diagnosed the "wooden/clay log limb" artifact: with pose-ref release OFF (the v1.199.23 bare
+default) the clay/mannequin pose capture is held as a reference for the WHOLE run, so its material
++ rigid geometry bleed into the skin. The bare experiment proved pose-ref release is NOT an
+over-engineering extra -- it is genuinely required for our app-side captures (the VNCCS node gets
+away without it because its pose image is a clean SAM3D-mesh render, not a clay capture).
+- `klein_pose_ref_end` default 1.0 (off) -> **0.85** (release before the texture-forming steps).
+- Frontend label restored to "0.85 (def)".
+Next (planned): make the Klein clone/base pose reference a render of the SAM3D-reconstructed body
+(the node's actual clean image) via the vendored headless nodes, replacing clay/mannequin; plus a
+"pure" node-faithful mode with all extras off by default and an Advanced section to re-enable them.
+
+
+## [1.199.26] - 2026-07-21
+### Proportion auto-fit — follow-ups (turnaround path, head_size, frontend toggle)
+- **Turnaround / base-preview**: the Klein base-preview MANNEQUIN-fallback branch (face-only clone /
+  keep-clothing) now runs the same SAM3D proportion auto-fit (`generate_preview`), fetching the
+  character's reference photo bytes from the cloner images. (The main reference-driven base path already
+  gets proportions from the photos directly; the Qwen path at the 4th `body_mesh_params` site is
+  intentionally untouched.)
+- **head_size**: `mesh_autofit.head_size_from_sam3d` derives head-to-body ratio as person/canonical head
+  fraction (both from SAM3D joints, so the joint-vs-mesh measurement bias cancels — our neutral mannequin
+  == the average head), clamped [0.8, 1.3], applied only when it deviates >2% from neutral. Validated on a
+  real character (head_size 1.01 — correctly near-neutral, no over-correction).
+- **Frontend toggle**: `klein_autofit_proportions` On/Off control in the Klein settings (default On),
+  wired through load + serialize. Off = description-based build only.
+Backend + frontend → run.bat restart + browser refresh.
+
+
+## [1.199.25] - 2026-07-21
+### Klein pose-mannequin proportion auto-fit (image -> body proportions, SAM 3D Body)
+Bare Klein poses hold the pose but drift in PROPORTIONS because the pose mannequin was built
+only from coarse text sliders and our renderer ignored the per-limb sliders entirely. This wires
+up a full "one image -> correct proportions" pipeline:
+- **Renderer** (`pose_render.py`): now applies every proportion slider the VNCCS node exposes.
+  Per-limb LENGTH (`upper_arm/forearm/thigh/shin_l/r_length`, `spine_length`) via bone-`rel` scaling
+  in the FK loop (`_compute_bone_length_scales`, `clamp(0.5+v,0.25,2.0)` matching the JS viewer), and
+  head/arm/hand/foot SIZE via weight-blended isotropic scaling about each posed joint
+  (`_compute_size_scales`). Our runtime rig is the retargeted 53-bone MHR skeleton (same bone names
+  as the JS), so the mapping is 1:1. Unit-tested geometrically.
+- **Detection**: new headless ComfyUI node **RBMN SAM3D Proportions**
+  (`tools/comfy_nodes/rbmn_sam3d_proportions/`) reuses the worker's `vnccs_sam3d` (SAM 3D Body) to
+  reconstruct the body from ONE image, re-running the MHR forward with the DETECTED shape/scale in a
+  rest pose so the joints reflect THIS person (the default export zeroes shape = average body). Writes
+  `<ComfyUI>/output/rbmn_sam3d_proportions.json`.
+- **Converter** (`mesh_autofit.py`, NEW): SAM3D rest joints -> mesh `*_length` block. Per-segment
+  slider = clamp(person_frac/our_neutral_frac - 0.5, 0, 1); segments averaged L/R; `our_neutral_fracs`
+  read live from the pose_render skeleton. Coarse weight/muscle from shape_params (optional). Validated
+  on a real character (long arms / lean build read correctly).
+- **Wiring**: Klein pose sets (new + clone) auto-fit on first run per character and CACHE the result
+  (`runtime/mesh_autofit/`, keyed by character + reference hash); reused for all later poses. On by
+  default (`klein_autofit_proportions`, set to off to disable); manual mesh values win; graceful no-op
+  if the proportions node/model isn't on the worker.
+Backend + a new worker node -> run.bat restart, and install the node on workers. Follow-ups: wire the
+base-preview/turnaround path too, a frontend toggle, and head_size.
+
+
+## [1.199.24] - 2026-07-21
+### Klein pose overhaul (part 2 — frontend regroup)
+Regrouped the scattered Klein POSE-panel controls (`VNCCSNativePage.tsx`) into three clearly
+labeled sections, so every default-OFF extra lives in one place:
+- **🕺 Core pose — the pose itself**: steps, cleanup, pose input (mannequin/skeleton/3D clay),
+  pose LoRA + strength.
+- **🙂 Identity & face**: PuLID (pose) + strength, Face refine (pose) + denoise/steps/guide.
+- **🧩 Consistency extras — default OFF**: the bolt-ons that translate/hold the pose, all in one
+  section with the "test the bare base first" banner — Pose-ref release, Body-match
+  (ReferenceLatentPlus), Face-crop reference, Consistent skin/seed, Consistency LoRA (dx8152).
+No control logic changed — blocks were moved verbatim and re-headed; the old 🕺 Pose control /
+🧬 Set consistency / 🙂 Face / 🧩 Identity aids headers are consolidated. Frontend-only (refresh).
+
+
+## [1.199.23] - 2026-07-21
+### Klein pose overhaul (part 1 — bare-default) — AUDIT + backend defaults
+Audited `build_klein_pose_graph` node-by-node against the ground-truth vnccs-utils
+**VNCCS_Utils Pose Studio Klein9b.json** workflow. Finding: our CORE already matches ground
+truth exactly (UNET/CLIP/VAE + Klein9b LoRA@1.0 + pose-ref latent + character-ref latent +
+Flux2Scheduler steps=4 + CFGGuider cfg=1 + euler; prompt "draw character from image2"). The
+over-engineering lived entirely in the DEFAULTS: five identity/consistency extras (none present
+in ground truth) were ON by default. Per request, made a bare Klein pose run == ground truth so
+poses can be validated on their own, then extras re-enabled one at a time. Extras are OPTIONAL, not
+removed — every knob is retained.
+- **Pose runs now default all identity aids OFF** (in `_klein_submit`), leaving base-preview,
+  base-set and clothes paths UNCHANGED:
+  - Pose-ref release (`klein_pose_ref_end`) default 0.85 → **1.0 (off)**.
+  - FaceDetailer refine on poses (`klein_pose_face_refine`) default → **off** (base preview's
+    global `klein_face_refine` untouched).
+  - Body-match / ReferenceLatentPlus on poses gated behind a NEW pose-only key
+    **`klein_pose_body_match`** (default off); the shared `klein_body_match` keeps its `auto`
+    default for base sets.
+  - Dedicated face-crop reference latent gated behind a NEW **`klein_face_crop_ref`** (default off).
+  - Anatomy negative only applied when cfg > 1 (inert at the default cfg=1).
+  - Already opt-in/off and left as-is: PuLID, SAM3 cleanup, DWPose skeleton, RMBG, consistency LoRA,
+    consistent-seed, GAN upscale.
+- **Frontend** (`VNCCSNativePage.tsx`): pose "Pose ref release" + "Face refine (pose)" default labels
+  corrected to show **Off (def)** (they previously mislabeled 0.85/Global while the backend now
+  defaults off); new **🧩 Identity aids — default OFF** subsection with re-enable toggles for
+  body-match and face-crop reference + an explainer banner.
+- Follow-up (after Lorenzo's bare-base validation): full 3-section cosmetic regroup of the remaining
+  scattered Klein controls; confirm which extras Klein genuinely needs and set as the kept defaults.
+
 
 ## [1.199.22] - 2026-07-21
 ### Fixed -- run status now persists per character (survives tab switch + browser close)

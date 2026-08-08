@@ -60,6 +60,7 @@ export interface VNCCSCharacterInfoT {
   body_muscle?: number;
   body_height?: number;
   body_breast?: number;
+  body_belly?: number;
   [k: string]: unknown;
 }
 
@@ -535,6 +536,35 @@ export const uploadReference = async (file: File): Promise<UploadRefT> => {
   fd.append('file', file);
   const res = await fetch(`${BASE}/upload`, { method: 'POST', body: fd });
   return j<UploadRefT>(res);
+};
+
+// Generate a MISSING reference view (back/left/right/front) from the existing refs via
+// Klein image-edit ("rotate to <view>"). Returns a new reference tagged with that angle.
+export const generateRefView = async (
+  clonerImages: Array<{ name: string; subfolder?: string; type?: string; role?: string; angle?: string }>,
+  view: string,
+  width?: number,
+  height?: number,
+): Promise<UploadRefT & { angle?: string }> => {
+  const res = await fetch(`${BASE}/generate-ref-view`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cloner_images: clonerImages, view, width, height }),
+  });
+  return j<UploadRefT & { angle?: string }>(res);
+};
+
+// Promote a 🧊 Mesh-turnaround pose set into a BASE VERSION with the FRONT as the
+// ACTIVE base (so mesh3d/generate + lock-base read the turnaround's views).  Pass the
+// 4 view->asset_id pairs the UI found; the backend auto-discovers any it can't map.
+export const promoteTurnaround = async (
+  characterName: string,
+  views: Array<{ view: string; asset_id: string }>,
+): Promise<{ ok: boolean; version?: unknown; views?: string[]; active?: boolean }> => {
+  const res = await fetch(`${BASE}/base/promote-turnaround`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ character_name: characterName, views }),
+  });
+  return j<{ ok: boolean; version?: unknown; views?: string[]; active?: boolean }>(res);
 };
 
 // Saved outfit reference images (v1.199.5): persist a costume's outfit photo

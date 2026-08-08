@@ -144,6 +144,9 @@ def build_hunyuan3d_graph(
         api[f"cv_{view}"] = {"class_type": "CLIPVisionEncode",
                              "inputs": {"clip_vision": ["ckpt", 1],
                                         "image": [f"img_{view}", 0],
+                                        # v1.199.54: views are PADDED to square before upload, so
+                                        # "center" is a no-op that keeps the full figure AND the
+                                        # true proportions (bare "none" squashed the height).
                                         "crop": "center"}}
         cond_inputs[view] = [f"cv_{view}", 0]
     api["cond"] = {"class_type": "Hunyuan3Dv2ConditioningMultiView", "inputs": cond_inputs}
@@ -156,7 +159,7 @@ def build_hunyuan3d_graph(
                             "latent_image": ["lat", 0], "denoise": 1.0}}
     api["vox"] = {"class_type": "VAEDecodeHunyuan3D",
                   "inputs": {"samples": ["ks", 0], "vae": ["ckpt", 2],
-                             "num_chunks": 8000, "octree_resolution": 256}}
+                             "num_chunks": 8000, "octree_resolution": int(models.get("octree_res") or 384)}}
     api["mesh"] = {"class_type": "VoxelToMesh",
                    "inputs": {"voxel": ["vox", 0], "algorithm": "surface net",
                               "threshold": 0.6}}

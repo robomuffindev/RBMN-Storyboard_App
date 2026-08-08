@@ -1120,6 +1120,7 @@ class JobDispatcher:
             from backend.api.vnccs_native import (
                 _klein_submit, _native_submit, _klein_identity_bytes,
                 _resolve_lock_base, GenerateIn, _qwen_emotion_submit_one,
+                _active_base_views, _identity_for_pose,
             )
             from backend.services.character_studio.vnccs_native.ingest import ingest_result
             from backend.services.character_studio.vnccs_native.client import VNCCSError
@@ -1193,6 +1194,21 @@ class JobDispatcher:
                     lock_base = _resolve_lock_base(st_settings, body)
                     identity_bytes = await _klein_identity_bytes(
                         session, body, ref_host or worker_url, lock_base)
+                    # v1.199.139: VIEW-AWARE IDENTITY.  v138 put this on the direct
+                    # /generate path -- but pose runs go through the QUEUE, so this
+                    # dispatcher is the path that actually executes and the fix was
+                    # inert (zero `klein pose identity` lines in a full 5-pose run).
+                    # Same lesson as v116-118: grep the log for which path RAN.
+                    try:
+                        _bviews = ({} if len(identity_bytes or []) != 1 else
+                                   await _active_base_views(session, body.character_name))
+                        if _bviews and len(_bviews) >= 2:
+                            identity_bytes = await asyncio.to_thread(
+                                _identity_for_pose,
+                                (pose_subset[0] if pose_subset else {}),
+                                _bviews, identity_bytes)
+                    except Exception as _vexc:  # noqa: BLE001
+                        logger.info("klein pose identity: view pick skipped (%s)", _vexc)
                 prompt_id, tap_map, _extras = await asyncio.to_thread(
                     _klein_submit, worker_url, st_settings, body, pose_subset,
                     identity_bytes, seed)

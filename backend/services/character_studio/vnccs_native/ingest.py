@@ -543,6 +543,18 @@ async def ingest_result(
             pose_name = (chunk_pose_names[i]
                          if chunk_pose_names and len(images) == len(chunk_pose_names)
                          else None)
+            # v1.199.66: mesh-turnaround views feed the 3D mesh AND get promoted to the
+            # base -- horizontally CENTER the subject (the generator can land it off-center,
+            # usually toward the left) so the turnaround images and the promoted base read
+            # centered.  Scoped to 🧊 Mesh views by pose_name; scale + proportions + vertical
+            # position are untouched.  Best-effort; never blocks the ingest.
+            if (pose_name and "mesh" in str(pose_name).strip().lower()
+                    and ("sprites" in label or label.endswith("sheet"))):
+                try:
+                    from backend.services.character_studio.cutout import recenter_subject_h
+                    await asyncio.to_thread(recenter_subject_h, abs_dest, abs_dest)
+                except Exception:  # noqa: BLE001 -- centering is best-effort
+                    logger.exception("ingest: mesh-view recenter failed for %s", fn)
             asset = await _create_asset_row(
                 session, proj, rel, asset_type,
                 meta={"vnccs": {"label": label, "character": character_name,

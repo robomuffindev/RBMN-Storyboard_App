@@ -24,10 +24,15 @@ import ImageWorkshopLightbox from '../ImageWorkshop/ImageWorkshopLightbox';
 import type {
   ContextListsT, HostInfoT, ResultImageT, VNCCSCharacterInfoT, VNCCSStepT,
 } from './vnccsNativeApi';
+import Klein2Panel from './Klein2Panel';
+import Klein3Panel from './Klein3Panel';
+import LoraPanel from './LoraPanel';
+import CharacterSheetPanel from './CharacterSheetPanel';
+import Text2ImagePanel from './Text2ImagePanel';
 
 
 type Phase = 'idle' | 'submitting' | 'polling' | 'ingesting' | 'done' | 'error';
-type Tab = 'create' | 'clothes' | 'emotions' | 'cloner' | 'poselib';
+type Tab = 'text2image' | 'create' | 'clothes' | 'emotions' | 'cloner' | 'poselib' | 'lora' | 'charsheet';
 
 const SEXES = ['female', 'male'];
 const BACKGROUNDS = ['Green', 'Blue', 'White', 'Alpha'];
@@ -875,6 +880,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [faceKind, setFaceKind] = useState<string>('auto');
   const [styleCustom, setStyleCustom] = useState<string>('');
   const [lockBase, setLockBase] = useState<boolean>(true);
+  const [autofitProps, setAutofitProps] = useState<boolean>(true);  // klein_autofit_proportions (SAM3D image auto-fit)
   // v1.176: base render mode — 'single' (front only), 'set' (4-view), or
   // 'mesh' (🧊 Mesh-ready A-pose set optimized for 3D mesh generation).
   const [baseMode, setBaseMode] = useState<'single' | 'set' | 'mesh'>('single');
@@ -906,7 +912,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [poseFrSteps, setPoseFrSteps] = useState<string>('');
   const [poseFrGuide, setPoseFrGuide] = useState<string>('');
   const [poseRefEnd, setPoseRefEnd] = useState<string>('');    // '' = default 0.85; '1' = off
-  const [poseInput, setPoseInput] = useState<string>('');     // '' = mannequin; 'skeleton' = DWPose
+  const [poseInput, setPoseInput] = useState<string>('');     // '' = mannequin; 'skeleton' = DWPose; 'depth' = RefControl depth
+  const [poseSlock, setPoseSlock] = useState<string>('');     // '' = off; 0.35-0.95 = img2img structure lock
+  const [poseSource, setPoseSource] = useState<string>('');    // '' = mannequin/clay; 'sam3d' = SAM3D reconstructed-body render
   const [poseLora, setPoseLora] = useState<string>('');       // '' = VNCCS PoseStudio; filename = override
   const [poseLoraStr, setPoseLoraStr] = useState<string>(''); // '' = 1.0
   const [consLora, setConsLora] = useState<boolean>(false);
@@ -923,6 +931,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [bodyMatch, setBodyMatch] = useState<string>('1.6');
   const [bodyKeep, setBodyKeep] = useState<string>('person');  // reference masking: what the body-ref carries
   const [consistentSkin, setConsistentSkin] = useState(false);  // share one seed + colour-lock across a pose set
+  // v1.199.23: pose-run identity aids now default OFF (bare = ground-truth Klein). Re-enable one at a time.
+  const [poseBodyMatch, setPoseBodyMatch] = useState(false);   // klein_pose_body_match (ReferenceLatentPlus for POSES)
+  const [poseFaceCropRef, setPoseFaceCropRef] = useState(false); // klein_face_crop_ref (dedicated face-crop reference latent)
   const [canvasW, setCanvasW] = useState<string>('1024');
   const [baseFr, setBaseFr] = useState<boolean>(true);
   const [baseFrDenoise, setBaseFrDenoise] = useState<string>('');
@@ -1018,7 +1029,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // 'qwen' = VNCCS's exact creation process rebuilt app-side (t2i base render
   // 640x1536 for new characters, reference-collage pipeline for clones, plus
   // the QIE2511 PoseStudio Pass-B pose sets).
-  const [createEngine, setCreateEngine] = useState<'klein' | 'qwen'>('klein');
+  const [createEngine, setCreateEngine] = useState<'klein' | 'qwen' | 'klein2' | 'klein3'>('klein');
   // v1.171 Debug Options: persisted toggle + the Settings Variation Test panel
   const [debugOn, setDebugOn] = useState(false);
   const [vtOpen, setVtOpen] = useState(false);
@@ -1027,12 +1038,23 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // saved Advanced dials are never touched.
   const [poseMode, setPoseMode] = useState<'advanced' | 'simple'>('advanced');
   const [simpleRef, setSimpleRef] = useState<'mannequin' | 'skeleton'>('mannequin');
-  const [m3dPoseOn, setM3dPoseOn] = useState(false);   // v1.175: 3D-body clay pose refs
+  // v1.199.92: PERSISTED. This used to be plain per-session state, so a page
+  // reload (e.g. after a run.bat restart) silently dropped it -- the next run
+  // then used the GENERIC MANNEQUIN with no error anywhere and the character
+  // came out thin and generic. Too costly a footgun for a per-run toggle.
+  const [m3dPoseOn, setM3dPoseOn] = useState<boolean>(() => {
+    try { return localStorage.getItem('rbmn_m3d_pose_on') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('rbmn_m3d_pose_on', m3dPoseOn ? '1' : '0'); } catch { /* ignore */ }
+  }, [m3dPoseOn]);
   const [simpleQuality, setSimpleQuality] = useState<'fast' | 'balanced' | 'max'>('balanced');
   // v1.173 Tier-1 3D body: generation status + template pick
   const [m3dStatus, setM3dStatus] = useState<api.Mesh3dStatusT | null>(null);
   const [m3dTemplate, setM3dTemplate] = useState<'mixamo' | 'articulationxl'>('mixamo');
   const [m3dBusy, setM3dBusy] = useState(false);
+  const [promoteBusy, setPromoteBusy] = useState(false);
+  const [promoteMsg, setPromoteMsg] = useState('');
   const m3dPoll = useRef<number | null>(null);
   const m3dCharName = () => (createSub === 'clone' ? cloneName.trim() : name.trim());
   const refreshM3d = async (nm: string) => {
@@ -1058,6 +1080,49 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     } catch (e) {
       setM3dBusy(false);
       setErrMsg(`3D body failed to start: ${(e as Error).message}`);
+    }
+  };
+  // Promote the mesh-turnaround sprites (front/right/left/back) into a BASE VERSION with
+  // the FRONT as the ACTIVE base, so "Generate 3D body" (which reads the active base's
+  // views) consumes the perfect turnaround output.  Finds the 4 views by pose_name.
+  const promoteTurnaroundBase = async () => {
+    const nm = m3dCharName();
+    if (!nm || !host?.online || promoteBusy) return;
+    const ORDER = ['front', 'right', 'left', 'back'];
+    const found: Record<string, string> = {};
+    for (const o of existingOutputs) {
+      for (const im of (o.images || [])) {
+        const pn = String((im as { pose_name?: string | null }).pose_name || '').trim().toLowerCase();
+        if (!pn.includes('mesh')) continue;
+        for (const vw of ORDER) { if (pn.endsWith(vw)) found[vw] = im.asset_id; }
+      }
+    }
+    if (!found['front']) {
+      setPromoteMsg('⚠ No 🧊 Mesh-turnaround FRONT sprite found. Run a 🧊 Mesh turnaround (front/right/left/back) first, then promote.');
+      return;
+    }
+    const views = ORDER.filter((v) => found[v]).map((v) => ({ view: v, asset_id: found[v] }));
+    setPromoteBusy(true); setPromoteMsg('Promoting turnaround to the active base…');
+    try {
+      const r = await api.promoteTurnaround(nm, views);
+      if (editingCharId) {
+        try {
+          const im = await api.getCharacterImages(editingCharId);
+          const vers = im.base_versions || [];
+          setBaseVersions(vers);
+          setActiveBase(im.active_base || '');
+          const ai = vers.findIndex((x) => x.id === im.active_base);
+          setVerIdx(ai >= 0 ? ai : Math.max(0, vers.length - 1));
+          if (vers.length) setPreviewImg(vers[ai >= 0 ? ai : vers.length - 1].url);
+          setExistingOutputs(im.outputs || []);
+        } catch { /* best-effort refresh */ }
+      }
+      void refreshM3d(nm);
+      setPromoteMsg(`✓ Turnaround promoted — ${(r.views || []).join(' / ') || 'views'} saved as the ACTIVE base. “Generate 3D body” will now use them.`);
+    } catch (e) {
+      setPromoteMsg(`Promote failed: ${(e as Error).message}`);
+    } finally {
+      setPromoteBusy(false);
     }
   };
   const [qwenCreateMode, setQwenCreateMode] = useState(''); // '' auto | illustrious | anima | qwen | klein | zimage | krea2
@@ -1208,6 +1273,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => { cancelled = true; };
   }, [enhanceOn, baseEnhanceOn, host, upscaleModels.length]);
   const [uploading, setUploading] = useState(false);
+  const [genViewBusy, setGenViewBusy] = useState(false);
   const [cloneInfo, setCloneInfo] = useState<VNCCSCharacterInfoT | null>(null);
 
   // LLM wizards
@@ -1253,6 +1319,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setFaceKind((s => (s === 'realistic' ? 'photorealistic' : s))(String(st.klein_face_kind ?? 'auto')));
     setStyleCustom(String(st.klein_style_custom ?? ''));
     setLockBase(!['off', 'false', '0', 'no'].includes(String(st.klein_lock_base ?? 'on').toLowerCase()));
+    setAutofitProps(!['off', 'false', '0', 'no'].includes(String(st.klein_autofit_proportions ?? 'on').toLowerCase()));
     setBaseMode((() => { const s = String(st.klein_base_set ?? 'off').toLowerCase();
       return ['mesh', 'mesh-ready', 'mesh_ready', '3d'].includes(s) ? 'mesh'
         : ['on', 'true', '1', 'yes', 'set'].includes(s) ? 'set' : 'single'; })());
@@ -1269,11 +1336,15 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     setPoseSteps(parseInt(String(st.klein_pose_steps ?? '8'), 10) || 8);
     setPoseCleanup(String(st.klein_pose_cleanup ?? st.klein_cleanup ?? 'gentle'));
     setPoseFr(st.klein_pose_face_refine !== undefined ? String(st.klein_pose_face_refine) : '');
+    setPoseSource(st.klein_pose_source !== undefined ? String(st.klein_pose_source) : '');
     setPoseFrDenoise(st.klein_pose_face_refine_denoise !== undefined ? String(st.klein_pose_face_refine_denoise) : '');
     setPoseFrSteps(st.klein_pose_face_refine_steps !== undefined ? String(st.klein_pose_face_refine_steps) : '');
     setPoseFrGuide(st.klein_pose_face_refine_guide !== undefined ? String(st.klein_pose_face_refine_guide) : '');
     setPoseRefEnd(st.klein_pose_ref_end !== undefined ? String(st.klein_pose_ref_end) : '');
+    setPoseBodyMatch(['on', 'auto', 'true', '1', 'yes'].includes(String(st.klein_pose_body_match ?? 'off').toLowerCase()));
+    setPoseFaceCropRef(['on', 'auto', 'true', '1', 'yes'].includes(String(st.klein_face_crop_ref ?? 'off').toLowerCase()));
     setPoseInput(st.klein_pose_input !== undefined ? String(st.klein_pose_input) : '');
+    setPoseSlock(st.klein_pose_structure_lock !== undefined ? String(st.klein_pose_structure_lock) : '');
     setDressStrength(st.klein_clothes_strength !== undefined ? String(st.klein_clothes_strength) : '');
     setDressRefEnd(st.klein_clothes_ref_end !== undefined ? String(st.klein_clothes_ref_end) : '');
     setDressSteps(st.klein_clothes_steps !== undefined ? String(st.klein_clothes_steps) : '');
@@ -1651,6 +1722,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     settings.klein_face_kind = faceKind || 'auto';
     settings.klein_style_custom = styleCustom;
     settings.klein_lock_base = lockBase ? 'on' : 'off';
+    settings.klein_autofit_proportions = autofitProps ? 'on' : 'off';
     settings.klein_base_set = baseMode === 'mesh' ? 'mesh' : baseMode === 'set' ? 'set' : 'off';
     settings.klein_base_set_anchor = baseSetAnchor;   // v1.181: remember last anchor choice
     settings.klein_base_derive_method = baseDeriveMethod;   // v1.189: reference | matchpose
@@ -1674,8 +1746,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     else delete settings.klein_pose_face_refine_guide;
     if (poseRefEnd.trim() !== '') settings.klein_pose_ref_end = poseRefEnd;
     else delete settings.klein_pose_ref_end;
+    settings.klein_pose_body_match = poseBodyMatch ? 'on' : 'off';   // pose-only; base sets keep their own klein_body_match
+    settings.klein_face_crop_ref = poseFaceCropRef ? 'on' : 'off';
     if (poseInput.trim() !== '') settings.klein_pose_input = poseInput;
     else delete settings.klein_pose_input;
+    if (poseSlock.trim() !== '') settings.klein_pose_structure_lock = poseSlock;
+    else delete settings.klein_pose_structure_lock;
+    if (poseSource.trim() !== '') settings.klein_pose_source = poseSource;
+    else delete settings.klein_pose_source;
     if (dressStrength.trim() !== '') settings.klein_clothes_strength = dressStrength; else delete settings.klein_clothes_strength;
     if (dressRefEnd.trim() !== '') settings.klein_clothes_ref_end = dressRefEnd; else delete settings.klein_clothes_ref_end;
     if (dressSteps.trim() !== '') settings.klein_clothes_steps = dressSteps; else delete settings.klein_clothes_steps;
@@ -1789,7 +1867,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editModel, genMode, genModel, genSteps, genCfg, genSampler, genScheduler, genSeed,
-      kpMode, kpStrength, frMode, frDenoise, frSteps, frGuide, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseMode, baseSetAnchor, cleanup, kSteps, poseSteps, poseCleanup, poseFr, poseFrDenoise, poseFrSteps, poseFrGuide, poseRefEnd, poseInput, poseLora, poseLoraStr, consLora, consLoraStr, posePu, posePuStr, presets, dressStrength, dressRefEnd, dressSteps, dressGuide, dressNeg, dressCons, dressIdLock, garmentClean, qwenSteps, qwenCfg, qwenClothesLora, qwenPoseLora, qwenTarget, qwenCreateMode, qwenCreateSteps, qwenCreateCfg, qwenCreateQL, debugOn, poseMode, simpleRef, simpleQuality, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, baseConsLora, baseConsLoraStr, baseMatchViews, samClean, samPrompt, samThresh,
+      kpMode, kpStrength, frMode, frDenoise, frSteps, frGuide, baseClothing, faceKind, styleCustom, runBaseClothing, lockBase, baseMode, baseSetAnchor, cleanup, kSteps, poseSteps, poseCleanup, poseFr, poseFrDenoise, poseFrSteps, poseFrGuide, poseRefEnd, poseInput, poseSlock, poseLora, poseLoraStr, consLora, consLoraStr, posePu, posePuStr, presets, dressStrength, dressRefEnd, dressSteps, dressGuide, dressNeg, dressCons, dressIdLock, garmentClean, qwenSteps, qwenCfg, qwenClothesLora, qwenPoseLora, qwenTarget, qwenCreateMode, qwenCreateSteps, qwenCreateCfg, qwenCreateQL, debugOn, poseMode, simpleRef, simpleQuality, rbEnd, bodyMatch, bodyKeep, consistentSkin, canvasW, baseFr, baseFrDenoise, baseFrSteps, baseConsLora, baseConsLoraStr, baseMatchViews, samClean, samPrompt, samThresh,
       enhanceOn, enhanceMethod, enhanceModel, enhanceSharpen, enhanceMaxSide, enhanceByChar,
       baseEnhanceOn, baseEnhanceMethod, baseEnhanceModel, baseEnhanceSharpen, baseEnhanceMaxSide,
       switchStyleOn, switchStyle, switchStyleCustom, switchStyleStrength, switchStyleRealism,
@@ -2762,6 +2840,36 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setErrMsg(`Upload failed: ${(e as Error).message}`);
     } finally {
       setUploading(false);
+    }
+  };
+
+  // Generate the MISSING standard turnaround views (back / left / right) from the
+  // references we DO have, using Klein image-edit. Each result is added to the set
+  // tagged with its angle, so the turnaround uses it directly (like a real photo).
+  const genMissingViews = async () => {
+    if (!host?.online || genViewBusy || !cloneRefs.length) return;
+    const present = new Set(cloneRefs.map((r) => (String((r as { angle?: string }).angle || '').toLowerCase() || 'front')));
+    const wanted = ['back', 'left', 'right'].filter((v) => !present.has(v));
+    if (!wanted.length) {
+      setErrMsg('All standard views (back / left / right) are already in the reference set.');
+      return;
+    }
+    setGenViewBusy(true); setErrMsg('');
+    try {
+      const cis = cloneRefs.map((r) => ({
+        name: r.name, subfolder: r.subfolder, type: r.type,
+        role: r.role, angle: (r as { angle?: string }).angle,
+      }));
+      for (const v of wanted) {
+        const gen = await api.generateRefView(cis, v);
+        setCloneRefs((prev) => [...prev, {
+          ...gen, role: ((gen.suggested_role as api.RefRole) || 'full') as api.RefRole, angle: v,
+        } as api.UploadRefT]);
+      }
+    } catch (e) {
+      setErrMsg(`Generate missing views failed: ${(e as Error).message}`);
+    } finally {
+      setGenViewBusy(false);
     }
   };
 
@@ -3960,7 +4068,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       </div>
       {variant === 'klein' && binfo && setBinfoPatch && (() => {
         const manual = binfo.body_weight != null || binfo.body_muscle != null
-          || binfo.body_height != null || binfo.body_breast != null;
+          || binfo.body_height != null || binfo.body_breast != null || binfo.body_belly != null;
         const isFemale = !String((binfo.sex as string) || 'female').toLowerCase().startsWith('m');
         const bslider = (lbl: string, key: string, hint: string) => {
           const val = binfo[key] != null ? Number(binfo[key]) : 50;
@@ -3973,18 +4081,39 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
             </div>
           );
         };
+        const hcm = cmFromHeight(binfo.height);
         return (
           <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '110px 90px 1fr', gap: 8, marginBottom: 8 }}>
+              <div><label style={label} title="Real height - drives the pose mannequin's stature (relative to sex; a 5'6&quot; man renders short)">Height (ft / in)</label>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input style={{ ...input, width: 44 }} type="number" min={2} max={8}
+                         value={hcm ? Math.floor(Math.round(hcm / 2.54) / 12) : ''}
+                         onChange={(e) => { const ft = parseInt(e.target.value || '0', 10); const tot = hcm ? Math.round(hcm / 2.54) : 66; const nt = ft * 12 + (tot % 12); setBinfoPatch!({ height: nt > 0 ? `${Math.round(nt * 2.54)} cm` : '' }); }} />
+                  <input style={{ ...input, width: 44 }} type="number" min={0} max={11}
+                         value={hcm ? Math.round(hcm / 2.54) % 12 : ''}
+                         onChange={(e) => { const inch = parseInt(e.target.value || '0', 10); const tot = hcm ? Math.round(hcm / 2.54) : 60; const nt = Math.floor(tot / 12) * 12 + inch; setBinfoPatch!({ height: nt > 0 ? `${Math.round(nt * 2.54)} cm` : '' }); }} />
+                </div></div>
+              <div><label style={label}>Height (cm)</label>
+                <input style={input} type="number" min={80} max={230} value={hcm || ''}
+                       onChange={(e) => { const cm = parseFloat(e.target.value); setBinfoPatch!({ height: cm > 0 ? `${Math.round(cm)} cm` : '' }); }} /></div>
+              <div><label style={label}>&nbsp;</label>
+                <div style={{ fontSize: 12, color: '#9aa4b2', paddingTop: 8 }}>
+                  {hcm ? `${Math.floor(Math.round(hcm / 2.54) / 12)}ft ${Math.round(hcm / 2.54) % 12}in - stature follows this (sex-relative). Regenerate poses after changing.`
+                       : (String(binfo.height || '').trim() ? `"${String(binfo.height)}" (text descriptor)` : 'not set - renders average height')}
+                </div></div>
+            </div>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#cbd2dc' }}>
               <input type="checkbox" checked={!manual}
                      onChange={(e) => setBinfoPatch!(e.target.checked
-                       ? { body_weight: undefined, body_muscle: undefined, body_height: undefined, body_breast: undefined }
+                       ? { body_weight: undefined, body_muscle: undefined, body_height: undefined, body_breast: undefined, body_belly: undefined }
                        : { body_weight: 55, body_muscle: 50, body_height: 50 })} />
               Build — auto from description (uncheck to dial the mannequin body by hand)
             </label>
             {manual && (
               <div style={{ ...wizBox, display: 'grid', gap: 6, marginTop: 6 }}>
                 {bslider('Weight', 'body_weight', 'body fat / heaviness')}
+                {bslider('Belly', 'body_belly', 'forward hanging gut (0 = flat; unset = auto from description)')}
                 {bslider('Muscle', 'body_muscle', 'muscle tone')}
                 {bslider('Height', 'body_height', 'stature')}
                 {isFemale && bslider('Bust', 'body_breast', 'bust size')}
@@ -4122,6 +4251,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           <label style={label}>Pose consistency — where each pose gets its body</label>
           {segRow([{ v: 'lock', label: 'Lock to approved base' }, { v: 'refs', label: 'Use references' }],
                   lockBase ? 'lock' : 'refs', (v) => setLockBase(v === 'lock'))}
+        </div>
+      )}
+      {variant === 'klein' && (
+        <div>
+          <label style={label}>Auto-fit body proportions from the reference image — scans a clean full-body reference with SAM 3D Body (once per character, cached) and matches the pose mannequin's limb/torso/head proportions to that build, so poses stop copying a generic body. Needs the RBMN SAM3D Proportions node + SAM 3D Body model on the worker; falls back to the description-based build if unavailable. Manual mesh values still win.</label>
+          {segRow([{ v: 'on', label: 'On (image-fit)' }, { v: 'off', label: 'Off (description only)' }],
+                  autofitProps ? 'on' : 'off', (v) => setAutofitProps(v === 'on'))}
         </div>
       )}
       {variant === 'klein' && bhead('🖼 Framing')}
@@ -4355,29 +4491,58 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           {segRow([{ v: 'off', label: 'Off' }, { v: 'gentle', label: 'Gentle' }, { v: 'strong', label: 'Strong' }],
                   poseCleanup, setPoseCleanup)}
           {extremes('keeps every accessory the base had', 'strips leftover shoes/jewelry hardest — can harden edges / rainbow fringe')}
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#8ab4ff', margin: '16px 0 8px', paddingTop: 12, borderTop: '1px solid #2a3242' }}>🕺 Pose control</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#8ab4ff', margin: '16px 0 8px', paddingTop: 12, borderTop: '1px solid #2a3242' }}>🕺 Core pose — the pose itself</div>
           {m3dPoseOn && (
             <p style={{ fontSize: 12, color: '#7ee0b0', margin: '0 0 8px', padding: '6px 9px',
                         border: '1px solid #2a4a3a', borderRadius: 6, background: 'rgba(10,22,16,0.6)' }}>
-              🧊 Using 3D clay references — Klein's pose reference is a render of this character's own
-              rigged body, so the mannequin / DWPose-skeleton input choice doesn't apply (skeleton
-              conversion is skipped automatically). The dials below still tune how hard Klein follows
-              that clay pose; the recommended starting point is the VNCCS PoseStudio LoRA at ~0.7 with
-              pose-ref release around 0.85.
+              🧊 Using 3D clay references — Klein's pose reference comes from this character's own
+              rigged body. Pose input = Skeleton now works WITH clay (v1.199.80): DWPose extracts a
+              stick figure with the character's REAL proportions from the clay render — immune to
+              surface smear, no limb ambiguity; pair it with the RefControl LoRA. Mannequin passes
+              the clay image through directly (VNCCS PoseStudio LoRA ~0.7, release ~0.85).
             </p>
           )}
-          {!m3dPoseOn && (
-            <>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Pose input — what Klein sees as reference image 1. Skeleton converts the mannequin to a DWPose stick figure on the worker (needs controlnet_aux): pure pose geometry with NO CGI material/shading to leak into the skin. Mannequin = old behavior</div>
-              {segRow([{ v: '', label: 'Mannequin' }, { v: 'skeleton', label: 'Skeleton (DWPose)' }],
-                      poseInput, setPoseInput)}
-            </>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Pose input — what Klein sees as reference image 1. <b style={{ color: '#7ee0b0' }}>Depth (recommended)</b> renders a true depth map from this character's own rigged 3D body: pose + VOLUME + height in one signal, driving the RefControl depth LoRA (auto-selects the LoRA, the undistilled base checkpoint, cfg 5 / 20 steps — nothing to dial per character). Skeleton sends a DWPose stick figure instead: accurate joints but ZERO body mass, so heavy/short characters get redrawn on the LoRA's tall-lean prior. Mannequin = pass the capture through directly. <b style={{ color: '#c9a7ff' }}>🟪 Normal (A/B vs Depth)</b> renders a colour-coded surface-normal map from the same rigged body — same recipe, different channel: normals keep a hard boundary where an arm presses against the torso, exactly the case where depth still merges the tucked arm</div>
+          {segRow([{ v: '', label: 'Mannequin / clay' }, { v: 'skeleton', label: 'Skeleton (DWPose)' }, { v: 'depth', label: '🟦 Depth (3D body)' }, { v: 'normal', label: '🟪 Normal (3D body)' }],
+                  poseInput, setPoseInput)}
+          {(poseInput === 'depth' || poseInput === 'normal') && !m3dPoseOn && (
+            <p style={{ fontSize: 12, color: '#ffcf8a', margin: '6px 0 0', padding: '6px 9px',
+                        border: '1px solid #5a4526', borderRadius: 6, background: 'rgba(40,30,10,0.6)' }}>
+              ⚠️ <b>“Use 3D body” is OFF.</b> Depth mode will still run, but the depth map would come
+              from the GENERIC mannequin — the wrong body — and the character renders thin and generic.
+              The backend now auto-enables the 3D body when this character has a rigged mesh, so you
+              are covered either way; turn it on to make the intent explicit.
+            </p>
           )}
+          {(poseInput === 'depth' || poseInput === 'normal') && (
+            <p style={{ fontSize: 12, color: '#7ee0b0', margin: '6px 0 0', padding: '6px 9px',
+                        border: '1px solid #2a4a3a', borderRadius: 6, background: 'rgba(10,22,16,0.6)' }}>
+              🟦 Depth mode needs <code>flux2_klein_9b_refcontrol_depth.safetensors</code>, 🟪 Normal mode
+              <code>flux2_klein_9b_refcontrol_normal.safetensors</code>, in models/loras
+              (and ideally <code>flux-2-klein-base-9b-fp8.safetensors</code> in models/diffusion_models).
+              If the LoRA is missing the run falls back to the previous pose input and says so in the log.
+              Turn 🧊 <b>Use 3D body</b> ON as well so the depth comes from the rigged mesh rather than the
+              generic mannequin.
+            </p>
+          )}
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Structure lock — the hard backstop for body size. Starts sampling FROM the pose render instead of empty noise and denoises only the tail, so the silhouette is already in the pixels and cannot drift. Lower = stronger lock but more of the render's own grey survives; 0.7–0.8 repaints texture while holding proportions. Off = reference conditioning only (advisory)</div>
+          {segRow([{ v: '', label: 'Off (def)' }, { v: '0.85', label: '0.85 light' }, { v: '0.8', label: '0.8' }, { v: '0.75', label: '0.75' }, { v: '0.7', label: '0.7' }, { v: '0.6', label: '0.6 hard' }],
+                  poseSlock, setPoseSlock)}
+          {extremes('no lock — body size is negotiable and the LoRA prior can win', 'silhouette welded to the 3D body — but clay tint can survive into the skin')}
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Pose reference body — SAM3D renders the character's OWN reconstructed body (front/side/back) as the pose image, matching the real build (the same clean body the VNCCS Pose Studio workflow uses). Mannequin/clay = the older generic/Hunyuan3D body. Needs the RBMN SAM3D Body Views node + SAM 3D Body model on the worker; best for base/turnaround sets.</div>
+          {segRow([{ v: '', label: 'Mannequin / clay' }, { v: 'sam3d', label: 'SAM3D reconstructed body' }],
+                  poseSource, setPoseSource)}
           <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Pose LoRA — which pose-control LoRA drives the render. {m3dPoseOn ? 'With 3D clay refs, VNCCS PoseStudio matches the clay figure; MatchingPose is the photoreal alternative. (RefControl is skeleton-only, so it’s hidden here.)' : 'RefControl is purpose-trained for photoreal pose transfer from a SKELETON (use with Pose input = Skeleton; its trigger phrase is added automatically). VNCCS = the PoseStudio LoRA (old behavior)'}</div>
           {segRow([{ v: '', label: 'VNCCS PoseStudio' },
-                   ...(m3dPoseOn ? [] : [{ v: 'refcontrol_v2_poses.safetensors', label: 'RefControl (skeleton)' }]),
+                   { v: 'refcontrol_v2_poses.safetensors', label: 'RefControl (skeleton)' },
+                   { v: 'flux2_klein_9b_refcontrol_depth.safetensors', label: 'RefControl (depth)' },
                    { v: 'Maching_Pose_9B_Rank256.safetensors', label: 'MatchingPose (photoreal)' }, { v: 'none', label: 'None (Klein native)' }],
                   poseLora, setPoseLora)}
+          {(poseInput === 'depth' || poseInput === 'normal') && (
+            <div style={{ fontSize: 11.5, color: '#8ea3bd', margin: '4px 0 0' }}>
+              Pose input = Depth/Normal selects the RefControl LoRA automatically; this row is ignored in that mode.
+            </div>
+          )}
           {poseLora !== 'none' && (
             <>
               <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Pose LoRA strength — at 1.0 the VNCCS LoRA imposes its trained style hard enough to draw black lines where skin touches skin; 0.6–0.8 keeps the pose while weakening the style stamp (MatchingPose likes 0.9–1.0)</div>
@@ -4386,11 +4551,57 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
               {extremes('weak style stamp — no black contact lines, pose may loosen', 'full pose control — VNCCS at 1.0 draws black lines where skin touches skin')}
             </>
           )}
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#8ab4ff', margin: '16px 0 8px', paddingTop: 12, borderTop: '1px solid #2a3242' }}>🙂 Identity & face — how likeness is carried (Global = ⚙ Settings)</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>PuLID (pose sets) — identity adapter override for pose runs only; Global follows the ⚙ Settings PuLID (strength 1.4 stamps texture into skin — 1.0 is the safe zone for poses)</div>
+          {segRow([{ v: '', label: 'Global' }, { v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  posePu, setPosePu)}
+          {posePu !== 'off' && (
+            <>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>PuLID strength (pose)</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '0.8', label: '0.8' }, { v: '0.9', label: '0.9' }, { v: '1.0', label: '1.0' }, { v: '1.2', label: '1.2' }, { v: '1.4', label: '1.4' }, { v: '1.6', label: '1.6' }, { v: '1.8', label: '1.8' }, { v: '2.0', label: '2.0' }],
+                      posePuStr, setPosePuStr)}
+              {extremes('gentle face nudge — safest for skin texture', 'hard identity stamp — likeness up, but waxy/etched skin risk grows fast past 1.6')}
+            </>
+          )}
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Face refine (pose sets) — FaceDetailer pass on each pose face, tuned separately from the base (Global = follow ⚙ Settings)</div>
+          {segRow([{ v: '', label: 'Off (def)' }, { v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
+                  poseFr, setPoseFr)}
+          {poseFr !== 'off' && (
+            <>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Refine denoise (pose) — lower stays truer to the render, higher rebuilds more face</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '0.3', label: '0.30' }, { v: '0.35', label: '0.35' }, { v: '0.4', label: '0.40' }, { v: '0.45', label: '0.45' }, { v: '0.5', label: '0.50' }, { v: '0.55', label: '0.55' }, { v: '0.6', label: '0.60' }],
+                      poseFrDenoise, setPoseFrDenoise)}
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Refine steps (pose)</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }],
+                      poseFrSteps, setPoseFrSteps)}
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Refine guide size (pose) — smaller = less blow-up/shrink on the face crop = least striping risk</div>
+              {segRow([{ v: '', label: 'Global' }, { v: '512', label: '512' }, { v: '640', label: '640' }, { v: '768', label: '768' }, { v: '1024', label: '1024' }],
+                      poseFrGuide, setPoseFrGuide)}
+            </>
+          )}
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#8ab4ff', margin: '16px 0 8px', paddingTop: 12, borderTop: '1px solid #2a3242' }}>🧩 Consistency extras — default OFF</div>
+          <p style={{ fontSize: 12, color: '#c7a86a', margin: '0 0 8px', padding: '6px 9px', border: '1px solid #4a3f2a', borderRadius: 6, background: 'rgba(26,22,10,0.6)' }}>
+            These are EXTRA identity/consistency tricks layered on top of the bare Klein pipeline
+            (which matches the VNCCS PoseStudio Klein9b workflow: one character reference + “draw
+            character from image”). They now default OFF so you can confirm poses hold on the bare
+            base, then switch these on ONE at a time to see which your character actually needs.
+          </p>
           <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Pose ref release — stop referencing the {m3dPoseOn ? '3D clay' : '3D mannequin'} capture for the last part of the render, so its flat {m3dPoseOn ? 'clay' : 'CGI'} texture can't stamp the skin (the pose itself locks in early). Lower = released sooner = more natural skin, slightly looser pose; Off = referenced the whole run</div>
-          {segRow([{ v: '1', label: 'Off' }, { v: '0.9', label: '0.90' }, { v: '', label: '0.85 (def)' }, { v: '0.8', label: '0.80' }, { v: '0.7', label: '0.70' }, { v: '0.6', label: '0.60' }],
+          {segRow([{ v: '', label: '0.85 (def)' }, { v: '0.9', label: '0.90' }, { v: '0.8', label: '0.80' }, { v: '0.7', label: '0.70' }, { v: '0.6', label: '0.60' }, { v: '1', label: 'Off (Hold)' }],
                   poseRefEnd, setPoseRefEnd)}
           {extremes('holds the mannequin ref the whole run — strictest pose, CGI look can leak into the skin', 'releases it early — natural skin, slightly looser pose')}
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#8ab4ff', margin: '16px 0 8px', paddingTop: 12, borderTop: '1px solid #2a3242' }}>🧬 Set consistency</div>
+          <label style={{ ...toggleBox, margin: '4px 0 0' }}>
+            <input type="checkbox" checked={poseBodyMatch} onChange={(e) => setPoseBodyMatch(e.target.checked)} />
+            Body-match (ReferenceLatentPlus) — route your body/full references through the masked
+            body channel so the pose locks to your source build/shoulders/chest (uses the Body adherence
+            + Reference masking values above). Needs the ReferenceLatentPlus node on the worker.
+          </label>
+          <label style={{ ...toggleBox, margin: '8px 0 0' }}>
+            <input type="checkbox" checked={poseFaceCropRef} onChange={(e) => setPoseFaceCropRef(e.target.checked)} />
+            Face-crop reference — add a dedicated close-up face crop as an EXTRA reference latch
+            (on top of the character reference) to hold facial likeness when the full-body ref leaves
+            the face at only a few dozen pixels. Ground truth uses a single reference; this is additive.
+          </label>
           <label style={{ ...toggleBox, margin: '4px 0 0' }}>
             <input type="checkbox" checked={consistentSkin} onChange={(e) => setConsistentSkin(e.target.checked)} />
             Consistent skin/lighting across the set — shares ONE seed for every pose (incl. the face refine pass) and pins skin tone + even lighting, so the set doesn't drift in complexion or exposure pose-to-pose (off = each pose gets its own seed for more variety)
@@ -4405,34 +4616,6 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
               {segRow([{ v: '0.5', label: '0.5' }, { v: '0.6', label: '0.6' }, { v: '', label: '0.7 (def)' }, { v: '0.8', label: '0.8' }, { v: '0.9', label: '0.9' }, { v: '1', label: '1.0' }],
                       consLoraStr, setConsLoraStr)}
               {extremes('subtle identity/colour help', 'strong lock — can stiffen the render')}
-            </>
-          )}
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#8ab4ff', margin: '16px 0 8px', paddingTop: 12, borderTop: '1px solid #2a3242' }}>🙂 Face</div>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>PuLID (pose sets) — identity adapter override for pose runs only; Global follows the ⚙ Settings PuLID (strength 1.4 stamps texture into skin — 1.0 is the safe zone for poses)</div>
-          {segRow([{ v: '', label: 'Global' }, { v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
-                  posePu, setPosePu)}
-          {posePu !== 'off' && (
-            <>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>PuLID strength (pose)</div>
-              {segRow([{ v: '', label: 'Global' }, { v: '0.8', label: '0.8' }, { v: '0.9', label: '0.9' }, { v: '1.0', label: '1.0' }, { v: '1.2', label: '1.2' }, { v: '1.4', label: '1.4' }, { v: '1.6', label: '1.6' }, { v: '1.8', label: '1.8' }, { v: '2.0', label: '2.0' }],
-                      posePuStr, setPosePuStr)}
-              {extremes('gentle face nudge — safest for skin texture', 'hard identity stamp — likeness up, but waxy/etched skin risk grows fast past 1.6')}
-            </>
-          )}
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Face refine (pose sets) — FaceDetailer pass on each pose face, tuned separately from the base (Global = follow ⚙ Settings)</div>
-          {segRow([{ v: '', label: 'Global' }, { v: 'on', label: 'On' }, { v: 'off', label: 'Off' }],
-                  poseFr, setPoseFr)}
-          {poseFr !== 'off' && (
-            <>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Refine denoise (pose) — lower stays truer to the render, higher rebuilds more face</div>
-              {segRow([{ v: '', label: 'Global' }, { v: '0.3', label: '0.30' }, { v: '0.35', label: '0.35' }, { v: '0.4', label: '0.40' }, { v: '0.45', label: '0.45' }, { v: '0.5', label: '0.50' }, { v: '0.55', label: '0.55' }, { v: '0.6', label: '0.60' }],
-                      poseFrDenoise, setPoseFrDenoise)}
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Refine steps (pose)</div>
-              {segRow([{ v: '', label: 'Global' }, { v: '4', label: '4' }, { v: '6', label: '6' }, { v: '8', label: '8' }, { v: '10', label: '10' }, { v: '12', label: '12' }],
-                      poseFrSteps, setPoseFrSteps)}
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#c9d3df', margin: '10px 0 5px' }}>Refine guide size (pose) — smaller = less blow-up/shrink on the face crop = least striping risk</div>
-              {segRow([{ v: '', label: 'Global' }, { v: '512', label: '512' }, { v: '640', label: '640' }, { v: '768', label: '768' }, { v: '1024', label: '1024' }],
-                      poseFrGuide, setPoseFrGuide)}
             </>
           )}
           </>
@@ -4795,13 +4978,56 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button style={tabBtn(tab === 'text2image')} onClick={() => setTab('text2image')}>🧬 Text 2 Image</button>
         <button style={tabBtn(tab === 'create')} onClick={() => setTab('create')}>Create</button>
         <button style={tabBtn(tab === 'clothes')} onClick={() => setTab('clothes')}>Clothes</button>
         <button style={tabBtn(tab === 'emotions')} onClick={() => setTab('emotions')}>Emotions</button>
         <button style={tabBtn(tab === 'poselib')} onClick={() => setTab('poselib')}>Pose Library</button>
+        <button style={tabBtn(tab === 'lora')} onClick={() => setTab('lora')}>🎓 LoRA Dataset Gen</button>
+        <button style={tabBtn(tab === 'charsheet')} onClick={() => setTab('charsheet')}>🪪 Character Sheet</button>
       </div>
 
-      {tab === 'poselib' ? (
+      {tab === 'create' && variant === 'klein' && createEngine === 'klein2' ? (
+        <div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('new'); }}>New</button>
+            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('clone'); }}>Clone</button>
+            <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />
+            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
+            <button style={tabBtn(false)} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
+            <button style={tabBtn(true)}>🚀 Klein 2.0</button>
+            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein3')}>🎯 Klein 3.0</button>
+          </div>
+          <p style={{ fontSize: 11, color: '#8d97a5', margin: '0 0 10px' }}>
+            🚀 Klein 2.0: statue-reference posing — rotate the textured 3D statue to the exact
+            angle, snapshot it, pair it with a pose image, and let Klein do the rest. No dials.
+          </p>
+          <Klein2Panel />
+        </div>
+      ) : tab === 'create' && variant === 'klein' && createEngine === 'klein3' ? (
+        <div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('new'); }}>New</button>
+            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('clone'); }}>Clone</button>
+            <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />
+            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
+            <button style={tabBtn(false)} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
+            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>
+            <button style={tabBtn(true)}>🎯 Klein 3.0</button>
+          </div>
+          <p style={{ fontSize: 11, color: '#8d97a5', margin: '0 0 10px' }}>
+            🎯 Klein 3.0: pure reference mode — tagged refs + one base image + a pose image; no 3D
+            anywhere. Klein does the rest: "the person from image 1 in the pose from image 2".
+          </p>
+          <Klein3Panel />
+        </div>
+      ) : tab === 'lora' ? (
+        <LoraPanel />
+      ) : tab === 'text2image' ? (
+        <Text2ImagePanel />
+      ) : tab === 'charsheet' ? (
+        <CharacterSheetPanel />
+      ) : tab === 'poselib' ? (
         <div style={box}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
             <h3 style={{ margin: 0, fontSize: 15 }}>Pose Library (host)</h3>
@@ -4967,6 +5193,8 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                   <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />
                   <button style={tabBtn(createEngine === 'klein')} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
                   <button style={tabBtn(createEngine === 'qwen')} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
+                  <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>
+                  <button style={tabBtn(false)} onClick={() => setCreateEngine('klein3')}>🎯 Klein 3.0</button>
                 </>
               )}
             </div>
@@ -5701,6 +5929,13 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                           })}
                           <button style={{ ...btnGhost, padding: '2px 8px', fontSize: 11 }}
                                   onClick={() => { setCloneRefs([]); setCloneSelIdx(0); setEnhancedMap({}); setRefView('original'); }}>clear all</button>
+                          <button style={{ ...btnGhost, padding: '2px 8px', fontSize: 11,
+                                           borderColor: '#6b5bd0', color: '#c4a8ff',
+                                           opacity: (genViewBusy || !host?.online || !cloneRefs.length) ? 0.5 : 1 }}
+                                  disabled={genViewBusy || !host?.online || !cloneRefs.length}
+                                  title="Use Klein to generate the reference views you're missing (back / left / right) from the ones you have. Each is added to the set tagged with its angle, so the turnaround uses it directly."
+                                  onClick={genMissingViews}>
+                            {genViewBusy ? 'Generating…' : '✨ Generate missing views'}</button>
                         </div>
                         <p style={{ fontSize: 12, color: '#8d97a5', margin: '4px 0 0' }}>
                           The selected source image is the character preview (node-UI behavior) — click to zoom / arrow through.
@@ -5784,8 +6019,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                             </select></div>
                         </div>
                         <p style={{ fontSize: 12, color: '#8d97a5', margin: '4px 0 0' }}>
-                          Set height in ft/in OR cm (they stay in sync). Klein reads height as a stature descriptor
-                          (petite / average / tall); the number is kept for LoRA captions. The body-type and chest
+                          Set height in ft/in OR cm (they stay in sync). The number DRIVES the pose
+                          mannequin's stature directly, relative to the character's sex (a 5'6" man
+                          renders short); it is also kept for LoRA captions. The body-type and chest
                           pickers append Danbooru-style tags into the "body" field above (the models read those tags
                           well) - edit "body" directly to fine-tune. "Analyze all references" fills it from your refs.
                         </p>
@@ -6293,6 +6529,12 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                               disabled={m3dBusy || !host?.online} onClick={() => { void startM3d(false); }}>
                         {m3dBusy ? 'Working…' : m3dStatus?.mesh3d ? '🧊 Regenerate 3D body' : '🧊 Generate 3D body'}
                       </button>
+                      <button style={{ ...btnGhost, padding: '6px 12px', fontSize: 12, borderColor: '#2f7d4f', color: '#8fe0a0', opacity: (promoteBusy || !host?.online) ? 0.5 : 1 }}
+                              disabled={promoteBusy || !host?.online}
+                              onClick={() => { void promoteTurnaroundBase(); }}
+                              title="Take the 🧊 Mesh-turnaround pose set (front/right/left/back) you just generated and save it as the ACTIVE base — the front becomes the base image. 'Generate 3D body' reads the active base, so this feeds it the perfect turnaround views directly.">
+                        {promoteBusy ? 'Promoting…' : '⬆ Use Mesh-turnaround as base'}
+                      </button>
                       {m3dStatus?.mesh3d && !m3dStatus.mesh3d.rigged && !m3dBusy && (
                         <button style={{ ...btnGhost, padding: '6px 12px', fontSize: 12, opacity: !host?.online ? 0.5 : 1 }}
                                 disabled={!host?.online} onClick={() => { void startM3d(true); }}
@@ -6314,6 +6556,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
                            href={api.mesh3dFileUrl(m3dCharName(), 'fbx')} download>⬇ FBX</a>
                       )}
                     </div>
+                    {promoteMsg && (
+                      <p style={{ fontSize: 11, margin: 0,
+                                  color: promoteMsg.startsWith('✓') ? '#5ee08a'
+                                       : (promoteMsg.startsWith('⚠') || promoteMsg.startsWith('Promote failed')) ? '#ffce6b'
+                                       : '#8ab4ff' }}>
+                        {promoteMsg}
+                      </p>
+                    )}
                     <p style={{ fontSize: 11, color: '#8d97a5', margin: 0 }}>
                       Builds a character-shaped 3D mannequin from the ACTIVE base render (all 4 views when the base
                       is a view set): Hunyuan3D shape on the worker → auto-rig, saved with the character (once per

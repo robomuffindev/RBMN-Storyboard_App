@@ -173,13 +173,52 @@ async def emotions(request: Request, session: AsyncSession = Depends(get_session
         raise HTTPException(status_code=502, detail=str(e))
 
 
+def _rbmn_pose_pack() -> list:
+    """The app-side RBMN default pose set (workflows/vnccs/RBMN_POSES.json).
+
+    v1.199.140.  The shipped VNCCS library is a VISUAL-NOVEL pose set authored on a
+    slim anime mannequin -- on a 480lb build those poses read as extreme, and the
+    arms land against (or inside) the flank.  This pack was authored for real,
+    heavy bodies: every pose was rendered on a Duke-proportioned mannequin
+    (body_width 1.4, belly 1.5) before shipping and its body facing measured with
+    `pose_render.body_facing_deg`, so the whole set stays inside the range the
+    view-aware identity (v1.199.139) covers -- nine within +-10 deg of front, two
+    at +-34 deg, none beyond.  Served alongside the worker library, never instead
+    of it; edit the JSON to tune a pose (no rebuild needed).
+    """
+    try:
+        from pathlib import Path as _P
+        import json as _j
+        f = _P(__file__).resolve().parents[2] / "workflows" / "vnccs" / "RBMN_POSES.json"
+        if not f.exists():
+            return []
+        return list((_j.loads(f.read_text(encoding="utf-8")) or {}).get("poses") or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.info("pose-library: RBMN pack skipped (%s)", exc)
+        return []
+
+
 @router.get("/pose-library")
 async def pose_library(request: Request, full: bool = False, session: AsyncSession = Depends(get_session)):
     host = await _need_host(request, session)
     try:
-        return await asyncio.to_thread(_client(host).pose_library_list, full)
+        out = await asyncio.to_thread(_client(host).pose_library_list, full)
     except VNCCSError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        # the RBMN pack lives in this repo, so it must survive an unreachable worker
+        pack = _rbmn_pose_pack()
+        if not pack:
+            raise HTTPException(status_code=502, detail=str(e))
+        logger.info("pose-library: worker unreachable (%s) -- serving %d RBMN poses only",
+                    e, len(pack))
+        return {"poses": pack}
+    pack = _rbmn_pose_pack()
+    if pack and isinstance(out, dict):
+        existing = out.get("poses")
+        if isinstance(existing, list):
+            have = {str(x.get("name")) for x in existing if isinstance(x, dict)}
+            out["poses"] = [p for p in pack if p["name"] not in have] + existing
+            logger.info("pose-library: +%d RBMN default poses", len(out["poses"]) - len(existing))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -375,6 +414,91 @@ async def _enrich_character_info(session, body) -> None:
     if saved:
         # client-sent values win; saved fills the gaps
         body.character_info = {**saved, **ci}
+
+
+async def _active_base_views(session, character_name: str) -> dict:
+    """{"front": bytes, "right": bytes, ...} for the ACTIVE base version.
+
+    v1.199.138.  A mesh-ready base version stores all four views under
+    ``entry["views"]``; only the FRONT has ever been used as the pose identity.
+    Returns {} when the active version is single-view (nothing to choose from).
+    """
+    from pathlib import Path as _Path
+    from uuid import UUID as _UUID
+    from sqlmodel import select as _select
+    from backend.config import settings as _cfg
+    from backend.database.models import Asset, StudioCharacter
+    out = {}
+    try:
+        char = (await session.execute(_select(StudioCharacter).where(
+            StudioCharacter.name == (character_name or "").strip()))).scalars().first()
+        if char is None:
+            return {}
+        v = (char.manifest or {}).get("vnccs") or {}
+        active = v.get("active_base")
+        entry = next((bv for bv in (v.get("base_versions") or [])
+                      if isinstance(bv, dict) and bv.get("id") == active), None)
+        for vw in ((entry or {}).get("views") or []):
+            aid, lbl = vw.get("asset_id"), str(vw.get("view") or "").strip().lower()
+            if not aid or not lbl:
+                continue
+            a = await session.get(Asset, _UUID(str(aid)))
+            if a is None:
+                continue
+            rel = str(a.rel_path).replace("\\", "/")
+            pid = str(a.project_id)
+            f = (_Path(_cfg.project_dir) / rel if rel.startswith(pid + "/")
+                 else _Path(_cfg.project_dir) / pid / rel)
+            if f.exists():
+                out[lbl] = f.read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("klein identity: base-view lookup skipped (%s)", exc)
+    return out
+
+
+# base-set view -> the body facing it depicts, degrees (0 = chest to camera)
+_VIEW_FACING = {"front": 0.0, "right": 90.0, "left": -90.0, "back": 180.0}
+
+
+def _identity_for_pose(pose: dict, views: dict, fallback: list) -> list:
+    """Pick the base-set view(s) whose FACING matches this pose.
+
+    v1.199.138.  MEASURED 2026-07-30/31: five poses rendered against clean clay
+    controls scored IoU 0.913 / 0.871 / 0.867 / 0.863 / 0.753 against the control
+    they were given -- and the ranking is monotonic in how far the POSE turns the
+    body: +3 deg, -6, -39, -37, **-123**.  The identity reference was the FRONT
+    base view every time, and identity beats the pose control on facing (the same
+    mechanism that made every derived base view come back front-facing on
+    2026-07-29).  So hand it a reference that already faces the right way.
+
+    NB the turn is NOT `modelRotation` -- clay_driver reads that as degrees and the
+    library stores ~-0.9 there.  It lives in the spine/hip bones, which is why
+    `pose_render.body_facing_deg` derives it from the POSED shoulder axis.
+    """
+    if not views or not fallback:
+        return fallback
+    try:
+        from backend.services.character_studio.vnccs_native import pose_render
+        ang = pose_render.body_facing_deg({"poses": [pose or {}], "mesh": {}})
+    except Exception:  # noqa: BLE001
+        ang = None
+    if ang is None:
+        return fallback
+
+    def _d(a, b):
+        return abs((a - b + 180.0) % 360.0 - 180.0)
+
+    ranked = sorted(((lbl, _d(ang, f)) for lbl, f in _VIEW_FACING.items() if lbl in views),
+                    key=lambda t: t[1])
+    if not ranked or ranked[0][0] == "front":
+        return fallback                      # front already is the reference
+    best, off = ranked[0]
+    picked = [views[best]]
+    if "front" in views:                     # keep the front for face/likeness
+        picked.append(views["front"])
+    logger.info("klein pose identity: body faces %+.0f deg -> %s base view "
+                "(%.0f deg off) as identity, front kept as 2nd ref", ang, best.upper(), off)
+    return picked + list(fallback[1:])
 
 
 async def _klein_identity_bytes(session, body: GenerateIn, pinned: str,
@@ -709,6 +833,251 @@ def _klein_gen_meta(saved: Optional[dict], *, seed=None,
     return {k: v for k, v in meta.items() if v is not None and v != ""}
 
 
+def _klein_sam3d_base_views(host, client, saved, body, models, views, cw, ch,
+                            pv_ci, identity_name, seed_v):
+    """NODE-FAITHFUL base/turnaround: render the character's SAM3D-reconstructed BODY
+    (front/side/back) and draw the character onto it with Klein (pose image = the real
+    body, identity = the photo, prompt = "draw character from image2").  This FORCES the
+    body shape (unlike the refbase path, which infers it from 2D photos).  Returns a list
+    of base64 view images, or None to fall back."""
+    from backend.services.character_studio.vnccs_native import mesh_autofit
+    if not views:
+        return None
+    # best full-body reference photo bytes (prefer full/body role) for the reconstruction
+    ref_bytes = None
+    try:
+        pick = None
+        for pref in ("full", "body"):
+            pick = next((im for im in (pv_ci or []) if isinstance(im, dict) and im.get("name")
+                         and str(im.get("role") or "").strip().lower() == pref), None)
+            if pick:
+                break
+        if pick is None:
+            pick = next((im for im in (pv_ci or []) if isinstance(im, dict) and im.get("name")), None)
+        if pick:
+            ref_bytes = client.view_image(pick.get("name"), pick.get("subfolder", "") or "",
+                                          pick.get("type", "input") or "input", 120)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("klein SAM3D base: reference fetch failed: %s", exc)
+        return None
+    if not ref_bytes:
+        return None
+    import uuid as _uuid
+    tok = _uuid.uuid4().hex[:8]
+    try:
+        _idup = client.upload_image("rbmn_sam3did_%s.png" % tok, ref_bytes, "", True, 120)
+        if _idup.get("name"):
+            identity_name = _idup.get("name")
+    except Exception:  # noqa: BLE001
+        pass
+    if not identity_name:
+        return None
+    # optional SIDE-PROFILE reference (tag a reference with role "side"/"profile"):
+    # fuses real depth + height into the mesh so the body stops drifting taller & thinner.
+    side_bytes = None
+    try:
+        def _is_side(im):
+            _r = str(im.get("role") or "").strip().lower()
+            _a = str(im.get("angle") or "").strip().lower()
+            # a reference tagged role side/profile OR angle-tagged Left/Right IS a side profile
+            return _r in ("side", "profile") or _a in ("left", "right")
+        spick = next((im for im in (pv_ci or []) if isinstance(im, dict)
+                      and im.get("name") and _is_side(im)), None)
+        if spick:
+            side_bytes = client.view_image(spick.get("name"), spick.get("subfolder", "") or "",
+                                           spick.get("type", "input") or "input", 120)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("klein SAM3D base: side reference fetch failed: %s", exc)
+        side_bytes = None
+    try:
+        _side_w = float((saved or {}).get("klein_sam3d_side_weight") or 0.5)
+    except Exception:  # noqa: BLE001
+        _side_w = 0.5
+    labels = [str(v[0]).strip().lower() for v in views]  # front/right/left/back
+    rendered = mesh_autofit.render_sam3d_body_views(
+        client, ref_bytes, "rbmn_sam3d_base_ref.png", views=",".join(labels),
+        width=int(cw), height=int(ch), side_bytes=side_bytes, side_weight=_side_w)
+    if not rendered or len(rendered) != len(views):
+        logger.info("klein SAM3D base: body renders unavailable (%d/%d) -- fallback",
+                    len(rendered) if rendered else 0, len(views))
+        return None
+    bc = str(getattr(body, "base_clothing", None) or (saved or {}).get("klein_base_clothing") or "strip")
+    keep = klein_poses._keep_clothing(bc)
+    # STRONGEST reference for a view is the person's OWN photo of that view (Lorenzo's
+    # proven "same image as pose = spot on"): the parametric mesh regresses toward an
+    # average build and cannot reach extreme short-legs / big-belly proportions, so where
+    # a real angle-tagged photo exists we drive Klein with THAT and keep the mesh only for
+    # views the user has no photo for (e.g. back).
+    def _real_photo_for(label):
+        want = str(label).strip().lower()
+        for im in (pv_ci or []):
+            if not isinstance(im, dict) or not im.get("name"):
+                continue
+            a = str(im.get("angle") or "").strip().lower()
+            r = str(im.get("role") or "").strip().lower()
+            if want in ("right", "left"):
+                if a == want or r in ("side", "profile"):
+                    return im
+            elif want == "back":
+                if a == "back":
+                    return im
+            elif want == "front":
+                if a in ("", "front") and r in ("", "full", "body"):
+                    return im
+        return None
+    out = []
+    for i, ((label, png), (_vl, _rot, _vp)) in enumerate(zip(rendered, views)):
+        try:
+            _real = _real_photo_for(label)
+            pose_name = None
+            if _real is not None:
+                try:
+                    _rb = client.view_image(_real.get("name"), _real.get("subfolder", "") or "",
+                                            _real.get("type", "input") or "input", 120)
+                    _ru = client.upload_image("rbmn_sam3dreal_%s_%d.png" % (tok, i), _rb, "", True, 120)
+                    pose_name = _ru.get("name")
+                    logger.info("klein SAM3D base: view %s uses the real angle-tagged photo", label)
+                except Exception as _ex:  # noqa: BLE001
+                    logger.info("klein SAM3D base: real photo for %s failed (%s) -- mesh", label, _ex)
+                    pose_name = None
+            if not pose_name:
+                up = client.upload_image("rbmn_sam3dpose_%s_%d.png" % (tok, i), png, "", True, 120)
+                pose_name = up.get("name")
+            _view_txt = (" side profile view" if label in ("right", "left")
+                         else " from behind" if label == "back" else "")
+            _cloth = "" if keep else " wearing plain white underwear"
+            # Inject the character's BUILD + HEIGHT text (short/heavy/belly, 5'6") so Klein
+            # renders HIS proportions instead of defaulting to an average build. The pose
+            # sets already do this via klein_body_text; the base clone was body-blind.
+            _appear = ""
+            try:
+                _appear = klein_poses.klein_body_text(getattr(body, "character_info", None) or {})
+            except Exception:  # noqa: BLE001
+                _appear = ""
+            _appear_txt = (", %s" % _appear) if _appear else ""
+            prompt = ("Draw character from image2%s%s, full body,%s plain solid white background"
+                      % (_cloth, _appear_txt, _view_txt))
+            graph, _tap = klein_poses.build_klein_pose_graph(
+                pose_files=[pose_name], identity_files=[identity_name], prompts=[prompt],
+                seed=int(seed_v) + i, models=models, out_width=int(cw), out_height=int(ch),
+                filename_prefix="rbmn_vnccs/sam3dbase_%d" % i)
+            res = client.submit_prompt(graph, timeout=120)
+            img = _klein_wait_first_image(client, res.get("prompt_id"), 600)
+            out.append(img)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("klein SAM3D base view %s failed: %s", label, exc)
+            return None
+    logger.info("klein SAM3D base: rendered %d views from the reconstructed body", len(out))
+    return out
+
+
+def _klein_autofit_mesh(host, st_settings, character_name, mesh, image_bytes,
+                        character_info=None):
+    """v1.199.25: merge image-derived PROPORTIONS into the pose-mannequin `mesh`
+    (SAM 3D Body auto-fit, run once per character on the reference and cached).
+    v1.199.74: now also pulls the COARSE build (weight/muscle/belly) from the
+    SAM3D shape params -- measured from the reference photo, so it beats the
+    text-keyword derivation; the EXPLICIT UI sliders (body_weight/body_belly/...)
+    still win over everything.  No-op when disabled or the proportions node/model
+    isn't available on the worker -- the mannequin then falls back to body_mesh_params."""
+    if str((st_settings or {}).get("klein_autofit_proportions") or "on").strip().lower() \
+            in ("off", "false", "0", "no", "none"):
+        return mesh
+    try:
+        from backend.services.character_studio.vnccs_native import klein_poses, mesh_autofit
+        auto = mesh_autofit.get_autofit_mesh(
+            _client(host, timeout=120), character_name, image_bytes, mesh,
+            include_coarse=True)
+        if auto:
+            merged = dict(mesh or {})
+            merged.update(auto)   # measured (image) beats derived (text keywords)
+            merged.update(klein_poses.explicit_mesh_overrides(character_info or {}))
+            logger.info("klein autofit: applied %d image-derived proportion slider(s) for %s",
+                        len(auto), character_name)
+            return merged
+    except Exception as exc:  # noqa: BLE001
+        logger.info("klein autofit: skipped (%s)", exc)
+    return mesh
+    try:
+        from backend.services.character_studio.vnccs_native import mesh_autofit
+        auto = mesh_autofit.get_autofit_mesh(
+            _client(host, timeout=120), character_name, image_bytes, mesh)
+        if auto:
+            merged = dict(auto)
+            merged.update(mesh or {})  # explicit/manual mesh values win over the auto-fit
+            logger.info("klein autofit: applied %d image-derived proportion slider(s) for %s",
+                        len(auto), character_name)
+            return merged
+    except Exception as exc:  # noqa: BLE001
+        logger.info("klein autofit: skipped (%s)", exc)
+    return mesh
+
+
+# Cache of reference-photo bytes keyed by upload name, so an intermittent per-job
+# view_image fetch (which was dropping the side photo on some turnaround jobs) only
+# has to succeed ONCE -- every later job reuses the cached bytes.
+_KLEIN_REF_BYTES_CACHE: dict = {}
+
+def _klein_ref_cache_dir():
+    from pathlib import Path as _P
+    d = _P(__file__).resolve().parents[2] / "runtime" / "klein_ref_cache"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return d
+
+def _klein_ref_key(name):
+    import hashlib
+    return hashlib.sha256(str(name or "").encode("utf-8")).hexdigest()[:24]
+
+def _klein_ref_disk_get(name):
+    try:
+        f = _klein_ref_cache_dir() / (_klein_ref_key(name) + ".png")
+        if f.exists():
+            return f.read_bytes()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+def _klein_ref_disk_put(name, data):
+    try:
+        if data:
+            (_klein_ref_cache_dir() / (_klein_ref_key(name) + ".png")).write_bytes(data)
+    except Exception:  # noqa: BLE001
+        pass
+
+def _klein_edit_rotate(client, ref_bytes_list, prompt, width, height, seed):
+    """Klein IMAGE-EDIT: feed reference images + an edit prompt (e.g. 'rotate to a back
+    pose') and return the generated PNG bytes.  Reuses the KLEIN_EDIT_*REF workflows -- the
+    same graph the Image Workshop uses.  Returns None on any failure."""
+    try:
+        from backend.services.comfyui.workflow import prepare_klein_workflow
+        from pathlib import Path as _P
+        import base64 as _b64
+        names = []
+        for i, b in enumerate([x for x in (ref_bytes_list or []) if x]):
+            up = client.upload_image("rbmn_genview_src_%d.png" % i, b, "", True, 120)
+            if up.get("name"):
+                names.append(up.get("name"))
+        if not names:
+            return None
+        n = max(1, min(len(names), 5))
+        wf_path = _P(__file__).resolve().parents[2] / "workflows" / ("KLEIN_EDIT_ULTRA_WORKFLOW_%dREF.json" % n)
+        if not wf_path.exists():
+            logger.info("generate-view: workflow missing (%s)", wf_path.name)
+            return None
+        wf = prepare_klein_workflow(str(wf_path), prompt, int(width), int(height), int(seed), ref_images=names[:n])
+        res = client.submit_prompt(wf, timeout=120)
+        pid = res.get("prompt_id") if isinstance(res, dict) else None
+        if not pid:
+            return None
+        return _b64.b64decode(_klein_wait_first_image(client, pid, 600))
+    except Exception as exc:  # noqa: BLE001
+        logger.info("generate-view: klein edit failed: %s", exc)
+        return None
+
+
 def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
                   pose_subset: list, identity_bytes: list, seed: int):
     """Render pose captures app-side, upload them + the identity image to the
@@ -727,6 +1096,24 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
         logger.info("klein pose run: %d per-run settings override(s) applied (Simple mode)", len(_ov))
     oi = _object_info(host)
     models = klein_poses.resolve_klein_models(oi, st_settings)
+    # v1.199.83 DEPTH POSE PATH.  Flux.2 has no ControlNet, so the pose image has
+    # only ever been a *reference latent* -- advisory conditioning that the pose
+    # LoRA's body prior overrules, which is why no amount of ref-release /
+    # LoRA-strength tuning ever held a heavy or short body. The RefControl DEPTH
+    # LoRA is trained to obey a depth map, and a depth map rendered from the
+    # character's OWN rigged mesh carries pose + volume + height together.
+    # One switch, one validated preset (lora/unet/steps/cfg/strength) -- nothing
+    # per-character to dial. Explicit studio settings still win below.
+    _depth = klein_poses.resolve_depth_recipe(oi, st_settings)
+    _slock = klein_poses.resolve_structure_lock(st_settings)
+    if _depth:
+        models = {**models, "lora": _depth["lora"]}
+        if _depth.get("unet"):
+            models["unet"] = _depth["unet"]
+        logger.info("klein pose input: %s recipe active (lora=%s unet=%s steps=%d "
+                    "cfg=%.1f strength=%.2f)", str(_depth.get("mode") or "depth").upper(),
+                    _depth["lora"], _depth.get("unet") or models["unet"], _depth["steps"],
+                    _depth["cfg"], _depth["strength"])
 
     pd = creator_baseline_pose_data()
     pd["poses"] = [p for p in pose_subset if isinstance(p, dict)]
@@ -734,6 +1121,11 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # reference (which Klein reproduces as the body) matches the intended shape.
     pd["mesh"] = {**(pd.get("mesh") or {}),
                   **klein_poses.body_mesh_params(body.character_info or {})}
+    # v1.199.25: auto-fit the per-limb proportions from the reference image so the
+    # mannequin matches THIS character's build (not the generic average).
+    pd["mesh"] = _klein_autofit_mesh(host, st_settings, body.character_name, pd["mesh"],
+                                     identity_bytes[0] if identity_bytes else None,
+                                     body.character_info)
     # Shared base+pose CANVAS: render the pose capture at the same (wider) frame the
     # base image uses, so wide characters get consistent room and base/poses match
     # in size.  The pose-render clamps a wide figure to fit width, so a wider frame
@@ -741,26 +1133,371 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # klein_canvas_width / klein_canvas_height.
     _cw, _ch = _klein_canvas(st_settings, getattr(body, "canvas_w", None),
                              getattr(body, "canvas_h", None))
-    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch}
+    pd["export"] = {**(pd.get("export") or {}), "view_width": _cw, "view_height": _ch,
+                    # v1.199.76: the vendored baseline's cam_zoom (~1.39) railed the
+                    # uniform framing to ~96% fill, defeating the 14% headroom and
+                    # pinning every head to the frame top ("raised to match the
+                    # pose"). Neutral zoom + HEIGHT-ANCHORED framing: scale is fixed
+                    # to a neutral-height body, feet share a floor line, so a short
+                    # character actually renders shorter in the reference.
+                    # v1.199.79: NODE-FAITHFUL camera -- fixed perspective (fov 30,
+                    # dist 45) + z-buffer in pose_render, honoring the blob's own
+                    # cam_zoom/offset/yaw/pitch (the tuned ~1.39 zoom is CORRECT for
+                    # this camera). Supersedes the ortho-era zoom/anchor/headroom
+                    # overrides above.
+                    "node_camera": True}
     # v1.175 (B3): when enabled and the character has a MIA-rigged 3D body,
     # the pose references are CLAY RENDERS of the character's real body shape
     # instead of the generic mannequin -- ends the body-shape tug-of-war.
+    # Single source of truth for BOTH renderers (pose_clay + pose_render).
+    # v1.199.115: _depth carries "mode" = depth|normal (same recipe family);
+    # the clay/mannequin renderers key the actual map they draw off this.
+    pd["export"]["render_mode"] = (str(_depth.get("mode") or "depth") if _depth else "shaded")
     captures = None
     _clay_used = False
-    if (st_settings or {}).get("mesh3d_pose"):
+    # v1.199.92: DEPTH MODE IMPLIES THE 3D BODY. The entire point of the depth
+    # path is that the silhouette comes from the character's OWN geometry -- a
+    # depth map of the generic parametric mannequin is a depth map of the wrong
+    # body, and it renders a wrong (thin, generic) character very convincingly.
+    # "Use 3D body" is per-run UI state, so a page reload silently drops it and
+    # the next run quietly regresses with no error anywhere (this bit us).
+    # When depth is on and the character HAS a rigged mesh, use it, toggle or not.
+    _want_clay = bool((st_settings or {}).get("mesh3d_pose"))
+    if _depth and not _want_clay:
+        try:
+            from backend.services.character_studio.vnccs_native import pose_clay as _pc0
+            if _pc0.has_rigged_mesh(body.character_name):
+                _want_clay = True
+                logger.info("klein pose run: depth mode -- auto-enabling the 3D body "
+                            "(rigged mesh found; 'Use 3D body' was off)")
+        except Exception:  # noqa: BLE001
+            pass
+    if _want_clay:
         from backend.services.character_studio.vnccs_native import pose_clay
-        captures = pose_clay.render_pose_clay_captures(body.character_name, pd)
+        # v1.199.82: when the capture will be converted to a DWPose skeleton,
+        # keep the clay COMPLETE (no smear-face amputation) -- see pose_clay.
+        _want_skel = str((st_settings or {}).get("klein_pose_input")
+                         or "mannequin").strip().lower() in ("skeleton", "dwpose", "bones")
+        # Depth mode keeps the smear too: an amputated limb is a HOLE in the
+        # depth map (reads as "infinitely far" mid-body), which is far worse
+        # than a slightly smeared shoulder. clay_driver seals the small
+        # boundaries left by the cull with holes_fill in depth mode.
+        captures = pose_clay.render_pose_clay_captures(body.character_name, pd,
+                                                       keep_smear=_want_skel or bool(_depth))
         if captures and len(captures) == len(pd["poses"]):
             _clay_used = True
             logger.info("klein pose run: using 3D-body CLAY pose references (%d)", len(captures))
         else:
             captures = None
-            logger.info("klein pose run: mesh3d_pose on but clay render unavailable -- mannequin fallback")
+            if _depth:
+                logger.warning(
+                    "klein pose run: DEPTH mode but the clay render is unavailable -- "
+                    "falling back to the GENERIC MANNEQUIN. The depth map will describe "
+                    "the wrong body and the character will come out generic/thin. Check "
+                    "the pose_clay warning above (rig missing? MIA env?).")
+            else:
+                logger.info("klein pose run: mesh3d_pose on but clay render unavailable -- mannequin fallback")
+    if captures is None and _depth and str(_depth.get("mode") or "depth") == "normal":
+        # v1.199.115: the mannequin renderer has no normal-map mode, so falling
+        # back would silently hand the NORMAL LoRA a SHADED mannequin -- a
+        # mislabelled control signal producing convincing garbage. Fail loudly
+        # (the depth mode's wrong-body fallback at least stays a depth map;
+        # this one would not even be the right kind of image).
+        raise VNCCSError(
+            "Pose input = Normal needs the 3D clay render (rigged mesh + MIA env), "
+            "which is unavailable for this character -- see the pose_clay warning in "
+            "the log. Fix the rig, or switch Pose input to Depth or Mannequin.")
     if not captures:
+        # v1.199.74: BODY FIT from the character's own 3D scan (character.glb).
+        # The scan was reconstructed from the approved turnaround, so its
+        # measured torso depth profile pins the mannequin's weight/belly to the
+        # REAL body -- no description keywords, no sliders. Explicit UI sliders
+        # still win. Skipped for base-set derivation runs (skip_meshfit) so base
+        # sets never feed back from an existing mesh (v1.189.2 rule).
+        if not _ov.get("skip_meshfit"):
+            try:
+                from backend.services.character_studio.vnccs_native import mesh_fit
+                _mf = mesh_fit.get_meshfit_params(body.character_name, pd["mesh"])
+                if _mf:
+                    pd["mesh"] = {**pd["mesh"], **_mf,
+                                  **klein_poses.explicit_mesh_overrides(
+                                      body.character_info or {})}
+                    logger.info("klein pose run: 3D-scan body fit applied %s", _mf)
+            except Exception as _mfe:  # noqa: BLE001
+                logger.info("klein pose run: 3D-scan body fit skipped (%s)", _mfe)
         captures = pose_render.render_pose_captures(pd, False)
     if not captures or len(captures) != len(pd["poses"]):
         raise VNCCSError("app-side pose renderer unavailable (CharacterData missing?) — "
                          "cannot build Klein pose references")
+    # STRUCTURE LOCK needs a SHADED render to seed the latent from: initialising
+    # from the grey depth map would bake the grey straight into the skin. Same
+    # geometry, same camera, different shading -- so the lock and the control
+    # signal agree pixel-for-pixel.
+    init_captures = None
+    if _slock:
+        try:
+            _pd_sh = {**pd, "export": {**pd["export"], "render_mode": "shaded"}}
+            if _clay_used:
+                from backend.services.character_studio.vnccs_native import pose_clay as _pcl
+                init_captures = _pcl.render_pose_clay_captures(
+                    body.character_name, _pd_sh, keep_smear=True)
+            if not init_captures or len(init_captures) != len(pd["poses"]):
+                init_captures = pose_render.render_pose_captures(_pd_sh, False)
+            if init_captures and len(init_captures) != len(pd["poses"]):
+                init_captures = None
+        except Exception as _sle:  # noqa: BLE001
+            logger.warning("klein structure lock: init render failed (%s) -- lock disabled", _sle)
+            init_captures = None
+        if not init_captures:
+            _slock = None
+        else:
+            logger.info("klein structure lock: %.2f denoise from %s init render",
+                        _slock, "clay" if _clay_used else "mannequin")
+    # v1.199.29: SAM3D-RENDER pose source (node-faithful).  When klein_pose_source=sam3d,
+    # the pose reference is a RENDER of the character's SAM3D-reconstructed body (front/side/
+    # back), i.e. the same clean image the VNCCS Pose Studio workflow uses -- replacing the
+    # Hunyuan3D clay / parametric mannequin (the wrong-body source).  Best for BASE/turnaround
+    # sets (camera angles of the rest body); each view maps to a camera yaw.  Needs the RBMN
+    # SAM3D Body Views node + SAM3D model on the worker; falls back to whatever `captures`
+    # already holds on any failure.  Opt-in (default off) until validated.
+    _pose_source = str((st_settings or {}).get("klein_pose_source") or "").strip().lower()
+    if _pose_source == "sam3d" and identity_bytes:
+        try:
+            from backend.services.character_studio.vnccs_native import mesh_autofit
+            import base64 as _b64
+            def _yaw_to_view(pose):
+                mr = (pose or {}).get("modelRotation") or [0, 0, 0]
+                try:
+                    y = float(mr[1]) % 360.0
+                except Exception:  # noqa: BLE001
+                    y = 0.0
+                names = [("front", 0), ("front_left", 45), ("left", 90), ("back_left", 135),
+                         ("back", 180), ("back_right", 225), ("right", 270), ("front_right", 315)]
+                return min(names, key=lambda nv: min((y - nv[1]) % 360, (nv[1] - y) % 360))[0]
+            _labels = [_yaw_to_view(p) for p in pd["poses"]]
+            _sc = _client(host, timeout=120)
+            _cimgs = list(getattr(body, "cloner_images", None) or [])
+            def _fetch_ref(im):
+                for _t in range(3):
+                    try:
+                        _b = _sc.view_image(im.get("name"), im.get("subfolder", "") or "",
+                                            im.get("type", "input") or "input", 120)
+                        if _b:
+                            return _b
+                    except Exception:  # noqa: BLE001
+                        pass
+                return None
+            def _ref_cached(im):
+                if not (isinstance(im, dict) and im.get("name")):
+                    return None
+                nm = str(im.get("name"))
+                b = _KLEIN_REF_BYTES_CACHE.get(nm)
+                if b:
+                    return b
+                b = _fetch_ref(im)
+                if not b:
+                    b = _klein_ref_disk_get(nm)
+                    if b:
+                        logger.info("klein: ref restored from DISK cache (%s)", nm)
+                if b:
+                    _KLEIN_REF_BYTES_CACHE[nm] = b
+                    _klein_ref_disk_put(nm, b)
+                return b
+            def _pick(pred):
+                return next((im for im in _cimgs if isinstance(im, dict) and im.get("name") and pred(im)), None)
+            def _is_side(im):
+                a = str(im.get("angle") or "").strip().lower(); r = str(im.get("role") or "").strip().lower()
+                return a in ("left", "right") or r in ("side", "profile")
+            def _is_back(im):
+                return str(im.get("angle") or "").strip().lower() == "back"
+            def _is_front(im):
+                a = str(im.get("angle") or "").strip().lower(); r = str(im.get("role") or "").strip().lower()
+                return a in ("", "front") and r in ("", "full", "body")
+            def _idx_of(pred):
+                _n = 0
+                for im in _cimgs:
+                    if isinstance(im, dict) and im.get("name"):
+                        if pred(im):
+                            return _n
+                        _n += 1
+                return None
+            # ALIGNMENT GUARD (v1.199.63): identity_bytes comes from _klein_identity_bytes,
+            # which SKIPS any reference whose fetch throws (intermittent worker-locality).
+            # _idx_of counts EVERY named ref, so a single dropped fetch shifts every later
+            # index and would feed a view the WRONG real photo (while STILL logging "REAL
+            # photo").  Trust the positional index ONLY when identity_bytes lines up 1:1 with
+            # the named refs; otherwise resolve THAT view's own photo by name via the robust
+            # disk/mem cache.  When aligned this is byte-identical to the perfect 1.199.51 path.
+            _named_cimgs = [im for im in _cimgs if isinstance(im, dict) and im.get("name")]
+            _ib_aligned = (len(identity_bytes) == len(_named_cimgs))
+            def _ib(idx):
+                return identity_bytes[idx] if (_ib_aligned and idx is not None and 0 <= idx < len(identity_bytes)) else None
+            # Resolve each view's REAL-photo bytes ONCE.  front<-front ref/base; side<-profile;
+            # back<-back photo if tagged.  side/back already fall to the by-name cache when the
+            # positional lookup misses (lock-base OR misaligned), so they only needed the guard.
+            # v1.199.68: the FRONT view must use the REAL front photo just like the side/
+            # back views use theirs -- NOT the approved base render.  In lock-base mode
+            # identity_bytes collapses to [base]; using that here made the front inherit the
+            # base's (often taller / drifted) proportions while the sides/back matched the
+            # real photos -- "only the front is taller".  Prefer the real front photo
+            # (positional when aligned, else by-name cache); the base render is a last resort
+            # only when the character has NO front reference photo at all.
+            _front_bytes = (_ib(_idx_of(_is_front))
+                            or _ref_cached(_pick(_is_front))
+                            or (identity_bytes[0] if identity_bytes else None))
+            _side_bytes = _ib(_idx_of(_is_side)) or _ref_cached(_pick(_is_side))
+            _back_bytes = _ib(_idx_of(_is_back)) or _ref_cached(_pick(_is_back))
+            def _flip_lr(data):
+                try:
+                    from PIL import Image as _PImage
+                    import io as _io
+                    _im = _PImage.open(_io.BytesIO(data))
+                    _im = _im.transpose(_PImage.FLIP_LEFT_RIGHT)
+                    _buf = _io.BytesIO()
+                    _im.save(_buf, format="PNG")
+                    return _buf.getvalue()
+                except Exception:  # noqa: BLE001
+                    return data
+            # the tagged profile is ONE side; the OPPOSITE side view uses a horizontal
+            # mirror of it, so left and right are not identical copies.
+            _side_angle = (str((_pick(_is_side) or {}).get("angle") or "").strip().lower()) or "right"
+            _side_mirror = _flip_lr(_side_bytes) if _side_bytes else None
+            def _view_side(lb):
+                l = str(lb).lower()
+                if "left" in l:
+                    return "left"
+                if "right" in l:
+                    return "right"
+                return None
+            def _real_for(lb):
+                if lb == "front":
+                    return _front_bytes
+                if lb == "back":
+                    return _back_bytes
+                if _side_bytes is None:
+                    return None
+                _vs = _view_side(lb)
+                if _vs is not None and _vs != _side_angle:
+                    return _side_mirror or _side_bytes  # opposite side -> mirror
+                return _side_bytes
+            # SMART: a view with a real photo is used DIRECTLY and SKIPS the expensive SAM3D
+            # mesh render.  Only no-photo views (e.g. back with no back photo) pay for the mesh.
+            def _infer_back():
+                # Klein IMAGE-EDIT (the Image Workshop path Lorenzo proved works): feed the real
+                # front+side refs and instruct "rotate to a standing back pose".  This is the
+                # KLEIN_EDIT graph, NOT refbase (which cannot turn the character around).
+                try:
+                    from backend.services.comfyui.workflow import prepare_klein_workflow
+                    from pathlib import Path as _P
+                    import time as _time
+                    # feed the ORIGINAL CLOTHED references (front photo + side photo) so Klein
+                    # makes a clothed back that MATCHES them.  The lock-base identity_bytes[0] is
+                    # the STRIPPED turnaround front -- mixing it with a clothed side confuses the
+                    # edit.  The turnaround then strips this back just like it strips the side photo.
+                    _front_ref = _ref_cached(_pick(_is_front)) or _front_bytes
+                    _rbytes = [b for b in (_front_ref, _side_bytes) if b]
+                    if not _rbytes:
+                        return None
+                    _rnames = []
+                    for _bi, _bb in enumerate(_rbytes):
+                        _bu = _sc.upload_image("rbmn_backedit_%d.png" % _bi, _bb, "", True, 120)
+                        if _bu.get("name"):
+                            _rnames.append(_bu.get("name"))
+                    if not _rnames:
+                        return None
+                    _n = max(1, min(len(_rnames), 5))
+                    _wf_path = (_P(__file__).resolve().parents[2] / "workflows"
+                                / ("KLEIN_EDIT_ULTRA_WORKFLOW_%dREF.json" % _n))
+                    if not _wf_path.exists():
+                        logger.info("klein: back edit workflow missing (%s)", _wf_path.name)
+                        return None
+                    _bprompt = ("Rotate this character so we can see him in a standing back pose, "
+                                "full body view, same clothing and body as the reference images, "
+                                "plain solid white background")
+                    _wf = prepare_klein_workflow(str(_wf_path), _bprompt, int(_cw), int(_ch),
+                                                 int(seed) + 977, ref_images=_rnames[:_n])
+                    _res = _sc.submit_prompt(_wf, timeout=120)
+                    _pid = _res.get("prompt_id") if isinstance(_res, dict) else None
+                    if not _pid:
+                        return None
+                    _b64img = _klein_wait_first_image(_sc, _pid, 600)
+                    logger.info("klein: back via KLEIN_EDIT rotate-to-back (%d refs)", _n)
+                    return "data:image/png;base64," + _b64img
+                except Exception as _be:  # noqa: BLE001
+                    logger.info("klein: back edit failed (%s) -- mesh fallback", _be)
+                    return None
+            _ovr = 0
+            _filled = set()
+            _real_by_idx = {}
+            try:
+                for _i, _lb in enumerate(_labels):
+                    _rb = _real_for(_lb)
+                    if _rb:
+                        captures[_i] = "data:image/png;base64," + _b64.b64encode(_rb).decode("ascii")
+                        _filled.add(_i)
+                        _real_by_idx[_i] = _rb
+                        _ovr += 1
+                        logger.info("klein: view %s uses the REAL photo (no mesh render)", _lb)
+                    elif _lb == "back":
+                        _bcap = _infer_back()
+                        if _bcap:
+                            captures[_i] = _bcap
+                            _filled.add(_i)
+                            _ovr += 1
+                            try:
+                                _real_by_idx[_i] = _b64.b64decode(_bcap.split(",", 1)[1])
+                            except Exception:  # noqa: BLE001
+                                pass
+                _need_mesh = [k for k in range(len(_labels)) if k not in _filled]
+                if _need_mesh:
+                    try:
+                        _side_w = float((st_settings or {}).get("klein_sam3d_side_weight") or 0.5)
+                    except Exception:  # noqa: BLE001
+                        _side_w = 0.5
+                    _mlabels = [_labels[k] for k in _need_mesh]
+                    # a rear view has no real photo; lean HARD on the side reconstruction
+                    # (correct proportions) so the mesh back is as close as we can get.
+                    if any("back" in _l for _l in _mlabels):
+                        _side_w = max(_side_w, 0.85)
+                    rendered = mesh_autofit.render_sam3d_body_views(
+                        _sc, identity_bytes[0], "rbmn_sam3d_ref.png",
+                        views=",".join(_mlabels), width=_cw, height=_ch,
+                        side_bytes=_side_bytes, side_weight=_side_w)
+                    if rendered and len(rendered) == len(_need_mesh):
+                        for _k, (_lbl, _png) in zip(_need_mesh, rendered):
+                            captures[_k] = "data:image/png;base64," + _b64.b64encode(_png).decode("ascii")
+                            logger.info("klein: view %s -> SAM3D mesh (no real photo)", _labels[_k])
+                    else:
+                        logger.info("klein: SAM3D mesh for %d no-photo view(s) unavailable -- mannequin kept",
+                                    len(_need_mesh))
+                logger.info("klein SAM3D BUILD=1.199.51 (back=clothed orig refs): %d/%d real, %d need mesh",
+                            _ovr, len(_labels), len(_need_mesh))
+                # IDENTITY-BLEED FIX (v1.199.64): lock-base collapses the identity latent to the
+                # approved base (the FRONT-derived render), so EVERY view -- including the back --
+                # inherits FRONT features ("front-on-back" bleed).  Match the proven Image-Workshop
+                # rule "same image for reference AND pose = spot on": drive each real-photo view's
+                # IDENTITY from its OWN photo, not the front base.  Runtime submits one view per
+                # call (the "1/1 real" logs), so a single-view batch swaps identity to that view's
+                # photo; a multi-view batch uses the collected angle photos so no one angle
+                # dominates.  Scoped to real-photo turnaround views only -- normal pose runs and
+                # mesh-fallback views are untouched.  The face crop sources from cloner_images
+                # (not identity_bytes), so likeness is unaffected.
+                if _real_by_idx:
+                    if len(_labels) == 1 and 0 in _real_by_idx:
+                        identity_bytes = [_real_by_idx[0]]
+                        logger.info("klein: identity latent = the view's OWN real photo "
+                                    "(front-base bleed removed)")
+                    else:
+                        _uni = [_real_by_idx[_k] for _k in sorted(_real_by_idx)][:4]
+                        if _uni:
+                            identity_bytes = _uni
+                            logger.info("klein: identity latent = %d real angle photos "
+                                        "(front-base bleed removed)", len(_uni))
+            except Exception as _ox:  # noqa: BLE001
+                logger.info("klein: SAM3D real-photo override skipped (%s) -- existing captures kept", _ox)
+        except Exception as _sx:  # noqa: BLE001
+            logger.info("klein: SAM3D pose source failed (%s) -- keeping existing captures", _sx)
+
 
     safe = "".join(ch for ch in body.character_name if ch.isalnum())[:24] or "char"
     # UNIQUE-per-chunk upload names.  Multiple workers often share ONE ComfyUI
@@ -880,7 +1617,7 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # denoise/steps/guide overrides fall back to the GLOBALS -- pose runs no
     # longer inherit the BASE-local values (decoupled by request: the base
     # generates fine, poses need their own knobs).
-    _pfr = str((st_settings or {}).get("klein_pose_face_refine") or "").strip().lower()
+    _pfr = str((st_settings or {}).get("klein_pose_face_refine") or "off").strip().lower()  # v1.199.23 bare-default: poses default face-refine OFF
     if _pfr in ("off", "false", "0", "no", "disabled", "none"):
         face_refine = None
         logger.info("klein pose face refine: OFF (pose-local)")
@@ -910,13 +1647,25 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # prompt redresses to white underwear (mirrors VNCCS remove_clothes: keep the
     # full image, change only the clothing). Face crop rides along; PuLID additive.
     strip_body_refs = False
-    face_as_reference = bool(face_file)
+    # v1.199.23 bare-default: the dedicated face-crop reference latent is an EXTRA
+    # (ground truth uses ONE character ref); default OFF, opt-in via klein_face_crop_ref.
+    _fcr = str((st_settings or {}).get("klein_face_crop_ref") or "off").strip().lower()
+    face_as_reference = bool(face_file) and _fcr in ("on", "auto", "1", "true", "yes")
     # BODY-MATCH channel (ReferenceLatentPlus): when the node is on the worker we
     # route the BODY/FULL references through it with the garment masked out, so the
     # base body matches the photo's build/shoulders/chest/hips WITHOUT the outfit
     # leaking.  Face still rides on the crop + PuLID.  Auto-detected + opt-out; on
     # workers without the node this stays None and behaviour is unchanged.
-    reflatentplus = klein_poses.resolve_reflatentplus(oi, st_settings) if not _keep else None
+    # v1.199.23 bare-default: ReferenceLatentPlus body-match is an EXTRA (not in ground
+    # truth); pose runs default it OFF. Opt-in via klein_body_match=on/auto. (The resolver
+    # keeps its own 'auto' default so base-preview/clothes paths are unchanged.)
+    # pose-specific key (NOT the shared klein_body_match, which base-set/clothes
+    # paths still default to 'auto'); default off. When on, force the resolver's
+    # mode on so it returns a config regardless of the global body-match mode.
+    _bm_pose = str((st_settings or {}).get("klein_pose_body_match") or "off").strip().lower()
+    _bm_on = _bm_pose not in ("off", "false", "0", "no", "none", "")
+    reflatentplus = (klein_poses.resolve_reflatentplus(oi, {**(st_settings or {}), "klein_body_match": "on"})
+                     if (not _keep and _bm_on) else None)
     # (roles computed earlier for the face-crop pick; reused here for the body split)
     body_files: list = []
     graph_identity = list(identity_files)
@@ -952,14 +1701,20 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # skeletons in-graph when klein_pose_input='skeleton' (needs DWPreprocessor
     # on the worker) -- pure pose geometry, no CGI style to leak.
     dwpose = klein_poses.resolve_dwpose(oi, st_settings)
-    # v1.177: 3D clay refs already ARE the character's real body shape -- running
-    # DWPose over them would throw that away and hand Klein a bare stick figure,
-    # defeating the point of clay. Skip the skeleton conversion whenever clay is
-    # in play (the clay capture is passed straight through as pose reference 1).
+    # v1.199.80: clay + skeleton is now ALLOWED. DWPose over the CLAY render
+    # extracts a stick figure with the character's REAL bone proportions (short
+    # legs, stance, reach) from the rigged mesh -- immune to surface smear and
+    # with no limb-count ambiguity; body/likeness rides on the identity refs.
+    # This is the "use the rigged mesh for posing" path (pair with RefControl).
+    # Pose input = Mannequin still passes the clay image through directly.
     if _clay_used and dwpose:
-        dwpose = None
-        logger.info("klein pose input: 3D clay refs active -> DWPose skeleton conversion skipped")
-    _pose_input = "skeleton" if dwpose else "mannequin"
+        logger.info("klein pose input: DWPose skeleton FROM 3D clay refs (real proportions)")
+    _pose_input = (str(_depth.get("mode") or "depth") if _depth
+                   else ("skeleton" if dwpose else "mannequin"))
+    # v1.199.91: resolved HERE (was ~L1615) because klein_pose_prompt now needs to
+    # know whether RMBG is doing the keying -- if it is, the backdrop should be
+    # neutral gray instead of chroma green (green bounce was tinting the subject).
+    rmbg = klein_poses.resolve_rmbg(oi, st_settings)
     logger.info("klein pose input: %s (clay=%s)", _pose_input, _clay_used)
     pose_files = []
     prompts = []
@@ -973,7 +1728,14 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
             base_clothing=base_clothing, nsfw=kposes_nsfw, appearance=appearance_txt,
             style_kind=face_kind, sex=str((body.character_info or {}).get("sex") or ""),
             body_ref_active=body_ref_active, style_custom=style_custom,
-            consistent_skin=_consistent_skin, pose_input=_pose_input))
+            consistent_skin=_consistent_skin, pose_input=_pose_input,
+            rmbg_active=bool(rmbg)))
+
+    init_files: list = []
+    for i, cap in enumerate(init_captures or []):
+        fn = f"rbmn_klein_{safe}_{token}_init{i}.png"
+        up = client.upload_image(fn, klein_poses.decode_capture(cap), "", True, 120)
+        init_files.append(up.get("name", fn))
 
     # honor the UI's upscaler control: any non-off mode = GAN tail (SeedVR has
     # no simple graph form; the label maps to GAN here)
@@ -1000,10 +1762,21 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     if getattr(body, "klein_steps", None):
         _eff["klein_steps"] = body.klein_steps
     neg_text, klein_cfg = klein_poses.resolve_strip_negative(_eff, _keep)
-    neg_text = klein_poses.with_anatomy_negative(neg_text)  # suppress extra/duplicated limbs
+    if klein_cfg and float(klein_cfg) > 1.0:  # v1.199.23 bare-default: neg is inert at cfg=1
+        neg_text = klein_poses.with_anatomy_negative(neg_text)  # suppress extra/duplicated limbs
     ksteps = klein_poses.resolve_klein_steps(_eff)
+    if _depth:
+        # The RefControl LoRAs were trained on the UNDISTILLED base at cfg 5 /
+        # 20 steps. The distilled 4-step regime this app normally runs (cfg 1.5)
+        # also leaves the negative prompt nearly inert, which is a second reason
+        # the anatomy negatives never bit. Explicit UI overrides still win.
+        if not str((st_settings or {}).get("klein_pose_steps_explicit") or "").strip():
+            ksteps = int(_depth["steps"])
+        if not str((st_settings or {}).get("klein_pose_cfg_explicit") or "").strip():
+            klein_cfg = float(_depth["cfg"])
+            if not neg_text:
+                neg_text = klein_poses.with_anatomy_negative("")
     logger.info("klein cleanup: cfg=%.2f steps=%d neg=%s", klein_cfg, ksteps, bool(neg_text))
-    rmbg = klein_poses.resolve_rmbg(oi, st_settings)
     if rmbg:
         logger.info("klein: worker-side RMBG background removal active (%s, res %d)",
                     rmbg.get("model"), rmbg.get("process_res"))
@@ -1014,6 +1787,9 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     # the last part of sampling so its flat plastic texture can't stamp the
     # final skin.  klein_pose_ref_end (default 0.85); >=1.0 = off (old behavior).
     try:
+        # v1.199.27: RE-ENABLED (bare validation proved our clay/mannequin capture bleeds
+        # its material into the skin when held the whole run -- that's the wood/plastic
+        # texture artifact).  0.85 releases the pose ref before the texture-forming steps.
         _pre = float(str((st_settings or {}).get("klein_pose_ref_end") or "0.85"))
     except Exception:  # noqa: BLE001
         _pre = 0.85
@@ -1025,9 +1801,15 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
     except Exception:  # noqa: BLE001
         _pls = 1.0
     _pls = max(0.1, min(1.5, _pls))
+    if _depth:
+        _pls = float(_depth["strength"])
     logger.info("klein pose LoRA: %s @ %.2f", models.get("lora") or "NONE", _pls)
     _lora_lo = str(models.get("lora") or "").lower()
-    if _pose_input == "skeleton" and "refcontrol" in _lora_lo:
+    if _depth:
+        # the depth LoRA's trained trigger is the single word "refcontrol"
+        prompts = [f"{_depth['trigger']}. " + pr for pr in prompts]
+        logger.info("klein pose input: RefControl DEPTH trigger prepended")
+    elif _pose_input == "skeleton" and "refcontrol" in _lora_lo:
         # thedeoxen/refcontrol-FLUX.2-klein-9B LoRA: lead with its trained trigger
         prompts = ["apply pose from image 1 with reference from image 2. " + pr for pr in prompts]
         logger.info("klein pose input: RefControl LoRA trigger phrase prepended")
@@ -1036,6 +1818,58 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
         # pose transfer; its trained trigger leads the prompt (use Mannequin input)
         prompts = ["matchingpose9b, " + pr for pr in prompts]
         logger.info("klein pose input: MatchingPose trigger prepended")
+    # v1.199.80: ALWAYS dump this run's pose refs + parameters to
+    # <repo>/_diag/last_pose_run/<timestamp>/ (last 3 runs kept) so a failing
+    # run can be diagnosed straight from the repo folder -- refs Klein actually
+    # saw, the final mesh, and every knob -- without the user re-describing it.
+    _dd = None          # THIS run's dump dir -- see the graph dump below
+    try:
+        import json as _dj
+        import shutil as _dsh
+        import time as _dt
+        from pathlib import Path as _dP
+        _dd_root = _dP(__file__).resolve().parents[2] / "_diag" / "last_pose_run"
+        _dd = _dd_root / _dt.strftime("%Y%m%d_%H%M%S")
+        _dd.mkdir(parents=True, exist_ok=True)
+        for _di, _dcap in enumerate(captures):
+            (_dd / f"ref_{_di:02d}.png").write_bytes(klein_poses.decode_capture(_dcap))
+        # v1.199.96: everything a replay needs. tools/worker_run.py re-submits
+        # this exact graph to a real worker with single-variable overrides, so
+        # A/B questions (cfg, steps, LoRA strength, PuLID, ref release) get
+        # ANSWERED against the fleet instead of estimated from a description.
+        for _di, _dib in enumerate(identity_bytes or []):
+            try:
+                (_dd / f"identity_{_di:02d}.png").write_bytes(_dib)
+            except Exception:  # noqa: BLE001
+                pass
+        for _di, _dcap in enumerate(init_captures or []):
+            (_dd / f"init_{_di:02d}.png").write_bytes(klein_poses.decode_capture(_dcap))
+        (_dd / "params.json").write_text(_dj.dumps({
+            "character": body.character_name, "clay_used": _clay_used,
+            "pose_input": _pose_input, "mesh": pd.get("mesh"),
+            "export": pd.get("export"), "lora": models.get("lora"),
+            "lora_strength": _pls, "pose_ref_end": _pose_ref_end,
+            "cfg": klein_cfg, "steps": ksteps, "neg": bool(neg_text),
+            "depth_recipe": _depth, "structure_lock": _slock,
+            "want_clay": _want_clay,
+            "body_source": ("rigged mesh (clay)" if _clay_used
+                            else "GENERIC MANNEQUIN -- not this character's body"),
+            "unet": models.get("unet"),
+            "n_poses": len(pd.get("poses") or []),
+            "poses": pd.get("poses"),
+        }, indent=1, default=str), encoding="utf-8")
+        # v1.199.137: keep 32, not 3.  A pose BATCH fans out across workers in
+        # parallel, so a 6-pose run creates 6+ dirs and a retention of 3 deletes
+        # the control image of every pose but the last two before anyone can look
+        # at them -- exactly what happened on 2026-07-30, where the six sprites
+        # that came back "weird" had no surviving `ref_00.png` to compare against.
+        # Comparing an OUTPUT to the CONTROL IT WAS GIVEN is the method that
+        # cracked the mannequin bug; the diagnostics have to outlive the batch.
+        _druns = sorted([d for d in _dd_root.iterdir() if d.is_dir()])
+        for _dold in _druns[:-32]:
+            _dsh.rmtree(_dold, ignore_errors=True)
+    except Exception as _dde:  # noqa: BLE001
+        logger.info("klein pose run: diag dump skipped (%s)", _dde)
     _consistency = klein_poses.resolve_consistency_lora(oi, st_settings)
     if _consistency:
         logger.info("klein: consistency LoRA stacked (%s @ %.2f)",
@@ -1046,6 +1880,8 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
         prompts=prompts, seed=seed, models=models, steps=ksteps,
         pose_ref_end=_pose_ref_end,
         dwpose=dwpose,
+        structure_lock=_slock,
+        init_files=init_files,
         pose_lora_strength=_pls,
         consistency_lora=_consistency,
         upscale_model=upscale_model, upscale_megapixels=up_mp,
@@ -1056,6 +1892,27 @@ def _klein_submit(host: str, st_settings: dict, body: GenerateIn,
         out_width=_cw, out_height=_ch,
         consistent_seed=_consistent_skin,
         filename_prefix=f"rbmn_vnccs/{safe}/klein_sprites")
+    try:
+        import json as _gj
+        # Use THIS call's own dump dir. Two bugs avoided: (a) `_dP` is only bound
+        # inside the try above, so a failure there made this raise NameError and
+        # silently produce no graph.json; (b) pose runs FAN OUT across workers in
+        # parallel threads, each creating its own timestamped dir -- picking
+        # sorted()[-1] could write this thread's graph into another thread's
+        # directory, so a replay would mix one run's graph with another's refs.
+        _gd = _dd
+        if _gd is None:
+            raise RuntimeError("no dump dir for this run")
+        (_gd / "graph.json").write_text(_gj.dumps(api, indent=1), encoding="utf-8")
+        (_gd / "replay.json").write_text(_gj.dumps({
+            "host": host, "seed": seed,
+            "pose_files": pose_files, "identity_files": graph_identity,
+            "init_files": init_files, "face_file": face_file,
+            "body_files": body_files, "prompts": prompts,
+            "negative": neg_text, "models": models,
+        }, indent=1, default=str), encoding="utf-8")
+    except Exception as _ge:  # noqa: BLE001
+        logger.info("klein pose run: graph dump skipped (%s)", _ge)
     res = client.submit_prompt(api, timeout=120)
     extras = {"face_ref": bool(face_file),
               "pulid_file": (pulid or {}).get("file"),
@@ -1498,8 +2355,83 @@ async def upload_reference(request: Request, file: UploadFile = File(...),
     except Exception:  # noqa: BLE001
         role = "full"
     if isinstance(res, dict):
+        try:
+            _klein_ref_disk_put(res.get("name") or fname, data)
+        except Exception:  # noqa: BLE001
+            pass
         return {**res, "suggested_role": role}
     return res
+
+
+class GenViewIn(BaseModel):
+    cloner_images: list = []
+    view: str = "back"
+    width: Optional[int] = None
+    height: Optional[int] = None
+    seed: Optional[int] = None
+
+
+@router.post("/generate-ref-view")
+async def generate_ref_view(body: GenViewIn, request: Request,
+                            session: AsyncSession = Depends(get_session)):
+    """Generate a MISSING reference view (back/left/right/front) from the existing
+    references via Klein image-edit, upload it as a new reference, and return it so the
+    UI can drop it into the set (tagged with that angle)."""
+    host = await _need_host(request, session)
+    client = _client(host, timeout=120)
+    view = (body.view or "back").strip().lower()
+
+    def _fetch(im):
+        nm = str((im or {}).get("name") or "")
+        if not nm:
+            return None
+        for _ in range(2):
+            try:
+                b = client.view_image(nm, (im.get("subfolder") or ""), (im.get("type") or "input"), 120)
+                if b:
+                    _klein_ref_disk_put(nm, b)
+                    return b
+            except Exception:  # noqa: BLE001
+                pass
+        return _klein_ref_disk_get(nm)
+
+    refs = []
+    for im in (body.cloner_images or [])[:4]:
+        if isinstance(im, dict) and im.get("name"):
+            b = await asyncio.to_thread(_fetch, im)
+            if b:
+                refs.append(b)
+    if not refs:
+        raise HTTPException(status_code=400, detail="No fetchable references to generate from.")
+
+    _prompts = {
+        "back": "Rotate this character so we can see him in a standing back pose, full body view, "
+                "same clothing and body as the reference images, plain solid white background",
+        "left": "Rotate this character to show his left side profile view, standing, full body, "
+                "same clothing and body as the reference images, plain solid white background",
+        "right": "Rotate this character to show his right side profile view, standing, full body, "
+                 "same clothing and body as the reference images, plain solid white background",
+        "front": "Show this character from the front, standing straight, full body, "
+                 "same clothing and body as the reference images, plain solid white background",
+    }
+    prompt = _prompts.get(view, _prompts["back"])
+    w = int(body.width or 832)
+    h = int(body.height or 1216)
+    import uuid as _uuid
+    seed = int(body.seed) if body.seed else int(_uuid.uuid4().int % 1_000_000_000)
+    out = await asyncio.to_thread(_klein_edit_rotate, client, refs, prompt, w, h, seed)
+    if not out:
+        raise HTTPException(status_code=502, detail="View generation failed on the worker.")
+    fn = "rbmn_genview_%s_%s.png" % (view, _uuid.uuid4().hex[:8])
+    up = await asyncio.to_thread(client.upload_image, fn, out, "", True, 120)
+    nm = up.get("name", fn)
+    try:
+        _klein_ref_disk_put(nm, out)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("generate-view: made %s reference from %d refs -> %s", view, len(refs), nm)
+    return {"name": nm, "subfolder": up.get("subfolder", ""), "type": up.get("type", "input"),
+            "suggested_role": "full", "angle": view}
 
 
 def _comfy_error_detail(status: dict) -> Optional[str]:
@@ -2832,6 +3764,13 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
         identity = await _klein_identity_bytes(session, body, pinned,
                                                _resolve_lock_base(saved, body) or bool(_kcostume),
                                                costume=_kcostume)
+        # v1.199.138: view-aware identity.  Only for un-costumed runs off a
+        # single lock-base reference -- a clone run's own refs and a dressed
+        # costume reference must not be swapped out.
+        _bviews = ({} if (_kcostume or len(identity) != 1)
+                   else await _active_base_views(session, body.character_name))
+        if _bviews and len(_bviews) < 2:
+            _bviews = {}
         try:
             per_job = int(saved.get("klein_poses_per_job") or 1)
         except Exception:  # noqa: BLE001
@@ -2856,8 +3795,10 @@ async def generate_parallel(step: str, body: ParallelGenerateIn, request: Reques
         errors = []
         for h, subset, cn, csd in kchunks:
             try:
+                _ident = await asyncio.to_thread(
+                    _identity_for_pose, (subset[0] if subset else {}), _bviews, identity)
                 prompt_id, tap_map, kextras = await asyncio.to_thread(
-                    _klein_submit, h, saved, body, subset, identity, csd)
+                    _klein_submit, h, saved, body, subset, _ident, csd)
                 out.append({"prompt_id": prompt_id, "host": h, "tap_map": tap_map,
                             "label": f"{len(subset)} pose(s) · Klein" + _klein_run_suffix(kextras),
                             "pose_count": len(subset),
@@ -3402,6 +4343,29 @@ async def generate_preview(body: PreviewIn, request: Request,
             _bp = pd.get("poses") or [{}]
             _base_neutral = dict(_bp[0]) if _bp else {}
             _base_neutral["bones"] = {}
+            # v1.199.118: T-POSE FOR MESH SETS, driven by BONES, not prose.
+            # Two A-pose prompt rounds (30deg then 45deg) both came out ~10-20deg
+            # on a heavy body -- measured by the sandbox ray-gap test: the upper
+            # arms stayed WELDED to the flank fat in the reconstructed mesh, and
+            # posing fused geometry stretches membranes (the week's wings). Text
+            # cannot reliably raise a heavy man's arms; a posed REFERENCE can --
+            # that is the entire pose system's premise. So mesh-ready views now
+            # carry real T-pose rotations for the pose reference AND say T-pose.
+            # v1.199.133 SIGN CORRECTED -- MEASURED, not assumed.  Rendering the
+            # exact saved pose_data of the 2026-07-29 01:04 base run offline
+            # (pose_render is pure python+numpy) showed [0,0,-84] on upperarm_l
+            # folds the arm INTO the torso: the control Klein received for the
+            # right/left/back views was an ARMLESS blob with hands at the hips.
+            # The authored VNCCS library poses settle it -- all 12 arms-DOWN
+            # poses carry upperarm_l NEGATIVE z (-26..-69) and upperarm_r
+            # POSITIVE.  So raising is l POSITIVE / r NEGATIVE, and +-84 also
+            # overshoots: the mannequin rest stance is already a wide A-pose, so
+            # +-45 puts the hands at shoulder height (hand_y 0.201 of figure
+            # height, span 1.006) = a real T.  Renders in _diag/_wcal/.
+            _MESH_T_BONES = {"clavicle_l": [0, 0, 6], "clavicle_r": [0, 0, -6],
+                             "upperarm_l": [0, 0, 45], "upperarm_r": [0, 0, -45],
+                             "lowerarm_l": [0, 0, 0], "lowerarm_r": [0, 0, 0],
+                             "hand_l": [0, 0, 0], "hand_r": [0, 0, 0]}
             BASE_VIEWS = [
                 ("front", [0, 0, 0], "FRONT view facing forward"),
                 ("right", [0, 90, 0], "RIGHT-SIDE profile view, body turned 90 degrees to the side"),
@@ -3437,11 +4401,13 @@ async def generate_preview(body: PreviewIn, request: Request,
                 _pose = dict(_base_neutral)
                 _pose["modelRotation"] = _rot
                 if _mesh_ready:
-                    _pose["prompt"] = ("standing in a symmetric A-pose, arms lowered and held "
-                                       "out about 30 degrees away from the torso so the arms and "
-                                       "hands are clearly separated from the body, hands open, "
-                                       "legs straight and feet shoulder-width apart, full body "
-                                       "visible head to toe, " + _vp)
+                    _pose["bones"] = dict(_MESH_T_BONES)
+                    _pose["prompt"] = ("standing in a T-pose: both arms raised straight out "
+                                       "horizontally to the sides at shoulder height, like the "
+                                       "letter T, palms down, hands open, with wide empty "
+                                       "background clearly visible between each arm and the body "
+                                       "and below each arm, legs straight and feet shoulder-width "
+                                       "apart, full body visible head to toe, " + _vp)
                 else:
                     _pose["prompt"] = ("standing straight and relaxed, arms resting slightly "
                                        "away from the body, full body visible head to toe, " + _vp)
@@ -3496,6 +4462,12 @@ async def generate_preview(body: PreviewIn, request: Request,
                 _eff["klein_cleanup"] = body.cleanup
             if getattr(body, "klein_steps", None):
                 _eff["klein_steps"] = body.klein_steps
+            # v1.199.56: a Mesh-ready set is the 3D input -- a shirt bleeding into even ONE
+            # view corrupts the Hunyuan3D mesh, so FORCE strong strip cleanup for consistent,
+            # shirt-free views (unless the user explicitly picked a cleanup mode this run).
+            if _mesh_ready and not keep_c and not getattr(body, "cleanup", None):
+                _eff["klein_cleanup"] = "strong"
+                logger.info("mesh-ready base: forcing STRONG strip cleanup for clean 3D input")
             # derive = rotate the approved front; treat as keep (no strip negatives)
             neg_text, klein_cfg = klein_poses.resolve_strip_negative(_eff, keep_c or _derive)
             neg_text = klein_poses.with_anatomy_negative(neg_text)
@@ -3535,8 +4507,24 @@ async def generate_preview(body: PreviewIn, request: Request,
             # a neutral base, build the body FROM the photos (no mannequin, so the
             # mannequin's build can't override the references).  The neutral pose comes
             # from the prompt; every pose later LOCKS to this base.  One render per view.
+            # v1.199.30: NODE-FAITHFUL base -- render the SAM3D-reconstructed body and
+            # draw the character onto it (pose image = real body, identity = photo). Forces
+            # the body shape; opt-in via klein_pose_source=sam3d; falls through on any failure.
+            _sam3d_imgs = None
+            if str(saved.get("klein_pose_source") or "").strip().lower() == "sam3d":
+                try:
+                    _s3cw, _s3ch = _klein_canvas(saved, body.canvas_w, body.canvas_h)
+                    _sam3d_imgs = _klein_sam3d_base_views(
+                        host, client, saved, body, models, _views, _s3cw, _s3ch,
+                        _pv_ci, (names[0] if names else None), seed_v)
+                except Exception as _s3e:  # noqa: BLE001
+                    logger.info("klein SAM3D base failed: %s", _s3e)
+                    _sam3d_imgs = None
             use_refbase = bool(pv_body_files) and not keep_c
-            if use_refbase:
+            if _sam3d_imgs:
+                imgs_b64 = _sam3d_imgs
+                logger.info("klein: base views from SAM3D reconstructed body (%d)", len(_sam3d_imgs))
+            elif use_refbase:
                 logger.info("klein refbase (clone preview): reference-driven base from "
                             "%d body ref(s) — no mannequin", len(pv_body_files))
                 import base64 as _b64r
@@ -3660,6 +4648,19 @@ async def generate_preview(body: PreviewIn, request: Request,
                 # its build matched to the character.
                 pd["mesh"] = {**(pd.get("mesh") or {}),
                               **klein_poses.body_mesh_params(body.character_info or {})}
+                # v1.199.26: auto-fit per-limb proportions from the reference photo
+                # so this mannequin-fallback base also matches the character's build.
+                try:
+                    _af_src = next((im for im in (_pv_ci or [])
+                                    if isinstance(im, dict) and im.get("name")), None)
+                    _af_ref = (client.view_image(_af_src.get("name"),
+                                                 _af_src.get("subfolder", "") or "",
+                                                 _af_src.get("type", "input") or "input", 120)
+                               if _af_src else None)
+                except Exception:  # noqa: BLE001
+                    _af_ref = None
+                pd["mesh"] = _klein_autofit_mesh(host, saved, body.character_name,
+                                                 pd["mesh"], _af_ref, body.character_info)
                 caps = pose_render.render_pose_captures(pd, False)
                 if not caps or len(caps) != len(_views):
                     raise VNCCSError("app-side pose renderer unavailable (CharacterData missing?)")
@@ -3788,6 +4789,16 @@ async def generate_preview(body: PreviewIn, request: Request,
 # polls per-view status + streams each thumbnail as it lands; Stop keeps
 # whatever finished as a partial base version.
 # --------------------------------------------------------------------------- #
+# Base-set / mesh-ready view spec: (label, prompt-description), front FIRST.  Referenced
+# by generate_preview's set branch and the /base-set endpoints; the name was used in 6
+# places but never defined (pre-existing NameError that only fires on base-set/start).
+_BASE_VIEW_SPEC = [
+    ("front", "FRONT view facing forward"),
+    ("right", "RIGHT-SIDE profile view, body turned 90 degrees to the side"),
+    ("left", "LEFT-SIDE profile view, body turned 90 degrees to the other side"),
+    ("back", "BACK view seen from directly behind, facing away from the camera"),
+]
+
 _BASE_SET_RUNS: dict = {}      # run_id -> state dict (in-memory; UI polls it)
 _BASE_SET_TASKS: dict = {}     # run_id -> asyncio.Task (keeps a handle alive)
 
@@ -3881,7 +4892,8 @@ _MATCHPOSE_ROT = {"front": [0, 0, 0], "right": [0, 90, 0],
 
 
 async def _matchpose_derive_view(saved: dict, body: "BaseSetStartIn", identity_bytes: bytes,
-                                 label: str, mesh_ready: bool, host: str, seed: int) -> bytes:
+                                 label: str, mesh_ready: bool, host: str, seed: int,
+                                 inplace: bool = False) -> bytes:
     """v1.189: body-shape-preserving turnaround view via the PROVEN mannequin +
     MatchingPose pose path. The approved (already body-correct) base is the IDENTITY
     reference and MatchingPose rotates a neutral mannequin to the target angle -- clay
@@ -3900,10 +4912,49 @@ async def _matchpose_derive_view(saved: dict, body: "BaseSetStartIn", identity_b
     # renderer unavailable"). We only re-aim the camera via modelRotation for each view.
     neutral = dict(_bp[0] or {})
     neutral["modelRotation"] = rot
+    if mesh_ready:
+        # v1.199.118: force a REAL T-pose in the pose reference (see the
+        # _MESH_T_BONES comment in the derived-view path): override the arm
+        # chain on top of the baseline's real bones so the mannequin/clay
+        # reference shows horizontal arms instead of hoping the prompt does it.
+        # v1.199.133: SIGN CORRECTED + magnitude measured -- see the _MESH_T_BONES
+        # comment in the derived-view path.  [0,0,-84] on upperarm_l folded the
+        # arms INTO the torso; raising is l POSITIVE / r NEGATIVE, and +-45 (not
+        # 84) lands the hands at shoulder height on this rest stance.
+        neutral["bones"] = {**(neutral.get("bones") or {}),
+                            "clavicle_l": [0, 0, 6], "clavicle_r": [0, 0, -6],
+                            "upperarm_l": [0, 0, 45], "upperarm_r": [0, 0, -45],
+                            "lowerarm_l": [0, 0, 0], "lowerarm_r": [0, 0, 0],
+                            "hand_l": [0, 0, 0], "hand_r": [0, 0, 0]}
+        try:
+            logger.info("base-set T-POSE bones (v133 sign-corrected): "
+                        "upperarm_l=+45 upperarm_r=-45 clavicle_l=+6 clavicle_r=-6 "
+                        "-- view=%s", label)
+        except Exception:  # noqa: BLE001
+            pass
+    # v1.199.134: IN-PLACE T-pose.  When the identity reference is this view's OWN
+    # turnaround image (not a rotated front), identity and pose reference already
+    # agree about facing, so the only edit asked for is the arms -- and the prompt
+    # must say so, or the model drifts the body back toward front.  MEASURED
+    # 2026-07-29 02:26: deriving right/left/back FROM the T-posed front returned
+    # four FRONT-facing images even with a correct T mannequin at yaw +-90/180;
+    # identity beats the pose reference on facing, every time.
+    _tpose_txt = (
+        "standing upright in a T-pose: both arms raised straight out horizontally to "
+        "the sides at shoulder height, like the letter T, palms down, hands open, with "
+        "wide empty background clearly visible between each arm and the body and below "
+        "each arm, legs straight, feet shoulder-width apart, full body visible head to "
+        "toe. If the reference image shows the arms lowered or at the sides, RAISE "
+        "both arms into the T-pose -- the person has exactly ONE pair of arms; do not "
+        "draw any extra arms, extra hands or leftover lowered arms")
+    if mesh_ready and inplace:
+        _tpose_txt += (
+            ". Keep the body facing EXACTLY the same direction as the reference image "
+            "-- do NOT turn, rotate or re-orient the body, do not make it face the "
+            "camera; change ONLY the arms. Same camera angle, same viewpoint, same "
+            "face and same body as the reference")
     neutral["prompt"] = (
-        "standing upright in a symmetric A-pose, arms lowered about 30 degrees out from "
-        "the body so arms and hands are clear of the torso, hands open, legs straight, "
-        "feet shoulder-width apart, full body visible head to toe"
+        _tpose_txt
         if mesh_ready else
         "standing straight and relaxed, arms slightly away from the body, full body "
         "visible head to toe")
@@ -3915,7 +4966,32 @@ async def _matchpose_derive_view(saved: dict, body: "BaseSetStartIn", identity_b
     # from the character's description (body_mesh_params in _klein_submit). The
     # approved base still supplies the real body via the identity reference.
     #  - MatchingPose LoRA (its trigger is auto-prepended by _klein_submit)
-    ov = {"mesh3d_pose": False}
+    # v1.199.122: `klein_pose_input` is GLOBAL, so with Depth/Normal saved
+    # `_klein_submit` (a) replaced the MatchingPose LoRA with the RefControl one --
+    # killing the rotation mechanism this function exists for -- and (b) hit the
+    # v1.199.92 auto-enable ("klein pose run: depth mode -- auto-enabling the 3D
+    # body (rigged mesh found; 'Use 3D body' was off)"), defeating the
+    # mesh3d_pose=False on this very line.  Result, measured on 2026-07-28 15:05:
+    # the T-pose re-pose ran off a clay NORMAL render of the character's EXISTING
+    # WELDED mesh -- the feedback loop v1.189.2 forbids, and the reason the T-pose
+    # pass could never escape the weld it was built to escape.  Pin mannequin so
+    # mesh3d_pose=False actually holds.
+    ov = {"mesh3d_pose": False, "skip_meshfit": True, "klein_pose_input": "mannequin"}
+    if mesh_ready:
+        # v1.199.123: PROPORTIONS.  With v122 the MatchingPose LoRA is genuinely
+        # driving this rotation again (it had been silently replaced by the
+        # RefControl one), so the MANNEQUIN's build is now actually copied into the
+        # output -- and skip_meshfit was leaving that mannequin generic.  Measured
+        # in the same run, 2026-07-28: the turnaround stage applied
+        #   mesh_fit[Duke]: scan profile {'hip':0.313,'navel':0.301,'chest':0.264}
+        #   -> 3D-scan body fit applied {'weight':1.0,'belly':1.5,'muscle':0.498}
+        # while the T-pose derive 6 minutes later logged NO body-fit line at all.
+        # Two stages of one set describing two different bodies; Lorenzo saw the
+        # chest come back too small.  mesh_fit reads the SCAN's torso profile
+        # (character.glb) and returns scalars only -- it is NOT a render of the
+        # rigged/posed mesh, so the v1.189.2 rule (mesh3d_pose stays False; no
+        # feedback from an existing RIG) is untouched.  Mesh sets only.
+        ov.pop("skip_meshfit")
     mp = klein_poses.resolve_matchpose_lora(oi, saved)
     if mp:
         ov["klein_pose_lora"] = mp
@@ -3940,6 +5016,68 @@ async def _matchpose_derive_view(saved: dict, body: "BaseSetStartIn", identity_b
                                prompt_id, _klein_preview_timeout(8, 1))
     if not raw:
         raise VNCCSError("matchpose produced no image")
+    return raw
+
+
+# camera yaw per turnaround view -- IDENTICAL to the frontend addMeshTurnaround preset
+# Lorenzo validated as perfect (front 0, right 90, left -90, back 180).
+_MESH_TURN_ROT = {"front": [0, 0, 0], "right": [0, 90, 0], "left": [0, -90, 0], "back": [0, 180, 0]}
+
+
+async def _turnaround_view_bytes(saved: dict, body: "BaseSetStartIn", label: str,
+                                 identity_bytes: list, host: str, seed: int) -> bytes:
+    """Render ONE mesh-turnaround view (front/right/left/back) through the PROVEN SAM3D
+    real-photo turnaround path (_klein_submit, klein_pose_source forced sam3d) -- the exact
+    per-view generator Lorenzo validated as perfect (same real photo as reference AND pose,
+    identity-per-view, mirror, back inference).  Returns PNG bytes; raises on failure."""
+    import asyncio as _aio
+    from backend.services.character_studio.vnccs_native.workflows import creator_baseline_pose_data
+    rot = _MESH_TURN_ROT.get(str(label).strip().lower(), [0, 0, 0])
+    pd0 = creator_baseline_pose_data()
+    _bp = pd0.get("poses") or [{}]
+    # keep the baseline pose's bone KEYS (the app-side mannequin renderer needs joint data)
+    # but ZERO every rotation -> neutral rest A-pose; re-aim the camera per view.  The SAM3D
+    # block then REPLACES that mannequin capture with the real angle photo, so the bone pose
+    # only has to be renderable.  This mirrors the FE addMeshTurnaround exactly.
+    neutral = dict(_bp[0] or {})
+    _bones = neutral.get("bones") or {}
+    if isinstance(_bones, dict) and _bones:
+        neutral["bones"] = {k: [0, 0, 0] for k in _bones}
+    neutral["modelRotation"] = rot
+    neutral["name"] = "\U0001f9ca Mesh %s" % str(label).strip().lower()
+    gen_body = GenerateIn(
+        character_name=body.character_name, character_info=body.character_info or {},
+        nsfw=bool(body.nsfw), background=(body.background or "Green"),
+        engine="klein", base_clothing=(body.base_clothing or "strip"),
+        cloner_images=list(body.cloner_images or []),
+        face_kind=body.face_kind, style_custom=body.style_custom,
+        canvas_w=body.canvas_w, canvas_h=body.canvas_h,
+        lock_base=_resolve_lock_base(saved, body), pose_set=[neutral],
+        # v1.199.122: PIN THE VALIDATED TURNAROUND RECIPE.  `klein_pose_input` is a
+        # GLOBAL studio setting, so when Pose input was switched to Depth/Normal
+        # (v115) `resolve_depth_recipe` silently took over THIS path too.  MEASURED
+        # in logs/rbmn.log -- 2026-07-23 (the set Lorenzo validated as PERFECT):
+        #   "klein pose input: mannequin (clay=False)"
+        #   "klein pose LoRA: VNCCS_PoseStudioKlein9b_V1 @ 0.70"
+        #   "klein cleanup: cfg=1.50 steps=12"
+        # vs 2026-07-28 14:54 (same code, normal mode saved):
+        #   "klein pose input: normal (clay=True)"   <- clay from the WELDED mesh
+        #   "klein pose LoRA: flux2_klein_9b_refcontrol_normal @ 1.00"
+        #   "klein cleanup: cfg=5.00 steps=20" + "RefControl DEPTH trigger prepended"
+        # i.e. the REAL PHOTO (SAM3D replaces the capture) was being fed to a LoRA
+        # trained to obey a NORMAL MAP -- a mislabelled control signal, which v115's
+        # own guard calls "convincing garbage".  Base-set building is not a pose run:
+        # pin the mode this path was validated with.  The SAM3D block is untouched.
+        settings_overrides={"klein_pose_source": "sam3d",
+                            "klein_pose_input": "mannequin"})  # force the real-photo turnaround
+    prompt_id, _tap, _kx = await _aio.to_thread(
+        _klein_submit, host, saved, gen_body, [neutral], list(identity_bytes or []), int(seed))
+    if not prompt_id:
+        raise VNCCSError("turnaround submit returned no prompt id")
+    raw = await _aio.to_thread(_wait_first_image_bytes, _client(host, timeout=120),
+                               prompt_id, _klein_preview_timeout(8, 1))
+    if not raw:
+        raise VNCCSError("turnaround produced no image")
     return raw
 
 
@@ -4053,7 +5191,215 @@ async def _base_set_run(run_id: str, body: BaseSetStartIn, request: Request):
 
         spec = _BASE_VIEW_SPEC                      # [(label, desc), ...] front first
         use_base = bool(getattr(body, "use_active_base", False))
+        # v1.199.58: a Mesh-ready base for a CLONE must be built from the REAL reference
+        # photos (the turnaround mechanism), not by rotating the single approved base -- which
+        # drifts thinner and keeps clothing.  When we have references, force FRESH-from-refs.
+        if mesh_ready and (getattr(body, "cloner_images", None)):
+            if use_base:
+                logger.info("base-set %s: mesh-ready + refs -> ignoring approved-base anchor, "
+                            "generating FRESH from the reference photos", run_id)
+            use_base = False
         saved = (st.studio_vnccs_settings if st else None) or {}
+        # v1.199.67: a MESH-READY base is now built the EXACT way the perfect 🧊 Mesh
+        # turnaround is -- every view through _klein_submit's SAM3D real-photo path (same
+        # image as reference AND pose, identity-per-view, mirror, back inference) -- then the
+        # FRONT is auto-set as the ACTIVE base.  This replaces the old refbase/derive mesh path
+        # (front-bleed on back, identical sides, proportion drift).  Scoped to mesh_ready WITH
+        # references; the 4-view and single paths below are untouched.  Streams per view.
+        if mesh_ready and (getattr(body, "cloner_images", None)):
+            from backend.services.character_studio.vnccs_native.ingest import save_base_preview as _save_bp
+            logger.info("base-set %s: MESH-READY via TURNAROUND path (_klein_submit SAM3D per "
+                        "view) + front auto-active", run_id)
+            _id_body = GenerateIn(
+                character_name=body.character_name, character_info=body.character_info or {},
+                engine="klein", cloner_images=list(body.cloner_images or []),
+                canvas_w=body.canvas_w, canvas_h=body.canvas_h)
+            async with _asession() as _sid:
+                identity_bytes = await _klein_identity_bytes(
+                    _sid, _id_body, pinned, _resolve_lock_base(saved, body))
+
+            async def _one_turn(_idx, _label, _host_i):
+                if run.get("cancelled"):
+                    _mark(_idx, state="skipped"); return
+                _mark(_idx, state="rendering", host=_host_i)
+                try:
+                    _raw = await _turnaround_view_bytes(saved, body, _label,
+                                                        identity_bytes, _host_i, seed0)
+                    _mark(_idx, state="done", host=_host_i,
+                          b64=_b64.b64encode(_raw).decode("ascii"))
+                except Exception as _te:  # noqa: BLE001
+                    logger.warning("base-set %s: turnaround view %s failed: %s", run_id, _label, _te)
+                    _mark(_idx, state="error", error=str(_te)[:200])
+
+            await asyncio.gather(*[
+                _one_turn(_i, _lbl, hosts[_k % len(hosts)])
+                for _k, (_i, (_lbl, _dsc)) in enumerate(enumerate(spec))])
+
+            _done = [v for v in run["views"] if v.get("state") == "done" and v.get("b64")]
+            if _done:
+                _raws = [_b64.b64decode(v["b64"]) for v in _done]
+                # v1.199.119: T-POSE RE-POSE PASS. The turnaround path uses the real
+                # photo as BOTH identity and pose -- which is exactly why it is
+                # perfect for likeness and exactly why every mesh set came out with
+                # the photo's arms-down stance: three prompt rounds (30deg, 45deg,
+                # T-pose text) measured ~10-30deg and the reconstructed mesh WELDS
+                # the arms to the flanks (sandbox ray-gap test; posing fused
+                # geometry stretches membranes). Fix: keep the turnaround for
+                # identity, then re-pose EACH view to a strict T through the proven
+                # mannequin+MatchingPose path (_matchpose_derive_view, mesh_ready
+                # branch carries real T-pose bones since v118): identity ref = the
+                # SAME-ANGLE turnaround view, pose ref = T-posed mannequin at that
+                # yaw -- the model only has to raise the arms. Per-view fallback to
+                # the arms-down view on failure, loudly (mesh would weld again).
+                # klein_mesh_tpose=off disables the pass.
+                if str(saved.get("klein_mesh_tpose") or "on").strip().lower() not in (
+                        "off", "0", "false", "no", "disabled"):
+                    # v1.199.120: SEQUENTIAL, not per-view. The v119 parallel
+                    # re-pose (each turnaround view re-posed independently)
+                    # produced exactly the three failures Lorenzo reported:
+                    # (a) TWO sets of arms on the front -- the arms-down identity
+                    # ref fought the arms-up pose ref and Klein drew both;
+                    # (b) side views came out FRONT-facing -- per-view re-posing
+                    # gives contradictory angle signals; (c) a different face per
+                    # view -- four independent regenerations. Fix: re-pose the
+                    # FRONT once (its prompt now explicitly says "RAISE the arms,
+                    # exactly one pair"), then derive right/left/back FROM that
+                    # T-posed front via the same matchpose machinery -- which is
+                    # the rotation tool used as designed: one conflict point, one
+                    # face source, consistent angles.
+                    # v1.199.134: IN-PLACE mode (default).  Deriving the sides/back
+                    # from the T-posed FRONT is measured dead: on 2026-07-29 02:26 all
+                    # four views of base_7e7e371b27f0 came back FRONT-facing even though
+                    # the mannequin control was a correct T at yaw +-90/180 (opened it).
+                    # identity_00 for those runs IS the T-posed front -- its width
+                    # profile matches the front output to 3 decimals -- and identity
+                    # beats the pose reference on facing.  So T-pose each view IN PLACE:
+                    # identity = that view's OWN turnaround image, pose ref = the
+                    # mannequin T at that view's yaw.  Restores the v1.199.64-69 rule
+                    # (same real photo as BOTH identity and pose, per view) that the
+                    # derive breaks.  klein_mesh_tpose_inplace=off restores the derive.
+                    _inplace = str(saved.get("klein_mesh_tpose_inplace") or "on"
+                                   ).strip().lower() not in ("off", "0", "false", "no",
+                                                             "disabled")
+                    # v1.199.135: "edit" (default) = pure Klein image edit, no mannequin.
+                    # "matchpose" = the v120-v134 mannequin+MatchingPose path.
+                    _tengine = str(saved.get("klein_mesh_tpose_engine") or "edit"
+                                   ).strip().lower()
+                    if _tengine not in ("edit", "matchpose"):
+                        _tengine = "edit"
+                    logger.info("base-set %s: T-POSE pass [engine=%s] -- %s "
+                                "(klein_mesh_tpose=off to disable; "
+                                "klein_mesh_tpose_inplace=%s)", run_id, _tengine,
+                                ("front re-pose, then T-pose each view IN PLACE off its "
+                                 "own turnaround view" if _inplace else
+                                 "front re-pose, then derive sides/back from the T front"),
+                                ("on" if _inplace else "off"))
+                    _by = {v["view"]: r for v, r in zip(_done, _raws)}
+                    if "front" not in _by:
+                        logger.warning("base-set %s: no front view survived -- skipping "
+                                       "the T-pose pass (mesh will likely weld arms).",
+                                       run_id)
+                    else:
+                        try:
+                            async def _tp_one(_lbl, _src, _host):
+                                """T-pose ONE view.
+
+                                v1.199.135: default engine is a PURE KLEIN IMAGE EDIT
+                                (`_klein_edit_rotate` -- the same graph that generates
+                                the missing reference perspectives, which Lorenzo
+                                confirms come out with the body correct).  NO mannequin,
+                                no MatchingPose LoRA, no pose reference at all.
+
+                                MEASURED 2026-07-29 20:53 on set base_b883d5f47560, per
+                                view, against the identity image each re-pose received:
+                                the mannequin+MatchingPose path returns the MANNEQUIN's
+                                silhouette, not the character's.  Side view, width /
+                                figure-height at y=0.42/0.50/0.66/0.74 --
+                                  identity (true build): 0.339 0.343 0.202 0.172
+                                  re-pose output:        0.214 0.203 0.137 0.102
+                                  mannequin control:     0.195 0.211 0.102 0.093
+                                The output lands on the CONTROL, within ~0.02, and loses
+                                41% of the body's depth.  Garbage in, garbage out: the
+                                generic mannequin IS the garbage.  The turnaround images
+                                already carry the right body -- so ask Klein to raise the
+                                arms and change nothing else.
+
+                                klein_mesh_tpose_engine=matchpose restores the mannequin
+                                path (kept because prompt-only rounds v116-117 landed at
+                                10-30deg -- but those ran WITH an arms-down pose
+                                reference fighting the prompt, which this path has none
+                                of).
+                                """
+                                if _tengine == "matchpose":
+                                    return await _matchpose_derive_view(
+                                        saved, body, _src, _lbl, True, _host, seed0,
+                                        inplace=(_inplace or _lbl == "front"))
+                                from backend.services.character_studio.vnccs_native \
+                                    import klein_poses as _kp
+                                _pmt = _kp.tpose_edit_prompt(_lbl)
+                                _out = await asyncio.to_thread(
+                                    _klein_edit_rotate, _client(_host, timeout=120),
+                                    [_src], _pmt, int(body.canvas_w or 832),
+                                    int(body.canvas_h or 1216), int(seed0))
+                                if not _out:
+                                    raise VNCCSError("klein T-pose edit produced no image")
+                                try:    # v1.199.136: keep the pair for tpose_retry.bat
+                                    from pathlib import Path as _Pth  # noqa: PLC0415
+                                    _td = (_Pth(__file__).resolve().parents[2] /
+                                           "_diag" / "tpose" / f"{run_id}_{_lbl}")
+                                    _td.mkdir(parents=True, exist_ok=True)
+                                    (_td / "in.png").write_bytes(_src)
+                                    (_td / "out.png").write_bytes(_out)
+                                    (_td / "prompt.txt").write_text(_pmt, encoding="utf-8")
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                return _out
+
+                            _tf = await _tp_one("front", _by["front"], hosts[0])
+                            _by["front"] = _tf
+
+                            async def _tp_side(_k, _lbl):
+                                try:
+                                    return _lbl, await _tp_one(
+                                        _lbl, (_by[_lbl] if _inplace else _tf),
+                                        hosts[(_k + 1) % len(hosts)])
+                                except Exception as _se:  # noqa: BLE001
+                                    logger.warning(
+                                        "base-set %s: T-pose of %s FAILED (%s) -- "
+                                        "keeping the arms-down turnaround view for it.",
+                                        run_id, _lbl, _se)
+                                    return _lbl, None
+
+                            _sides = [l for l in ("right", "left", "back") if l in _by]
+                            for _lbl, _img in await asyncio.gather(
+                                    *[_tp_side(_k, _l) for _k, _l in enumerate(_sides)]):
+                                if _img:
+                                    _by[_lbl] = _img
+                        except Exception as _fe:  # noqa: BLE001
+                            logger.warning(
+                                "base-set %s: FRONT T-pose re-pose FAILED (%s) -- keeping "
+                                "the arms-down turnaround set; the mesh will likely WELD "
+                                "the arms to the torso again.", run_id, _fe)
+                    _raws = [_by[v["view"]] for v in _done]
+                try:  # center the subject (the turnaround output can land off-center)
+                    from backend.services.character_studio.cutout import recenter_subject_h_bytes
+                    _raws = [recenter_subject_h_bytes(r) for r in _raws]
+                except Exception:  # noqa: BLE001
+                    pass
+                _views_payload = [{"view": v["view"],
+                                   "image_b64": _b64.b64encode(_raw).decode("ascii")}
+                                  for v, _raw in zip(_done, _raws)]
+                _gm = _klein_gen_meta(
+                    saved, seed=seed0, canvas_w=body.canvas_w, canvas_h=body.canvas_h,
+                    extra={"engine": "klein-turnaround", "base_mode": "mesh"})
+                async with _asession() as _s3:
+                    ver = await _save_bp(
+                        _s3, character_name=body.character_name.strip(),
+                        image_b64=None, views=_views_payload, variant="klein",
+                        gen_meta=_gm, make_active=True)      # FRONT becomes the ACTIVE base
+                run["version"] = ver
+            run["status"] = "cancelled" if run.get("cancelled") else "done"
+            return
         _derive_method = str(getattr(body, "derive_method", None)
                              or saved.get("klein_base_derive_method") or "reference").strip().lower()
         _matchpose = _derive_method in ("matchpose", "mannequin", "match_pose", "pose")
@@ -4232,6 +5578,20 @@ async def base_set_start(body: BaseSetStartIn, request: Request,
         if await _active_base_front_bytes(session, name) is None:
             raise HTTPException(status_code=409,
                                 detail="No approved base image yet — generate a Single base first, then anchor the set on it.")
+    # v1.199.59: if the request didn't carry references (some Generate buttons don't send
+    # them), load the character's SAVED clone refs so a Mesh-ready CLONE base is built from
+    # the REAL photos (the turnaround mechanism) instead of rotating the clothed approved base.
+    if not body.cloner_images:
+        try:
+            from backend.database.models import StudioCharacter
+            from sqlmodel import select as _sel
+            _row = (await session.execute(_sel(StudioCharacter).where(StudioCharacter.name == name))).scalars().first()
+            _refs = ((((_row.manifest if _row else None) or {}).get("vnccs") or {}).get("clone") or {}).get("refs") or []
+            if _refs:
+                body.cloner_images = _refs
+                logger.info("base-set: request carried no refs; loaded %d saved reference(s) for %s", len(_refs), name)
+        except Exception as _e:  # noqa: BLE001
+            logger.info("base-set: could not load saved refs for %s: %s", name, _e)
     mode = "mesh" if str(body.base_mode or "").lower().startswith("mesh") else "set"
     spec = _BASE_VIEW_SPEC
     run_id = "bs_" + _uuid.uuid4().hex[:10]
@@ -4406,19 +5766,157 @@ async def base_set_save(run_id: str, session: AsyncSession = Depends(get_session
     return {"ok": True, "version": ver}
 
 
+class PromoteTurnaroundIn(BaseModel):
+    character_name: str
+    # [{"view": "front"|"right"|"left"|"back", "asset_id": "..."}] -- the 4 mesh
+    # turnaround sprites.  If omitted/short, the backend auto-discovers the LATEST
+    # sprite per view by its pose_name ("... Mesh <view>").
+    views: Optional[list] = None
+
+
+@router.post("/base/promote-turnaround")
+async def promote_turnaround(body: PromoteTurnaroundIn,
+                             session: AsyncSession = Depends(get_session)):
+    """Promote a mesh-turnaround pose set (front/right/left/back sprites) into a BASE
+    VERSION with the FRONT as the ACTIVE base.  The turnaround is a POSE run, so its
+    perfect real-photo-accurate views are only cataloged as sprites; this copies those
+    4 views into a base version so lock-base and mesh3d/generate (which read the ACTIVE
+    base version's views) consume the turnaround output directly.  make_active=True."""
+    from uuid import UUID as _UUID
+    from pathlib import Path as _Path
+    from backend.config import settings as _cfg
+    from backend.database.models import StudioCharacter, Asset
+    from backend.services.character_studio.vnccs_native.ingest import save_base_preview
+    import base64 as _b64
+
+    name = (body.character_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="character_name required")
+    char = (await session.execute(
+        select(StudioCharacter).where(StudioCharacter.name == name))).scalars().first()
+    if char is None:
+        raise HTTPException(status_code=404, detail="character not found")
+
+    _ORDER = ["front", "right", "left", "back"]
+
+    async def _asset(aid):
+        try:
+            return await session.get(Asset, _UUID(str(aid)))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _bytes_of(a):
+        if a is None or not getattr(a, "rel_path", None):
+            return None
+        rel = str(a.rel_path).replace("\\", "/")
+        _pth = _Path(_cfg.project_dir) / str(a.project_id) / rel
+        try:
+            return _pth.read_bytes() if _pth.exists() else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    picked = {}          # view -> asset_id (explicit from the caller)
+    for it in (body.views or []):
+        if isinstance(it, dict) and it.get("view") and it.get("asset_id"):
+            vw = str(it["view"]).strip().lower()
+            if vw in _ORDER and vw not in picked:
+                picked[vw] = str(it["asset_id"])
+
+    # auto-discover any MISSING views from the catalog sprites by pose_name; latest wins
+    if len(picked) < len(_ORDER):
+        v = (char.manifest or {}).get("vnccs") or {}
+        outs = v.get("outputs") or {}
+        best = {}        # view -> (created_at, asset_id)
+        for key, ids in outs.items():
+            if not (str(key).endswith("sprites") or str(key).endswith("sheet")):
+                continue
+            for aid in (ids or []):
+                a = await _asset(aid)
+                if a is None:
+                    continue
+                pn = str(((a.meta or {}).get("vnccs") or {}).get("pose_name") or "").strip().lower()
+                if "mesh" not in pn:
+                    continue
+                ca = str(getattr(a, "created_at", "") or "")
+                for vw in _ORDER:
+                    if vw in picked:
+                        continue
+                    if pn.endswith(vw):
+                        if vw not in best or ca >= best[vw][0]:
+                            best[vw] = (ca, str(a.id))
+        for vw, tup in best.items():
+            picked.setdefault(vw, tup[1])
+
+    if "front" not in picked:
+        raise HTTPException(status_code=409, detail=(
+            "No Mesh-turnaround FRONT view found to promote. Generate a Mesh "
+            "turnaround (front/right/left/back) first, then promote."))
+
+    # build the views payload FRONT-first so save_base_preview picks front as primary
+    views_payload = []
+    for vw in _ORDER:
+        aid = picked.get(vw)
+        if not aid:
+            continue
+        data = _bytes_of(await _asset(aid))
+        if not data:
+            continue
+        try:  # safety net: center older sprites saved before the ingest-side recenter
+            from backend.services.character_studio.cutout import recenter_subject_h_bytes
+            data = recenter_subject_h_bytes(data)
+        except Exception:  # noqa: BLE001
+            pass
+        views_payload.append({"view": vw, "image_b64": _b64.b64encode(data).decode("ascii")})
+    if not views_payload or views_payload[0]["view"] != "front":
+        raise HTTPException(status_code=409,
+                            detail="could not load the turnaround view images to promote")
+
+    st = await _settings(session)
+    _gm = _klein_gen_meta((st.studio_vnccs_settings if st else None) or {},
+                          extra={"engine": "klein-turnaround-promote",
+                                 "promoted_views": ",".join(pp["view"] for pp in views_payload)})
+    ver = await save_base_preview(
+        session, character_name=name, image_b64=None, views=views_payload,
+        variant="klein", gen_meta=_gm, make_active=True)
+    _vid = (ver or {}).get("version", {}).get("id") if isinstance(ver, dict) else "?"
+    logger.info("promote-turnaround[%s]: base version %s from %d views (%s) -> ACTIVE base",
+                name, _vid, len(views_payload), ",".join(pp["view"] for pp in views_payload))
+    return {"ok": True, "version": ver,
+            "views": [pp["view"] for pp in views_payload], "active": True}
+
+
 @router.get("/pose-defaults")
-async def pose_defaults(thumbs: bool = True):
-    """The 12 default VNCCS poses (full data for pose_set) + optional app-side
-    rendered thumbnails (best-effort — null when CharacterData is unavailable)."""
-    poses = default_pose_set()
+async def pose_defaults(thumbs: bool = True, source: str = ""):
+    """The DEFAULT pose set (full data for pose_set) + app-side silhouette thumbs.
+
+    v1.199.141: defaults to the **RBMN** set (`workflows/vnccs/RBMN_POSES.json`),
+    not the vendored VNCCS twelve.  Those are visual-novel poses authored on a slim
+    anime mannequin -- on a heavy build they twist past 120 deg and lay the arms
+    against the flank, which is where this pipeline measurably fails (IoU 0.75 vs
+    0.94-0.96 for poses inside 40 deg).  The whole grid arrives pre-selected with
+    silhouettes, so a run needs no picking.
+
+    `?source=vnccs` (or setting `klein_default_poses=vnccs`) restores the old set.
+    Names come from the pack instead of "Pose 1..12".
+    """
+    pack = _rbmn_pose_pack()
+    want = (source or "").strip().lower()
+    use_rbmn = bool(pack) and want != "vnccs"
+    if use_rbmn:
+        poses = [dict(p.get("data") or {}) for p in pack]
+        names = [str(p.get("name") or f"Pose {i + 1}") for i, p in enumerate(pack)]
+    else:
+        poses = default_pose_set()
+        names = [f"Pose {i + 1}" for i in range(len(poses))]
     out = [{"index": i,
-            "name": f"Pose {i + 1}",
+            "name": names[i],
             "prompt": (p.get("prompt") or "") if isinstance(p, dict) else "",
             "pose": p, "thumb": None} for i, p in enumerate(poses)]
     if thumbs and poses:
         try:
             from backend.services.character_studio.vnccs_native import pose_render
             pd = creator_baseline_pose_data()
+            pd["poses"] = poses            # RBMN or vendored -- thumb what we serve
             pd["export"] = {**(pd.get("export") or {}),
                             "view_width": 144, "view_height": 328,
                             "bg_color": [255, 255, 255]}
@@ -4429,7 +5927,9 @@ async def pose_defaults(thumbs: bool = True):
                     out[i]["thumb"] = c
         except Exception as e:  # noqa: BLE001 — thumbs are cosmetic
             logger.debug(f"pose-defaults thumbs unavailable: {e}")
-    return {"poses": out, "max_pose_set": MAX_POSE_SET}
+    logger.info("pose-defaults: serving %d %s poses", len(out), "RBMN" if use_rbmn else "VNCCS")
+    return {"poses": out, "max_pose_set": MAX_POSE_SET,
+            "source": "rbmn" if use_rbmn else "vnccs"}
 
 
 class CharacterSaveIn(BaseModel):
@@ -7004,6 +8504,29 @@ class Mesh3dGenerateIn(BaseModel):
     reuse_mesh: Optional[bool] = False        # v1.173.1: re-rig the stored GLB (skip mesh gen)
 
 
+def _pad_square_bytes(data):
+    """Pad a PNG to a SQUARE (letterbox with the plate/background color) before the
+    Hunyuan3D CLIP conditioning.  A portrait fed raw gets center-cropped (loses head+feet)
+    or square-resized (squashes height); padding to square keeps the FULL figure AND the
+    true proportions."""
+    try:
+        from PIL import Image
+        import io as _io
+        im = Image.open(_io.BytesIO(data)).convert("RGB")
+        w, h = im.size
+        if w == h:
+            return data
+        side = max(w, h)
+        bg = im.getpixel((0, 0))
+        canvas = Image.new("RGB", (side, side), bg)
+        canvas.paste(im, ((side - w) // 2, (side - h) // 2))
+        buf = _io.BytesIO()
+        canvas.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001
+        return data
+
+
 @router.post("/mesh3d/generate")
 async def mesh3d_generate(body: Mesh3dGenerateIn, request: Request,
                           session: AsyncSession = Depends(get_session)):
@@ -7153,7 +8676,7 @@ async def mesh3d_generate(body: Mesh3dGenerateIn, request: Request,
             vf = {}
             for vl, data in views.items():
                 fn = f"rbmn_mesh3d_{safe}_{token}_{vl}.png"
-                up = client.upload_image(fn, data, "", True, 120)
+                up = client.upload_image(fn, _pad_square_bytes(data), "", True, 120)
                 vf[vl] = up.get("name", fn)
             graph, _t1 = char_mesh.build_hunyuan3d_graph(
                 view_files=vf, models=models, seed=seed,

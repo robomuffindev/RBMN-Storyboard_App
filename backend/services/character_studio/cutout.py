@@ -236,6 +236,51 @@ def normalize_base_set(images, bg_rgb=None, pad_frac=0.06, thresh=60.0):
     return out
 
 
+def recenter_subject_h_bytes(data):
+    """Return PNG bytes with the subject's alpha bbox shifted to HORIZONTAL CENTER on
+    the SAME-size canvas.  Vertical position and scale are untouched (so body
+    proportions are preserved for 3D-mesh input) -- only left/right offset is removed.
+    Used for mesh-turnaround sprites, which the generator sometimes lands off-center
+    (usually toward the left).  Returns the input unchanged on any miss / no alpha."""
+    if not _HAVE_PIL:
+        return data
+    try:
+        import numpy as np
+        from io import BytesIO
+        im = Image.open(BytesIO(data))
+        if "A" not in im.getbands():
+            return data
+        im = im.convert("RGBA")
+        w, h = im.size
+        alpha = np.asarray(im)[:, :, 3]
+        xs = np.where(alpha.max(axis=0) > 16)[0]
+        if len(xs) == 0:
+            return data
+        x0, x1 = int(xs.min()), int(xs.max())
+        dx = (w - (x1 - x0 + 1)) // 2 - x0
+        if dx == 0:
+            return data
+        canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        canvas.paste(im, (dx, 0), im)
+        b = BytesIO(); canvas.save(b, "PNG")
+        return b.getvalue()
+    except Exception:  # noqa: BLE001
+        return data
+
+
+def recenter_subject_h(image_path, out_path):
+    """File wrapper for recenter_subject_h_bytes.  Returns True when the image moved."""
+    try:
+        from pathlib import Path as _P
+        data = _P(str(image_path)).read_bytes()
+        out = recenter_subject_h_bytes(data)
+        if out is not data:
+            _P(str(out_path)).write_bytes(out)
+        return out is not data
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def rembg_cutout(image_path: str | Path, out_path: str | Path) -> tuple[bool, Optional[str]]:
     """Subject-based background removal via rembg (U2Net), when installed.
 
