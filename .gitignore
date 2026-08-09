@@ -222,3 +222,7 @@ node_modules/
 # Lorenzo's call 2026-08-09: this is working material, not part of the product.
 # It was also the ONLY tracked file containing a C:\Users\hexum path.
 /HANDOVER_PROMPT.md
+HANDOVER_PROMPT.md
+scripts/git_cleanup.ps1
+scripts/git_history_clean.ps1
+HANDOVER_PROMPT.md
