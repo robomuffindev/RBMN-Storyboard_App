@@ -10,7 +10,8 @@ import socket
 import urllib.request
 
 SUBNET = "192.168.12."
-TOKEN = "49ae12e57c0949158b2efb4edfb0ac49"
+from helper_token import helper_token as _helper_token  # v1.276.4: token out of source
+TOKEN = _helper_token()
 
 
 def probe(ip_port):

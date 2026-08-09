@@ -58,6 +58,7 @@ export default function SettingsPage() {
     video_tail: 0,
     color_correction_enabled: false,
     restrict_explicit_content: false,
+    enable_experimental_modes: false,
     network_access: false,
     app_port: 8899,
     global_negative_prompt: '',
@@ -166,6 +167,7 @@ export default function SettingsPage() {
         video_tail: savedSettings.video_tail || 0,
         color_correction_enabled: savedSettings.color_correction_enabled === true,
         restrict_explicit_content: savedSettings.restrict_explicit_content === true,
+      enable_experimental_modes: savedSettings.enable_experimental_modes === true,
         network_access: savedSettings.network_access === true,
         app_port: savedSettings.app_port || 8899,
         global_negative_prompt: savedSettings.global_negative_prompt || '',
@@ -1286,6 +1288,33 @@ export default function SettingsPage() {
                 <p className="text-xs text-amber-400 mt-1">When enabled but empty, the built-in prompt will be used.</p>
               )}
             </div>
+          </div>
+        </section>
+
+        {/* Experimental Modes (v1.276.0) */}
+        <section className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-4">Experimental Modes</h2>
+          <div className="space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                onClick={() => setSettings((prev) => ({ ...prev, enable_experimental_modes: !prev.enable_experimental_modes }))}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  settings.enable_experimental_modes ? 'bg-amber-600' : 'bg-gray-700'
+                }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                  settings.enable_experimental_modes ? 'translate-x-5' : ''
+                }`} />
+              </div>
+              <span className="text-sm font-medium">Enable Experimental Modes</span>
+            </label>
+            <p className="text-xs text-gray-400">
+              Off by default. Reveals character-creation lanes that are parked in development and are not
+              intended for everyday use: <span className="text-gray-300">🧪 Klein</span> (1.0) and{' '}
+              <span className="text-gray-300">🚀 Klein 2.0</span> (3D statue mode). Their functionality is
+              intact and kept for later purposes such as game-asset export — this only controls whether they
+              appear in the mode picker. The live lanes (🟣 Qwen VNCCS and 🎯 Klein 3.0) are always shown.
+            </p>
           </div>
         </section>
 

@@ -60,6 +60,12 @@ export default function VideoLabPanel(): React.ReactElement {
   const [sizeFromImage, setSizeFromImage] = useState(true);
   const [turbo, setTurbo] = useState(true);
   const [spectrum, setSpectrum] = useState(false);
+  // v1.275.11: default ON. H3 rounds frames to f%17==5, LTX's upscaler can only
+  // carry f=8k+1 and FLOORS -- so a 124f clip comes back 121f, losing the tail
+  // and the matching slice of audio. Rendering one H3 step long costs 17 frames
+  // (~0.7s) and makes the trim take slack instead. Frames cannot be recovered
+  // after the fact, so this is cheap insurance, not a preference.
+  const [planUpscale, setPlanUpscale] = useState(true);
   const [refImageSize, setRefImageSize] = useState('match');
   const [firstUp, setFirstUp] = useState<UpT | null>(null);
   const [lastUp, setLastUp] = useState<UpT | null>(null);
@@ -154,7 +160,7 @@ export default function VideoLabPanel(): React.ReactElement {
       const body = {
         mode, prompt, worker_id: workerId || null, duration_s: duration,
         resolution, aspect, size_from_image: sizeFromImage,
-        turbo, spectrum, ref_image_size: refImageSize,
+        turbo, spectrum, plan_upscale: planUpscale, ref_image_size: refImageSize,
         first_frame: firstUp?.id || null, last_frame: lastUp?.id || null,
         ref_images: refImgs.map((u) => u.id),
         ref_videos: refVids.map((v) => ({ id: v.up.id, use_audio: v.use_audio })),
@@ -297,6 +303,18 @@ export default function VideoLabPanel(): React.ReactElement {
               <label style={{ ...hint, display: 'flex', gap: 4, alignItems: 'center' }}>
                 <input type="checkbox" checked={spectrum} onChange={(e) => setSpectrum(e.target.checked)} />
                 🌀 SPECTRUM speedup <span style={{ color: '#e0b05e' }}>⚠ quality may suffer</span>
+              </label>
+              <label style={{ ...hint, display: 'flex', gap: 4, alignItems: 'center' }}
+                     title={'H3 frame counts (f%17==5) and the LTX upscaler (f=8k+1) disagree, and '
+                            + 'the upscaler FLOORS -- a 124-frame clip comes back 121, losing the '
+                            + 'tail and its audio. This renders one H3 step longer so the trim '
+                            + 'takes slack instead. Costs ~17 frames of render; nothing when the '
+                            + 'count is already on the shared lattice (73, 209, 345...). '
+                            + 'Upscaling itself is still a separate manual button.'}>
+                <input type="checkbox" checked={planUpscale}
+                       onChange={(e) => setPlanUpscale(e.target.checked)} />
+                ⬆ Upscale-safe length
+                <span style={{ color: '#8a8a8a' }}>(+17f, keeps ⬆ lossless)</span>
               </label>
             </div>
           </div>

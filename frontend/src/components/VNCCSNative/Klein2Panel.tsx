@@ -18,6 +18,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
+import useLightbox from '../shared/useLightbox';
 const BASE = '/api/klein2';
 
 // ── styles (match the page) ─────────────────────────────────────────────────
@@ -233,6 +234,7 @@ function StatueViewer({ character, statueStamp, onSnapshot, onMeshState }: {
 
 // ── main panel ──────────────────────────────────────────────────────────────
 export default function Klein2Panel() {
+  const lb = useLightbox();
   const [chars, setChars] = useState<CharT[]>([]);
   const [charName, setCharName] = useState('');
   const [charErr, setCharErr] = useState('');
@@ -650,10 +652,12 @@ export default function Klein2Panel() {
               </div>
             )}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              {gen.images.map((im) => (
-                <a key={im.id} href={im.url} target="_blank" rel="noreferrer">
-                  <img src={im.url} alt={im.id} style={{ width: '100%', borderRadius: 6, border: '1px solid #2a2f3a' }} />
-                </a>
+              {gen.images.map((im, ii) => (
+                <img key={im.id} src={im.url} alt={im.id}
+                     title="Click to view large (zoom + pan)"
+                     onClick={() => lb.open(gen.images.map((x) => x.url), ii)}
+                     style={{ width: '100%', borderRadius: 6, border: '1px solid #2a2f3a',
+                              cursor: 'zoom-in' }} />
               ))}
             </div>
           </div>
@@ -663,6 +667,7 @@ export default function Klein2Panel() {
           &amp; fabric (so the statue look doesn't leak). Your extra prompt is appended after it.
         </p>
       </div>
+      {lb.node}
     </div>
   );
 }

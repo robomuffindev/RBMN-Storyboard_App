@@ -680,6 +680,22 @@ export default function Klein3Panel() {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(330px,1fr) minmax(380px,1.2fr) minmax(360px,1.1fr)', gap: 16, alignItems: 'start' }}>
+      {/* v1.276.0 — WHO AM I WORKING ON. The character was only identifiable by
+          reading the dropdown's current value, which is easy to lose track of
+          once you are three columns deep in refs and poses. */}
+      {slug && (
+        <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 10,
+                      background: '#161a22', border: '1px solid #2a2f3a', borderRadius: 8,
+                      padding: '7px 12px', position: 'sticky', top: 0, zIndex: 5 }}>
+          <span style={{ fontSize: 15, fontWeight: 700, color: '#e6e9ee' }}>
+            🎯 {chars.find((c) => c.slug === slug)?.name || slug}
+          </span>
+          <span style={{ fontSize: 11, color: '#8d97a5' }}>
+            Klein 3.0 · {chars.find((c) => c.slug === slug)?.ref_count ?? 0} refs
+            {chars.find((c) => c.slug === slug)?.has_base ? ' · ✓ base' : ' · no base yet'}
+          </span>
+        </div>
+      )}
       {/* ── column 1: character + description ── */}
       <div style={{ ...box, display: 'grid', gap: 10, alignContent: 'start' }}>
         <h3 style={{ margin: 0, fontSize: 15 }}>🎯 Character</h3>

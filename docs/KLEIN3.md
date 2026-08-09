@@ -24,6 +24,108 @@ An existing face ref is reused (no wasted render); the "🙂 Regenerate views
 re-run — the fix for a set whose faces drifted. Opt-outs: `face_first:false`,
 `regen_face:true` on POST /views/generate.
 
+## 👗 Outfit sets (v1.276.2/.3)
+
+`GET|POST /api/klein3/characters/{slug}/outfits`
+
+An outfit is a Klein edit of a VIEW reference — that view's own image as reference 1 with
+the identity refs behind it — fanned across the workers and saved back as an `outfit`-tagged
+ref. A SET is that same edit applied to every view, so a costume is consistent front, back
+and both sides. **Each view is a standalone 832×1216 PNG**; the "outfit" is metadata
+grouping them, never a merged file, so any single view can be used as a reference elsewhere.
+
+**13 slots, all optional.** Core: `outerwear · top · bottom · shoes`. Detail: `headwear ·
+eyewear · underlayer · belt · legwear · gloves · jewellery · accessories · carried`.
+
+Two rules baked into `_outfit_prompt`, both consequences of Klein having no negative node at
+cfg=1:
+
+- **Empty slots are skipped entirely.** Emitting "no hat" would put a hat on the character.
+- **Declaration order IS prompt order** — head to toe, then held items — because the slots
+  are comma-joined into one sentence and it should read like a description. `carried` gets
+  its own "and carrying …" clause, since a satchel is held rather than worn.
+
+**Variants** (`variant: "jacket off"`) are a look WITHIN an outfit: outfit → variants →
+per-view images. A scene where she takes the jacket off should not need a second wardrobe
+entry. An empty variant is the base look and sorts first.
+
+`?download=1` on the ref image route returns a meaningfully-named attachment —
+`clonejoan_red-leather_jacket-off_front.png`, not `9c848c8e8c41.png`.
+
+**As a dataset base (v1.276.3):** `GET|PUT /api/lora/datasets/{id}/base-outfit`. Opt-in and
+unset by default — an existing dataset must not change what it renders because a new option
+appeared. A chosen outfit outranks every other base tier (it is the only one named directly
+by the user), and **views it has no image for fall through to the normal base chain**, so a
+partial outfit degrades instead of failing rows. `/identity-preview` reports which image
+each view will actually start from, before a render is spent.
+
+### 📐 The anchor is gated, and here is what measuring it found (v1.275.4–.6)
+
+Run **`python scripts\k3_face_audit.py --char <slug>`** before spending renders on identity
+work. CPU-only, no GPU, no worker, free. It ArcFace-scores every ref of a character against
+the uploaded front reference AND against the face anchor, with head yaw, keypoint yaw and
+detector score alongside — so "no face found" (a back view) reads as itself rather than as
+bad likeness. Bands: different <0.25, borderline <0.30, match ≥0.45.
+
+Measured on clonejoan, four independent runs. Generated **front** views — a frontal image
+against a frontal baseline, so no profile excuse (yaw ≈ +1°):
+
+    vs the UPLOAD   0.3312   0.3592   0.3727   0.3900
+    vs the ANCHOR   0.7587   0.7644   0.7773   0.8226
+
+**Reference propagation is excellent and reproducible. Fidelity to the uploaded person is
+not. The set converges — on the wrong face.** An unmeasured anchor is a drift amplifier:
+it is copied into every downstream job, so its error becomes the floor for every view,
+strip, pose and dataset row that character will ever produce. Three anchors scored 0.4660 /
+0.3926 / 0.3499 against the upload.
+
+> **⚠⚠ RETRACTED THE SAME DAY (v1.275.8/.9). Read this before acting on the paragraph
+> above.** The conclusion drawn here — "fix the close-up and the views follow" — was WRONG.
+> The anchor was then fixed completely by cropping it out of the upload
+> (**0.4660 → 0.8440**, +81%) and **the views did not move**: mean 0.3633 → 0.3641 across
+> four runs each. Meanwhile "vs anchor" COLLAPSED from 0.76–0.82 to 0.33–0.37, which
+> reveals what the original number really was: **sibling similarity**, not propagation.
+> Anchor and views were both Klein renditions of the same references, so of course they
+> resembled each other; put a real photograph in slot 1 and the resemblance vanishes,
+> because the views were never taking their face from slot 1.
+>
+> **The actual lever was the REFERENCE LIST** (v1.275.9). `_identity_ref_paths` took every
+> `front`-tagged ref before any other tag, and view generation APPENDS a front ref every
+> run — so Klein was being handed `[upload, generated front, generated front]`: zero angle
+> information, and the app feeding its own output back in as identity evidence. A drift
+> loop. Fixed to ONE REF PER TAG, uploads first, back last:
+>
+>     3 refs, slot 3 = duplicate front   n=8   mean 0.3637   (0.3312–0.3900)
+>     3 refs, slot 3 = LEFT view         n=3   mean 0.4498   (0.4191–0.4749)
+>
+> No overlap between the groups. ⚠ `ref_count` is exposed (1–5) but **4 measured WORSE**
+> (0.4498 → 0.3797, n=2): a profile reference drags a frontal render toward profile
+> features. Default stays 3.
+>
+> Klein 3.0 identity now sits ~0.45 on a good frontal. It is still NOT a likeness
+> guarantee — that is the LoRA lane (dorian 0.8118 vs a 0.1211 no-LoRA control). Treat
+> Klein 3.0 output as staging and dataset material.
+
+The fixes listed below are all still correct and still live; only the causal story was
+wrong, and it is kept rather than deleted because a recorded wrong turn is worth more than
+a deleted one.
+
+Consequences now in the code:
+
+- **Back views are no longer identity references.** `_identity_ref_paths` ranked by tag and
+  capped at 3; a fresh character has exactly two face-bearing refs, so slot 3 went to
+  `back` — the back of a head, with no face in it at all. Back rows sort LAST now. A 2-ref
+  list beats a 3-ref list padded with a faceless one.
+- **`_ANCHOR_MIN = 0.45`** (= `likeness.ARC_MATCH`, chosen over the borderline band on
+  purpose). A fresh anchor below the bar buys ONE more render on a different seed and the
+  better of the two wins; the loser is retagged `other`, never deleted, and only if this
+  run produced it.
+- **Selection is BEST-by-score, not NEWEST**, for both reuse and forced regen. Newest is
+  not a quality signal — `existing[-1]` would have reused a 0.3926 anchor while a 0.4660
+  one sat in the same char.json. `anchor_score` and `anchor_source` publish on the job
+  status (`"reused (best of N)"` / `"generated (N render(s))"` /
+  `"kept incumbent (beat N fresh render(s))"`).
+
 1. **Create a character**, upload reference images, tag them (front / back / left / right /
    face / outfit / other). The **front** ref is the default base.
 2. **🪄 Analyze references (LLM)** — sends up to 4 refs (front+face first) through the

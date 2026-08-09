@@ -106,6 +106,34 @@ def _frames(seconds: float) -> int:
     return f + (5 - (f % 17)) % 17
 
 
+def _ltx_frames(n: int) -> int:
+    """What the LTX 2.3 upscaler will hand back for an n-frame clip.
+
+    LTX's VAE compresses time by 8, so it can only represent frame counts of
+    the form 8k+1 and floors to the largest one that fits. Measured 2026-08-09:
+    a 124-frame H3 render came back as 121 (= 8*15+1), losing 3 frames off the
+    TAIL along with the matching slice of audio."""
+    return 8 * ((max(1, int(n)) - 1) // 8) + 1
+
+
+def _frames_for_upscale(target: int) -> int:
+    """The H3-legal frame count to RENDER so that, after the upscaler floors it
+    to 8k+1, at least `target` frames survive.
+
+    H3 wants f%17==5 and LTX wants f=8k+1; the two agree only every 136 frames
+    (73, 209, 345, ...), so snapping the user's duration to the shared lattice
+    would mean 5 seconds simply does not exist. Instead: render one H3 step
+    longer as needed and trim back afterwards. This is already the house
+    pattern — `video_tail` + `trim_video()` do exactly this for LTX overshoot
+    elsewhere in the app."""
+    f = int(target)
+    for _ in range(64):                      # 64 * 17 frames is ~45s of video
+        if _ltx_frames(f) >= target:
+            return f
+        f += 17
+    return f
+
+
 def _dims(preset: str, aspect: str) -> tuple[int, int]:
     mp = RES_PRESETS.get(preset, 0.9)
     if aspect == "16:9" and mp in _TABLE_169:
@@ -424,7 +452,17 @@ def _build_upscale_graph(video_name: str, largest: int, prompt: str = "") -> dic
                           "temporal_overlap_cond_strength": 0.5,
                           "cond_image_strength": 1.0,
                           "horizontal_tiles": 1, "vertical_tiles": 1,
-                          "spatial_overlap": 1}}
+                          "spatial_overlap": 1,
+                          # v1.275.3: /object_info calls these four OPTIONAL, but
+                          # LTXVLoopingSampler.sample() takes adain_factor as a
+                          # positional arg with no default — omitting it raised
+                          # "missing 1 required positional argument" AT RUNTIME,
+                          # after validation passed. The source workflow's own
+                          # widget values are 0 / 0 / 1000 / "0"; send all four.
+                          "adain_factor": 0.0,
+                          "guiding_start_step": 0,
+                          "guiding_end_step": 1000,
+                          "optional_cond_image_indices": "0"}}
     g["17"] = {"class_type": "LTXVSpatioTemporalTiledVAEDecode",
                "inputs": {"vae": ["4", 0], "latents": ["16", 0],
                           "spatial_tiles": 4, "spatial_overlap": 4,
@@ -441,6 +479,53 @@ def _build_upscale_graph(video_name: str, largest: int, prompt: str = "") -> dic
                           "save_output": True},
                "_meta": {"title": "upscaled combine"}}
     return g
+
+
+def _trim_to_frames(fp: Path, want: Optional[int]) -> Optional[dict]:
+    """Cut a finished mp4 back to exactly `want` frames, audio included.
+
+    v1.275.7. The other half of `_frames_for_upscale`: we deliberately rendered
+    long so the upscaler's 8k+1 flooring could not eat the tail, and this puts
+    the clip back to the length that was actually asked for. Re-encodes rather
+    than stream-copying because a frame-exact cut cannot land on a keyframe by
+    luck. Returns None when there is nothing to do, and NEVER raises — a clip
+    that failed to trim is still a clip, and losing it to a tidying step would
+    be the worst possible trade."""
+    if not want or not fp.exists():
+        return None
+    try:
+        import subprocess
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-count_frames", "-show_entries", "stream=nb_read_frames,r_frame_rate",
+             "-of", "json", str(fp)],
+            capture_output=True, text=True, timeout=300)
+        info = json.loads(probe.stdout or "{}").get("streams", [{}])[0]
+        have = int(info.get("nb_read_frames") or 0)
+        num, _, den = (info.get("r_frame_rate") or "24/1").partition("/")
+        fps = float(num) / float(den or 1)
+        if have <= int(want) or fps <= 0:
+            return {"trimmed": False, "frames": have, "wanted": int(want),
+                    "note": "nothing to cut"}
+        dur = int(want) / fps
+        out = fp.with_suffix(".trim.mp4")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(fp),
+             "-frames:v", str(int(want)), "-t", f"{dur:.6f}",
+             "-c:v", "libx264", "-crf", "17", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "192k", str(out)],
+            capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0 or not out.exists():
+            logger.warning("h3 trim failed (%s), keeping the untrimmed clip: %s",
+                           r.returncode, (r.stderr or "")[-400:])
+            return {"trimmed": False, "frames": have, "wanted": int(want),
+                    "error": (r.stderr or "")[-200:]}
+        out.replace(fp)
+        return {"trimmed": True, "from_frames": have, "frames": int(want),
+                "fps": round(fps, 3), "duration_s": round(dur, 3)}
+    except Exception as e:  # noqa: BLE001 — tidying must never destroy a render
+        logger.warning("h3 trim skipped: %s", e)
+        return {"trimmed": False, "error": str(e)[:200]}
 
 
 # ── job runner ───────────────────────────────────────────────────────────────
@@ -490,8 +575,9 @@ def _run_job(jid: str) -> None:
                 dest = _VID_DIR / f"{jid}.mp4"
                 with urllib.request.urlopen(url, timeout=600) as resp:
                     dest.write_bytes(resp.read())
+                trimmed = _trim_to_frames(dest, j.get("trim_to_frames"))
                 _set(jid, status="done", video=dest.name,
-                     box_file=v["filename"],
+                     box_file=v["filename"], trimmed=trimmed,
                      elapsed_s=round(time.time() - t0, 1))
                 return
         raise TimeoutError(f"no result after {int(timeout)}s")
@@ -560,12 +646,22 @@ async def overview():
         "resolutions": list(RES_PRESETS.keys()),
         "aspects": ["16:9", "9:16", "1:1"],
         "defaults": {"resolution": "720p", "aspect": "16:9", "turbo": True,
-                     "spectrum": False, "ref_image_size": "match"},
+                     "spectrum": False, "ref_image_size": "match",
+                     "plan_upscale": True},
         "notes": {
             "sage": "Sage attention is ON via --use-sage-attention in every "
                     "box's .bat — the workflow's PATCH SAGE groups stay off.",
             "spectrum": "SPECTRUM speed enhancer: extra speedup on top of "
                         "turbo, quality may suffer.",
+            "plan_upscale": "ON by default. H3 rounds frames to f%17==5 and "
+                            "the LTX upscaler can only carry f=8k+1, flooring "
+                            "to fit — so a 124-frame clip returns 121, losing "
+                            "the tail and its audio. This renders one H3 step "
+                            "longer (+17 frames, ~0.7s; nothing when already on "
+                            "the shared lattice 73/209/345) and the upscale is "
+                            "trimmed back to the exact length. Frames cannot be "
+                            "recovered after the render — running the upscale "
+                            "itself is still a separate manual action.",
             "upscale": "Renders default to 720p; ⬆ Upscale re-details a "
                        "finished clip with the LTX 2.3 enhancer (22B GGUF + "
                        "detailer lora, 3-step refine) up to a chosen max side "
@@ -627,6 +723,18 @@ class GenerateIn(BaseModel):
     ref_audios: List[str] = []             # upload ids (≤3)
     ref_image_size: str = "match"          # match|max
     label: str = ""
+    plan_upscale: bool = True              # v1.275.11 — DEFAULT ON (Lorenzo's
+                                           # call). Renders one H3 step long so
+                                           # the LTX upscaler's 8k+1 flooring
+                                           # eats slack instead of the tail,
+                                           # then trims the upscale back to the
+                                           # exact length. Costs 17 frames
+                                           # (~0.7s) and nothing when already on
+                                           # the lattice; the alternative is
+                                           # discovering frames are missing
+                                           # AFTER the render, when they cannot
+                                           # be recovered. Upscaling itself is
+                                           # still a separate manual action.
 
 
 @router.post("/generate")
@@ -684,7 +792,12 @@ async def generate(body: GenerateIn):
                                   body.resolution)
     else:
         gw, gh = _dims(body.resolution, body.aspect)
-    frames = _frames(max(1.0, min(150.0, body.duration_s)))
+    want_frames = _frames(max(1.0, min(150.0, body.duration_s)))
+    # v1.275.7: with an upscale planned, render one H3 step long so the LTX
+    # 8k+1 flooring eats slack instead of the tail. Costs 17 frames (~0.7s of
+    # render) and nothing at all when the count is already on the shared
+    # lattice (73, 209, 345, ...).
+    frames = _frames_for_upscale(want_frames) if body.plan_upscale else want_frames
     seed = body.seed if body.seed is not None else int(time.time()) % 2**31
 
     jid = uuid.uuid4().hex[:12]
@@ -703,7 +816,11 @@ async def generate(body: GenerateIn):
                     "images": len(ref_imgs), "videos": len(ref_vids),
                     "audios": len(ref_auds)},
            "status": "queued", "error": None, "elapsed_s": 0,
+           "plan_upscale": bool(body.plan_upscale),
+           "target_frames": want_frames,
            "at": time.strftime("%Y-%m-%d %H:%M:%S"), "_graph": graph}
+    if body.plan_upscale and frames != want_frames:
+        job["label"] = f"{job['label']} (+{frames - want_frames}f for upscale)"
     with _LOCK:
         _JOBS[jid] = job
     _jobs_save()
@@ -747,6 +864,12 @@ async def upscale(jid: str, body: UpscaleIn):
            "refs": {"first": False, "last": False, "images": 0,
                     "videos": 1, "audios": 0},
            "status": "queued", "error": None, "elapsed_s": 0,
+           # v1.275.7: the source rendered long on purpose — trim the UPSCALE
+           # back to the length that was actually asked for. Only set when the
+           # source opted in, so nothing that rendered before this exists gets
+           # silently shortened.
+           "trim_to_frames": (src.get("target_frames")
+                              if src.get("plan_upscale") else None),
            "timeout_s": 10800,
            "at": time.strftime("%Y-%m-%d %H:%M:%S"), "_graph": graph}
     with _LOCK:

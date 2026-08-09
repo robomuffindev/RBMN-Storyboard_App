@@ -198,6 +198,8 @@ export interface AppSettings {
   video_tail?: number;
   color_correction_enabled?: boolean;
   restrict_explicit_content?: boolean;
+  /** v1.276.0 — show parked dev lanes (Klein 1.0 / Klein 2.0) in the UI. */
+  enable_experimental_modes?: boolean;
   global_negative_prompt?: string;
   // Export transition settings
   export_transition_type?: string;

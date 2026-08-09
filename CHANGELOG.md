@@ -1,3 +1,579 @@
+## v1.276.6 -- 🧪 The history clean, REHEARSED (2026-08-09)
+
+Not predicted — run. A throwaway clone in a sandbox, filter-repo applied, results measured.
+The script now carries these numbers instead of my estimates:
+
+    tracked files   1496  ->  544
+    .git          239 MB  ->  5.1 MB     (fresh-clone size; the working repo's
+                                          880 MB includes loose objects + reflogs)
+    commits          137  ->  137        ALL history preserved
+    purged from ALL history: _diag · VNCCS302 · rbmn_v1.126_restore.zip ·
+                             apply_refbase_1114.py · HANDOVER_PROMPT.md
+    still present: run.py · run.bat · install.bat · requirements.txt ·
+                   backend/main.py · frontend/package.json · README + Screenshots
+
+**HANDOVER_PROMPT.md dropped** (Lorenzo): it is internal working material — LAN layout, box
+roles, session notes — not part of the product. Removing it also closed the only personal
+filesystem exposure in the repo: **it was the sole tracked file containing a
+`C:\Users\hexum` path, and after the purge that count is 0.**
+
+Two robustness fixes the dry run earned:
+- **PATH-proofing.** `pip install git-filter-repo` drops the launcher into a Scripts folder
+  git may not have on PATH, so "installed" and "git can see it" are different questions.
+  The script now falls back to importing the module and running its `.py` directly, trying
+  `python` / `py` / `python3`. Verified: `import git_filter_repo` resolves to a real file,
+  which is exactly the fallback path.
+- **`$args` renamed `$frArgs`** — `$args` is a PowerShell automatic variable and assigning
+  to it is unreliable.
+
+Also swept the files that WOULD be published for internal detail. Private `192.168.x` LAN
+addresses appear in a handful of source defaults and docs; those are RFC1918, not routable,
+and not worth alarming anyone over. No worker hostnames, no absolute install paths.
+
+⚠ `--path` removes PATHS, not text: the old helper token still sits in 2 commits inside
+files that are KEPT. Moot — it is being rotated. A `--replace-text` pass would be the fix if
+it ever mattered.
+
+## v1.276.5 -- 🧹 History clean: only what installs and runs the app goes to GitHub (2026-08-09)
+
+**The repo is PUBLIC** — verified by fetching it anonymously; GitHub reports "Public". That
+turned the audit's second finding from a size question into a content one, because `_diag/`
+is tracked and holds ~653 images, and `_diag/last_pose_run/*/identity_*.png` are the literal
+reference images each run used. Many of those runs used STRIPPED bases: the replay.json
+prompts read "REMOVE every garment ... ONLY plain WHITE FORM-FITTING briefs", and opening
+one confirmed it — an underwear character base. Nothing explicit and nobody real, but not
+something to publish under a dev account by accident.
+
+**Why it was ever tracked: it was never a decision.** `.gitignore` had `scripts/_diag/` and
+never the ROOT `_diag/`, so the 1 MB one was ignored and the 343 MB one was not.
+
+Lorenzo's call: only what is needed to install and run the app goes up, and VNCCS302 does
+not. Measured, exactly:
+
+    BEFORE                 1496 files   372.52 MB
+    drop _diag/             683 files   ~343 MB    dev diagnostics + stripped bases
+    drop VNCCS302/          266 files   ~33 MB     third-party reference repo
+    drop restore .zip + a one-shot patch script
+    ------------------------------------------------------------------
+    DROPPED                 951 files   359.66 MB
+    AFTER (the app)         545 files    12.85 MB
+
+**Verified safe before proposing the deletion:** nothing imports or reads `VNCCS302`, and
+the app only ever WRITES to `_diag` (it recreates the folder), so no fresh install depends
+on either. Also caught and reverted a mistake of my own — I had put `/Screenshots/` in
+.gitignore, but README.md embeds `Screenshots/robomuffin_idea_factory_screenshot.webp`;
+dropping it would have broken the repo's front page. Two files, 0.28 MB, kept.
+
+`scripts/git_history_clean.ps1` builds a CLEAN CLONE in a sibling folder and purges those
+paths from every commit there. **It never touches the working repo and never pushes.** It
+verifies the purge (`git log --all -- <path>` must return nothing) and refuses to declare
+success if anything survives. Requires `pip install git-filter-repo`; dry-run by default.
+Pure ASCII, single-line statements, and `$args` renamed to `$frArgs` — `$args` is a
+PowerShell automatic variable and assigning to it is unreliable.
+
+**On the token, Lorenzo was right and the earlier advice is withdrawn:** he is rotating it,
+and a rotated credential in history is archaeology rather than a vulnerability. History
+rewriting is being done for the IMAGES, not the token. What made it worth doing now is
+timing — he has never pushed, so there is no remote history to coordinate and no
+collaborator to force a rewrite onto. That is the cheapest this operation will ever be.
+
+## v1.276.4 -- 🔐 Pre-push audit: a real credential out of the source, and 360 MB untracked (2026-08-09)
+
+Lorenzo is about to push to origin for the first time in weeks and asked for a .gitignore
+audit. The audit found one genuine credential leak and a repository that is 97% junk.
+
+### The credential
+
+**The worker-helper token `49ae…ac49` was hard-coded as a DEFAULT in seven tracked files** —
+`backend/api/lora_train.py` (×3) plus `checkpoint_score / fetch_ckpt / fetch_pick /
+find_helper / lora_test / train_report`. It is already in two local commits, so .gitignore
+could never have helped: **the only reason it is not on GitHub already is that he has not
+pushed in weeks.**
+
+Now resolved out of the source by `scripts/helper_token.py`, first hit wins:
+`RBMN_HELPER_TOKEN` env → `scripts/helper_token.txt` (gitignored) → the forge settings
+store → empty. Empty is a legitimate answer that surfaces as a helper 401, which is a much
+better failure than silently authenticating with a token that lives in git. Every previous
+use was a *default*, so behaviour is unchanged — verified: token resolves (32 chars),
+backend restarted to v1.276.4, helper `/health` still answers `1.219.0 ZOMAIN01`.
+
+**⚠ It remains in git history.** Since the fix is only forward-looking, **rotate the token
+on the boxes** — that makes the historical value worthless and costs one edit.
+
+Two false alarms worth recording so nobody re-raises them: `sk-ant-…` and `AIza…` appear in
+three commits each, but they are `placeholder="sk-ant-..."` strings in the Settings UI. And
+`.env` has never been committed.
+
+### The bulk
+
+    _diag/       683 tracked files    327.80 MB     <- root, never ignored
+    VNCCS302/    266 tracked files     31.53 MB     <- third-party reference repo
+    backend + frontend + scripts + docs + workflows ~11 MB   <- the actual application
+
+`scripts/_diag/` was ignored; the ROOT `_diag/` — the far bigger one — never was.
+`.gitignore` gained the root `_diag/`, `VNCCS302/`, archives, 3D/model binaries
+(glb/fbx/safetensors/gguf/…), media, `frontend/dist*/`, secret-shaped filenames, and
+`/C:*` for the stray literal-Windows-path file sitting in the repo root.
+
+**A .gitignore rule does not untrack an already-committed file** — verified both ways here:
+the new rules correctly ignore `_diag/BRANDNEW.glb`, and correctly do NOT ignore
+`_diag/mirror/chardata.tgz`, because the latter is tracked. So `scripts/git_cleanup.ps1`
+reports and (with `-Apply`) untracks them, leaving every file on disk. Pure ASCII,
+single-line statements, dry-run by default. **Not executed here on purpose**: mutating his
+git index is his call, and this repo has a standing rule against driving git remotely.
+
+⚠ That shrinks FUTURE commits only. `.git` is 880 MB because the binaries are in past
+commits; shrinking the remote needs a deliberate `git filter-repo` on a fresh clone.
+
+## v1.276.2/.3 -- 👗 The full wardrobe: 13 slots, variants, and outfits as a dataset base (2026-08-09)
+
+Lorenzo: "give me all the ones you suggest -- maximize the ability to create outfits. If
+people want to do it simply they can, but if they want more detail, this gives them the
+avenue." Plus: outfits should have variants, and a dataset should be able to train from one.
+
+### 13 slots, 4 of them core
+
+    core  outerwear · top · bottom · shoes
+    more  headwear · eyewear · underlayer · belt · legwear · gloves · jewellery ·
+          accessories · carried
+
+Every slot optional; empty ones are skipped ENTIRELY rather than emitting "no hat", which
+at cfg=1 with no negative node would put a hat on the character. `group` drives the UI so
+the simple path is still four fields. **The declaration order IS the prompt order** -- head
+to toe, then held items -- because the slots get comma-joined into one sentence and it
+should read like someone describing what they can see, not like a form dump. `carried` gets
+its own "and carrying …" clause, since a satchel is held, not worn. All six original keys
+are preserved, so outfits saved before this load and re-render identically (verified: the
+existing "Red Leather" came back as the base variant with its 4 slots intact).
+
+**Measured on a 7-slot render** (`scripts/_diag/variant_cmp.png`): glasses, tank, brass-buckle
+belt, jeans, boots, hoop earrings + cross necklace, and the satchel on the shoulder -- every
+named item present, same face, same pose, jacket correctly absent.
+
+### Variants — a look WITHIN an outfit
+
+`variant: "jacket off"`. An outfit is a wardrobe entry; a variant is one look within it; each
+variant has one standalone image per view. Three levels because that is what the thing
+actually is -- a scene where she takes the jacket off should not need a second wardrobe
+entry. Empty variant = the base look, and the list route sorts base first (the others are a
+change TO it, so anywhere else reads wrong). Download filenames carry it:
+`clonejoan_red-leather_jacket-off_front.png`.
+
+### An outfit can be the dataset's base (v1.276.3)
+
+His call: "we should still use our base image already set, but have the option to select an
+outfit base." So it is **opt-in and returns None by default** -- an existing dataset keeps
+rendering off exactly the base it always did, which is the only safe direction for a set
+that may already be half-rendered. `GET|PUT /api/lora/datasets/{id}/base-outfit`, threaded
+through all seven `_base_for_view` call sites in lora.py. A chosen outfit outranks every
+other tier (it is the only one the user named directly), and **views the outfit has no image
+for fall through to the normal base chain** -- a partial outfit degrades instead of failing
+rows.
+
+**Verified live on his real 65-image dataset**, then reverted so nothing was left changed:
+
+    front    front outfit 'Red Leather'        <- outfit
+    left     left outfit 'Red Leather'         <- outfit
+    back     back reference (generated)        <- fell through, outfit has no back
+    right    right reference (generated)       <- fell through
+
+`_identity_preview` reports `base_outfit_label` alongside the per-view labels, so which image
+each row will start from is answerable BEFORE a render is spent -- the whole point of that
+instrument (v1.260's "the render used a base nobody meant it to use").
+
+## v1.276.1 -- Outfit views are standalone images, and now they have names (2026-08-09)
+
+Lorenzo asked whether an outfit set comes out as two separate images "so those single
+images can be used as reference elsewhere". **It already did** — the side-by-side in the
+report was a diagnostic composite, not the output. Each view is written as its own
+832x1216 PNG, its own `outfit`-tagged ref with its own id and URL; the "outfit" is metadata
+(`{name, view, slots, extra}`) grouping them, never a merged file. That was deliberate and
+it is worth stating plainly in the docs rather than leaving him to infer it from a picture.
+
+What was actually missing was a way to GET one out. `?download=1` on the ref image route
+now returns an attachment under a meaningful filename built from the character, the outfit
+and the view: **`clonejoan_red-leather_front.png`** instead of `9c848c8e8c41.png`. Verified
+on the live route -- `content-disposition: attachment; filename="clonejoan_red-leather_front.png"`.
+A file named after a hex id is useless the moment it leaves this app, which is exactly what
+"use it as a reference elsewhere" means. Falls back to the plain id if anything about the
+name lookup fails; a nice filename is a bonus, never a blocker.
+
+Note for the reference lanes: outfit refs already sit in `_identity_ref_paths`' tag order
+(front · face · left · right · **outfit** · other · back), so they are reachable as Klein
+references without any further plumbing -- and because that function takes ONE ref per tag
+and caps at 3, an outfit ref cannot crowd out the identity refs by accident.
+
+## v1.276.0 -- 🎭 One character list, one lightbox, and Experimental Modes (2026-08-09)
+
+Lorenzo's UI pass. The headline bug turned out to be architectural, and two of his separate
+complaints had the same root cause.
+
+### ⭐ THE ROOT CAUSE: two disjoint character universes
+
+He made a character in Klein 3.0, went to the Clothes tab, and it was not in the list. It
+was also missing from the /studio page. Neither was a filter bug:
+
+    DB universe    studio_characters rows, UUID-keyed, images as Asset records,
+                   sprite shards on a VNCCS worker. Written by VNCCS Native and
+                   Klein 2.0. Read by /studio, the Clothes tab, /studio/vnccs/catalog.
+    DISK universe  _libraries/klein3/chars/<slug>/char.json, slug-keyed, files on
+                   the app machine. Written by Klein 3.0 and 🧬 Text 2 Image. Read
+                   by Klein 3.0, Charsheet, LoRA and the 🏠 Studio Hub.
+
+**Nothing in klein3.py has ever written a StudioCharacter row, and the catalog skips any
+row without `manifest["vnccs"]`.** Those two facts are the whole bug. The two halves of the
+app did not know about each other's characters.
+
+Fixed with an **adapter, not a sync** (his call): `backend/api/characters_all.py`,
+`GET /api/characters`, merging both stores with polymorphic self-describing IDs —
+`k3:dorian` / `db:<uuid>`, and `parse_ref()` treats a bare value as a UUID so nothing
+written before the prefix existed is invalidated. Every character keeps ONE home. Mirroring
+rows between the stores would have been quicker and would have created two sources of truth
+that drift apart silently. **Verified live: 22 characters — 3 klein3 + 19 DB — in one call.**
+
+### 👗 Klein 3.0 dresses characters the Klein 3.0 way
+
+The Clothes tab dresses a StudioCharacter using sprite shards on a worker; a Klein 3.0
+character is a folder of tagged images with no DB row. Threading a second identity type
+through the asset loader, sprite picker and costume writer is a lot of blast radius around
+a path that currently works. So Klein 3.0 got outfit sets built from the machinery it
+already has and that is already proven: `GET|POST /api/klein3/characters/{slug}/outfits`.
+An outfit is a Klein edit of a view reference fanned across the workers by
+`_parallel_klein_edits` and saved as an `outfit`-tagged ref; a SET is that edit applied to
+every view, so a costume is consistent front/back/left/right. Named slots (top, bottom,
+shoes, outerwear, headwear, accessories), affirmative prompts only, every garment NAMED --
+Klein has no negative node at cfg=1 and ignores category words.
+**Verified live on clonejoan:** "Red Leather" across front+left, 2/2, and the render shows
+the cropped red biker jacket with silver zips, white ribbed tank, black slim jeans and
+black ankle boots, identity holding across both views.
+
+### 🔍 One lightbox, with zoom and pan
+
+Ten separate image viewers existed; exactly ONE had zoom and pan, and it was inlined and
+unexported inside VNCCSNativePage while nine other places rendered a flat "big picture on
+a dark background". Now `components/shared/ImageLightbox.tsx` (+ a `useLightbox()` hook so
+wiring a panel is two lines). It keeps the subtle bit every other copy got wrong: React's
+`onWheel` is PASSIVE, so its preventDefault silently does nothing and the page scrolls
+behind the overlay — the listener has to be registered non-passively on the element.
+`p2Shared.ImageLightbox` now re-exports it, which upgraded **nine call sites with no
+call-site change** (the shared component accepts `url` as an alias for `src` precisely so
+that swap could be a one-line re-export). Newly wired where there was no viewer at all:
+🧬 Text 2 Image, 🪪 Character Sheet, 🏠 Studio Hub, 🚀 Klein 2.0, and the new grid.
+
+### ⚙ Experimental Modes (OFF by default)
+
+`enable_experimental_modes` on app_settings, all 8 touchpoints (model, migration, both
+Pydantic schemas, both builders, PUT, import). When off, **🧪 Klein (1.0) and 🚀 Klein 2.0
+disappear from the mode picker** — all three places it is duplicated. Their code is
+untouched and still works; Lorenzo wants them for later (game-asset export), just not in
+front of someone making a character today. If the lane you are sitting in gets hidden, the
+picker falls back to Klein 3.0 rather than stranding you on an invisible tab.
+
+### 🎭 /studio rebuilt in the Studio Hub's image
+
+`UnifiedCharacterGrid.tsx` replaces the old DB-only grid: one card per character = its whole
+pipeline, tri-state checklist chips carrying real numbers ("views 3/4 (missing left, back)",
+not "75%"), source badge, live 20s poll, source filter + name search. Cards are
+**capability-aware** — a Klein 3.0 character offers views/outfits/dataset/sheet, a VNCCS one
+offers clothes/emotions/details — rather than showing every button and letting some fail.
+Also: **New/Clone now only appear in Qwen VNCCS mode** (they seed a VNCCS character on the
+worker, so they mean nothing elsewhere), and Klein 3.0 gained a **sticky character-name
+header** so you can always see who you are working on from three columns deep.
+
+## v1.275.11 -- ⬆ Upscale-safe length is ON by default, and it has a UI toggle (2026-08-09)
+
+Lorenzo's call: "`plan_upscale` at render time so we dont get issues with cutting off
+frames." Default flipped to **True**, in the Pydantic model, in `/overview`'s advertised
+defaults, and as a real checkbox in the Video Lab -- **"⬆ Upscale-safe length (+17f, keeps
+⬆ lossless)"**, next to ⚡ Turbo and 🌀 SPECTRUM, with the whole frame-lattice explanation
+on hover. It is NOT a backend-only flag; a default nobody can see or switch off in the UI is
+the thing he has twice gone looking for and not found.
+
+The reasoning, restated because the asymmetry is the whole argument: the flag costs **17
+frames of render (~0.7s), and zero when the count is already on the shared lattice**
+(73/209/345). Not setting it costs **frames that cannot be recovered** -- once a 124-frame
+clip exists, the 3 the upscaler will floor away are simply gone, along with the matching
+slice of audio, and you only find out after spending the render. Cheap insurance against an
+irreversible loss is not a preference.
+
+**This does NOT make upscaling automatic** -- that stays a separate manual button, per his
+reasoning: an upscale is ~8 minutes of compute and you do not spend it on a take you may
+reject. `plan_upscale` only changes how many frames get RENDERED, so the option stays open.
+
+## v1.275.9/.10 -- ⭐ THE REFERENCE LIST WAS THE LEVER ALL ALONG (2026-08-09)
+
+Chasing the anchor found the real bug three feet to the left of it. `_identity_ref_paths`
+took every `front`-tagged ref before it considered any other tag -- and views/generate
+APPENDS a new front ref every time it runs. Measured on clonejoan after a day of
+experiments: **nine front refs, and the three slots Klein actually received were
+[upload, generated front, generated front].** Zero angle information, and the app feeding
+its own lower-fidelity output back in as identity evidence. **That is a drift loop, and it
+compounds every single time the button is pressed.** Any character more than a couple of
+runs old was quietly being described to Klein by copies of itself.
+
+Fixed: **one ref per tag, uploads first.** Tag order front, face, left, right, outfit,
+other, then `back` last (it carries no face at all). Within a tag an `upload` beats a `crop`
+beats anything generated. Three slots now carry three viewpoints.
+
+**Measured, same character, same crop anchor, same three seeds -- only slot 3 changed:**
+
+    3 refs, slot 3 = duplicate front view   n=8   mean 0.3637   (0.3312 - 0.3900)
+    3 refs, slot 3 = LEFT view              n=3   mean 0.4498   (0.4191 - 0.4749)
+
+**No overlap between the groups at all**, and the best row (0.4749) is effectively at
+ARC_MATCH. This is the largest single improvement measured today, and it came from the
+reference LIST -- not the anchor, not the prompt, not the close-up. Everything the last six
+entries chased was downstream of a slot allocation bug.
+
+**And a knob that turned out to be a trap.** `ref_count` is now exposed (1-5; those
+workflows have all existed) after noticing the cap of 3 was arbitrary. **4 refs measured
+WORSE:** adding the right-profile ref as slot 4 took a frontal render from 0.4498 to
+**0.3797** (n=2, preliminary). Plausible and consistent with the §1 profile problem -- a
+profile reference drags a frontal generation toward profile features. **Default stays 3.**
+The knob is exposed because the right answer may differ per character, not as an invitation
+to raise it blind.
+
+## v1.275.8 -- ❌ CORRECTION: the face anchor has almost NO effect on view identity (2026-08-09)
+
+**This retracts the causal claim in v1.275.4.** That entry said the view set "converges on
+the wrong face" *because* the anchor is wrong, and that fixing the anchor would fix the
+views. The crop anchor fixed the anchor -- **0.4660 -> 0.8440 against Lorenzo's upload, an
+81% improvement** -- and the views did not move at all.
+
+Four front views from the 0.8440 crop anchor, against the four earlier ones built on
+generated anchors (0.4660 / 0.3926). Frontal vs frontal throughout, yaw +0.7 to +1.0:
+
+    anchor 0.4660 / 0.3926   vs upload   0.3312  0.3592  0.3727  0.3900   mean 0.3633
+    anchor 0.8440 (crop)     vs upload   0.3470  0.3724  0.3839  0.3532   mean 0.3641
+
+**Mean moved by 0.0008.** Nothing. Inside the run-to-run spread of either group.
+
+And the tell that explains the original mistake: **"vs anchor" collapsed from 0.7587-0.8226
+down to 0.3302-0.3659.** The old 0.76-0.82 was never the anchor propagating its identity
+into the views -- it was **sibling similarity**. Anchor and views were both Klein renditions
+built from the same references, so of course they resembled each other. Read as
+"the mechanism works, it's just anchored wrong", it was a real number carrying a story it
+could not support. Swap in a genuine photograph and the resemblance vanishes, because the
+views were never taking their face from reference slot 1 in the first place.
+
+**What is actually true:** ~0.36 against the upload is simply what Klein view generation
+produces for this character at these settings, *regardless of what occupies reference 1*.
+The identity bottleneck is the view render itself, not the anchor and not `_face_prompt`.
+v1.275.4's item "fix the face close-up" is therefore **closed as a dead end** -- the close-up
+is now near-perfect and it bought nothing.
+
+**Where identity actually comes from, already measured:** the LoRA lane. dorian's trained
+LoRA scored **0.8118** on the TURBO exam against a 0.1211 no-LoRA control. That is the
+instrument that carries likeness; Klein 3.0 is for staging, framing and wardrobe, and its
+output is dataset material rather than a likeness guarantee. Nothing here changes that lane.
+
+**Kept anyway, on cost grounds only:** `face_from_crop` stays the default because it is
+strictly *cheaper* -- a crop plus one GAN pass instead of one-to-two Klein renders -- and it
+cannot be worse. But the honest expectation is now recorded: **it does not improve view
+likeness.** Whether `face_first` should default to false at all is a live question; it is
+left on because the anchor may still help framing consistency, which nobody has measured.
+Also fixed here: the status counter read "2/1" when the crop short-circuited the render.
+
+## v1.275.7 -- Two of Lorenzo's calls, built: render-long-and-trim, and a CROPPED face anchor (2026-08-09)
+
+### ① The frame lattice: render one H3 step long, trim after the upscale
+
+**First, the rule was proven instead of assumed.** v1.275.3 recorded "LTX floors to 8k+1"
+off ONE observation (124 -> 121). Two more clips were rendered at 480p specifically to try
+to falsify it, with the answers written down BEFORE the runs:
+
+    3s -> H3  73f  -> predicted  73  -> MEASURED  73   (0 lost)   [already on the lattice]
+    5s -> H3 124f  -> predicted 121  -> MEASURED 121   (3 lost)
+    7s -> H3 175f  -> predicted 169  -> MEASURED 169   (6 lost)
+
+Three for three. `_ltx_frames(n) = 8*((n-1)//8)+1` is now a measured law, not a guess.
+
+Snapping durations to the shared lattice was rejected -- H3 needs f%17==5 and LTX needs
+f=8k+1, which coincide only every 136 frames (73, 209, 345, ...), so "5 seconds" would
+simply cease to exist. Instead, `plan_upscale: true` on POST /api/h3/generate renders the
+next H3-legal count whose floor still covers the target (`_frames_for_upscale`), and the
+upscale trims back to `target_frames`. Cost is a flat **17 frames (~0.7s of render)**, and
+**zero** when the count is already on the lattice:
+
+    sec  target  render  ->LTX  trim to  extra
+      3      73      73     73       73      0
+      5     124     141    137      124     17
+      7     175     192    185      175     17
+     15     362     379    377      362     17
+
+This is the house pattern already -- `video_tail` + `trim_video()` do exactly this for LTX
+overshoot elsewhere. `_trim_to_frames()` re-encodes rather than stream-copying (a
+frame-exact cut cannot land on a keyframe by luck), carries the audio, and **never raises**:
+a clip that fails to trim is still a clip, and losing a 6-minute render to a tidying step
+would be the worst trade in the app. The job label shows `(+17f for upscale)` so the longer
+render is never a surprise, and `trim_to_frames` is set **only when the source opted in** --
+nothing rendered before today gets silently shortened. (Verified: the two lattice clips,
+rendered pre-flag, correctly came back with `trim_to: None`.)
+
+### ② The face anchor is CROPPED out of the upload, not generated
+
+Lorenzo's call, and the measurement backs it: a generated close-up scored 0.4660 / 0.3926 /
+0.3499 against his upload across three tries. **A crop cannot drift -- it IS the upload.**
+
+He also called the risk correctly ("simply cropping may create a pixelated messy image"),
+and the numbers say how bad: measured on clonejoan, the face box in the 1024x1536 upload is
+**115x150 px**, against **512x654** in a generated anchor. So `_face_crop_ref()` runs the
+crop through the same proven STUDIO_UPSCALE GAN graph the base upscaler uses, **in the right
+order: crop small -> GAN -> fit to 832x1024.** LANCZOS-ing to full size first and GAN-ing the
+mush afterwards would throw away the crop's only advantage.
+
+- `_face_crop_box()` frames head-and-shoulders: face fills 60% of crop height (chosen to
+  land near the 0.638 the generated anchors actually measured, so Klein sees a like-for-like
+  reference) with the face centre at 42% -- headroom above, collarbone below. Slides to stay
+  inside the image rather than deforming.
+- `likeness.pose()` gained **`face_cx`**: the horizontal centre was the one number missing,
+  so nothing could CROP to a face, only describe one.
+- New flags `face_from_crop` (default TRUE) and `face_crop_gan` (default TRUE). The crop is
+  tried FIRST and, if it clears `_ANCHOR_MIN`, **no Klein render is spent at all**. Below the
+  bar it still competes with the generate-and-retry path and the best score wins.
+- Every failure falls back: no face box, no workflow, no worker, GAN error -- all log and
+  continue to the old generate path. The anchor lane cannot be made worse by this.
+
+## v1.275.6 -- Audit script scores against the anchor the BACKEND uses (2026-08-09)
+
+Housekeeping with teeth: `k3_face_audit.py` picked its `face` baseline as the NEWEST
+face-tagged ref while v1.275.4b's backend picks the BEST-scoring one. On clonejoan that
+meant the report's "vs face" column was measured against a 0.3926 anchor while the renders
+it was judging had been made with a 0.4660 one. The instrument must model the pipeline
+under test; both now select best-by-score. (Same class of error as everything else in this
+file: a real number on the wrong baseline.)
+
+## v1.275.5 -- 🙂 Anchor selection is BEST, not NEWEST (2026-08-09)
+
+Immediately measured consequence of v1.275.4. With the gate live, a forced `regen_face`
+produced anchors scoring **0.3499** (demoted to `other`) and **0.3926** (kept) against the
+upload -- while the anchor already sitting in char.json from Lorenzo's own earlier run
+scored **0.4660**. Reuse picked `existing[-1]`, the NEWEST, so the next view set would have
+anchored on 0.3926 and thrown away the best face the character had. **Newest is not a
+quality signal. The score is, and it is free (CPU, cached).**
+
+- Reuse now scores every face-tagged ref and takes the maximum:
+  `anchor_source: "reused (best of N)"`.
+- A forced regen COMPETES against the incumbents instead of replacing them blind -- three
+  measured anchors on one character spanned 0.3499-0.4660, so a fresh render is a lottery
+  ticket, not an upgrade. If the incumbent wins, it is kept and the status says
+  `"kept incumbent (beat N fresh render(s))"`.
+- Demotion is now scoped to close-ups THIS run produced. An incumbent that loses is left
+  exactly as it was: rewriting a ref another run created is not this run's business, and
+  the audit script reads history off those tags.
+
+**Verified live, not asserted:** `views/generate {face_first:true, regen_face:false}` on
+clonejoan returned `anchor_score 0.4660445749759674, anchor_source "reused (best of 2)"` --
+it picked the 0.4660 anchor over the newer 0.3926 one. The front view it then produced
+scored **0.3727** vs the upload against the previous run's 0.3312.
+
+**The stable finding across four independently-anchored front views** (frontal vs frontal,
+no profile excuse): **0.3312 / 0.3592 / 0.3727 / 0.3900 against the uploaded person, and
+0.7587 / 0.7644 / 0.7773 / 0.8226 against whichever anchor was used.** Reference
+propagation is excellent and consistent; fidelity to Lorenzo's actual source image is not.
+The bottleneck is the face close-up's own likeness, and the open question is now the
+`_face_prompt` / Klein path that makes it -- not the anchoring mechanism, which is proven.
+
+## v1.275.4 -- 🙂 The face anchor was measured, and it was anchoring to the wrong face (2026-08-09)
+
+v1.275.2 shipped a claim: lead every view job with a generated face close-up and the set's
+faces stop drifting. Nobody had measured it. `scripts/k3_face_audit.py` (new, CPU-only,
+costs nothing) now scores every ref of a character with ArcFace against the uploaded front
+reference AND against the face anchor, alongside head yaw, keypoint yaw and detector score
+so "no face found" reads as itself instead of masquerading as bad likeness.
+
+**clonejoan, measured 2026-08-09.** Bands: different <0.25, borderline <0.30, match >=0.45.
+
+    the anchor itself   vs uploaded front   0.4660      <- barely over ARC_MATCH
+    generated front view  vs upload 0.3592 / 0.3900   vs ANCHOR 0.7644 / 0.7887
+    generated right view  vs upload 0.2452 / 0.3384   vs ANCHOR 0.2049 / 0.2437
+    generated left  view  vs upload 0.2401 / 0.2739   vs ANCHOR 0.3083 / 0.3591
+
+Read the front row, because it is the only clean comparison in the table -- a frontal image
+against a frontal baseline, no profile excuse (yaw +1.0 and +0.9). **The generated front
+view is ~0.37 from the person Lorenzo uploaded and ~0.78 from the anchor.** The mechanism
+is not broken; it is working beautifully. The pipeline reproduces the ANCHOR with high
+fidelity and the UPLOAD poorly. **The set converges -- on the wrong face.** An unmeasured
+anchor is a drift amplifier: it is copied into every downstream job, so its error becomes
+the floor for every view, strip, pose and dataset row the character will ever produce.
+
+**A second defect fell out of the same table.** `_identity_ref_paths` ranks by TAG
+(front, face, then everything else, capped at 3). A fresh character has exactly two
+face-bearing refs, so the third slot goes to whatever tag comes next -- on clonejoan that
+was **`back`, a picture of the back of a head with no face in it**. ArcFace finds nothing
+in it. Klein was handed a third reference that could contribute only hair and outfit while
+diluting the two that actually carried the face. Back rows now sort LAST and are used only
+if there is genuinely nothing else: a two-ref list beats a three-ref list padded with a
+faceless one.
+
+Both fixed:
+- **`_identity_ref_paths`** deprioritises `back`. New `_front_ref_path()` (prefers the
+  UPLOAD over any generated front -- a generated front is itself a claim under test) and
+  `_anchor_score()` (ArcFace cosine, DEGRADED-safe, returns None rather than raising, and
+  a None must never be read as a bad score).
+- **The anchor is gated at `_ANCHOR_MIN = 0.45`** (= likeness.ARC_MATCH, chosen over the
+  borderline band deliberately). A freshly generated anchor below the bar buys ONE more
+  render on a different seed and the better of the two wins; the loser is **retagged
+  `other`, never deleted** -- it is still a picture of roughly this person, it is just not
+  allowed to anchor. A REUSED anchor is scored too and logs a loud warning naming
+  `regen_face:true` as the cure. Both paths publish `anchor_score` / `anchor_source` on the
+  job status. After the anchor phase the reference list is recomputed from the CURRENT
+  char.json, because a stale `id_refs` is exactly how a demoted close-up sneaks back in as
+  reference 2.
+
+**What is NOT claimed.** An A/B was run at a fixed seed (555000) with `face_first` true vs
+false and arm B scored higher, but that comparison is CONFOUNDED and is not being reported
+as a result: (a) `face_first:false` does not remove the anchor from the reference list, it
+only stops it leading, so neither arm was a true control; (b) arm A's own generated front
+landed in char.json before arm B ran, so the two arms drew different 3-ref sets entirely;
+(c) arm B's "left" came back at yaw -53.6 vs arm A's -75.7, and a less-profile face scores
+higher against a frontal baseline for reasons that have nothing to do with identity. n=1
+per cell. The anchor-quality finding above stands on its own and needs no arm comparison.
+
+## v1.275.3 -- ⬆ Upscale fix: LTXVLoopingSampler's four "optional" widgets (2026-08-09)
+
+FIRST LIVE H3 RENDER: ✅ PASSED. SMOKE-01, t2v, 5.17s / 124f / 1280x736 / turbo /
+seed 20260809, on ZOAI3 (192.168.12.163) -- **377s wall, first load included**. mp4 pulled
+back to scripts/_diag/h3_smoke01.mp4: h264 1280x736 @ 24fps, 124 frames, AAC stereo 32kHz
+5.152s alongside it (mean -34.0 dB / max -11.9 dB -- speech dynamics, not silence). Frames
+0/41/82/123 eyeballed as a tile: identity holds across the clip, the push-in reads as a
+push-in, the head turn happens, rain and wet-coat specular are coherent. The mode works.
+
+Then the ⬆ upscale on that same job FAILED in 55s, and the failure is worth recording
+because it is the object_info trap in a new costume: `/object_info` lists `adain_factor`
+under **optional**, so the graph omitted it -- and ComfyUI's validator agreed. But
+`LTXVLoopingSampler.sample()` declares it as a positional parameter with no default, so
+the call blew up at EXECUTION time, after fifteen nodes had already run:
+`TypeError: sample() missing 1 required positional argument: 'adain_factor'`.
+**"optional" in object_info means "the UI may omit it", not "the function has a default."**
+Read the source workflow's own widget values instead of trusting the schema: node 381's
+`widgets_values` are `[56, 24, 1, 0.5, 1, 1, 1, 1, 0, 0, 1000, "0"]` -- the last four map
+to adain_factor 0.0, guiding_start_step 0, guiding_end_step 1000,
+optional_cond_image_indices "0". All four are now sent explicitly. Also confirmed from the
+same subgraph that the source really does drive the sampler with a plain **CFGGuider**
+(cfg 1), not the STGGuiderAdvanced its tooltip asks for -- our graph already matched.
+
+⬆ UPSCALE RE-RUN AFTER THE FIX: ✅ PASSED. 493.9s on ZOAI3, out at **1920x1088 h264 @ 24fps
+with the AAC stereo source audio carried through**. Face crop compared at native pixels
+against the source lanczos'd to the same size (scripts/_diag/cmp_face.png): individual wet
+hair strands separate instead of smearing, brick mortar regains grain, water beads on the
+temple resolve -- and the framing/pose/lighting are identical. It re-details, it does not
+re-imagine, which is exactly what guiding_strength 1.0 on the source latents is for.
+
+**MEASURED, and it needs to be known: the upscale returns 121 frames, not 124.** LTX's VAE
+compresses time by 8, so it can only represent frame counts of the form 8k+1; 124 is not
+one (121 = 8*15+1 is the largest that fits). H3's own frame math wants f%17==5 (124), so
+**the two models disagree about legal frame counts and the upscale silently drops up to 7
+frames off the tail** -- 5.17s in, 5.04s out. Not a defect in the graph; a property of the
+pair. It matters the moment a clip is cut to music or joined to a next shot. Recorded here
+rather than "fixed": the honest fix is to choose durations that satisfy BOTH constraints.
+Solving f = 17m+5 and f = 8k+1 together gives m = 4 (mod 8), so the frame counts that
+survive an upscale untouched are **f in {73, 209, 345, 481, ...} -- every 136 frames**
+(73f = 3.04s, 209f = 8.71s, 345f = 14.38s at 24fps; H3 is trained ~124-362, so 209 and 345
+are the usable ones and 73 is below the trained band). Verified by hand: 209 % 17 = 5 and
+209 % 8 = 1. Whether the Video Lab should snap durations to that lattice when an upscale is
+planned is a product decision, not a patch. Open.
+
 ## v1.275.2 -- 🙂 Face anchor for Klein 3.0 view generation (2026-08-09)
 
 Lorenzo's fresh character came out of "generate missing views" with a slightly-off face --

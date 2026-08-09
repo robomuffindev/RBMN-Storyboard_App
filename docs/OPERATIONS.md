@@ -1,4 +1,4 @@
-# RBMN Operations Runbook (v1.275.2, 2026-08-09)
+# RBMN Operations Runbook (v1.276.4, 2026-08-09)
 
 Everything that exists, where it runs, and how to drive it. This is the "which tool, which
 box, which command" page — the narrative is in `HANDOVER_PROMPT.md`, the decisions in
@@ -30,9 +30,16 @@ for ports 8765/8188. Every worker's ComfyUI + Fizgig paths are visible/editable 
    batch 1-8, edit-iterate loop with version chains, master gallery, 🏁 promote → front
    ref + base, 📖 Profile & Lore (Story Builder substrate, ✨ LLM fill).
 2. **Create / Clothes / Emotions** — Klein 3.0 character lane (refs, base, strip, views,
-   wardrobe, expressions). **v1.275.2: view generation is FACE-ANCHORED** — a zoomed face
-   close-up renders first (saved as a ref tagged `face`) and leads every view job's refs;
-   "🙂 Regenerate views (face-anchored)" re-runs a drifted set with a fresh anchor.
+   wardrobe, expressions). Views are face-anchored (v1.275.2) — but see the v1.275.8
+   RETRACTION in CHANGELOG: the anchor does NOT drive view identity. **The lever is the
+   REFERENCE LIST** (v1.275.9): one ref per tag, uploads first, back views last, cap 3.
+   **👗 Outfit sets (v1.276.2):** `POST /api/klein3/characters/{slug}/outfits` — a named
+   outfit, 13 optional garment slots (4 core + 9 detail), optional `variant` for a look
+   within it, rendered across every view. Each view is its own standalone image.
+2b. **🎭 `/studio`** — the Character Studio front page: EVERY character from EVERY mode
+   (both stores), pipeline checklist per card, capability-aware actions.
+2c. **⚙ Experimental Modes** (Settings, default OFF) — hides 🧪 Klein 1.0 and 🚀 Klein 2.0
+   from the mode picker. Code untouched; kept for later game-asset export.
 3. **Pose Library** — SETS/TAGS, imports, generate-missing.
 4. **🎓 LoRA Dataset Gen** — the dataset+training lane:
    - **⚡ Autogen** (top): character → whole recipe → installed LoRA. Options: 👕 signature
@@ -116,6 +123,7 @@ Key routes (all others `?token=…`):
 | `fetch_ckpt.py --name FILE` | download one checkpoint, window-verified |
 | `lora_test.py --host IP --lora FILE --char SLUG --trigger T --cls woman` | the 6-render TURBO exam (core-node graph) |
 | `lora_score.py --char SLUG` | ArcFace table over an existing exam grid |
+| `k3_face_audit.py --char SLUG` | **(v1.275.4, FREE — CPU, no GPU, no worker)** ArcFace-scores EVERY ref of a Klein 3.0 character against the uploaded front ref AND against the face anchor, plus head yaw / keypoint yaw / detector score. Run it before spending renders on identity work. `--json` for the machine-readable form. |
 
 The in-app 🚀/⚡ pipelines are these scripts' logic as code (`backend/api/lora_train.py`);
 the scripts remain the manual/recovery path.
@@ -132,9 +140,37 @@ the scripts remain the manual/recovery path.
 - `/api/h3/*` — 🎬: overview (workers/caps/defaults), upload (image|video|audio),
   generate (all five modes), jobs (+{id}, DELETE), media/{id} (+`?download=1`),
   jobs/{id}/upscale (LTX 2.3, largest_size 1280/1920/2560), draft-prompt (Ollama+spec).
-- `/api/klein3/*` — refs, base, strip, views/generate, generate(-set), posefit.
+- `/api/klein3/*` — refs, base, strip, views/generate, generate(-set), posefit,
+  **outfits (GET+POST: 13 named slots, variants, rendered per view)**, and
+  `refs/{id}/image?download=1` for a meaningfully-named single file.
+- `/api/characters` — **the unified character list (v1.276.0)**: every character from every
+  mode, from BOTH stores, with polymorphic ids `k3:<slug>` / `db:<uuid>`. Use this rather
+  than assuming a character is a `studio_characters` row — Klein 3.0 characters never are.
+- `/api/lora/datasets/{id}/base-outfit` — GET options / PUT the outfit a dataset renders
+  from. Opt-in; unset keeps the existing base behaviour exactly.
 - Zero-cost preflights: `/api/health`, `/api/lora/health`, `/api/lora/likeness-health`,
   `/api/klein3/health`, helper `/health`.
+
+## 7c. Secrets and repo hygiene (v1.276.4 — read before any push)
+
+**The helper token is NOT in the source any more.** It used to be a hard-coded default in
+seven tracked files. `scripts/helper_token.py` resolves it, first hit wins:
+
+1. `RBMN_HELPER_TOKEN` in the environment
+2. `scripts/helper_token.txt` — **gitignored**, this is where it lives on this machine
+3. `token` / `helper_token` / `trainer_token` in `_libraries/forge/settings.json`
+4. empty — which surfaces as a helper 401, a far better failure than a token from git
+
+Rotating the token means changing it on the boxes and updating (2) or (1). Nothing else.
+
+**Before pushing:** `.gitignore` does NOT untrack anything already committed. Measured
+2026-08-09: `_diag/` held 683 tracked files / 327 MB and `VNCCS302/` 266 files / 31 MB,
+against roughly 11 MB of actual application code. Run
+`powershell -ExecutionPolicy Bypass -File scripts\git_cleanup.ps1` to see the report and
+`-Apply` to untrack them (files stay on disk; only the index changes).
+
+⚠ That shrinks FUTURE commits only. `.git` is ~880 MB because those binaries are in past
+commits; shrinking the remote needs a deliberate `git filter-repo` on a fresh clone.
 
 ## 8. Recovery playbook
 
@@ -164,12 +200,19 @@ the scripts remain the manual/recovery path.
 **Done and measured:** dataset lane + wardrobe QC · training loop (4× by hand, then
 automated) · controlled experiment (dataset quality = the ceiling) · 🏠/🧬/🪪/🎓 modes ·
 in-app 🚀 Train + ⚡ Autogen + multi-worker registry · SageAttention fleet-wide (37%
-faster, ArcFace unchanged) · **🎬 Video Lab: MiniMax H3 local (five modes, every
-reference type) + ⬆ LTX 2.3 upscale — routes built, models/nodes verified on every box;
-FIRST LIVE RENDER still pending — that's the next validation** (t2v smoke → i2v → ref2v →
-upscale) · 🙂 face-anchored view generation (v1.275.2 — pending a live drifted-set compare).
-Also pending: first real ⚡ Autogen run. Dist bundle verified 2026-08-09 02:53 UTC: Video
-Lab + Upscale UI ARE in the built frontend; the face-anchor UI needs the NEXT rebuild.
+faster, ArcFace unchanged) · **🎬 Video Lab: MiniMax H3 local — ✅ FIRST LIVE RENDER PASSED
+2026-08-09** (t2v, 5.17s/124f/1280×736/turbo on ZOAI3, **377s** incl. first model load,
+h264 + AAC stereo, identity coherent across the clip) **and ✅ ⬆ LTX 2.3 upscale PASSED**
+(494s → 1920×1088 + source audio, real re-detailing, artifacts in `scripts/_diag/`).
+⚠ Two known issues from that exam: `/object_info` "optional" args can still be positional
+in the node's Python (cost one failed run — v1.275.3), and **the upscale returns 121 frames
+from 124** because LTX needs f=8k+1 while H3 wants f%17==5; they agree only at
+f ∈ {73, 209, 345, …}. · 🙂 face-anchored view generation **MEASURED** (v1.275.4–.6):
+propagation is excellent (views 0.76–0.82 vs the anchor) but the anchor itself is only
+0.35–0.47 vs Lorenzo's upload — the set converges on the WRONG face, so `_face_prompt` is
+now the open item; anchor gated at 0.45, BEST-not-newest, back views no longer usable as
+identity refs. Still pending: first real ⚡ Autogen run, and H3's other four modes
+(i2v / first_last / last_frame / ref2v have never touched the GPU).
 
 **Roadmap (Lorenzo's words):** verify the new stuff tracks → finish the character studio
 area → tie characters into projects/other site sections (H3 video into project scenes) →

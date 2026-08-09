@@ -472,6 +472,12 @@ app.include_router(lora_train_router)
 from backend.api.h3video import router as h3video_router  # noqa: E402
 app.include_router(h3video_router)
 
+# v1.276.0 — the unified character list. Characters live in two disjoint stores
+# (studio_characters rows vs the klein3 disk store) and nothing joined them, so
+# a Klein 3.0 character was invisible on /studio and in the Clothes picker.
+from backend.api.characters_all import router as characters_all_router  # noqa: E402
+app.include_router(characters_all_router)
+
 # Log registered routes for debugging
 _gen_routes = []
 for route in app.routes:

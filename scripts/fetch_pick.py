@@ -9,6 +9,7 @@ import json
 import re
 import urllib.request
 from pathlib import Path
+from helper_token import helper_token as _helper_token  # v1.276.4: token out of source
 
 ROOT = Path(__file__).resolve().parent          # scripts/
 OUT = ROOT / "_diag" / "pick"
@@ -27,7 +28,7 @@ def bget(url, timeout=120):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--helper", default="http://192.168.12.202:8765")
-    ap.add_argument("--token", default="49ae12e57c0949158b2efb4edfb0ac49")
+    ap.add_argument("--token", default=_helper_token())
     ap.add_argument("--run", default="20260806-151443-af60")
     ap.add_argument("--epochs", default="14,15,16,21,22")
     a = ap.parse_args()

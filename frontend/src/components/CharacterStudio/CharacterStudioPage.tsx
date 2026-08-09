@@ -39,6 +39,7 @@ import { ImageLightbox } from './p2Shared';
 import { BaseEditorModal } from './BaseEditorModal';
 import { CustomBaseModal } from './CustomBaseModal';
 
+import UnifiedCharacterGrid from './UnifiedCharacterGrid';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -2441,66 +2442,20 @@ export default function CharacterStudioPage() {
             />
 
             <div className="flex-1">
-              {loading ? (
-                <div className="flex items-center gap-2 text-gray-400 text-sm p-6">
-                  <Spinner size={16} /> Loading characters...
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                  {characters.map((c) => (
-                    <CharacterCard
-                      key={c.id}
-                      character={c}
-                      storyName={storyNameFor(c.story_id)}
-                      onClick={() => {
-                        // VNCCS-Native-created characters open in the VNCCS
-                        // Native editor (their images/config live there), not
-                        // the engine-mode editor.
-                        const vn = ((c.manifest as Record<string, unknown> | undefined)?.vnccs || null) as { variant?: string } | null;
-                        if (vn) {
-                          navigate(`/studio/${vn.variant === 'klein' ? 'vnccs-klein' : 'vnccs'}?char=${encodeURIComponent(c.name)}`);
-                        } else {
-                          setSelectedCharacterId(c.id);
-                        }
-                      }}
-                      onClone={(() => {
-                        // clone = start a new character from this one's active
-                        // base image (VNCCS characters only — they carry base
-                        // versions the Klein clone screen can preload)
-                        const vn = ((c.manifest as Record<string, unknown> | undefined)?.vnccs || null) as
-                          { base_versions?: unknown[] } | null;
-                        if (!vn || !(vn.base_versions || []).length) return undefined;
-                        return () => navigate(`/studio/vnccs-klein?cloneof=${encodeURIComponent(c.name)}`);
-                      })()}
-                      onDelete={async () => {
-                        const isVnccs = Boolean((c.manifest as Record<string, unknown> | undefined)?.vnccs);
-                        if (!window.confirm(`Delete character "${c.name}"?${isVnccs ? ' Its VNCCS library images are removed from the app.' : ' Its datasets are removed too.'}`)) return;
-                        try {
-                          if (isVnccs) {
-                            const fromHosts = window.confirm(
-                              'ALSO delete it from the VNCCS workers (node-side sprites/config)?\n\nOK = workers too · Cancel = keep worker files');
-                            const r = await fetch(`/api/studio/vnccs/catalog/${c.id}?from_hosts=${fromHosts}`, { method: 'DELETE' });
-                            if (!r.ok) throw new Error(await r.text());
-                          } else {
-                            await api.deleteCharacter(c.id);
-                          }
-                          loadCharacters();
-                        } catch (e) {
-                          window.alert(`Delete failed: ${(e as Error).message}`);
-                        }
-                      }}
-                    />
-                  ))}
-                  <NewCharacterCard onClick={() => setShowModePicker(true)} />
-                </div>
-              )}
-
-              {characters.length === 0 && !loading && (
-                <div className="mt-2 text-sm text-gray-500 flex items-center gap-2">
-                  {selectedStoryId ? <Users size={14} /> : <Package size={14} />}
-                  No characters yet {selectedStoryId ? 'in this story' : ''} — create one to get started.
-                </div>
-              )}
+              {/* v1.276.0 — the unified grid: every character from every mode,
+                  in the 🏠 Studio Hub's card language. The old grid read only
+                  the studio_characters DB table, so anything made in Klein 3.0
+                  was invisible here. */}
+              <UnifiedCharacterGrid onOpenDbCharacter={(id) => setSelectedCharacterId(id)} />
+              <div className="flex items-center gap-2 mt-1">
+                <button
+                  onClick={() => setShowModePicker(true)}
+                  className="px-3 py-1.5 rounded-md bg-purple-700 hover:bg-purple-600 text-sm font-medium"
+                >+ New Character</button>
+                <span className="text-xs text-gray-500">
+                  Klein 3.0 characters are created in 🧬 Text 2 Image / 🎯 Klein 3.0.
+                </span>
+              </div>
             </div>
           </div>
         )}

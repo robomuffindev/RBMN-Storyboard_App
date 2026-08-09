@@ -8,6 +8,7 @@
  * Poses, LoRA, Character Sheet) takes over.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import useLightbox from '../shared/useLightbox';
 
 const BASE = '/api/forge';
 
@@ -121,6 +122,7 @@ export default function Text2ImagePanel(): React.ReactElement {
   const [gallery, setGallery] = useState<ImgT[]>([]);
   const [history, setHistory] = useState<string[]>([]);
   const [sel, setSel] = useState<ImgT | null>(null);
+  const lb = useLightbox();
   const [instruction, setInstruction] = useState('');
   const [editCount, setEditCount] = useState(2);
   const [galFilter, setGalFilter] = useState<'all' | 'starred' | 'gen' | 'edit'>('all');
@@ -521,6 +523,14 @@ export default function Text2ImagePanel(): React.ReactElement {
                     <div style={{ position: 'absolute', top: 4, left: 4, fontSize: 12 }}>
                       {g.starred ? '⭐' : ''}{g.kind === 'edit' ? ' ✏' : ''}
                     </div>
+                    <button title="View large (zoom + pan)"
+                            onClick={(e) => { e.stopPropagation();
+                              lb.open(gallery.map((x) => x.url),
+                                      gallery.findIndex((x) => x.id === g.id), undefined); }}
+                            style={{ position: 'absolute', top: 4, right: 4, border: 'none',
+                                     borderRadius: 5, cursor: 'zoom-in', fontSize: 12,
+                                     background: 'rgba(14,17,22,0.82)', color: '#cbd2dc',
+                                     padding: '2px 6px' }}>🔍</button>
                   </div>
                 ))}
                 {!gallery.length && <div style={hint}>Nothing yet — hit 🎨 Generate.</div>}
@@ -529,7 +539,11 @@ export default function Text2ImagePanel(): React.ReactElement {
 
             {sel && (
               <div style={{ ...box, display: 'grid', gridTemplateColumns: '260px 1fr', gap: 12 }}>
-                <img src={sel.url} alt="" style={{ width: '100%', borderRadius: 8 }} />
+                <img src={sel.url} alt="" title="Click to view large (zoom + pan)"
+                     onClick={() => lb.open(gallery.map((x) => x.url),
+                                            Math.max(0, gallery.findIndex((x) => x.id === sel.id)),
+                                            undefined)}
+                     style={{ width: '100%', borderRadius: 8, cursor: 'zoom-in' }} />
                 <div>
                   <div style={hint}>
                     {sel.kind === 'edit' ? `✏ edit of ${sel.parent}` : `🎨 ${sel.engine}`} · seed {sel.seed}
@@ -677,6 +691,7 @@ export default function Text2ImagePanel(): React.ReactElement {
           </div>
         </div>
       )}
+      {lb.node}
     </div>
   );
 }

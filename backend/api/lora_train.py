@@ -50,12 +50,33 @@ _AUTO_DIR = _LORA_DS_ROOT.parent / "_autogen"
 _ACTIVE: Dict[str, bool] = {}        # "train:<ds>" / "auto:<slug>" -> thread alive
 
 
+def _default_helper_token() -> str:
+    """The helper token, resolved OUT of the source (v1.276.4).
+
+    It used to be a hard-coded default in three places in this file and four
+    scripts — a shared credential living in a repo that is about to be pushed.
+    Order: RBMN_HELPER_TOKEN env -> scripts/helper_token.txt -> the forge
+    settings store. Empty is a legitimate answer and surfaces as a helper 401,
+    which is a far better failure than silently using a token from git."""
+    try:
+        import sys
+        from pathlib import Path as _P
+        _s = str((_P(__file__).resolve().parents[2] / "scripts"))
+        if _s not in sys.path:
+            sys.path.insert(0, _s)
+        from helper_token import helper_token as _ht
+        return _ht()
+    except Exception:  # noqa: BLE001 — never break a render over a lookup
+        import os
+        return os.environ.get("RBMN_HELPER_TOKEN", "").strip()
+
+
 # ── trainer settings (host lives with forge's; token/port here) ─────────────
 def _tsettings() -> dict:
     tr = next((h for h in _helpers_list() if h.get("is_trainer")), None) \
         or _helpers_list()[0]
     return {"host": str(tr.get("host")), "port": int(tr.get("port") or 8765),
-            "token": str(tr.get("token") or "49ae12e57c0949158b2efb4edfb0ac49")}
+            "token": str(tr.get("token") or _default_helper_token())}
 
 
 def _helpers_list() -> list:
@@ -70,7 +91,7 @@ def _helpers_list() -> list:
                "host": str(st.get("krea2_host") or "192.168.12.201"),
                "port": int(st.get("helper_port") or 8765),
                "token": str(st.get("helper_token") or
-                            "49ae12e57c0949158b2efb4edfb0ac49"),
+                            _default_helper_token()),
                "is_trainer": True}]
         st["helpers"] = hs
         _fsettings_save(st)
@@ -287,7 +308,7 @@ async def helpers_add(body: HelperIn):
     hs.append({"id": hid, "name": (body.name or host).strip(), "host": host,
                "port": int(body.port or 8765),
                "token": (body.token or "").strip() or
-               "49ae12e57c0949158b2efb4edfb0ac49",
+               _default_helper_token(),
                "is_trainer": False})
     _helpers_save(hs)
     return {"ok": True, "id": hid}

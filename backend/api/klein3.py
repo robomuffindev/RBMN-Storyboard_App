@@ -62,6 +62,13 @@ _JOBS: Dict[str, dict] = {}      # f"{slug}:{kind}" -> {"status","detail","error
 REF_TAGS = ["front", "back", "left", "right", "face", "outfit", "other"]
 VIEW_TAGS = ["front", "back", "left", "right"]
 
+# v1.275.4: the bar a generated face close-up must clear against the uploaded
+# front reference before it is allowed to anchor a whole view set. This is
+# likeness.ARC_MATCH — "solid match" — deliberately, not the borderline band:
+# the anchor is copied into every downstream job, so its error is the floor for
+# everything the character will ever produce.
+_ANCHOR_MIN = 0.45
+
 _FIELD_ORDER = ["age", "sex", "race", "skin_color", "hair", "eyes", "face",
                 "body", "height", "aesthetics", "additional_details"]
 
@@ -173,8 +180,47 @@ def _base_mode(c: dict, override: Optional[str] = None) -> str:
     return "auto"
 
 
+def _outfit_ref_for_view(slug: str, c: dict, view: str,
+                         outfit: Optional[dict]) -> Optional[Tuple[Path, str]]:
+    """The image of a chosen OUTFIT for one view, if it exists.
+
+    v1.276.3 — Lorenzo wants a dataset to be able to train on a specific outfit
+    rather than only on the character's default base. An outfit view IS a
+    dressed full-body render of this character from that angle, so it is a
+    legitimate identity base; it just was not reachable before.
+
+    `outfit` is {"name": ..., "variant": ...}; an absent/empty variant means the
+    base look. Returns None when that outfit has no image for this view, so the
+    caller falls through to the normal base chain rather than failing the row.
+    """
+    if not outfit or not str(outfit.get("name") or "").strip():
+        return None
+    want_name = str(outfit["name"]).strip()
+    want_var = str(outfit.get("variant") or "").strip()
+    hits = []
+    for r in c.get("refs", []):
+        if r.get("tag") != "outfit":
+            continue
+        o = r.get("outfit") or {}
+        if str(o.get("name") or "").strip() != want_name:
+            continue
+        if str(o.get("variant") or "").strip() != want_var:
+            continue
+        if str(o.get("view") or "") != view:
+            continue
+        fp = _cdir(slug) / "refs" / f"{r['id']}.png"
+        if fp.exists():
+            hits.append((r.get("created_at") or "", fp))
+    if not hits:
+        return None
+    hits.sort()
+    label = f"{view} outfit '{want_name}'" + (f" / {want_var}" if want_var else "")
+    return hits[-1][1], label
+
+
 def _base_for_view(slug: str, c: dict, view: str,
-                   mode: Optional[str] = None) -> Tuple[Optional[Path], str]:
+                   mode: Optional[str] = None,
+                   outfit: Optional[dict] = None) -> Tuple[Optional[Path], str]:
     """Identity image for a pose's DOMINANT ANGLE (v1.205, mode-aware v1.217).
 
     Priority: an UPSCALED base version of that view -> any base version of that
@@ -190,6 +236,11 @@ def _base_for_view(slug: str, c: dict, view: str,
       stripped -- prefers stripped versions and upscales of them.
       auto     -- pre-v1.217 behaviour: newest of that view wins."""
     view = (view or "").strip().lower()
+    # v1.276.3: an explicitly chosen outfit outranks every other candidate —
+    # it is the only tier the user named directly. Missing view -> fall through.
+    hit = _outfit_ref_for_view(slug, c, view, outfit)
+    if hit:
+        return hit
     mode = _base_mode(c, mode)
     want = {"dressed": True, "stripped": False}.get(mode)
     if view in VIEW_TAGS:
@@ -226,19 +277,212 @@ def _base_for_view(slug: str, c: dict, view: str,
 
 def _identity_ref_paths(slug: str, c: dict, limit: int = 3) -> List[str]:
     """Best identity refs for view synthesis: front first, then face, then
-    newest others."""
+    newest others.
+
+    v1.275.4 — BACK VIEWS ARE NOT IDENTITY REFERENCES. Measured on clonejoan:
+    a fresh character has exactly two face-bearing refs (the upload and the
+    generated anchor), so the third slot was filled by tag order — and on that
+    character the next tag was `back`, a picture of the back of a head with no
+    face in it at all. ArcFace finds nothing in it; Klein got a third reference
+    that could only contribute hair and outfit while diluting the two that
+    carried the face. Back rows now sort LAST and are used only if there is
+    genuinely nothing else, so a two-ref list beats a three-ref list padded
+    with a faceless one."""
+    # v1.275.9 — ONE REF PER TAG, UPLOADS FIRST. The old version took every
+    # front-tagged ref before considering any other tag, and views/generate
+    # APPENDS a new front ref every time it runs. Measured on clonejoan after a
+    # day of experiments: nine front refs, and the three slots Klein actually
+    # got were [upload, generated front, generated front] — zero angle
+    # information, and the app feeding its own lower-fidelity output back in as
+    # identity evidence. That is a drift loop, and it gets worse every run.
+    # Now: one ref per tag so the three slots carry three viewpoints, and
+    # within a tag an UPLOAD always beats something we generated.
+    def _pick(tag: str) -> Optional[dict]:
+        cands = [r for r in _refs_by_tag(c, tag)
+                 if (_cdir(slug) / "refs" / f"{r['id']}.png").exists()]
+        if not cands:
+            return None
+        ups = [r for r in cands if r.get("source") == "upload"]
+        if ups:
+            return ups[-1]
+        crops = [r for r in cands if r.get("source") == "crop"]
+        if crops:                       # a crop of an upload is still the upload
+            return crops[-1]
+        return cands[-1]
+
     ordered: List[dict] = []
-    for tag in ("front", "face"):
-        ordered += _refs_by_tag(c, tag)
-    ordered += [r for r in c.get("refs", []) if r not in ordered]
+    for tag in ("front", "face", "left", "right", "outfit", "other", "back"):
+        r = _pick(tag)                  # `back` last: it carries no face at all
+        if r is not None:
+            ordered.append(r)
     out: List[str] = []
     for r in ordered:
-        p = _cdir(slug) / "refs" / f"{r['id']}.png"
-        if p.exists():
-            out.append(str(p))
+        out.append(str(_cdir(slug) / "refs" / f"{r['id']}.png"))
         if len(out) >= limit:
             break
     return out
+
+
+def _front_ref_path(slug: str, c: dict) -> Optional[Path]:
+    """The uploaded front reference — the character's source of truth. Prefers
+    an upload over anything this app generated, because a generated front is
+    itself a claim under test."""
+    fronts = _refs_by_tag(c, "front")
+    if not fronts:
+        return None
+    r = next((x for x in fronts if x.get("source") == "upload"), fronts[-1])
+    p = _cdir(slug) / "refs" / f"{r['id']}.png"
+    return p if p.exists() else None
+
+
+def _face_crop_box(pv: Dict[str, Any], aspect: float = 832 / 1024,
+                   face_share: float = 0.60, face_at: float = 0.42
+                   ) -> Tuple[int, int, int, int]:
+    """Head-and-shoulders crop box around a detected face, in pixels.
+
+    `face_share` is how much of the crop's HEIGHT the face box should occupy —
+    0.60 is chosen to land near the 0.638 the generated anchors actually
+    measured, so the crop and the thing it replaces frame the head the same way
+    and Klein sees a like-for-like reference. `face_at` puts the face centre at
+    42% of the crop height, which leaves headroom above and collarbone below
+    instead of a face floating dead centre.
+    """
+    W, H = int(pv["img_w"]), int(pv["img_h"])
+    fh = float(pv["face_h_ratio"]) * H
+    cx = float(pv["face_cx"]) * W
+    cy = float(pv["face_cy"]) * H
+    ch = fh / max(face_share, 0.05)
+    cw = ch * aspect
+    x1, y1 = cx - cw / 2.0, cy - ch * face_at
+    # Clamp INSIDE the image without changing the shape of the box: slide it
+    # back in first, and only shrink if it genuinely cannot fit.
+    if cw > W:
+        ch *= W / cw
+        cw = W
+    if ch > H:
+        cw *= H / ch
+        ch = H
+    x1 = max(0.0, min(x1, W - cw))
+    y1 = max(0.0, min(y1, H - ch))
+    return int(round(x1)), int(round(y1)), int(round(x1 + cw)), int(round(y1 + ch))
+
+
+def _anchor_score(slug: str, c: dict, face_png: Path) -> Optional[float]:
+    """ArcFace cosine of a face close-up against the front reference.
+
+    Returns None when the measurement is unavailable (no insightface, no face
+    found) — DEGRADED is not FAILED, and a None must never be read as a bad
+    score. CPU-only and cached inside likeness.py, so this costs nothing."""
+    try:
+        from backend.services import likeness
+        front = _front_ref_path(slug, c)
+        if front is None:
+            return None
+        a, b = likeness.embed(face_png), likeness.embed(front)
+        if a is None or b is None:
+            return None
+        return likeness.cosine(a, b)
+    except Exception as e:  # noqa: BLE001 — measurement must never break a render
+        logger.warning("klein3: anchor scoring unavailable: %s", e)
+        return None
+
+
+def _face_crop_ref(slug: str, c: dict, disp: Any,
+                   gan: bool = True, model_name: Optional[str] = None
+                   ) -> Optional[Tuple[str, Optional[float], dict]]:
+    """Build the face anchor by CROPPING the uploaded front reference.
+
+    v1.275.7. Generating a close-up cost identity every time it was measured —
+    three anchors scored 0.4660 / 0.3926 / 0.3499 against Lorenzo's upload,
+    and the views built on them landed 0.33-0.39 while matching the anchor at
+    0.76-0.82. The pipeline was faithfully reproducing a face that was never
+    his. A crop cannot drift: it IS the upload.
+
+    The cost is resolution, and it is real — measured on clonejoan the face box
+    in the 1024x1536 upload is **115x150 px**, against 512x654 in a generated
+    anchor. So the crop is upscaled with the same proven STUDIO_UPSCALE GAN
+    graph the base upscaler uses, in the right order: crop small -> GAN -> fit
+    to 832x1024. Blowing up with LANCZOS first and GAN-ing the mush afterwards
+    would waste the one advantage the crop has.
+
+    Returns (path, score_vs_front, meta) or None. Never raises: if anything
+    here fails the caller falls back to generating a close-up, which is the old
+    behaviour and still works.
+    """
+    from io import BytesIO
+    from PIL import Image
+    try:
+        from backend.services import likeness
+        front = _front_ref_path(slug, c)
+        if front is None:
+            return None
+        pv = likeness.pose(front)
+        if not pv or pv.get("face_cx") is None or not pv.get("img_w"):
+            logger.info("klein3 %s: no face box in the front ref — cannot crop", slug)
+            return None
+
+        box = _face_crop_box(pv)
+        img = Image.open(front)
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        crop = img.crop(box)
+        meta: dict = {"crop_box": list(box),
+                      "crop_px": [crop.width, crop.height],
+                      "face_px": [round(pv["face_w_ratio"] * pv["img_w"]),
+                                  round(pv["face_h_ratio"] * pv["img_h"])],
+                      "gan": False}
+
+        out_img = crop
+        if gan:
+            wf_path = _WORKFLOWS_DIR / "STUDIO_UPSCALE.json"
+            if wf_path.exists():
+                tmp = _cdir(slug) / "refs" / f"_crop_{uuid4().hex[:8]}.png"
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+                crop.save(tmp, "PNG")
+                try:
+                    _wk, client = _klein_worker(disp)
+                    if client:
+                        up = f"k3_facecrop_{uuid4().hex[:8]}.png"
+                        client.upload_image(str(tmp), up)
+                        wf = prepare_studio_upscale_workflow(
+                            str(wf_path), image_path=up, model_name=model_name)
+                        outs = _run_prompt_blocking(client, wf, 300)
+                        imgs = _images_from_outputs(outs)
+                        if imgs:
+                            pick = imgs[-1]
+                            data = client.download_output(
+                                pick["filename"], pick.get("subfolder", ""),
+                                pick.get("type", "output"))
+                            out_img = Image.open(BytesIO(data)).convert("RGB")
+                            meta["gan"] = True
+                            meta["gan_px"] = [out_img.width, out_img.height]
+                            meta["worker"] = _short_worker(getattr(_wk, "url", "?"))
+                except Exception as e:  # noqa: BLE001 — GAN is a bonus, not a gate
+                    logger.warning("klein3 %s: face-crop GAN upscale failed, "
+                                   "using the plain crop: %s", slug, e)
+                finally:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+        out_img = out_img.convert("RGB").resize((832, 1024), Image.LANCZOS)
+        rid = uuid4().hex[:12]
+        p = _cdir(slug) / "refs" / f"{rid}.png"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        out_img.save(p, "PNG")
+        c2 = _load(slug)
+        c2.setdefault("refs", []).append(
+            {"id": rid, "tag": "face",
+             "name": ("face crop from upload (GAN-upscaled)" if meta["gan"]
+                      else "face crop from upload"),
+             "source": "crop", "created_at": _now(), "crop_meta": meta})
+        _save(slug, c2)
+        return str(p), _anchor_score(slug, _load(slug), p), meta
+    except Exception as e:  # noqa: BLE001
+        logger.warning("klein3 %s: face crop failed, falling back to a generated "
+                       "close-up: %s", slug, e)
+        return None
 
 
 def _public_char(slug: str, c: dict, full: bool = False) -> dict:
@@ -508,13 +752,41 @@ async def ref_delete(slug: str, rid: str):
 
 
 @router.get("/characters/{slug}/refs/{rid}/image")
-async def ref_image(slug: str, rid: str):
+async def ref_image(slug: str, rid: str, download: int = 0):
+    """A single reference image.
+
+    v1.276.1: `?download=1` returns it as an attachment under a MEANINGFUL
+    filename — `clonejoan_red-leather_front.png` rather than `9c848c8e8c41.png`.
+    Every outfit view is its own standalone image (the grouping into an "outfit"
+    is metadata, not a merged file) precisely so it can be handed to something
+    else as a reference; a file named after a hex id is useless the moment it
+    leaves this app.
+    """
     if "/" in rid or "\\" in rid or ".." in rid:
         raise HTTPException(400, "bad id")
     p = _cdir(slug) / "refs" / f"{rid}.png"
     if not p.exists():
         raise HTTPException(404, "image not found")
-    return FileResponse(str(p), media_type="image/png")
+    if not download:
+        return FileResponse(str(p), media_type="image/png")
+    name = f"{slug}_{rid}.png"
+    try:
+        r = _ref_by_id(_load(slug), rid) or {}
+        o = r.get("outfit") or {}
+        parts = [slug]
+        if o.get("name"):
+            def _sl(x: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "-", str(x).lower()).strip("-")
+            parts.append(_sl(o["name"]))
+            if o.get("variant"):
+                parts.append(_sl(o["variant"]))
+            parts.append(str(o.get("view") or "view"))
+        else:
+            parts.append(str(r.get("tag") or "ref"))
+        name = "_".join(x for x in parts if x) + ".png"
+    except Exception:  # noqa: BLE001 — a nice name is a bonus, never a blocker
+        pass
+    return FileResponse(str(p), media_type="image/png", filename=name)
 
 
 # ── Missing-view synthesis (Klein N-ref edit, per-view prompt) ───────────────
@@ -559,6 +831,19 @@ class ViewsIn(BaseModel):
     height: int = 1216
     face_first: bool = True            # 🙂 render/reuse a face close-up anchor
     regen_face: bool = False           # force a fresh face even if one exists
+    face_from_crop: bool = True        # v1.275.7: CROP the anchor out of the
+                                       # uploaded front ref instead of generating
+                                       # one. A crop cannot drift — it IS the
+                                       # upload. False = the old generate path.
+    face_crop_gan: bool = True         # GAN-upscale the crop (STUDIO_UPSCALE)
+    ref_count: int = 3                 # v1.275.10: how many identity refs a view
+                                       # job gets (1-5; those workflows all
+                                       # exist). Was hardcoded 3 and 3 MEASURED
+                                       # BEST: adding a 4th ref (the right
+                                       # profile) dropped a frontal render from
+                                       # 0.4498 to 0.3797. Knob exposed because
+                                       # the right answer may differ per
+                                       # character, but do not raise it blind.
 
 
 @router.post("/characters/{slug}/views/generate")
@@ -567,7 +852,8 @@ async def views_generate(slug: str, body: ViewsIn, request: Request):
     todo = [v for v in (body.views or []) if v in VIEW_TAGS]
     if not todo:
         raise HTTPException(400, f"views must be from {', '.join(VIEW_TAGS)}")
-    id_refs = _identity_ref_paths(slug, c)
+    nref = max(1, min(int(body.ref_count or 4), 5))   # 1..5 workflows exist
+    id_refs = _identity_ref_paths(slug, c, limit=nref)
     if not id_refs:
         raise HTTPException(409, "upload at least one reference first")
     st = _job(slug, "views")
@@ -590,39 +876,171 @@ async def views_generate(slug: str, body: ViewsIn, request: Request):
         refs_for_views = list(id_refs)
         total = len(todo)
         if body.face_first:
+            # v1.275.4 — THE ANCHOR IS NOW MEASURED BEFORE IT IS TRUSTED.
+            # v1.275.2 adopted whatever close-up came back. Measured on
+            # clonejoan 2026-08-09: that anchor scored 0.4660 against the
+            # uploaded front reference — barely over ARC_MATCH — while the
+            # views it produced scored 0.76-0.79 against the ANCHOR and only
+            # 0.36-0.39 against the upload. The mechanism worked perfectly and
+            # propagated the wrong face. An unmeasured anchor is a drift
+            # amplifier: every view inherits its error and adds its own.
+            # So: score it, and if it is below the band, spend ONE more render
+            # on a different seed and keep the better of the two. The loser is
+            # retagged `other` rather than deleted — it is still a picture of
+            # roughly this person, it is just not allowed to be the anchor.
             face_path: List[str] = []
             existing = [r for r in _refs_by_tag(c, "face")
                         if (_cdir(slug) / "refs" / f"{r['id']}.png").exists()]
             if existing and not body.regen_face:
-                face_path = [str(_cdir(slug) / "refs" / f"{existing[-1]['id']}.png")]
+                # v1.275.4b: BEST, not NEWEST. Measured on clonejoan the same
+                # afternoon: three anchors scored 0.4660, 0.3499 and 0.3926
+                # against the upload, and `existing[-1]` would have reused the
+                # 0.3926 one purely because it was last. Newest is not a quality
+                # signal; the score is, and it is free.
+                best_p, best_sc = None, None
+                for r in existing:
+                    p = _cdir(slug) / "refs" / f"{r['id']}.png"
+                    s = _anchor_score(slug, c, p)
+                    if best_p is None or (s is not None and
+                                          (best_sc is None or s > best_sc)):
+                        best_p, best_sc = p, s
+                face_path = [str(best_p)]
+                sc = best_sc
+                st["anchor_score"] = sc
+                st["anchor_source"] = f"reused (best of {len(existing)})"
+                if sc is not None and sc < _ANCHOR_MIN:
+                    logger.warning(
+                        "klein3 %s: REUSED face anchor scores %.4f vs the front "
+                        "reference (below %.2f) — every view will inherit that "
+                        "drift. Pass regen_face:true to render a fresh one.",
+                        slug, sc, _ANCHOR_MIN)
             else:
                 total += 1
                 st["detail"] = f"0/{total} (face anchor first)"
-                fjob = [{"key": "face", "prompt": _face_prompt(fields),
-                         "refs": id_refs, "w": 832, "h": 1024, "seed": seed0 - 1}]
 
-                def on_face(jb, data):
-                    rid = uuid4().hex[:12]
-                    p = _cdir(slug) / "refs" / f"{rid}.png"
-                    _save_png_bytes(data, p)
-                    c2 = _load(slug)
-                    c2.setdefault("refs", []).append(
-                        {"id": rid, "tag": "face",
-                         "name": "generated face close-up (anchor)",
-                         "source": "generated", "created_at": _now()})
-                    _save(slug, c2)
-                    face_path.append(str(p))
+                def _render_anchor(seed: int) -> Optional[Tuple[str, Optional[float]]]:
+                    """One face close-up → (path, score). None if it failed."""
+                    got: List[str] = []
+
+                    def on_face(jb, data):
+                        rid = uuid4().hex[:12]
+                        p = _cdir(slug) / "refs" / f"{rid}.png"
+                        _save_png_bytes(data, p)
+                        c2 = _load(slug)
+                        c2.setdefault("refs", []).append(
+                            {"id": rid, "tag": "face",
+                             "name": "generated face close-up (anchor)",
+                             "source": "generated", "created_at": _now()})
+                        _save(slug, c2)
+                        got.append(str(p))
+
+                    try:
+                        _parallel_klein_edits(
+                            disp,
+                            [{"key": "face", "prompt": _face_prompt(fields),
+                              "refs": id_refs, "w": 832, "h": 1024, "seed": seed}],
+                            on_face, st)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("klein3 face anchor render failed: %s", e)
+                        return None
+                    if not got:
+                        return None
+                    return got[0], _anchor_score(slug, _load(slug), Path(got[0]))
+
+                # v1.275.4b: a forced regen competes against the anchors that
+                # already exist instead of replacing them blind. Three measured
+                # anchors on one character spanned 0.3499-0.4660 — this render
+                # is a lottery ticket, not an upgrade, and the best ticket in
+                # hand should not be thrown away because a newer one printed.
+                best, best_sc, tries = None, None, 0
+                for r in existing:
+                    p = _cdir(slug) / "refs" / f"{r['id']}.png"
+                    s = _anchor_score(slug, c, p)
+                    if s is not None and (best_sc is None or s > best_sc):
+                        best, best_sc = str(p), s
+                fresh: List[Tuple[str, Optional[float]]] = []
+
+                # v1.275.7: try the CROP first. It costs one GAN pass instead of
+                # a Klein render and it cannot drift off the upload, so if it
+                # clears the bar there is nothing to generate.
+                if body.face_from_crop:
+                    st["detail"] = f"0/{total} (face crop from upload)"
+                    cropped = _face_crop_ref(slug, _load(slug), disp,
+                                             gan=body.face_crop_gan)
+                    if cropped:
+                        cp, csc, cmeta = cropped
+                        st["face_crop"] = cmeta
+                        logger.info("klein3 %s: face crop scores %s vs the front "
+                                    "ref (%s)", slug,
+                                    "n/a" if csc is None else f"{csc:.4f}", cmeta)
+                        if csc is None or (best_sc is None or csc > best_sc):
+                            best, best_sc = cp, csc
+                        if best_sc is not None and best_sc >= _ANCHOR_MIN:
+                            face_path = [best]
+                            st["anchor_score"] = best_sc
+                            st["anchor_source"] = (
+                                "cropped from upload"
+                                + (" (GAN)" if cmeta.get("gan") else ""))
+                            st["done"] = st.get("done", []) + ["face"]
+                            st["detail"] = f"{len(st['done'])}/{total}"
+                crop_won = bool(face_path)   # crop cleared the bar; nothing to render
+                first = None if crop_won else _render_anchor(seed0 - 1)
+                if first:
+                    tries = 1
+                    fresh.append(first)
+                    if best_sc is None or (first[1] is not None and first[1] > best_sc):
+                        best, best_sc = first
+                    if best_sc is not None and best_sc < _ANCHOR_MIN:
+                        logger.warning(
+                            "klein3 %s: best face anchor is %.4f vs the front "
+                            "reference (below %.2f) — retrying once on a new seed",
+                            slug, best_sc, _ANCHOR_MIN)
+                        total += 1
+                        second = _render_anchor(seed0 - 2)
+                        if second:
+                            tries = 2
+                            fresh.append(second)
+                            if second[1] is not None and (best_sc is None or
+                                                          second[1] > best_sc):
+                                best, best_sc = second
+                # Demote only the close-ups THIS run produced and did not pick.
+                # An incumbent anchor that lost is left exactly as it was —
+                # rewriting a ref that another run created is not this run's
+                # business, and the audit script reads history off these tags.
+                losers = [p for p, _ in fresh if p != best]
+                if losers:
+                    c3 = _load(slug)
+                    lids = {Path(p).stem for p in losers}
+                    for r in c3.get("refs", []):
+                        if r.get("id") in lids:
+                            r["tag"] = "other"
+                            r["name"] = "face close-up (not chosen as anchor)"
+                    _save(slug, c3)
+                if not crop_won:
+                    if best:
+                        face_path = [best]
+                    st["anchor_score"] = best_sc
+                    st["anchor_source"] = (
+                        f"generated ({tries} render(s))"
+                        if best in [p for p, _ in fresh]
+                        else (f"cropped from upload (beat {tries} render(s))"
+                              if best and Path(best).name not in
+                              {Path(p).name for p, _ in fresh} and tries
+                              else f"kept incumbent (beat {tries} fresh render(s))"))
                     st["done"] = st.get("done", []) + ["face"]
                     st["detail"] = f"{len(st['done'])}/{total}"
-
-                try:
-                    _parallel_klein_edits(disp, fjob, on_face, st)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("klein3 face anchor failed, views proceed "
-                                   "without it: %s", e)
+                if best_sc is not None and best_sc < _ANCHOR_MIN:
+                    logger.warning(
+                        "klein3 %s: BEST anchor is still %.4f vs the front "
+                        "reference. The view set will be self-consistent around "
+                        "a face that is not the uploaded one.", slug, best_sc)
             if face_path:
+                # Recompute against the CURRENT char.json: the anchor render may
+                # have added or retagged refs, and a stale id_refs list is how a
+                # demoted close-up sneaks back in as reference 2.
+                cur = _identity_ref_paths(slug, _load(slug), limit=nref)
                 refs_for_views = ([face_path[0]] +
-                                  [p for p in id_refs if p != face_path[0]])[:3]
+                                  [p for p in cur if p != face_path[0]])[:nref]
 
         # ── phase 2: the views, face-anchored ───────────────────────────────
         jobs = [{"key": v, "prompt": _view_prompt(v, fields),
@@ -651,6 +1069,237 @@ async def views_generate(slug: str, body: ViewsIn, request: Request):
 
     _spawn(_run)
     return {"started": True, "views": todo}
+
+
+# ── 👗 Outfit sets (v1.276.0) ────────────────────────────────────────────────
+#
+# Lorenzo went to the Clothes tab with a character he had just made in Klein 3.0
+# and it was not in the list.  The reason turned out to be architectural: that
+# tab dresses a `StudioCharacter` row using sprite shards that live on a VNCCS
+# worker, and a Klein 3.0 character is a folder of tagged images on this machine
+# with no DB row at all.  Bending that route to accept a slug would have meant
+# threading a second identity type through the asset loader, the sprite picker
+# and the costume writer — a lot of blast radius around a path that currently
+# works for VNCCS characters.
+#
+# So Klein 3.0 dresses characters the Klein 3.0 way, with the machinery this
+# mode already has and that is already proven: an outfit is a Klein edit of a
+# view reference, fanned across the workers by `_parallel_klein_edits`, saved
+# back as an `outfit`-tagged ref.  A SET is that same edit applied to every
+# view, so a costume comes out consistent from the front, back and both sides.
+#
+# Affirmative prompts only, and every garment NAMED — Klein has no negative
+# prompt node and runs at cfg=1, so "no jacket" injects a jacket, and category
+# words like "clothing" are ignored.
+
+# v1.276.2 — the full wardrobe vocabulary. Lorenzo: "maximize the ability to
+# create outfits — if people want to do it simply they can, but if they want
+# more detail, this gives them the avenue."
+#
+# So: FOUR core slots cover the simple case (top, bottom, shoes, outerwear) and
+# nine more cover everything else. Every slot is optional; empty ones are
+# skipped entirely rather than emitting "no hat", which at cfg=1 with no
+# negative node would put a hat on the character.
+#
+# `group` drives the UI: "core" renders expanded, "more" behind a disclosure.
+# ORDER IS THE PROMPT ORDER — head to toe, then held items — because the list
+# is comma-joined into one sentence and it should read like a person describing
+# what they can see. The original six keys are all preserved unchanged, so
+# outfits saved before this still load and re-render identically.
+_OUTFIT_SLOT_META = [
+    {"key": "headwear", "label": "Headwear", "group": "more",
+     "example": "a black wool beanie"},
+    {"key": "eyewear", "label": "Eyewear", "group": "more",
+     "example": "thin gold wire-frame glasses"},
+    {"key": "outerwear", "label": "Outerwear", "group": "core",
+     "example": "a cropped red leather biker jacket with silver zips"},
+    {"key": "top", "label": "Top", "group": "core",
+     "example": "a plain white ribbed tank top"},
+    {"key": "underlayer", "label": "Base layer / underwear", "group": "more",
+     "example": "a grey cotton long-sleeve undershirt"},
+    {"key": "belt", "label": "Belt", "group": "more",
+     "example": "a brown leather belt with a brass buckle"},
+    {"key": "bottom", "label": "Bottom", "group": "core",
+     "example": "black slim-fit jeans"},
+    {"key": "legwear", "label": "Legwear", "group": "more",
+     "example": "sheer black tights"},
+    {"key": "shoes", "label": "Shoes", "group": "core",
+     "example": "black leather ankle boots"},
+    {"key": "gloves", "label": "Gloves", "group": "more",
+     "example": "fingerless black leather gloves"},
+    {"key": "jewellery", "label": "Jewellery", "group": "more",
+     "example": "small silver hoop earrings and a thin cross necklace"},
+    {"key": "accessories", "label": "Other accessories", "group": "more",
+     "example": "a charcoal wool scarf"},
+    {"key": "carried", "label": "Carried / held", "group": "more",
+     "example": "a worn brown leather satchel"},
+]
+_OUTFIT_SLOTS = tuple(s["key"] for s in _OUTFIT_SLOT_META)
+# Held, not worn — it gets its own clause so the sentence stays true.
+_CARRIED_SLOTS = ("carried",)
+
+
+def _outfit_prompt(slots: Dict[str, str], extra: str, fields: Dict[str, Any]) -> str:
+    """Name every garment, affirmatively, and pin everything else in place.
+
+    Slots are emitted in _OUTFIT_SLOT_META order (head to toe), NOT in whatever
+    order the caller's dict happens to iterate — the prompt is one sentence and
+    it should read like a description, not a form dump.
+    """
+    worn = [str(slots.get(k) or "").strip() for k in _OUTFIT_SLOTS
+            if k not in _CARRIED_SLOTS and str(slots.get(k) or "").strip()]
+    held = [str(slots.get(k) or "").strip() for k in _CARRIED_SLOTS
+            if str(slots.get(k) or "").strip()]
+    if extra.strip():
+        worn.append(extra.strip())
+    garments = ", ".join(worn) if worn else "a plain fitted t-shirt and plain trousers"
+    carry = f", and carrying {', '.join(held)}" if held else ""
+    hair = str(fields.get("hair") or "").strip()
+    keep_hair = f", identical {hair} hairstyle" if hair else ", identical hairstyle"
+    return ("The exact same person from image 1 — identical face, identical body, "
+            f"identical standing pose, camera angle and framing{keep_hair} — "
+            f"now wearing {garments}{carry}. The clothing fits naturally with "
+            "realistic fabric folds, seams and drape. Plain white studio "
+            "background, even lighting, photorealistic full body shot.")
+
+
+class OutfitIn(BaseModel):
+    name: str                              # what to call this outfit
+    variant: str = ""                      # v1.276.2: a LOOK within the outfit —
+                                           # "jacket off", "sleeves rolled". Empty
+                                           # = the base look. Same wardrobe, one
+                                           # change; a scene where she takes the
+                                           # jacket off should not need a whole
+                                           # second outfit.
+    slots: Dict[str, str] = {}             # see _OUTFIT_SLOT_META (13 slots)
+    extra: str = ""                        # free text appended to the garments
+    views: List[str] = []                  # [] = the whole SET (front/back/left/right)
+    seed: Optional[int] = None
+    width: int = 832
+    height: int = 1216
+    ref_count: int = 3
+
+
+@router.get("/characters/{slug}/outfits")
+async def outfits_list(slug: str):
+    """Every outfit → its variants → their per-view images, newest first.
+
+    Three levels because that is what the thing actually is: an OUTFIT is a
+    wardrobe entry, a VARIANT is one look within it (jacket on / jacket off),
+    and each variant has one standalone image per view.
+    """
+    c = _load(slug)
+    groups: Dict[str, dict] = {}
+    for r in c.get("refs", []):
+        if r.get("tag") != "outfit":
+            continue
+        o = r.get("outfit") or {}
+        nm = str(o.get("name") or r.get("name") or "outfit")
+        vr = str(o.get("variant") or "")
+        g = groups.setdefault(nm, {"name": nm, "variants": {},
+                                   "created_at": r.get("created_at")})
+        v = g["variants"].setdefault(vr, {
+            "variant": vr, "label": vr or "base look",
+            "slots": o.get("slots") or {}, "extra": o.get("extra") or "",
+            "views": {}, "created_at": r.get("created_at"),
+        })
+        v["views"][str(o.get("view") or "front")] = {
+            "id": r["id"],
+            "url": f"/api/klein3/characters/{slug}/refs/{r['id']}/image",
+            "download_url": (f"/api/klein3/characters/{slug}/refs/{r['id']}"
+                             f"/image?download=1"),
+            "created_at": r.get("created_at"),
+        }
+        if (r.get("created_at") or "") > (g.get("created_at") or ""):
+            g["created_at"] = r.get("created_at")
+    out = []
+    for g in groups.values():
+        # base look first, then variants newest-first — the base is the thing
+        # the others are a change TO, so it reads wrong anywhere else.
+        vs = sorted(g["variants"].values(),
+                    key=lambda v: (v["variant"] != "", v.get("created_at") or ""))
+        out.append({"name": g["name"], "created_at": g["created_at"], "variants": vs})
+    out.sort(key=lambda g: g.get("created_at") or "", reverse=True)
+    return {"slug": slug, "outfits": out,
+            "slots": _OUTFIT_SLOT_META, "slot_keys": list(_OUTFIT_SLOTS)}
+
+
+@router.post("/characters/{slug}/outfits")
+async def outfit_generate(slug: str, body: OutfitIn, request: Request):
+    """Dress this character in a NAMED outfit, across one view or the whole set.
+
+    Each view is dressed from that view's own reference, so the result keeps the
+    pose and angle it started from and only the clothes change.
+    """
+    c = _load(slug)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "outfit name required")
+    want = [v for v in (body.views or []) if v in VIEW_TAGS] or list(VIEW_TAGS)
+
+    sources: List[tuple] = []
+    for v in want:
+        rs = [r for r in _refs_by_tag(c, v)
+              if (_cdir(slug) / "refs" / f"{r['id']}.png").exists()]
+        if rs:
+            sources.append((v, _cdir(slug) / "refs" / f"{rs[-1]['id']}.png"))
+    if not sources:
+        raise HTTPException(409, "no view-tagged references to dress — generate the "
+                                 "missing views first")
+
+    st = _job(slug, "outfit")
+    if st.get("status") == "running":
+        raise HTTPException(409, "an outfit job is already running")
+    disp = _dispatcher(request)
+    seed = int(body.seed) if body.seed else random.randint(1, 2_000_000_000)
+    w = max(256, min(int(body.width or 832), 2048))
+    h = max(256, min(int(body.height or 1216), 2048))
+    nref = max(1, min(int(body.ref_count or 3), 5))
+    prompt = _outfit_prompt(body.slots or {}, body.extra or "", c.get("fields", {}))
+    st.clear()
+    variant = (body.variant or "").strip()
+    tag_txt = f"{name}{f' / {variant}' if variant else ''}"
+    st.update({"status": "running", "detail": f"{tag_txt} ×{len(sources)}",
+               "error": None, "outfit": name, "variant": variant,
+               "prompt": prompt, "done": []})
+
+    def _run():
+        # Each view is dressed from ITS OWN reference (image 1), with the
+        # character's identity refs behind it — same shape as view generation.
+        id_refs = _identity_ref_paths(slug, _load(slug), limit=nref)
+        jobs = []
+        for i, (view, p) in enumerate(sources):
+            refs = [str(p)] + [r for r in id_refs if r != str(p)]
+            jobs.append({"key": view, "prompt": prompt, "refs": refs[:nref],
+                         "w": w, "h": h, "seed": seed + i})
+
+        def on_result(jb, data):
+            rid = uuid4().hex[:12]
+            _save_png_bytes(data, _cdir(slug) / "refs" / f"{rid}.png")
+            c2 = _load(slug)
+            c2.setdefault("refs", []).append({
+                "id": rid, "tag": "outfit",
+                "name": f"{tag_txt} — {jb['key']}",
+                "source": "generated", "created_at": _now(),
+                "outfit": {"name": name, "variant": variant, "view": jb["key"],
+                           "slots": body.slots or {}, "extra": body.extra or ""},
+            })
+            _save(slug, c2)
+            st["done"] = st.get("done", []) + [jb["key"]]
+            st["detail"] = f"{tag_txt} {len(st['done'])}/{len(sources)}"
+
+        try:
+            _parallel_klein_edits(disp, jobs, on_result, st)   # fans across workers
+            errs = [f"{k}: {t.get('error')}" for k, t in st.get("tasks", {}).items()
+                    if t.get("status") == "error"]
+            st["error"] = "; ".join(errs) if errs else None
+            st["status"] = "done" if not errs else "done_with_errors"
+        except Exception as e:  # noqa: BLE001
+            st.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
+
+    _spawn(_run)
+    return {"started": True, "outfit": name, "variant": variant,
+            "views": [v for v, _ in sources], "prompt": prompt}
 
 
 # ── Strip (underwear / nude base from any reference) ─────────────────────────

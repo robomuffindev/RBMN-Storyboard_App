@@ -43,7 +43,8 @@ OUT = ROOT / "_diag" / "lora_test"
 
 APP = "http://127.0.0.1:8899"
 HELPER = "http://192.168.12.202:8765"
-TOKEN = "49ae12e57c0949158b2efb4edfb0ac49"
+from helper_token import helper_token as _helper_token  # v1.276.4: token out of source
+TOKEN = _helper_token()
 COMFY = "http://192.168.12.202:8188"
 LORA = "dorian-v1-b1966f-000016.safetensors"
 CHAR = "dorian"

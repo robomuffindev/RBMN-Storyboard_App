@@ -1059,6 +1059,25 @@ def _ds_base_mode(ds: dict) -> str:
     return m if m in ("dressed", "stripped", "auto") else "dressed"
 
 
+def _ds_base_outfit(ds: dict) -> Optional[dict]:
+    """The OUTFIT a dataset renders from, if one was chosen.
+
+    v1.276.3 (Lorenzo): "we should still use our base image already set, but
+    have the option to select an outfit base." So this is opt-in and returns
+    None by default — an existing dataset keeps rendering off exactly the base
+    it always did, which is the only safe direction for a dataset that may
+    already be half-rendered.
+
+    Shape: {"name": "Red Leather", "variant": "jacket off"}; an empty variant
+    means the base look. `_base_for_view` falls through to the normal base chain
+    for any view this outfit has no image for, so a partial outfit degrades
+    instead of failing rows."""
+    o = ds.get("base_outfit")
+    if not isinstance(o, dict):
+        return None
+    return o if str(o.get("name") or "").strip() else None
+
+
 def _identity_preview(ds: dict) -> Dict[str, Any]:
     """Which image every view will actually start from, before anything renders.
 
@@ -1066,9 +1085,15 @@ def _identity_preview(ds: dict) -> Dict[str, Any]:
     it to use", and it was previously only visible by reading `identity` on a
     finished row."""
     mode = _ds_base_mode(ds)
+    _bo = _ds_base_outfit(ds)
     out: Dict[str, Any] = {"base_mode": mode,
                            "base_mode_source": ("explicit" if ds.get("base_mode")
                                                 else "default (v1.260: dressed)"),
+                           "base_outfit": _bo,
+                           "base_outfit_label": (
+                               f"{_bo['name']}" + (f" / {_bo['variant']}"
+                                                   if _bo.get("variant") else "")
+                               if _bo else None),
                            "outfits": len(ds.get("outfits") or []),
                            "views": {}, "warnings": []}
     try:
@@ -1080,7 +1105,8 @@ def _identity_preview(ds: dict) -> Dict[str, Any]:
                      for it in ds.get("items", []) if it.get("angle")}) or ["front"]
     for view in wanted:
         try:
-            fp, label = _base_for_view(ds["char_slug"], char, view, mode)
+            fp, label = _base_for_view(ds["char_slug"], char, view, mode,
+                                       _ds_base_outfit(ds))
         except Exception as e:  # noqa: BLE001
             out["views"][view] = {"error": f"{type(e).__name__}: {e}"}
             continue
@@ -1137,7 +1163,7 @@ def _baseline_sets(ds: dict) -> Dict[str, Tuple[List[Any], List[str]]]:
     slug = ds["char_slug"]
     picks: Dict[str, List[Tuple[Optional[Path], str]]] = {"front": [], "left": [], "right": []}
 
-    fp, lbl = _base_for_view(slug, char, "front", _ds_base_mode(ds))
+    fp, lbl = _base_for_view(slug, char, "front", _ds_base_mode(ds), _ds_base_outfit(ds))
     picks["front"].append((fp, lbl))
     for tag in ("face",):
         refs = _refs_by_tag(char, tag)
@@ -1152,7 +1178,7 @@ def _baseline_sets(ds: dict) -> Dict[str, Tuple[List[Any], List[str]]]:
         else:
             # No tagged side reference. The generated base is second best and
             # is labelled so the score can be read with that in mind.
-            bp, blbl = _base_for_view(slug, char, side, _ds_base_mode(ds))
+            bp, blbl = _base_for_view(slug, char, side, _ds_base_mode(ds), _ds_base_outfit(ds))
             if bp:
                 picks[side].append((bp, f"{blbl} (generated)"))
 
@@ -1192,7 +1218,7 @@ def _identity_ref_png(ds: dict) -> Optional[bytes]:
         char = _load_char(ds["char_slug"])
         # QC compares against the SAME identity source the renders used, or it
         # would flag his real clothes as "not him" whenever the modes disagree.
-        fp, _lbl = _base_for_view(ds["char_slug"], char, "front", _ds_base_mode(ds))
+        fp, _lbl = _base_for_view(ds["char_slug"], char, "front", _ds_base_mode(ds), _ds_base_outfit(ds))
         return fp.read_bytes() if fp and fp.exists() else None
     except Exception:  # noqa: BLE001 — QC still works without it
         return None
@@ -1214,7 +1240,7 @@ def _render_jobs(ds: dict, char: dict, items: List[dict], seed0: int) -> List[di
         _view = _base_view_for(it["angle"], ang[3],
                                (ds.get("options") or {}).get("tq_base", "side"))
         base, src_label = _base_for_view(ds["char_slug"], char, _view,
-                                         _ds_base_mode(ds))
+                                         _ds_base_mode(ds), _ds_base_outfit(ds))
         if not base:
             raise HTTPException(409, "this character has no base image yet — strip or tag one "
                                      "in Klein 3.0 first")
@@ -1226,7 +1252,8 @@ def _render_jobs(ds: dict, char: dict, items: List[dict], seed0: int) -> List[di
         side_idx = None
         if (it["angle"] in _TQ_ANGLES and _tq_mode(ds, it["angle"]) == "tworef"
                 and _view == "front"):
-            _sb, _ = _base_for_view(ds["char_slug"], char, ang[3], _ds_base_mode(ds))
+            _sb, _ = _base_for_view(ds["char_slug"], char, ang[3],
+                                    _ds_base_mode(ds), _ds_base_outfit(ds))
             if _sb and Path(_sb).exists():
                 refs.append(str(_sb))
                 side_idx = len(refs)     # 1-based, matching the prompt text
@@ -2977,6 +3004,69 @@ def _fizgig_sh(ds: dict) -> str:
         '  echo "Set FIZGIG to the folder containing lora_trainer_gui.py"; exit 2; }\n'
         'PY="$FIZGIG/venv/bin/python"; [ -x "$PY" ] || PY="python3"\n'
         '"$PY" ./fizgig_run.py --fizgig "$FIZGIG" --python "$PY" "$@"\n')
+
+class BaseOutfitIn(BaseModel):
+    """Pick (or clear) the Klein 3.0 outfit a dataset renders from."""
+    name: str = ""                         # "" clears it -> back to the normal base
+    variant: str = ""
+
+
+@router.get("/datasets/{ds_id}/base-outfit")
+async def base_outfit_get(ds_id: str):
+    """What outfit this dataset renders from, and what it COULD render from.
+
+    v1.276.3. The default stays exactly what it was — the character's own base
+    under the dataset's base_mode — because an existing dataset must not change
+    what it renders just because a new option appeared. Choosing an outfit is
+    opt-in and reversible.
+    """
+    ds = _read_ds(ds_id)
+    slug = ds.get("char_slug")
+    available: List[dict] = []
+    try:
+        char = _load_char(slug)
+        seen: Dict[tuple, dict] = {}
+        for r in char.get("refs", []):
+            if r.get("tag") != "outfit":
+                continue
+            o = r.get("outfit") or {}
+            key = (str(o.get("name") or ""), str(o.get("variant") or ""))
+            if not key[0]:
+                continue
+            rec = seen.setdefault(key, {"name": key[0], "variant": key[1],
+                                        "label": key[0] + (f" / {key[1]}" if key[1] else ""),
+                                        "views": []})
+            v = str(o.get("view") or "")
+            if v and v not in rec["views"]:
+                rec["views"].append(v)
+        available = sorted(seen.values(), key=lambda x: x["label"])
+    except Exception as e:  # noqa: BLE001 — listing must never break the panel
+        logger.warning("base-outfit list failed for %s: %s", slug, e)
+    cur = _ds_base_outfit(ds)
+    return {"base_outfit": cur,
+            "label": (cur["name"] + (f" / {cur['variant']}" if cur.get("variant") else ""))
+                     if cur else None,
+            "base_mode": _ds_base_mode(ds),
+            "available": available,
+            "note": ("Views this outfit has no image for fall back to the normal "
+                     "base, so a partial outfit degrades instead of failing rows.")}
+
+
+@router.put("/datasets/{ds_id}/base-outfit")
+async def base_outfit_put(ds_id: str, body: BaseOutfitIn):
+    ds = _read_ds(ds_id)
+    name = (body.name or "").strip()
+    if name:
+        ds["base_outfit"] = {"name": name, "variant": (body.variant or "").strip()}
+    else:
+        ds.pop("base_outfit", None)
+    _write_ds(ds)
+    rendered = sum(1 for it in ds.get("items", []) if it.get("status") == "done")
+    return {"base_outfit": _ds_base_outfit(ds),
+            "identity_preview": _identity_preview(ds),
+            "note": (f"{rendered} image(s) already rendered against the previous base — "
+                     "re-render those rows to apply this") if rendered else ""}
+
 
 @router.get("/datasets/{ds_id}/outfits")
 async def outfits_get(ds_id: str):

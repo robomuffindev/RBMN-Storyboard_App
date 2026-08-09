@@ -69,6 +69,7 @@ class SettingsResponse(BaseModel):
     video_tail: int = 0
     color_correction_enabled: bool = True
     restrict_explicit_content: bool = False
+    enable_experimental_modes: bool = False
     # Export transition settings
     export_transition_type: str = "crossfade"
     export_transition_duration: float = 0.5
@@ -146,6 +147,7 @@ class SettingsUpdate(BaseModel):
     video_tail: Optional[int] = None
     color_correction_enabled: Optional[bool] = None
     restrict_explicit_content: Optional[bool] = None
+    enable_experimental_modes: Optional[bool] = None
     export_transition_type: Optional[str] = None
     export_transition_duration: Optional[float] = None
     export_color_match_clips: Optional[bool] = None
@@ -361,6 +363,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         video_tail=settings.video_tail or 0,
         color_correction_enabled=settings.color_correction_enabled if settings.color_correction_enabled is not None else True,
         restrict_explicit_content=settings.restrict_explicit_content or False,
+        enable_experimental_modes=settings.enable_experimental_modes or False,
         export_transition_type=settings.export_transition_type or "crossfade",
         export_transition_duration=settings.export_transition_duration if settings.export_transition_duration is not None else 0.5,
         export_color_match_clips=settings.export_color_match_clips if settings.export_color_match_clips is not None else True,
@@ -571,6 +574,8 @@ async def update_settings(
             settings.color_correction_enabled = req.color_correction_enabled
         if req.restrict_explicit_content is not None:
             settings.restrict_explicit_content = req.restrict_explicit_content
+        if req.enable_experimental_modes is not None:
+            settings.enable_experimental_modes = req.enable_experimental_modes
         if req.export_transition_type is not None:
             settings.export_transition_type = req.export_transition_type
         if req.export_transition_duration is not None:
@@ -1346,6 +1351,7 @@ class SettingsExportData(BaseModel):
     video_tail: int = 0
     color_correction_enabled: bool = True
     restrict_explicit_content: bool = False
+    enable_experimental_modes: bool = False
     global_negative_prompt: Optional[str] = None
     # Export / transition settings
     export_transition_type: str = "none"
@@ -1431,6 +1437,7 @@ async def export_settings(
             video_tail=settings.video_tail or 0,
             color_correction_enabled=settings.color_correction_enabled if settings.color_correction_enabled is not None else False,
             restrict_explicit_content=settings.restrict_explicit_content or False,
+        enable_experimental_modes=settings.enable_experimental_modes or False,
             global_negative_prompt=settings.global_negative_prompt,
             export_transition_type=settings.export_transition_type or "none",
             export_transition_duration=settings.export_transition_duration if settings.export_transition_duration is not None else 0.5,
@@ -1579,6 +1586,8 @@ async def import_settings(
             settings.color_correction_enabled = data["color_correction_enabled"]
         if "restrict_explicit_content" in data:
             settings.restrict_explicit_content = data["restrict_explicit_content"]
+        if "enable_experimental_modes" in data:
+            settings.enable_experimental_modes = data["enable_experimental_modes"]
         if "export_transition_type" in data:
             settings.export_transition_type = data["export_transition_type"]
         if "export_transition_duration" in data:

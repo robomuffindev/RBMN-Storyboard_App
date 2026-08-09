@@ -21,6 +21,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from './vnccsNativeApi';
 import VaritestPanel, { type VtCtxT } from './VaritestPanel';
 import ImageWorkshopLightbox from '../ImageWorkshop/ImageWorkshopLightbox';
+import ImageLightbox from '../shared/ImageLightbox';
 import type {
   ContextListsT, HostInfoT, ResultImageT, VNCCSCharacterInfoT, VNCCSStepT,
 } from './vnccsNativeApi';
@@ -733,125 +734,10 @@ function EditImageModal({ charName, src, costumeName, onSaved, onClose }: {
   );
 }
 
-interface LightboxVersionCtl {
-  index: number; count: number; isActive: boolean;
-  onPrev: () => void; onNext: () => void; onSetActive: () => void;
-}
-
-interface LightboxNavCtl { index: number; count: number; onPrev: () => void; onNext: () => void; }
-
-function ImageLightbox({ src, onClose, version, nav }: {
-  src: string; onClose: () => void; version?: LightboxVersionCtl; nav?: LightboxNavCtl;
-}) {
-  const [scale, setScale] = useState(1);
-  const [tx, setTx] = useState(0);
-  const [ty, setTy] = useState(0);
-  const [drag, setDrag] = useState<{ x: number; y: number; tx: number; ty: number } | null>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-      else if (e.key === 'ArrowLeft') { if (nav) nav.onPrev(); else if (version) version.onPrev(); }
-      else if (e.key === 'ArrowRight') { if (nav) nav.onNext(); else if (version) version.onNext(); }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, nav, version]);
-  // fresh image -> reset zoom/pan so each pose opens fitted
-  useEffect(() => { setScale(1); setTx(0); setTy(0); }, [src]);
-  // While the lightbox is open, lock page scrolling and register a NON-passive
-  // wheel listener on the overlay (browsers treat React's wheel handler as
-  // passive, so its preventDefault can't stop the page scrolling behind us).
-  useEffect(() => {
-    const prevBody = document.body.style.overflow;
-    const prevHtml = document.documentElement.style.overflow;
-    document.body.style.overflow = 'hidden';
-    document.documentElement.style.overflow = 'hidden';
-    const el = rootRef.current;
-    const block = (e: WheelEvent) => e.preventDefault();
-    el?.addEventListener('wheel', block, { passive: false });
-    return () => {
-      document.body.style.overflow = prevBody;
-      document.documentElement.style.overflow = prevHtml;
-      el?.removeEventListener('wheel', block);
-    };
-  }, []);
-  const zoomAt = (clientX: number, clientY: number, factor: number) => {
-    setScale((prev) => {
-      const next = Math.min(12, Math.max(0.2, prev * factor));
-      const k = next / prev;
-      // anchor zoom at the cursor (positions measured from viewport centre)
-      const cx = clientX - window.innerWidth / 2;
-      const cy = clientY - window.innerHeight / 2;
-      setTx((t) => cx - (cx - t) * k);
-      setTy((t) => cy - (cy - t) * k);
-      return next;
-    });
-  };
-  return (
-    <div ref={rootRef}
-         style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.88)', zIndex: 80,
-                  overflow: 'hidden', overscrollBehavior: 'contain',
-                  cursor: drag ? 'grabbing' : 'grab', touchAction: 'none' }}
-         onWheel={(e) => zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015))}
-         onPointerDown={(e) => { (e.target as HTMLElement).setPointerCapture?.(e.pointerId); setDrag({ x: e.clientX, y: e.clientY, tx, ty }); }}
-         onPointerMove={(e) => { if (drag) { setTx(drag.tx + e.clientX - drag.x); setTy(drag.ty + e.clientY - drag.y); } }}
-         onPointerUp={() => setDrag(null)}
-         onDoubleClick={() => { setScale(1); setTx(0); setTy(0); }}>
-      <img src={src} alt="result"
-           draggable={false}
-           style={{ position: 'absolute', left: '50%', top: '50%', maxWidth: '92vw', maxHeight: '92vh',
-                    transform: `translate(-50%, -50%) translate(${tx}px, ${ty}px) scale(${scale})`,
-                    transformOrigin: 'center center', userSelect: 'none' }} />
-      {nav && nav.count > 1 && (
-        <>
-          <button title="Previous (←)"
-                  onClick={(e) => { e.stopPropagation(); nav.onPrev(); }}
-                  onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}
-                  style={{ ...btnGhost, position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
-                           background: 'rgba(22,26,34,0.9)', fontSize: 22, padding: '14px 16px', lineHeight: 1 }}>‹</button>
-          <button title="Next (→)"
-                  onClick={(e) => { e.stopPropagation(); nav.onNext(); }}
-                  onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}
-                  style={{ ...btnGhost, position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
-                           background: 'rgba(22,26,34,0.9)', fontSize: 22, padding: '14px 16px', lineHeight: 1 }}>›</button>
-          <div style={{ position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)',
-                        fontSize: 12, color: '#cbd2dc', fontWeight: 600, background: 'rgba(22,26,34,0.9)',
-                        border: '1px solid #2a2f3a', borderRadius: 12, padding: '3px 12px' }}>
-            {nav.index + 1} / {nav.count}
-          </div>
-        </>
-      )}
-      <div style={{ position: 'absolute', top: 14, right: 14, display: 'flex', gap: 8 }}
-           onPointerDown={(e) => e.stopPropagation()}>
-        <button style={{ ...btnGhost, background: '#161a22' }} onClick={(e) => { e.stopPropagation(); zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.3); }}>＋</button>
-        <button style={{ ...btnGhost, background: '#161a22' }} onClick={(e) => { e.stopPropagation(); zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.3); }}>－</button>
-        <button style={{ ...btnGhost, background: '#161a22' }} onClick={(e) => { e.stopPropagation(); setScale(1); setTx(0); setTy(0); }}>1:1</button>
-        <button style={{ ...btnGhost, background: '#161a22' }} onClick={(e) => { e.stopPropagation(); onClose(); }}>✕ Close</button>
-      </div>
-      {version && (
-        <div style={{ position: 'absolute', bottom: 40, left: '50%', transform: 'translateX(-50%)',
-                      display: 'flex', alignItems: 'center', gap: 10, background: '#161a22',
-                      border: '1px solid #2a2f3a', borderRadius: 8, padding: '6px 12px' }}
-             onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-          <button style={{ ...btnGhost, padding: '2px 10px' }} onClick={(e) => { e.stopPropagation(); version.onPrev(); }}>‹</button>
-          <span style={{ fontSize: 13, color: '#cbd2dc', fontWeight: 600 }}>{version.index + 1} / {version.count}</span>
-          <button style={{ ...btnGhost, padding: '2px 10px' }} onClick={(e) => { e.stopPropagation(); version.onNext(); }}>›</button>
-          {version.isActive ? (
-            <span style={{ fontSize: 12, color: '#5ee08a' }}>● Active</span>
-          ) : (
-            <button style={{ ...btnGreen, padding: '3px 10px', fontSize: 12 }}
-                    onClick={(e) => { e.stopPropagation(); version.onSetActive(); }}>Set active</button>
-          )}
-        </div>
-      )}
-      <div style={{ position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
-                    fontSize: 12, color: '#a8b2c0' }}>
-        scroll = zoom · drag = pan · double-click = reset · Esc = close
-      </div>
-    </div>
-  );
-}
+// v1.276.0: the app's ONLY zoom+pan image viewer used to live here, unexported,
+// while nine other places rendered a flat no-zoom copy. It now lives in
+// components/shared/ImageLightbox.tsx and everything imports that one — the
+// control-slot types come from there too, so the call sites below are unchanged.
 
 // ---------------------------------------------------------------------------
 export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'native' | 'klein' }) {
@@ -1032,6 +918,30 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // 640x1536 for new characters, reference-collage pipeline for clones, plus
   // the QIE2511 PoseStudio Pass-B pose sets).
   const [createEngine, setCreateEngine] = useState<'klein' | 'qwen' | 'klein2' | 'klein3'>('klein');
+  // v1.276.0 — Experimental Modes gate. Klein 1.0 and Klein 2.0 are parked dev
+  // lanes: they still work and are kept for later (game-asset export), but they
+  // are not what someone making a character today should be steered into. The
+  // setting hides their BUTTONS; nothing about their code paths changes.
+  // NOTE: `settings` in this file is already the VNCCS/forge worker blob, hence
+  // the deliberately different name.
+  const [expModes, setExpModes] = useState(false);
+  // v1.276.0 — New / Clone belong to the Qwen VNCCS flow (they seed a VNCCS
+  // character on the worker), so they only make sense there. On the plain
+  // VNCCS Native page the whole page IS that flow, so they always show.
+  const showNewClone = variant !== 'klein' || createEngine === 'qwen';
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/settings')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((st) => { if (alive && st) setExpModes(st.enable_experimental_modes === true); })
+      .catch(() => { /* default stays off — the safe direction */ });
+    return () => { alive = false; };
+  }, []);
+  // If the lane we are sitting in just got hidden, do not strand the user on an
+  // invisible tab: fall back to the live Klein lane.
+  useEffect(() => {
+    if (!expModes && (createEngine === 'klein' || createEngine === 'klein2')) setCreateEngine('klein3');
+  }, [expModes, createEngine]);
   // v1.171 Debug Options: persisted toggle + the Settings Variation Test panel
   const [debugOn, setDebugOn] = useState(false);
   const [vtOpen, setVtOpen] = useState(false);
@@ -4994,12 +4904,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       {tab === 'create' && variant === 'klein' && createEngine === 'klein2' ? (
         <div>
           <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('new'); }}>New</button>
-            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('clone'); }}>Clone</button>
-            <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />
-            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
+            {expModes && <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>}
             <button style={tabBtn(false)} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
-            <button style={tabBtn(true)}>🚀 Klein 2.0</button>
+            {expModes && <button style={tabBtn(true)}>🚀 Klein 2.0</button>}
             <button style={tabBtn(false)} onClick={() => setCreateEngine('klein3')}>🎯 Klein 3.0</button>
           </div>
           <p style={{ fontSize: 11, color: '#8d97a5', margin: '0 0 10px' }}>
@@ -5011,12 +4918,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       ) : tab === 'create' && variant === 'klein' && createEngine === 'klein3' ? (
         <div>
           <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('new'); }}>New</button>
-            <button style={tabBtn(false)} onClick={() => { setCreateEngine('klein'); setCreateSub('clone'); }}>Clone</button>
-            <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />
-            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
+            {expModes && <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>}
             <button style={tabBtn(false)} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
-            <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>
+            {expModes && <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>}
             <button style={tabBtn(true)}>🎯 Klein 3.0</button>
           </div>
           <p style={{ fontSize: 11, color: '#8d97a5', margin: '0 0 10px' }}>
@@ -5194,14 +5098,22 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         <div style={{ ...box, position: 'sticky', top: 12, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto' }}>
           {tab === 'create' && (
             <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button style={tabBtn(createSub === 'new')} onClick={() => setCreateSub('new')}>New</button>
-              <button style={tabBtn(createSub === 'clone')} onClick={() => setCreateSub('clone')}>Clone</button>
+              {showNewClone && (
+                <>
+                  <button style={tabBtn(createSub === 'new')} onClick={() => setCreateSub('new')}>New</button>
+                  <button style={tabBtn(createSub === 'clone')} onClick={() => setCreateSub('clone')}>Clone</button>
+                </>
+              )}
               {variant === 'klein' && (
                 <>
-                  <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />
-                  <button style={tabBtn(createEngine === 'klein')} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
+                  {showNewClone && <span style={{ width: 1, height: 22, background: '#2a2f3a', margin: '0 4px' }} />}
+                  {expModes && (
+                    <button style={tabBtn(createEngine === 'klein')} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>
+                  )}
                   <button style={tabBtn(createEngine === 'qwen')} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
-                  <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>
+                  {expModes && (
+                    <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>
+                  )}
                   <button style={tabBtn(false)} onClick={() => setCreateEngine('klein3')}>🎯 Klein 3.0</button>
                 </>
               )}

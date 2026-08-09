@@ -310,6 +310,7 @@ async def init_db() -> None:
             "ALTER TABLE app_settings ADD COLUMN use_distilled_lora BOOLEAN DEFAULT 1",
             "ALTER TABLE app_settings ADD COLUMN distilled_lora_name VARCHAR DEFAULT 'ltx-2.3-22b-distilled-lora-384.safetensors'",
             "ALTER TABLE app_settings ADD COLUMN restrict_explicit_content BOOLEAN DEFAULT 0",
+            "ALTER TABLE app_settings ADD COLUMN enable_experimental_modes BOOLEAN DEFAULT 0",
             "ALTER TABLE app_settings ADD COLUMN global_negative_prompt TEXT DEFAULT NULL",
             "ALTER TABLE app_settings ADD COLUMN project_dir VARCHAR DEFAULT NULL",
             "ALTER TABLE app_settings ADD COLUMN network_access BOOLEAN DEFAULT 0",

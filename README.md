@@ -4,18 +4,48 @@ A local desktop application for creating AI-powered music videos and narration v
 
 ![Robomuffin Idea Factory](Screenshots/robomuffin_idea_factory_screenshot.webp)
 
-## Status (v1.275.2, 2026-08-09)
+## Status (v1.276.4, 2026-08-09)
 
-**🎬 Video Lab is live: MiniMax H3 runs LOCALLY on our workers.** All five H3 modes in-app
-(text→video, image→video, first+last frame, last-frame, references→video with up to 9
-image / 3 video / 3 audio references), 720p default, ⚡ turbo-lora path by default,
-opt-in 🌀 SPECTRUM speedup, prompts drafted by Ollama from the canonical H3 spec, and
-**⬆ one-click LTX 2.3 enhancer upscale** on every finished render (720p→1080p/1440p,
-re-details rather than re-imagines). SageAttention is live fleet-wide (measured 37%
-faster, quality unchanged). Klein 3.0 view generation is now **face-anchored** (v1.275.2):
-a zoomed face close-up renders first and leads every view render's references, so generated
-view sets keep the same face. Next: first live H3 render exam, first face-anchored view-set
-compare, first real ⚡ Autogen run.
+**🎬 The Video Lab is validated on the GPU, and the character studio is now one place.**
+
+**MiniMax H3 runs locally on our own workers** — all five modes in-app (text→video,
+image→video, first+last frame, last-frame, references→video with up to 9 image / 3 video /
+3 audio references), 720p default, ⚡ turbo path, opt-in 🌀 SPECTRUM, prompts drafted by
+Ollama from the canonical H3 spec. **First live render passed**: 5.17 s / 124 f / 1280×736
+in 377 s including model load, with a real audio track. **⬆ LTX 2.3 enhancer upscale
+passed** too: 1920×1088 in 494 s, re-detailing rather than re-imagining.
+
+⚠ H3 and LTX disagree about legal frame counts (H3 wants `f%17==5`, LTX's VAE only carries
+`f=8k+1`), so an upscale used to silently eat up to 7 frames off the tail. **`⬆ Upscale-safe
+length` is now ON by default**: the render is one H3 step longer and the upscale is trimmed
+back to the exact duration. Costs ~0.7 s of render; the frames it saves cannot be recovered
+any other way. Running an upscale is still a deliberate button, not automatic.
+
+**🎭 Every character, from every mode, in one place.** Characters lived in two disjoint
+stores that were joined nowhere — a character made in Klein 3.0 was invisible on the
+Character Studio page and in the clothing picker. `GET /api/characters` now merges both
+behind polymorphic IDs, and the Character Studio front page is rebuilt in the Studio Hub's
+language: one card per character showing its whole pipeline (front ref → views → dataset →
+LoRA → sheet → lore) with real numbers, not progress bars.
+
+**👗 Klein 3.0 outfit sets.** Name an outfit, fill as few or as many of **13 garment slots**
+as you like (4 core: outerwear / top / bottom / shoes — 9 more for headwear, eyewear, base
+layer, belt, legwear, gloves, jewellery, accessories, carried items), and it renders across
+every view so a costume is consistent front, back and both sides. **Variants** capture one
+look within an outfit ("jacket off") without a second wardrobe entry. Each view is a
+standalone image, so any of them can be used as a reference elsewhere — and **a dataset can
+now train from a chosen outfit** instead of only the character's default base.
+
+**🔍 One image viewer, everywhere.** Click any generated image for a full-screen lightbox
+with cursor-anchored zoom, drag-pan, arrow-key stepping and download.
+
+**⚙ Experimental Modes** (Settings, off by default) hides the parked development lanes —
+🧪 Klein 1.0 and 🚀 Klein 2.0 — from the mode picker. Their code is intact and kept for
+later use; they are simply not in the way.
+
+Next: the outfit and base-outfit UI, the first real ⚡ Autogen run, and H3's four untested
+modes (i2v, first+last, last-frame, references→video). See **`docs/OPERATIONS.md`** (the
+runbook), `CHANGELOG.md` (the decision log) and `HANDOVER_PROMPT.md`.
 
 ### Previous status (v1.271.2, 2026-08-08)
 
@@ -85,7 +115,25 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 
 ## Features
 
-### Character Studio (VNCCS Native page)
+### Character Studio
+- **🎭 Character Studio front page (`/studio`)** — every character from every mode in one
+  grid, whichever mode created it. One card per character shows its whole pipeline as a
+  checklist with real numbers ("views 3/4 (missing left, back)", "dataset 47/120 · ⚠3"),
+  a source badge, live status, name search and per-source filtering. Buttons are
+  capability-aware: a Klein 3.0 character offers views / outfits / dataset / sheet, a
+  VNCCS one offers clothes / emotions / details.
+- **👗 Outfit sets (Klein 3.0)** — name an outfit and fill as few or as many of **13
+  garment slots** as you want: 4 core (outerwear, top, bottom, shoes) and 9 more
+  (headwear, eyewear, base layer, belt, legwear, gloves, jewellery, accessories, carried).
+  It renders across every view, so a costume is consistent front, back and both sides.
+  **Variants** capture one look within an outfit ("jacket off") without needing a second
+  wardrobe entry. Every view is a standalone image usable as a reference anywhere, and a
+  LoRA dataset can be pointed at an outfit instead of the character's default base.
+- **🔍 Image lightbox everywhere** — click any generated image for full-screen review with
+  cursor-anchored zoom, drag-pan, ←/→ through the gallery, and download.
+- **⚙ Experimental Modes** (Settings, off by default) — reveals the parked development
+  lanes (🧪 Klein 1.0, 🚀 Klein 2.0). Their code is intact and kept for later use such as
+  game-asset export; this only controls whether they appear in the mode picker.
 - **🏠 Studio Hub** — the landing tab: every character's whole pipeline at a glance
   (front ref → views → dataset → LoRA → sheet → lore, live train/autogen stages) with
   one-click jumps into any tab, character preselected.

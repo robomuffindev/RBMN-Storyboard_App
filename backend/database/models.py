@@ -413,6 +413,12 @@ class AppSettings(SQLModel, table=True):
     export_lfff_trim_enabled: bool = Field(default=True)  # trim first frame of scenes using prev scene's last frame
     # Content safety: append SFW tags to all prompts to restrict nudity/explicit content
     restrict_explicit_content: bool = Field(default=False)
+
+    # v1.276.0 — Experimental Modes. OFF by default. Lanes that are parked in
+    # development (Klein 1.0, Klein 2.0 statue mode) still WORK and are kept for
+    # later use (game-asset export), but they should not be in front of a user
+    # who just wants to make a character. This gates their UI, not their code.
+    enable_experimental_modes: bool = Field(default=False)
     # Global negative prompt for image generation — appended to anti-text suffix on all image workflows
     global_negative_prompt: Optional[str] = Field(default=None)
     # Project directory path (overrides env PROJECT_DIR when set via Settings UI)

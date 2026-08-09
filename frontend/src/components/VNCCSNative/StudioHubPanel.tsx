@@ -7,6 +7,7 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 
+import useLightbox from '../shared/useLightbox';
 const BASE = '/api/forge';
 export const FOCUS_KEY = 'rbmn_focus_char';
 
@@ -50,6 +51,8 @@ export default function StudioHubPanel({ goTo }: { goTo: (tab: string, slug: str
     return () => window.clearInterval(t);
   }, [load]);
 
+  const lb = useLightbox();
+
   const jump = (tab: string, slug: string) => {
     try { window.localStorage.setItem(FOCUS_KEY, slug); } catch { /* ignore */ }
     goTo(tab, slug);
@@ -87,7 +90,9 @@ export default function StudioHubPanel({ goTo }: { goTo: (tab: string, slug: str
             <div key={c.slug} style={box}>
               <div style={{ display: 'flex', gap: 10 }}>
                 {c.thumb
-                  ? <img src={c.thumb} alt="" style={{ width: 84, height: 122, objectFit: 'cover', borderRadius: 6 }} />
+                  ? <img src={c.thumb} alt="" title="Click to view large"
+                         onClick={() => lb.open(c.thumb || '', 0, c.name)}
+                         style={{ width: 84, height: 122, objectFit: 'cover', borderRadius: 6, cursor: 'zoom-in' }} />
                   : <div style={{ width: 84, height: 122, borderRadius: 6, background: '#0e1116',
                                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                                   color: '#4a5568', fontSize: 24 }}>?</div>}
@@ -126,6 +131,7 @@ export default function StudioHubPanel({ goTo }: { goTo: (tab: string, slug: str
           </div>
         )}
       </div>
+      {lb.node}
     </div>
   );
 }

@@ -20,6 +20,7 @@ import json
 import re
 import sys
 import urllib.request
+from helper_token import helper_token as _helper_token  # v1.276.4: token out of source
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -36,7 +37,7 @@ def get(url: str, timeout: float = 120.0):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--helper", default="http://192.168.12.202:8765")
-    ap.add_argument("--token", default="49ae12e57c0949158b2efb4edfb0ac49")
+    ap.add_argument("--token", default=_helper_token())
     ap.add_argument("--run", default="")
     a = ap.parse_args()
     base, tok = a.helper.rstrip("/"), a.token

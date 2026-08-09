@@ -256,6 +256,10 @@ def pose(path: str | Path) -> Optional[Dict[str, Any]]:
                 out["face_w_ratio"] = round((_x2 - _x1) / _w, 4)
                 out["head_top"] = round(_y1 / _h, 4)
                 out["face_cy"] = round(((_y1 + _y2) / 2) / _h, 4)
+                # v1.275.7: the horizontal centre was the one number missing, so
+                # nothing could CROP to the face — only describe it. The face
+                # crop anchor (klein3 `_face_crop_ref`) needs it.
+                out["face_cx"] = round(((_x1 + _x2) / 2) / _w, 4)
             except Exception:  # noqa: BLE001 — geometry is a bonus, never fatal
                 pass
             pv = getattr(f, "pose", None)

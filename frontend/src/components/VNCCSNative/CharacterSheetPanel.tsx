@@ -9,6 +9,7 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 
+import useLightbox from '../shared/useLightbox';
 const BASE = '/api/charsheet';
 
 const box: React.CSSProperties = {
@@ -52,6 +53,7 @@ interface SheetT {
 
 export default function CharacterSheetPanel(): React.ReactElement {
   const [chars, setChars] = useState<CharT[]>([]);
+  const lb = useLightbox();
   const [slug, setSlug] = useState(() => {
     try {
       const f = window.localStorage.getItem('rbmn_focus_char') || '';
@@ -215,7 +217,9 @@ export default function CharacterSheetPanel(): React.ReactElement {
                 </a>
               </div>
               <img src={`${shown.url}?t=${shown.file}`} alt="character sheet"
-                   style={{ width: '100%', borderRadius: 8, background: '#fff' }} />
+                   title="Click to view large (zoom + pan) — sheets are dense, zoom in on the face row"
+                   onClick={() => lb.open(`${shown.url}?t=${shown.file}`, 0, shown.file)}
+                   style={{ width: '100%', borderRadius: 8, background: '#fff', cursor: 'zoom-in' }} />
             </>
           ) : (
             <div style={hint}>Pick a character and hit 🪪 Build sheet.</div>
@@ -244,6 +248,7 @@ export default function CharacterSheetPanel(): React.ReactElement {
           </div>
         )}
       </div>
+      {lb.node}
     </div>
   );
 }

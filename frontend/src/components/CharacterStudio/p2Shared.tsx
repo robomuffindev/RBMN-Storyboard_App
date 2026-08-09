@@ -7,31 +7,21 @@
  * look identical to Phase 1, without modifying the Phase 1 file to export
  * them.
  */
-import { Loader2, AlertTriangle, X } from 'lucide-react';
+import { Loader2, AlertTriangle } from 'lucide-react';
 
-/** Full-screen image lightbox reused across the studio tabs. */
-export function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
-  return (
-    <div
-      className="fixed inset-0 bg-black/80 z-[9995] flex items-center justify-center p-6"
-      onClick={onClose}
-    >
-      <button
-        type="button"
-        onClick={onClose}
-        className="absolute top-4 right-4 text-gray-300 hover:text-white"
-      >
-        <X size={24} />
-      </button>
-      <img
-        src={url}
-        alt=""
-        onClick={(e) => e.stopPropagation()}
-        className="max-w-full max-h-full object-contain rounded-lg"
-      />
-    </div>
-  );
-}
+/**
+ * Full-screen image lightbox reused across the studio tabs.
+ *
+ * v1.276.0 — this used to be a flat "big picture on a dark background": no
+ * zoom, no pan, so you could see an image larger but not actually REVIEW it.
+ * It now re-exports the shared viewer, which has cursor-anchored zoom, drag
+ * pan, arrow-key gallery stepping and a download button. Every consumer of
+ * this symbol (the poses / costumes / emotions / process / renders / dataset /
+ * Klein 3.0 / pose-library tabs) gets that for free, with no call-site change:
+ * the shared component accepts `url` as an alias for `src` precisely so this
+ * swap could be a one-line re-export instead of a nine-file rename.
+ */
+export { default as ImageLightbox } from '../shared/ImageLightbox';
 
 export function Spinner({ size = 16 }: { size?: number }) {
   return <Loader2 size={size} className="animate-spin text-purple-400" />;
