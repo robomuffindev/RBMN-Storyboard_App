@@ -132,3 +132,6 @@ anima/
 # Diagnostic dumps (scripts/dump_state.ps1) - local only
 scripts/_diag/
 scripts/_agent/
+
+# MiniMax H3 example workflows (Lorenzo's API-ready samples — study copies, not repo)
+tempworkflows/

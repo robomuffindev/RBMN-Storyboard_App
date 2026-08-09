@@ -4,7 +4,20 @@ A local desktop application for creating AI-powered music videos and narration v
 
 ![Robomuffin Idea Factory](Screenshots/robomuffin_idea_factory_screenshot.webp)
 
-## Status (v1.270.0, 2026-08-08)
+## Status (v1.275.2, 2026-08-09)
+
+**🎬 Video Lab is live: MiniMax H3 runs LOCALLY on our workers.** All five H3 modes in-app
+(text→video, image→video, first+last frame, last-frame, references→video with up to 9
+image / 3 video / 3 audio references), 720p default, ⚡ turbo-lora path by default,
+opt-in 🌀 SPECTRUM speedup, prompts drafted by Ollama from the canonical H3 spec, and
+**⬆ one-click LTX 2.3 enhancer upscale** on every finished render (720p→1080p/1440p,
+re-details rather than re-imagines). SageAttention is live fleet-wide (measured 37%
+faster, quality unchanged). Klein 3.0 view generation is now **face-anchored** (v1.275.2):
+a zoomed face close-up renders first and leads every view render's references, so generated
+view sets keep the same face. Next: first live H3 render exam, first face-anchored view-set
+compare, first real ⚡ Autogen run.
+
+### Previous status (v1.271.2, 2026-08-08)
 
 **The character pipeline is complete and measured, end to end.** Three new modes landed on
 2026-08-07/08: **🧬 Text 2 Image** (the master character entry point — name-first resumable
@@ -17,7 +30,11 @@ proved likeness tracks dataset quality proportionally: dorian 0.81 (ds 0.69) / r
 (ds 0.534) / redv1-v2 0.61 (ds 0.568). **Standing dataset recipe:** face_heavy 40, universal
 face ref, dressed base, one targeted re-render round, likeness floor 0.25 at export. Rules for
 LoRA consumers: always name the outfit in the prompt; unload the LoRA for shots the character
-isn't in; strength 1.0; fp8 on 40xx boxes. See `docs/LORA_DATASET.md` + `HANDOVER_PROMPT.md`.
+isn't in; strength 1.0; fp8 on 40xx boxes. **v1.271: the whole loop is in-app — 🚀 Train on
+any dataset and ⚡ Autogen (one button from a front reference to an installed LoRA, with
+signature-outfit vs wardrobe-variations modes), plus a Training Worker settings card showing
+the box's own ComfyUI/Fizgig install paths with detect-and-switch.** See
+**`docs/OPERATIONS.md` (the runbook)**, `docs/LORA_DATASET.md`, and `HANDOVER_PROMPT.md`.
 
 ## Previous status (v1.267.0, 2026-08-07)
 
@@ -68,11 +85,39 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
 
 ## Features
 
+### Character Studio (VNCCS Native page)
+- **🏠 Studio Hub** — the landing tab: every character's whole pipeline at a glance
+  (front ref → views → dataset → LoRA → sheet → lore, live train/autogen stages) with
+  one-click jumps into any tab, character preselected.
+- **🧬 Text 2 Image** — master character creation: name-first resumable characters,
+  engines Klein (0–5 refs) / Krea 2 Turbo (the LoRA-testing engine — picker with trigger
+  display + add-to-prompt), pose scaffolds, batch 1–8, Klein edit-iterate loop with
+  version chains, master gallery, 🏁 promote-to-front-reference, and 📖 Profile & Lore
+  per character (physical fields + backstory — the future Story Builder substrate,
+  ✨ LLM-fillable).
+- **🪪 Character Sheet** — one downloadable reference image per character (turnaround +
+  face row) composited from identity-scored dataset renders — purpose-built as input for
+  sheet-as-reference video models like MiniMax H3. No GPU, no LoRA needed.
+- **🎬 Video Lab (MiniMax H3, local)** — five modes: text→video, image→video, first+last
+  frame, last-frame, references→video (up to 9 reference images, 3 reference videos each
+  with an optional use-its-soundtrack toggle, 3 standalone audios, match/max identity
+  fidelity). 720p default, ⚡ 8-step turbo-lora path by default vs 20-step quality path,
+  🌀 SPECTRUM speedup opt-in, 🧠 LLM prompt drafting from the canonical H3 spec, and
+  **⬆ LTX 2.3 enhancer upscale** (3-step guided refine on the 22B GGUF + detailer LoRA —
+  sharpens, doesn't re-imagine) on any finished render. Jobs persist across restarts.
+  Method: docs/MINIMAX_H3_PROMPTING.md.
 - **🎓 LoRA Dataset Gen + Training** — plan, render, caption, QC (framing/angle/identity/
   artifacts/**wardrobe** — all measured instruments), repair and export a training-ready
   character LoRA dataset from a Klein 3.0 character; then train it on a remote Fizgig worker,
   score checkpoints by ArcFace (never loss), install into ComfyUI and validate on Krea 2
   TURBO — the whole loop headless via the Worker Helper + agent (docs/LORA_DATASET.md).
+- **🛠 Worker Helpers (fleet management)** — every render box runs `rbmn_helper.py`
+  (:8765, per-box auto-generated tokens): dataset/training lifecycle on the trainer, plus
+  fleet-wide `/inventory` (nodes, models, env), node/pip installs, background model
+  downloads, LoRA sync between boxes, and the full SageAttention install+verify recipe
+  (real-kernel proof, measured 37% speedup). Managed from Settings → Worker Helpers
+  (multi-worker registry: per-row host/token/paths, 🔍 Detect, ⭐ trainer). All boxes are
+  DHCP — edit the row when an IP moves. Full reference: docs/WORKER_HELPER.md.
 
 ### Narration Chapters (long-form workflow)
 - **Mini-projects inside a project** — Hour-long narrations break naturally into chapters of ~25 scenes. Click any chapter bar above the timeline (or any chapter name in the Chapters tab) to drill into a focused view with the Timeline, Scene Editor, Auto-Gen, and Export scoped to just that chapter's scenes.

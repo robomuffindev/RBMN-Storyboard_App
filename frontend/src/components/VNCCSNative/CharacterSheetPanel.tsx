@@ -52,7 +52,13 @@ interface SheetT {
 
 export default function CharacterSheetPanel(): React.ReactElement {
   const [chars, setChars] = useState<CharT[]>([]);
-  const [slug, setSlug] = useState('');
+  const [slug, setSlug] = useState(() => {
+    try {
+      const f = window.localStorage.getItem('rbmn_focus_char') || '';
+      window.localStorage.removeItem('rbmn_focus_char');
+      return f;
+    } catch { return ''; }
+  });
   const [preset, setPreset] = useState<'standard' | 'turnaround'>('standard');
   const [labels, setLabels] = useState(false);
   const [width, setWidth] = useState<'full' | '2048'>('full');

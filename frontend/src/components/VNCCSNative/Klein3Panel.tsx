@@ -375,6 +375,19 @@ export default function Klein3Panel() {
     } catch (e) { setMsg((e as Error).message); }
   };
 
+  // v1.275.2: full re-run with a FRESH 🙂 face anchor — for when the set
+  // exists but the faces drifted. Renders the close-up first, then all views.
+  const regenViewsFaced = async () => {
+    setMsg('');
+    try {
+      await j(await fetch(`${BASE}/characters/${slug}/views/generate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ views: ['front', 'back', 'left', 'right'], regen_face: true }),
+      }));
+      await loadCur();
+    } catch (e) { setMsg((e as Error).message); }
+  };
+
   // v1.225: PUT returns `resolves_to` for every view, so the consequence of the
   // toggle is visible BEFORE a render is spent on it.
   const setMode = async (m: 'auto' | 'dressed' | 'stripped') => {
@@ -771,6 +784,15 @@ export default function Klein3Panel() {
               {jobs.views?.status === 'running'
                 ? `⏳ Views ${jobs.views.detail || ''}`
                 : `🧭 Generate missing views (${cur.missing_views.join(', ')})`}
+            </button>
+          )}
+          {cur && cur.missing_views.length === 0 && (cur.ref_count || 0) > 0 && (
+            <button style={btnSm} disabled={jobs.views?.status === 'running'}
+                    title="Renders a zoomed face close-up FIRST, then regenerates all four views with it as the lead reference — use when the set's faces drifted."
+                    onClick={regenViewsFaced}>
+              {jobs.views?.status === 'running'
+                ? `⏳ Views ${jobs.views.detail || ''}`
+                : '🙂 Regenerate views (face-anchored)'}
             </button>
           )}
         </div>

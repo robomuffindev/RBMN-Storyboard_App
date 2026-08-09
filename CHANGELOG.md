@@ -1,3 +1,303 @@
+## v1.275.2 -- 🙂 Face anchor for Klein 3.0 view generation (2026-08-09)
+
+Lorenzo's fresh character came out of "generate missing views" with a slightly-off face --
+the view jobs only saw the uploaded refs, and a full-body reference is a weak identity
+signal at face scale. Now views/generate runs in two phases: FIRST a zoomed face close-up
+(832x1024, head and shoulders, face filling the frame, sharp on the eyes) is generated from
+the identity refs and saved as a ref tagged `face`; THEN every view job gets that close-up
+as reference image 1 ahead of the other refs. _identity_ref_paths already ranked
+face-tagged refs second -- now one actually exists, so strips, poses and everything else
+downstream inherit the anchor too. An existing face ref is reused (no wasted render);
+`regen_face: true` forces a fresh one; `face_first: false` opts out. A failed face render
+logs a warning and the views proceed with the plain refs -- never blocks the set.
+
+## v1.275.1 -- ⬆ LTX 2.3 upscale stage live in the Video Lab (2026-08-09)
+
+Lorenzo dropped LTX-2-3_ULTRA_WORKFLOW-V3.json into tempworkflows/ and the VIDEO ENHANCER
+UPSCALER group is now a one-click action on every finished H3 render: frames lanczos'd to
+a chosen max side (720p/1080p default/1440p), tiled VAE encode, 3-step ManualSigmas refine
+(0.909->0) on the LTX 2.3 22B GGUF with ic-detailer(0.9)+distilled-384(0.6) loras -- the
+source latents ride along as guiding latents at strength 1.0, so it re-details rather than
+re-imagines -- spatio-temporal tiled decode, source audio passed through at source fps.
+Every model/node verified by name on the boxes before wiring (GGUF unet, gemma dual-clip,
+LTX23 VAEs, both loras, LTXV sampler/decode nodes, ManualSigmas). Upscale runs as a normal
+tracked job (3h timeout) on the source render's box by default. POST /api/h3/jobs/{id}/upscale.
+
+## v1.275.0 -- 🎬 Video Lab: MiniMax H3 runs LOCAL, all five modes in-app (2026-08-09)
+
+The "API-only" research conclusion died on contact with Lorenzo's two ultra workflows:
+Comfy-Org shipped local H3 weights and all three boxes already carry the full set
+(fl2va + ref2va int8 UNets, video/audio VAEs, Qwen3-VL encoder, turbo lora -- verified
+by name on every box via /object_info). Both workflows are committed to tempworkflows/
+(gitignored) and fully mapped: section groups toggled by rgthree muters/bypassers,
+SetNode/GetNode model buses, BasicGuider (no cfg) -> SamplerCustomAdvanced -> dual VAE
+decode -> VHS combine at 24fps, frame formula f=max(5,round(s*24)) rounded to %17==5.
+
+New 🎬 Video Lab tab (frontend/VideoLabPanel.tsx) + /api/h3 (backend/api/h3video.py):
+- All five modes: 📝 T2V · 🖼 I2V · 🎞 first+last · 🎯 last-only · 🧩 references→video
+  with EVERY reference type the node takes: ≤9 images, ≤3 videos (each with an optional
+  "use its soundtrack" toggle), ≤3 standalone audios, ref_image_size match|max.
+- 720p default (0.9MP -> 1280x736, the workflow note's marked row); 480p/1080p presets;
+  16:9/9:16/1:1; i2v inherits the first frame's aspect at target MP.
+- ⚡ Turbo on by default (turbo lora @1.0, euler+beta/8) vs 20-step quality path --
+  the exact diff between Lorenzo's two files. 🌀 SPECTRUM speedup opt-in with the
+  workflow's tuned values (sigma shift 12.191/3.0), flagged "quality may suffer".
+  PATCH SAGE groups never emitted: the .bats already carry --use-sage-attention.
+- Renders direct on a registry worker (⭐ trainer default), uploads pushed to the box's
+  input/, jobs polled + persisted + reconciled across backend restarts, mp4 pulled back
+  to _libraries/h3video/ and played/downloaded in the panel.
+- 🧠 Draft prompt: Ollama with the VERBATIM canonical spec as system prompt -- H3 prompts
+  never touch the prompt-enhancer cleaning.
+Docs: MINIMAX_H3_PROMPTING.md Part 1 correction + Part 3 rewritten as the workflow
+anatomy record. Next: LTX 2.3 upscale stage (needs the LTX ultra workflow), first live
+render exam.
+
+## v1.274.5 -- SageAttention measured: 37% faster, quality unchanged (2026-08-09)
+
+The A/B nobody has to argue about: the redv1 TURBO exam grid re-run bit-for-bit (same six
+graphs, same seeds, same box) with --use-sage-attention live.
+
+    per-render, steady state (renders 2-6):
+      before sage   78, 77, 72, 72, 71   ->  74.0s avg
+      with sage     46, 51, 45, 51, 40   ->  46.6s avg     = 37% faster (1.59x)
+    whole grid: 448s -> 315s (30% incl. the model-load render)
+
+    ArcFace, sage vs pre-sage:  0.6054/0.6089 · 0.5309/0.5240 · 0.6084/0.6062 ·
+    0.4964/0.4973 · 0.6250/0.6014 · control 0.0522/0.0478 -- all within run noise.
+    Different attention math shifts pixels slightly at the same seed; identity and
+    verdicts unchanged. Speed bought, nothing paid.
+
+Applies fleet-wide (all three boxes verified + flagged). Krea2 renders in 🧬, exam grids,
+and every ComfyUI graph on these boxes now take the fast path.
+## v1.274.4 -- SageAttention: three boxes, three real kernels (2026-08-09)
+
+Helpers redeployed at v1.219 and the recipe ran fleet-wide: python headers installed into
+each box's python_embeded (Python.h + python313.lib verified present), the matched wheel
+(sageattention 2.2.0+cu130torch2.10.0andhigher, abi3) installed on both workers, and the
+REAL-KERNEL verify passed on ALL THREE boxes — `SAGE_OK (1, 8, 128, 64) float16` from an
+actual sageattn() call on each GPU. The original "says installed, still errors" mystery is
+closed: right wheel + triton + the embedded python's missing include/libs, all three needed,
+only the last was absent.
+
+Remaining manual step (one line per box): add `--use-sage-attention` to each ComfyUI launch
+bat and restart ComfyUI — the startup node warning disappears and renders pick up the
+faster attention path. Then measure a real render A/B.
+## v1.274.3 -- LoRAs on every worker; sage pilot finds the REAL blocker (2026-08-09)
+
+Two jobs from Lorenzo, both measured.
+
+**Character LoRA fleet sync — DONE.** Both render workers were missing all three character
+LoRAs (trainer 40 files, workers 37 — exactly ours). Synced box-to-box with zero manual
+copying: each worker's helper /download/model pulled from the trainer helper's run-artifact
+routes. All six transfers byte-exact (117,431,024 / 117,431,368 / 117,432,984). Batches can
+now fan character renders across all three boxes.
+
+**SageAttention pilot (trainer box).** Fleet inventory first: all three boxes are IDENTICAL
+(python 3.13.11, torch 2.10.0+cu130, CUDA 13.0, sm89, triton 3.6.0 present, sage missing —
+confirming the node's startup warning). The matching wheel exists and installed clean
+(sageattention 2.2.0+cu130torch2.10.0andhigher, abi3). The verify-by-real-kernel then FAILED
+inside triton's runtime compiler — tcc linking `-lpython313` against `python_embeded\Include`
+— because **ComfyUI's embedded python ships without CPython's include/ and libs/**. That is
+the actual root cause of Lorenzo's original "says installed, still errors" attempt, found
+only because the recipe refuses to trust pip.
+
+Fix shipped: helper v1.219 `POST /install/python-headers` — downloads the triton-windows
+author's include/libs zip matching the box's OWN python minor (3.11/3.12/3.13 mapped, url
+overridable), extracts the two folders into python_embeded, and verifies Python.h +
+python*.lib exist. Needs a helper redeploy on all three boxes, then: headers → sage verify →
+roll the wheel to the other two.
+## v1.274.2 -- reachable and authed are two different facts (2026-08-09)
+
+The two new worker rows said "offline" while their consoles showed connections. Debugging
+produced one false lead worth recording: a direct /health call with the trainer token
+"succeeded" on a worker — but the helper's /health is UNAUTHENTICATED by design (it feeds
+the landing page), so that success proved nothing about tokens. The truth: /health passed,
+/config 401'd — each helper auto-generates its OWN token on first run (the 'TOKEN …' line
+in its console banner), and the rows carried the trainer's token.
+
+The probe now reports the two facts separately: unreachable (network) vs "reachable but
+WRONG TOKEN — paste THIS box's token (the 'TOKEN …' line in its helper console banner)".
+GPU + helper version show even before auth (they come from the open /health); paths appear
+once the token is right. Debug fingerprints removed.
+## v1.274.1 -- "offline" workers that were actually saying 401 (2026-08-09)
+
+Lorenzo added his two render workers; their helper consoles showed the connections arriving,
+but the rows said offline. Each helper GENERATES ITS OWN TOKEN on first run (printed as
+'TOKEN <hex>' in its console banner and stored in its config) — the new rows were probing
+with the trainer's token, the workers answered 401, and the probe collapsed that into
+"offline". The probe now reports what happened: **"wrong token — paste THIS box's token
+(printed as 'TOKEN …' in its helper console at startup)"** vs "unreachable (…)" for real
+network failures, and the row displays the reason instead of a generic offline. Paths
+appearing only when a row is online is unchanged and by design — fix the token, the row
+goes green, the path fields appear.
+## v1.274.0 -- one worker card becomes a worker REGISTRY (2026-08-08)
+
+Lorenzo: the card had one slot; he has many boxes, the paths were hidden inside the Detect
+flow, and not every worker has Fizgig. Settings -> 🔧 Worker Helpers is now a registry:
+
+* **Rows for every box running the helper** — add by IP (➕), rename inline, edit host/port,
+  set token per box, remove (never the last). ⭐ marks THE TRAINER — the box that 🚀 Train,
+  ⚡ Autogen and 🧬 Krea 2 renders use; starring a box syncs the legacy trainer keys so every
+  existing pipeline follows it with zero other changes. Registry lives in the forge settings
+  store (`helpers` list); legacy single-trainer keys migrate in on first read.
+* **Paths always visible and editable** when a box is online: ComfyUI root, ComfyUI start
+  command (the network bat), and Fizgig root/python — the Fizgig fields say plainly they are
+  optional and trainer-only. 🔍 Detect fills the fields from the box's own scan (→ field
+  buttons); 💾 Save writes into THAT box's helper config, which overrides autodetect
+  permanently (autodetect fills blanks only, by design).
+* Backend: /api/lora/helpers CRUD + per-worker /paths and /detect, parallel health+config
+  probes (online dot, helper version, GPU name per row). Old /trainer-settings and the 🧬
+  panel's host field keep working — they read/write the ⭐ entry.
+## v1.273.1 -- Settings crashed with "React is not defined" (2026-08-08)
+
+My bug, introduced in v1.271: TrainerWorkerCard used `React.useState`-style hook calls, but
+SettingsPage imports hooks directly under the modern JSX runtime and never binds `React` —
+a runtime-only failure, which is why the vite build passed and the tsc-in-isolation check
+missed it (the isolated check compiles the new component alone, where the pattern is legal).
+All hook calls converted to the file's imported forms; `useCallback` added to the import.
+Lesson recorded: match the HOST FILE's hook style when injecting components into files that
+use the react-jsx runtime.
+## v1.273.0 -- worker inventory + installers: the helper learns what's on the box (2026-08-08)
+
+Lorenzo's ask: inventory every worker's ComfyUI (what's installed, what isn't), install
+missing custom nodes and models, and handle the version-sensitive installs like
+SageAttention — which he already hit the classic failure on ("said it installed, gives
+errors"). Helper v1.217 → **v1.218** (deploy = copy `scripts\worker\rbmn_helper.py` over
+each box's copy and restart its bat; run history survives):
+
+* `GET /inventory` — custom_nodes (git/dir/disabled/has-requirements), models tree with
+  per-folder counts + GB, and an **embedded-python env probe**: python, torch + its CUDA,
+  GPU + sm level, triton, sageattention, xformers, flash_attn — the exact facts a
+  version-matched install needs, read from the python that actually runs ComfyUI (the #1
+  cause of "installed but broken" is pip-ing into the WRONG python).
+* `POST /install/node {git_url}` — clone/pull into custom_nodes + embedded-pip its
+  requirements. `POST /install/pip {args}` — arbitrary pip in the embedded python.
+* `POST /download/model {url, folder, filename?, token?}` — background download straight
+  into models/<folder> (.part + rename), progress at `GET /downloads`.
+* `POST /install/sageattention {wheel_url?}` — the recipe: probe the embedded env →
+  install triton-windows if missing → pick the prebuilt Windows wheel matching torch
+  major.minor + CUDA from the community wheel releases (woct0rdho; SageAttention2++ needs
+  sm89/sm120 + CUDA ≥ 12.8 — the 4060 Ti qualifies) → install → **VERIFY BY RUNNING A REAL
+  KERNEL ON THE GPU** (`POST /verify/sageattention` runs it alone). pip saying "installed"
+  is not success here and never reports as such — the verify step is the whole point,
+  and a failed kernel reports as the mismatch it is, with the wheel that was tried.
+
+The training box gets this on its next helper restart; the klein workers (.163/.224) get
+their first helper install the same way — after which every box answers /inventory and
+takes installs remotely. App-side inventory UI comes after the H3 workflow work.
+## v1.272.2 -- MiniMax H3 adopted: the prompting standard lands ahead of the workflows (2026-08-08)
+
+Lorenzo's verdict on H3: "the most incredible video model I've ever used... this is going to
+change the game with our video generation over LTX." Docs + prep only in this version — his
+API-ready example workflows arrive in `tempworkflows/` (now gitignored) and then H3 becomes a
+video option in the app.
+
+* **NEW `docs/MINIMAX_H3_PROMPTING.md`** — three parts: (1) researched model facts — modes
+  (t2v / first+last frame / reference-to-video with up to 9 images + 3 videos 2-15s + 3
+  audio, 12 files, 64MB, 7000-char prompts; i2v and reference mode are mutually exclusive
+  per request), output (5-15s @ 24fps, 2K, native stereo always on), editing capabilities,
+  and the access reality: **API-only today (~$0.13/s of 2K — a 10s clip is ~$1.30; open
+  weights announced but not shipped, no VRAM floor known)** — so H3 generations cost real
+  money and get prompted right the FIRST time, never loop-retried like local renders.
+  (2) **Lorenzo's prompt-agent spec, verbatim — the canonical base instruction set** for
+  building H3 prompts (modes, [Shot N] + timestamps, camera vocabulary, (S1) speaker IDs +
+  <d>[lang] dialogue</d>, visible-text quoting, soundscape vs non-diegetic split, the
+  full-reference six-section format with subject_definitions / retention_analysis, final
+  quality checklist). (3) Integration notes: our 🪪 sheets + identity-scored dataset renders
+  map 1:1 onto the 9 reference-image slots, narration audio onto voice-timbre refs; the
+  structured format must BYPASS the prompt-enhancer cleaning pipeline when wired.
+## v1.272.1 -- the hub said 0 sheets; the sheets said otherwise (2026-08-08)
+
+Caught by measuring the new overview against the routes it summarizes: the hub counted 0
+character sheets for dorian while /api/charsheet listed 2. Root cause is a startup subtlety:
+**cfg.project_dir is overridden from the DB after modules import** — every module that
+captures its root at import time (klein3, lora, charsheet, forge) lives on one tree, but
+studio-overview built paths from cfg at REQUEST time and got the other one. The same latent
+bug sat in lora_train's zip lookup and state dirs, where it would have broken the first 🚀
+Train run. All request-time path building now derives from the import-time module roots.
+
+Also: the hub now credits LEGACY LoRAs (trained via scripts before v1.271, so no _train
+state file) by matching the box's own lora list against dataset-id/slug prefixes (60s cache)
+— dorian and redv1 show their installed LoRAs on their cards instead of "no LoRA".
+## v1.272.0 -- 🏠 Studio Hub: the character studio gets a home (2026-08-08)
+
+The studio finish-up, part one. Seven tabs each knew one thing about a character; nothing
+showed the whole pipeline or where each character stood. The new 🏠 Studio tab — now the
+LANDING tab — is one card per character:
+
+* portrait (active base) + a completeness checklist that mirrors the actual pipeline:
+  front reference → views 4/4 → dataset rendered/flagged → LoRA (with the installed
+  filename) → character sheets → lore. Live states show through: an ⚡ Autogen or 🚀 Train
+  in flight renders as ⏳ with its current stage, refreshed every 20s.
+* one-click jumps into 🧬 / Create / 🎓 / 🪪 with the character preselected (a shared focus
+  key the panels consume on mount), the dataset's trigger phrase on the card, and
+  ➕ New character straight into 🧬's name-first screen.
+* `GET /api/forge/studio-overview` aggregates it server-side: klein3 character state,
+  datasets grouped by character with train-pipeline stage files joined in, installed LoRA
+  names, autogen stage, sheet counts, lore state.
+
+The tab row now reads as the pipeline itself: 🏠 Studio → 🧬 create → Create/Clothes/
+Emotions refine → Pose Library → 🎓 train → 🪪 ship.
+## v1.271.2 -- the 50%-mark documentation checkpoint (2026-08-08)
+
+Docs only, at Lorenzo's call: a mid-session checkpoint so any continuation knows exactly
+where we are, what exists, and how to drive it.
+
+* **NEW `docs/OPERATIONS.md` — the runbook.** One page: the machines (and the DHCP-moves
+  reality), the five character modes, the measured method (recipe, pick rules, inference
+  rules, the experiment numbers), the agent's job kinds with copy-paste examples, the
+  helper's route list, the loop scripts with args, the API surfaces, a symptom→fix recovery
+  playbook, where everything lives on disk, and current state + roadmap.
+* HANDOVER_PROMPT.md → current: runbook pointer up top; Era 6 carries the v1.271 in-app
+  Train/Autogen state; open items now lead with "first real ⚡ Autogen run" and the
+  studio→projects→Story-Builder roadmap.
+* README status block → v1.271.2 with the in-app loop paragraph and the runbook pointer.
+## v1.271.1 -- the Settings card shows WHICH installs the trainer box uses (2026-08-08)
+
+Lorenzo: boxes can carry several ComfyUI / Fizgig installs — show the paths next to the
+server so there is no guessing which one is in play. The paths' source of truth is the
+HELPER's own config on the box (comfy.root / comfy.start_cmd / fizgig.root / fizgig.python),
+so the Training Worker card now reads them live from GET /config and displays them under the
+online indicator, including which bat starts ComfyUI. A **🔍 Detect installs** button runs the
+helper's own autodetect and lists every candidate it finds, each with a one-click "use this"
+that writes the choice back into the helper config (PUT /api/lora/trainer-paths → helper
+POST /config, one-level merge, only sent fields change) — the card marks the active install
+with "← in use". No app-side copy of the paths exists to go stale.
+## v1.271.0 -- 🚀 in-app training + ⚡ Autogen: the loop becomes a button (2026-08-08)
+
+The loop that has now been driven by hand four times — export → upload → Fizgig → ArcFace
+checkpoint pick → install — is code: `backend/api/lora_train.py`, two background orchestrators
+with persisted stage files that survive restarts, driving the app's own routes over localhost
+(the exact same calls the agent made) plus the worker helper.
+
+* **🚀 Train** (button on every dataset in 🎓, after Export): POST
+  /api/lora/datasets/{id}/train. Exports with the 0.25 likeness floor, uploads the zip,
+  starts the run (the helper stops ComfyUI — the arbiter as always), polls every minute with
+  checkpoint counts in the status line, survives the box dropping off the network (retries and
+  says so instead of dying), scores window-filtered previews with ArcFace against the
+  character's own refs — NEVER loss — installs the best epoch under a collision-proof name
+  ({char}-{stamp}-e{N}.safetensors), restarts ComfyUI, and reports the installed filename.
+  The LoRA is pickable in 🧬 the moment the status says done. `{run_id}` in the body attaches
+  to an existing helper run instead of starting one (recovery + scoring old runs).
+* **⚡ Autogen** (blue box at the top of 🎓): pick a character with a front reference, choose
+  **👕 Signature outfit** (base wardrobe stays dominant) or **👗 Wardrobe variations** (the
+  vision model proposes outfits that get mixed into the plan so clothing stays promptable —
+  Lorenzo's "sometimes dominant, sometimes flexible" ask), optionally "dataset only", and go:
+  missing views → face_heavy-40 dataset → render → caption → QC → repair (≤2 rounds) → ONE
+  targeted below-match re-render round → likeness → export (floor 0.25) → the Train pipeline.
+  Every stage visible live; errors stop loudly with the stage they died in.
+* **Settings → 🎓 Training Worker (Fizgig helper)**: host/port/token with a live
+  online/offline probe — the one place to update the box's DHCP-drifted IP (shared with the
+  🧬 panel's field; both write the same store). GET/PUT /api/lora/trainer-settings.
+## v1.270.1 -- the LoRA picker tells you its trigger (2026-08-08)
+
+Pick a character LoRA in 🧬 and the panel now shows its trigger phrase ("rbmnredv1 woman")
+in a highlighted strip, with a one-click ➕ add-to-prompt button that only appears while the
+trigger is missing from the prompt. Mapping is filename → dataset: /loras matches each
+installed file against every dataset id (longest prefix first, then the slug before the hash,
+so dest_name files like redv1-v2-e21 still resolve), and reads trigger + class_token from
+dataset.json — no separate registry to go stale. Files we did not train say so honestly
+instead of guessing a trigger.
 ## v1.270.0 -- test your LoRAs where you made your characters (2026-08-08)
 
 Docs wave two (README status block, HANDOVER to v1.270 with Era 6 + the DHCP reality,

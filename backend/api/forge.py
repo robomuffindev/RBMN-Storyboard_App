@@ -33,6 +33,7 @@ import random
 import shutil
 import threading
 import time
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +56,7 @@ _RUNS: Dict[str, dict] = {}          # slug -> live generate/edit status
 _FORGE_DIR = Path(cfg.project_dir) / "_libraries" / "forge"
 _SETTINGS_FP = _FORGE_DIR / "settings.json"
 _UNET_CACHE: Dict[str, str] = {}     # host -> chosen krea2 unet file
+_OV_CACHE: Dict[str, Any] = {}       # studio-overview box-lora cache
 
 
 # ── forge settings (the Krea 2 box moves — DHCP) ─────────────────────────────
@@ -383,6 +385,41 @@ async def krea2_host_put(body: HostIn):
     return {"ok": True, "krea2_host": host}
 
 
+def _lora_triggers(files: List[str]) -> Dict[str, str]:
+    """Map an installed LoRA filename back to its dataset's trigger phrase.
+
+    Our trained files are named from the dataset id (redv1-bca382-000036) or a
+    dest_name that keeps the character prefix (redv1-v2-e21). Match the longest
+    dataset-id prefix first, then the id's slug part before the hash — and say
+    nothing for files we did not train (his other 36 LoRAs have no trigger)."""
+    from backend.api.lora import _DS_ROOT
+    cands = []                        # (match_prefix, trigger_phrase)
+    if _DS_ROOT.exists():
+        for dj in _DS_ROOT.glob("*/dataset.json"):
+            try:
+                ds = json.loads(dj.read_text("utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            trig = " ".join(x for x in (ds.get("trigger"), ds.get("class_token")) if x)
+            if not trig:
+                continue
+            ds_id = str(ds.get("id") or "")
+            if ds_id:
+                cands.append((ds_id.lower(), trig))
+                slug = ds_id.rsplit("-", 1)[0]          # redv1-bca382 -> redv1
+                if slug:
+                    cands.append((slug.lower() + "-", trig))
+    cands.sort(key=lambda c: -len(c[0]))                # longest prefix wins
+    out: Dict[str, str] = {}
+    for f in files:
+        base = f.replace("\\", "/").split("/")[-1].lower()
+        for prefix, trig in cands:
+            if base.startswith(prefix):
+                out[f] = trig
+                break
+    return out
+
+
 @router.get("/loras")
 async def loras():
     """Character LoRAs installed on the Krea 2 box, straight from its own list."""
@@ -392,11 +429,11 @@ async def loras():
     except Exception:  # noqa: BLE001
         files = []
     if not files:
-        return {"host": host, "loras": [],
+        return {"host": host, "loras": [], "triggers": {},
                 "note": f"Krea 2 box at {host}:8188 unreachable or has no LoRAs — "
                         "check the IP (it moves) and that ComfyUI is running."}
-    return {"host": host,
-            "loras": sorted(f for f in files if f.lower().endswith(".safetensors"))}
+    safes = sorted(f for f in files if f.lower().endswith(".safetensors"))
+    return {"host": host, "loras": safes, "triggers": _lora_triggers(safes)}
 
 
 @router.get("/characters")
@@ -811,6 +848,103 @@ async def lore_generate(slug: str, body: LoreGenIn,
     c["lore"] = cur
     _save(slug, c)
     return {"ok": True, "lore": cur, "changed": changed}
+
+
+@router.get("/studio-overview")
+async def studio_overview():
+    """🏠 The studio hub: every character's whole pipeline at a glance."""
+    from backend.api.klein3 import _K3_ROOT, _load, _public_char
+    from backend.api.lora import _DS_ROOT
+    from backend.api.charsheet import _ROOT as sheets_root
+    # ⚠ cfg.project_dir is OVERRIDDEN from the DB after import — modules capture
+    # their roots at import time, so derive from those, never from cfg at
+    # request time (that mismatch made this route count 0 sheets, v1.272.1).
+    train_dir = _DS_ROOT.parent / "_train"
+    auto_dir = _DS_ROOT.parent / "_autogen"
+    # legacy installed LoRAs (trained via scripts, no _train state): match the
+    # box's own lora list by dataset-id/slug prefix, cached 60s.
+    box_loras: List[str] = []
+    now = time.time()
+    if _OV_CACHE.get("t", 0) > now - 60:
+        box_loras = _OV_CACHE.get("loras", [])
+    else:
+        try:
+            box_loras = [f for f in _krea2_models(_krea2_host(), "loras")
+                         if f.lower().endswith(".safetensors")]
+        except Exception:  # noqa: BLE001
+            box_loras = []
+        _OV_CACHE.update(t=now, loras=box_loras)
+
+    # datasets + training state, grouped by character ------------------------
+    ds_by_char: Dict[str, list] = {}
+    if _DS_ROOT.exists():
+        for dj in _DS_ROOT.glob("*/dataset.json"):
+            try:
+                ds = json.loads(dj.read_text("utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            items = ds.get("items", [])
+            rec = {"id": ds.get("id"), "total": len(items),
+                   "rendered": sum(1 for i in items if i.get("status") == "done"),
+                   "flagged": sum(1 for i in items
+                                  if (i.get("qc") or {}).get("ok") is False),
+                   "trigger": " ".join(x for x in (ds.get("trigger"),
+                                                   ds.get("class_token")) if x)}
+            tr = train_dir / f"{ds.get('id')}.json"
+            if tr.exists():
+                try:
+                    t = json.loads(tr.read_text("utf-8"))
+                    rec["train_stage"] = t.get("stage")
+                    rec["installed_lora"] = t.get("installed")
+                except Exception:  # noqa: BLE001
+                    pass
+            ds_by_char.setdefault(ds.get("char_slug") or "", []).append(rec)
+
+    out = []
+    if _K3_ROOT.exists():
+        for d in sorted(_K3_ROOT.iterdir()):
+            if not (d / "char.json").exists():
+                continue
+            slug = d.name
+            try:
+                c = _load(slug)
+            except Exception:  # noqa: BLE001
+                continue
+            pub = _public_char(slug, c)
+            lore = c.get("lore") or {}
+            f = _fload(slug)
+            dss = ds_by_char.get(slug, [])
+            auto = {}
+            aj = auto_dir / f"{slug}.json"
+            if aj.exists():
+                try:
+                    a = json.loads(aj.read_text("utf-8"))
+                    auto = {"stage": a.get("stage"), "detail": a.get("detail")}
+                except Exception:  # noqa: BLE001
+                    pass
+            sheet_count = (len(list((sheets_root / slug).glob("sheet_*.png")))
+                           if (sheets_root / slug).exists() else 0)
+            installed = [x["installed_lora"] for x in dss if x.get("installed_lora")]
+            prefixes = [str(x.get("id") or "").lower() for x in dss] + [slug.lower() + "-"]
+            for bl in box_loras:
+                base = bl.replace("\\", "/").split("/")[-1].lower()
+                if any(pref and base.startswith(pref) for pref in prefixes) \
+                        and bl not in installed:
+                    installed.append(bl)
+            out.append({
+                "slug": slug, "name": pub["name"],
+                "thumb": pub.get("active_base_url"),
+                "has_front": "front" not in pub["missing_views"],
+                "missing_views": pub["missing_views"],
+                "ref_count": pub["ref_count"], "has_base": pub["has_base"],
+                "forge_images": len(f.get("images", [])),
+                "datasets": dss, "installed_loras": installed,
+                "autogen": auto, "sheets": sheet_count,
+                "lore_filled": bool(lore.get("description") or lore.get("backstory")),
+                "updated_at": pub.get("updated_at"),
+            })
+    out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+    return {"characters": out}
 
 
 @router.get("/health")

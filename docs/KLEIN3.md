@@ -16,6 +16,14 @@ Backend: `backend/api/klein3.py` (`/api/klein3`); pose library lives in `backend
 
 ## Character workflow (left → middle columns)
 
+**🙂 Face anchor (v1.275.2):** "Generate missing views" runs two-phase — a zoomed face
+close-up (832×1024, head+shoulders, sharp on the eyes) renders FIRST from the identity
+refs, saved as a ref tagged `face`, then every view render gets it as reference image 1.
+An existing face ref is reused (no wasted render); the "🙂 Regenerate views
+(face-anchored)" button (shown when the set is complete) forces a fresh anchor + full
+re-run — the fix for a set whose faces drifted. Opt-outs: `face_first:false`,
+`regen_face:true` on POST /views/generate.
+
 1. **Create a character**, upload reference images, tag them (front / back / left / right /
    face / outfit / other). The **front** ref is the default base.
 2. **🪄 Analyze references (LLM)** — sends up to 4 refs (front+face first) through the

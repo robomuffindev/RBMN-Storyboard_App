@@ -360,6 +360,7 @@ export default function LoraPanel() {
 
   return (
     <div style={{ display: 'grid', gap: 14 }}>
+      <AutogenBox chars={chars} />
       <div style={box}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <h3 style={{ margin: 0, fontSize: 15 }}>🎓 LoRA Dataset Gen</h3>
@@ -805,6 +806,9 @@ finished set meant it silently did nothing."
                 )}
               </div>
 
+              {/* train on worker (v1.271) */}
+              <TrainBox dsId={ds.id} />
+
               {/* gallery */}
               <div style={box}>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -996,6 +1000,133 @@ finished set meant it silently did nothing."
           <img src={lightbox} alt="" style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 8 }} />
         </div>
       )}
+    </div>
+  );
+}
+
+
+/* ── v1.271: in-app training + autogen ──────────────────────────────────── */
+function TrainBox({ dsId }: { dsId: string }): React.ReactElement {
+  const [st, setSt] = useState<Record<string, unknown>>({});
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch(`${BASE}/datasets/${dsId}/train/status`);
+        if (r.ok) setSt(await r.json());
+      } catch { /* ignore */ }
+    };
+    void load();
+    const t = window.setInterval(load, 15000);
+    return () => window.clearInterval(t);
+  }, [dsId]);
+  const start = async () => {
+    setMsg('');
+    try {
+      const r = await fetch(`${BASE}/datasets/${dsId}/train`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      if (!r.ok) { setMsg((await r.json()).detail || `${r.status}`); return; }
+      setMsg('started — export → upload → train (hours) → score → install, all automatic');
+    } catch (e) { setMsg(String((e as Error).message || e)); }
+  };
+  const stage = String(st.stage || 'idle');
+  return (
+    <div style={box}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 13, color: '#e6e9ee' }}>🚀 Train LoRA on worker</b>
+        <span style={hint}>
+          export → upload → Fizgig → ArcFace checkpoint pick → install into ComfyUI —
+          the finished LoRA appears in 🧬 Text 2 Image's Krea 2 picker.
+        </span>
+        <div style={{ flex: 1 }} />
+        <button style={btnGhost} disabled={stage !== 'idle' && Boolean(st.active)}
+                onClick={() => void start()}>
+          {st.active ? '⏳ running…' : '🚀 Train'}
+        </button>
+      </div>
+      {stage !== 'idle' && (
+        <p style={{ ...hint, margin: '6px 0 0',
+                    color: stage === 'error' ? '#ff8a8a' : stage === 'done' ? '#5ee08a' : '#9cc2ff' }}>
+          {stage}: {String(st.detail || '')}
+          {typeof st.installed === 'string' && st.installed ? ` → ${st.installed}` : ''}
+        </p>
+      )}
+      {msg && <p style={{ ...hint, margin: '4px 0 0' }}>{msg}</p>}
+    </div>
+  );
+}
+
+function AutogenBox({ chars }: { chars: CharT[] }): React.ReactElement {
+  const [slug, setSlug] = useState('');
+  const [mode, setMode] = useState<'dominant' | 'flexible'>('dominant');
+  const [dsOnly, setDsOnly] = useState(false);
+  const [st, setSt] = useState<Record<string, unknown>>({});
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    if (!slug) return;
+    const load = async () => {
+      try {
+        const r = await fetch(`${BASE}/autogen/${slug}/status`);
+        if (r.ok) setSt(await r.json());
+      } catch { /* ignore */ }
+    };
+    void load();
+    const t = window.setInterval(load, 15000);
+    return () => window.clearInterval(t);
+  }, [slug]);
+  const go = async () => {
+    setMsg('');
+    try {
+      const r = await fetch(`${BASE}/autogen`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ char_slug: slug, outfit_mode: mode, dataset_only: dsOnly }),
+      });
+      if (!r.ok) { setMsg((await r.json()).detail || `${r.status}`); return; }
+      setMsg('⚡ running — views → dataset → render → QC → fix rounds → export' +
+             (dsOnly ? '' : ' → train → install') + '. Walk away; status updates here.');
+    } catch (e) { setMsg(String((e as Error).message || e)); }
+  };
+  const stage = String(st.stage || '');
+  return (
+    <div style={{ ...box, border: '1px solid #3b82f6' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 13, color: '#e6e9ee' }}>⚡ Autogen — one button, whole recipe</b>
+        <span style={hint}>
+          From a character with a front reference: missing views → face_heavy-40 dataset →
+          QC + auto-fix rounds → export → train → installed LoRA.
+        </span>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        <select style={{ ...input, width: 220 }} value={slug} onChange={(e) => setSlug(e.target.value)}>
+          <option value="">— pick character —</option>
+          {chars.map((c) => <option key={c.slug} value={c.slug}>{c.name}</option>)}
+        </select>
+        <button style={chip(mode === 'dominant')} onClick={() => setMode('dominant')}
+                title="Their base outfit appears throughout — it stays strongly tied to the character.">
+          👕 Signature outfit
+        </button>
+        <button style={chip(mode === 'flexible')} onClick={() => setMode('flexible')}
+                title="The vision model proposes outfit variations that get mixed into the set, so wardrobe stays promptable rather than baked in.">
+          👗 Wardrobe variations
+        </button>
+        <button style={chip(dsOnly)} onClick={() => setDsOnly(!dsOnly)}
+                title="Stop after the dataset — review it, then hit 🚀 Train yourself.">
+          {dsOnly ? '☑' : '☐'} dataset only
+        </button>
+        <div style={{ flex: 1 }} />
+        <button style={btn} disabled={!slug || Boolean(st.active)} onClick={() => void go()}>
+          {st.active ? '⏳ running…' : '⚡ Autogen'}
+        </button>
+      </div>
+      {stage && (
+        <p style={{ ...hint, margin: '6px 0 0',
+                    color: stage === 'error' ? '#ff8a8a' : stage === 'done' ? '#5ee08a' : '#9cc2ff' }}>
+          {stage}: {String(st.detail || '')}
+          {typeof st.dataset === 'string' && st.dataset ? ` (dataset ${st.dataset})` : ''}
+        </p>
+      )}
+      {msg && <p style={{ ...hint, margin: '4px 0 0' }}>{msg}</p>}
     </div>
   );
 }

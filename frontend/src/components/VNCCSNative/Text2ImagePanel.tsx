@@ -90,7 +90,13 @@ const LORE_KEYS: { key: string; name: string; rows: number }[] = [
 
 export default function Text2ImagePanel(): React.ReactElement {
   const [chars, setChars] = useState<CharT[]>([]);
-  const [slug, setSlug] = useState('');            // '' = home screen
+  const [slug, setSlug] = useState(() => {          // '' = home screen
+    try {                                           // 🏠 hub jump: preselect
+      const f = window.localStorage.getItem('rbmn_focus_char') || '';
+      window.localStorage.removeItem('rbmn_focus_char');
+      return f;
+    } catch { return ''; }
+  });
   const [engines, setEngines] = useState<EngineT[]>([]);
   const [err, setErr] = useState('');
 
@@ -106,6 +112,7 @@ export default function Text2ImagePanel(): React.ReactElement {
   const [useFields, setUseFields] = useState(true);
   const [refIds, setRefIds] = useState<string[]>([]);
   const [loras, setLoras] = useState<string[]>([]);
+  const [loraTriggers, setLoraTriggers] = useState<Record<string, string>>({});
   const [loraName, setLoraName] = useState('');
   const [loraStrength, setLoraStrength] = useState(1.0);
   const [krea2Host, setKrea2Host] = useState('');
@@ -142,9 +149,10 @@ export default function Text2ImagePanel(): React.ReactElement {
   }, [engine]);
   const loadLoras = useCallback(async () => {
     try {
-      const r = await j<{ loras: string[] }>(await fetch(`${BASE}/loras`));
+      const r = await j<{ loras: string[]; triggers?: Record<string, string> }>(await fetch(`${BASE}/loras`));
       setLoras(r.loras || []);
-    } catch { setLoras([]); }
+      setLoraTriggers(r.triggers || {});
+    } catch { setLoras([]); setLoraTriggers({}); }
   }, []);
   const saveHost = async () => {
     setHostMsg('');
@@ -378,10 +386,31 @@ export default function Text2ImagePanel(): React.ReactElement {
                       ))}
                     </div>
                   )}
+                  {loraName && loraTriggers[loraName] && (
+                    <div style={{ marginTop: 6, padding: '6px 8px', background: '#16233a',
+                                  border: '1px solid #3b82f6', borderRadius: 6,
+                                  display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12, color: '#dbe9ff' }}>
+                        Trigger: <b>{loraTriggers[loraName]}</b>
+                      </span>
+                      <div style={{ flex: 1 }} />
+                      {!prompt.toLowerCase().includes(loraTriggers[loraName].split(' ')[0].toLowerCase()) && (
+                        <button style={{ ...btnGhost, padding: '2px 8px', fontSize: 11 }}
+                                onClick={() => setPrompt((p) => `${loraTriggers[loraName]} ${p}`.trim())}>
+                          ➕ add to prompt
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {loraName && !loraTriggers[loraName] && (
+                    <div style={{ ...hint, marginTop: 4 }}>
+                      No trigger on file for this LoRA (not one of our character datasets) —
+                      check its own documentation.
+                    </div>
+                  )}
                   {loraName && (
                     <div style={{ ...hint, marginTop: 4 }}>
-                      Include the character's trigger in your prompt (e.g. “rbmnredv1 woman …”)
-                      and always name the outfit — an unclothed prompt renders skin.
+                      Always name the outfit — an unclothed prompt renders skin.
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' }}>

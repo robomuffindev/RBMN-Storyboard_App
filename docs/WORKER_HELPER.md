@@ -203,3 +203,61 @@ root/port/manage intact.
 helper (e.g. to deploy new helper code) keeps run history and artifact serving for old runs.
 The helper cannot self-update: copy the new `rbmn_helper.py` over the box's copy and restart
 its bat.
+
+---
+
+# v1.218/v1.219 additions (2026-08-08/09) — the FLEET helper
+
+The helper stopped being a trainer-only tool: it now runs on **every** worker
+(ZOMAIN01 `.201` ⭐ trainer, ZOAI3 `.163`, ZOAI1 `.224`) and is the app's hands on each
+box — inventory, node/pip installs, model downloads, and the SageAttention recipe that
+needs box-side surgery. All three boxes run identical stacks (python 3.13.11, torch
+2.10.0+cu130, CUDA 13.0, sm89 RTX 4060 Ti 16GB), so anything proven on one rolls out
+unchanged.
+
+## Tokens: per-box, auto-generated
+
+Each helper generates its OWN token on first start and prints it as a `TOKEN …` banner in
+its console. Paste each box's token into its row in Settings → Worker Helpers. Two
+hard-won facts: **`/health` is unauthenticated** — a green /health proves the box is
+alive, NOT that your token is right; and a wrong token shows up as 401 on `/config`,
+which the registry probe reports as "reachable but WRONG TOKEN" (the boxes looked
+"offline" for exactly this reason on 2026-08-08).
+
+## New routes (all `?token=…`)
+
+| method | route | what |
+|---|---|---|
+| GET | `/inventory` | one payload: custom_nodes list (name/kind/disabled/has_requirements), per-model-folder `{count, gb}`, env (python, torch, cuda, gpu, sm, triton, sageattention, xformers, flash_attn). Counts only — verify FILES by name via ComfyUI `/object_info` on :8188 |
+| POST | `/install/node` | `{git_url}` → git clone into custom_nodes + pip install its requirements |
+| POST | `/install/pip` | `{packages: [...]}` into the embedded python |
+| POST | `/download/model` | `{url, folder, filename}` — background download into the models folder; watch `/downloads` |
+| POST | `/install/python-headers` | extracts CPython include/ + libs/ into python_embeded (from the triton-windows headers zip) — **the fix for triton's `-lpython31X` link failure** |
+| POST | `/install/sageattention` | installs the matched wheel (auto-pick from woct0rdho releases, or explicit `{wheel_url}` — auto-pick returned 0 assets once, pass the URL) + triton-windows |
+| POST | `/verify/sageattention` | runs a REAL q/k/v `sageattn()` kernel call in the embedded python and looks for `SAGE_OK`. **The only accepted proof** — "pip says installed" produced a broken install on 2026-08-08 |
+
+## The SageAttention recipe (proven fleet-wide 2026-08-09)
+
+Three pieces + one flag, in order, per box:
+1. `/install/sageattention` with the matched wheel
+   (`sageattention-2.2.0+cu130torch2.10.0andhigher.post6-cp310-abi3-win_amd64.whl`) —
+   installs the wheel + triton-windows.
+2. `/install/python-headers` — CPython 3.13 include/+libs into python_embeded (without
+   this the kernel compiles fail at link time; this was the "it says installed but
+   errors" mystery).
+3. Add `--use-sage-attention` to the box's network bat, restart ComfyUI.
+4. `/verify/sageattention` → must print SAGE_OK via a real kernel call.
+
+Measured result (redv1 TURBO exam grid, bit-identical graphs/seeds): **74.0 → 46.6 s per
+render steady-state (37% faster)**, ArcFace identical within run noise. Because the flag
+is in every bat, ComfyUI workflows must NOT also enable Patch-Sage nodes (the H3 ultra
+workflows' PATCH SAGE groups stay bypassed; our 🎬 Video Lab never emits them).
+
+## Who calls all this
+
+- Settings → Worker Helpers registry (probe, paths, 🔍 Detect) — `backend/api/lora_train.py`.
+- 🎬 Video Lab renders go to the box's **ComfyUI :8188 directly** (not the helper):
+  uploads via `/upload/image`, graphs via `/prompt`, results via `/history` + `/view`.
+  The helper's job there was getting the boxes ready (sage, nodes, models).
+- LoRA sync across boxes: helper→helper artifact pulls (byte-exact, no human hop).
+- The agent (`scripts/_agent/inbox`) is how Claude reaches any of it from a session.

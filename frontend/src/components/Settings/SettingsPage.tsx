@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -1100,6 +1100,8 @@ export default function SettingsPage() {
                 </div>
               )}
             </div>
+
+            <TrainerWorkerCard />
 
             {/* Video Model + FPS Row */}
             <div className="grid grid-cols-3 gap-4 items-start">
@@ -3050,6 +3052,155 @@ export default function SettingsPage() {
         </div>,
         document.body
       )}
+    </div>
+  );
+}
+
+
+/* v1.271: Fizgig training worker — stored in the forge settings file (the box is
+   on DHCP and moves; this is the one place to update its IP). */
+function TrainerWorkerCard() {
+  type Paths = { comfy_root?: string; comfy_start_cmd?: string; fizgig_root?: string; fizgig_python?: string };
+  type Wk = { id: string; name: string; host: string; port: number; is_trainer: boolean;
+    online?: boolean; helper_version?: string; gpu?: string; paths?: Paths; has_fizgig?: boolean };
+  const [wks, setWks] = useState<Wk[]>([]);
+  const [edit, setEdit] = useState<Record<string, Paths>>({});
+  const [tok, setTok] = useState<Record<string, string>>({});
+  const [detect, setDetect] = useState<Record<string, { comfy?: { candidates?: { root: string }[] }; fizgig?: { candidates?: { root: string; python?: string }[] } }>>({});
+  const [msg, setMsg] = useState('');
+  const [newHost, setNewHost] = useState('');
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch('/api/lora/helpers');
+      if (r.ok) {
+        const j = await r.json();
+        setWks(j.helpers || []);
+        setEdit((prev) => {
+          const next = { ...prev };
+          for (const w of j.helpers || []) if (!next[w.id]) next[w.id] = { ...(w.paths || {}) };
+          return next;
+        });
+      }
+    } catch { /* ignore */ }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  const call = async (url: string, method: string, body?: unknown) => {
+    setMsg('');
+    const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' },
+                                 body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!r.ok) { setMsg(`${url.split('/').pop()}: ${(await r.json()).detail || r.status}`); return false; }
+    return true;
+  };
+  return (
+    <div className="mt-4 p-4 bg-gray-800/50 border border-gray-700 rounded">
+      <label className="block text-sm font-medium">🔧 Worker Helpers (all boxes running rbmn_helper)</label>
+      <p className="text-xs text-gray-500 mt-1 mb-2">
+        Every worker with the helper installed. ⭐ marks the TRAINER — the box 🚀 Train, ⚡ Autogen and
+        🧬 Krea 2 renders use (it needs Fizgig; plain workers don't). Paths are read from and written to
+        each box's own helper config — what you set here overrides autodetect permanently.
+      </p>
+      {wks.map((w) => (
+        <div key={w.id} className="mb-3 p-3 bg-gray-900 border border-gray-700 rounded">
+          <div className="flex gap-2 items-center flex-wrap">
+            <button title="make this the trainer box"
+                    className={`text-lg ${w.is_trainer ? '' : 'opacity-30 hover:opacity-70'}`}
+                    onClick={async () => { if (await call(`/api/lora/helpers/${w.id}`, 'PUT', { is_trainer: true })) void load(); }}>⭐</button>
+            <input className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm w-36"
+                   defaultValue={w.name}
+                   onBlur={async (e) => { if (e.target.value !== w.name) { await call(`/api/lora/helpers/${w.id}`, 'PUT', { name: e.target.value }); void load(); } }} />
+            <input className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm w-36"
+                   defaultValue={w.host}
+                   onBlur={async (e) => { if (e.target.value !== w.host) { await call(`/api/lora/helpers/${w.id}`, 'PUT', { host: e.target.value }); void load(); } }} />
+            <input className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm w-20"
+                   type="number" defaultValue={w.port}
+                   onBlur={async (e) => { const p = Number(e.target.value) || 8765; if (p !== w.port) { await call(`/api/lora/helpers/${w.id}`, 'PUT', { port: p }); void load(); } }} />
+            <input className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm w-44"
+                   type="password" placeholder="token (blank = keep)" value={tok[w.id] || ''}
+                   onChange={(e) => setTok((p) => ({ ...p, [w.id]: e.target.value }))} />
+            {tok[w.id] && (
+              <button className="px-2 py-1 bg-blue-700 hover:bg-blue-600 rounded text-xs"
+                      onClick={async () => { if (await call(`/api/lora/helpers/${w.id}`, 'PUT', { token: tok[w.id] })) { setTok((p) => ({ ...p, [w.id]: '' })); void load(); } }}>set token</button>
+            )}
+            <span className={`text-xs ${w.online ? 'text-emerald-400' : 'text-red-400'}`}>
+              {w.online ? `● online v${w.helper_version}${w.gpu ? ` · ${w.gpu}` : ''}`
+                : `● ${(w as Wk & { error?: string }).error || 'offline'}`}
+            </span>
+            <div className="flex-1" />
+            {!w.is_trainer && (
+              <button className="px-2 py-1 bg-red-900 hover:bg-red-800 rounded text-xs"
+                      onClick={async () => { if (await call(`/api/lora/helpers/${w.id}/delete`, 'POST', {})) void load(); }}>remove</button>
+            )}
+          </div>
+          {w.online && (
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-xs text-gray-500">ComfyUI root</span>
+                <input className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-xs font-mono"
+                       value={edit[w.id]?.comfy_root ?? ''} placeholder="E:\\ComfyUI_windows_portable"
+                       onChange={(e) => setEdit((p) => ({ ...p, [w.id]: { ...p[w.id], comfy_root: e.target.value } }))} />
+              </div>
+              <div>
+                <span className="text-xs text-gray-500">ComfyUI start command (network bat)</span>
+                <input className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-xs font-mono"
+                       value={edit[w.id]?.comfy_start_cmd ?? ''} placeholder="…\\run_nvidia_gpu.bat"
+                       onChange={(e) => setEdit((p) => ({ ...p, [w.id]: { ...p[w.id], comfy_start_cmd: e.target.value } }))} />
+              </div>
+              <div>
+                <span className="text-xs text-gray-500">Fizgig root (optional — trainer only)</span>
+                <input className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-xs font-mono"
+                       value={edit[w.id]?.fizgig_root ?? ''} placeholder="leave blank if this box doesn't train"
+                       onChange={(e) => setEdit((p) => ({ ...p, [w.id]: { ...p[w.id], fizgig_root: e.target.value } }))} />
+              </div>
+              <div>
+                <span className="text-xs text-gray-500">Fizgig python (optional)</span>
+                <input className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-xs font-mono"
+                       value={edit[w.id]?.fizgig_python ?? ''} placeholder="…\\Fizgig\\venv\\Scripts\\python.exe"
+                       onChange={(e) => setEdit((p) => ({ ...p, [w.id]: { ...p[w.id], fizgig_python: e.target.value } }))} />
+              </div>
+              <div className="col-span-2 flex gap-2 items-center">
+                <button className="px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs font-medium"
+                        onClick={async () => { if (await call(`/api/lora/helpers/${w.id}/paths`, 'PUT', edit[w.id] || {})) { setMsg('paths saved'); void load(); } }}>💾 Save paths</button>
+                <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs"
+                        onClick={async () => {
+                          try { const r = await fetch(`/api/lora/helpers/${w.id}/detect`); if (r.ok) { const j = await r.json(); setDetect((p) => ({ ...p, [w.id]: j })); } } catch { /* ignore */ }
+                        }}>🔍 Detect installs</button>
+                <span className="text-xs text-gray-500">saving overrides autodetect permanently</span>
+              </div>
+              {detect[w.id] && (
+                <div className="col-span-2 p-2 bg-gray-950 rounded border border-gray-700 space-y-1 text-xs">
+                  {(detect[w.id].comfy?.candidates || []).map((c) => (
+                    <div key={c.root} className="flex gap-2 items-center">
+                      <span className="text-gray-500">ComfyUI</span>
+                      <span className="font-mono text-gray-300">{c.root}</span>
+                      <button className="px-2 py-0.5 bg-blue-700 hover:bg-blue-600 rounded"
+                              onClick={() => setEdit((p) => ({ ...p, [w.id]: { ...p[w.id], comfy_root: c.root } }))}>→ field</button>
+                    </div>
+                  ))}
+                  {(detect[w.id].fizgig?.candidates || []).map((c) => (
+                    <div key={c.root} className="flex gap-2 items-center">
+                      <span className="text-gray-500">Fizgig</span>
+                      <span className="font-mono text-gray-300">{c.root}</span>
+                      <button className="px-2 py-0.5 bg-blue-700 hover:bg-blue-600 rounded"
+                              onClick={() => setEdit((p) => ({ ...p, [w.id]: { ...p[w.id], fizgig_root: c.root, ...(c.python ? { fizgig_python: c.python } : {}) } }))}>→ field</button>
+                    </div>
+                  ))}
+                  {!(detect[w.id].comfy?.candidates || []).length && !(detect[w.id].fizgig?.candidates || []).length && (
+                    <span className="text-gray-500">nothing detected on this box</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+      <div className="flex gap-2 items-center">
+        <input className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-100 text-sm w-40"
+               placeholder="new worker IP" value={newHost} onChange={(e) => setNewHost(e.target.value)} />
+        <button className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 rounded text-sm font-medium"
+                disabled={!newHost.trim()}
+                onClick={async () => { if (await call('/api/lora/helpers', 'POST', { host: newHost.trim() })) { setNewHost(''); void load(); } }}>➕ Add worker</button>
+        {msg && <span className="text-xs text-gray-400">{msg}</span>}
+      </div>
     </div>
   );
 }

@@ -48,13 +48,14 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = "1.217.0"
+VERSION = "1.219.0"
 IS_WIN = os.name == "nt"
 HERE = Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get("RBMN_HELPER_HOME") or (HERE / "rbmn_helper_data"))
@@ -787,6 +788,327 @@ def install_lora(cfg: dict, st: dict, body: dict) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  v1.218 — inventory + installers (the "what's on this worker" layer)
+# ══════════════════════════════════════════════════════════════════════════
+_DOWNLOADS: dict = {}
+
+
+def _comfy_dir(cfg: dict) -> Path:
+    root = Path(cfg["comfy"].get("root") or "")
+    return root / "ComfyUI" if (root / "ComfyUI").is_dir() else root
+
+
+def _embedded_python(cfg: dict) -> str:
+    explicit = (cfg["comfy"].get("python") or "").strip()
+    if explicit:
+        return explicit
+    root = Path(cfg["comfy"].get("root") or "")
+    for cand in (root / "python_embeded" / "python.exe",
+                 root / "python_embedded" / "python.exe",
+                 _comfy_dir(cfg) / "venv" / "Scripts" / "python.exe"):
+        if cand.exists():
+            return str(cand)
+    return sys.executable
+
+
+_PROBE_SRC = (
+    "import json,sys\n"
+    "out={'python':sys.version.split()[0]}\n"
+    "def probe(mod):\n"
+    "    try:\n"
+    "        m=__import__(mod); return getattr(m,'__version__','?')\n"
+    "    except Exception as e:\n"
+    "        return 'MISSING: '+type(e).__name__\n"
+    "try:\n"
+    "    import torch\n"
+    "    out['torch']=torch.__version__; out['cuda']=torch.version.cuda\n"
+    "    out['cuda_available']=torch.cuda.is_available()\n"
+    "    if torch.cuda.is_available():\n"
+    "        out['gpu']=torch.cuda.get_device_name(0)\n"
+    "        cc=torch.cuda.get_device_capability(0); out['sm']=cc[0]*10+cc[1]\n"
+    "except Exception as e:\n"
+    "    out['torch']='MISSING: '+type(e).__name__\n"
+    "for m in ('triton','sageattention','xformers','flash_attn'):\n"
+    "    out[m]=probe(m)\n"
+    "print(json.dumps(out))\n")
+
+
+def _run_embedded(cfg: dict, code: str, timeout: float = 120.0) -> dict:
+    py = _embedded_python(cfg)
+    try:
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True,
+                           timeout=timeout)
+        return {"rc": r.returncode, "stdout": r.stdout.strip()[-8000:],
+                "stderr": r.stderr.strip()[-8000:], "python_exe": py}
+    except Exception as e:  # noqa: BLE001
+        return {"rc": -1, "stdout": "", "stderr": f"{type(e).__name__}: {e}",
+                "python_exe": py}
+
+
+def env_probe(cfg: dict) -> dict:
+    r = _run_embedded(cfg, _PROBE_SRC.replace("\\n", "\n"))
+    try:
+        env = json.loads(r["stdout"].splitlines()[-1]) if r["stdout"] else {}
+    except Exception:  # noqa: BLE001
+        env = {}
+    env["python_exe"] = r.get("python_exe")
+    if r["rc"] != 0:
+        env["probe_error"] = r["stderr"][:400]
+    return env
+
+
+def inventory(cfg: dict) -> dict:
+    cdir = _comfy_dir(cfg)
+    nodes = []
+    nd = cdir / "custom_nodes"
+    if nd.is_dir():
+        for d in sorted(nd.iterdir()):
+            if d.is_file() and d.suffix == ".py":
+                nodes.append({"name": d.name, "kind": "file"})
+            elif d.is_dir() and d.name != "__pycache__":
+                nodes.append({"name": d.name, "kind": "git" if (d / ".git").exists()
+                              else "dir",
+                              "disabled": d.name.endswith(".disabled"),
+                              "has_requirements": (d / "requirements.txt").exists()})
+    models = {}
+    md = cdir / "models"
+    if md.is_dir():
+        for d in sorted(md.iterdir()):
+            if not d.is_dir():
+                continue
+            files = [f for f in d.rglob("*") if f.is_file()
+                     and f.suffix.lower() in (".safetensors", ".ckpt", ".pt", ".pth",
+                                              ".onnx", ".gguf", ".bin", ".sft")]
+            if files:
+                models[d.name] = {"count": len(files),
+                                  "gb": round(sum(f.stat().st_size for f in files)
+                                              / 1e9, 2)}
+    return {"comfy_root": str(cfg["comfy"].get("root") or ""),
+            "comfy_dir": str(cdir), "custom_nodes": nodes, "models": models,
+            "env": env_probe(cfg)}
+
+
+def install_node(cfg: dict, body: dict) -> dict:
+    url = (body.get("git_url") or "").strip()
+    if not url.startswith(("https://", "http://")):
+        raise ValueError("git_url must be an http(s) git URL")
+    name = (body.get("name") or url.rstrip("/").split("/")[-1]
+            .removesuffix(".git")).strip()
+    if "/" in name or "\\" in name or ".." in name:
+        raise ValueError("bad name")
+    dest = _comfy_dir(cfg) / "custom_nodes" / name
+    steps = []
+    if dest.exists():
+        r = subprocess.run(["git", "-C", str(dest), "pull", "--ff-only"],
+                           capture_output=True, text=True, timeout=600)
+        steps.append(f"git pull rc={r.returncode}: {(r.stdout + r.stderr)[-300:]}")
+    else:
+        r = subprocess.run(["git", "clone", "--depth", "1", url, str(dest)],
+                           capture_output=True, text=True, timeout=1800)
+        steps.append(f"git clone rc={r.returncode}: {(r.stdout + r.stderr)[-300:]}")
+        if r.returncode != 0:
+            return {"ok": False, "steps": steps}
+    req = dest / "requirements.txt"
+    if req.exists():
+        rr = _run_embedded(cfg, "", 0.1)  # just to resolve python path
+        py = rr["python_exe"]
+        r = subprocess.run([py, "-m", "pip", "install", "-r", str(req)],
+                           capture_output=True, text=True, timeout=1800)
+        steps.append(f"pip -r requirements rc={r.returncode}: "
+                     f"{(r.stdout + r.stderr)[-400:]}")
+    return {"ok": True, "installed": str(dest), "steps": steps,
+            "note": "restart ComfyUI to load the node"}
+
+
+def pip_install(cfg: dict, body: dict) -> dict:
+    args = body.get("args") or []
+    if not isinstance(args, list) or not args:
+        raise ValueError("args list required, e.g. ['install','triton-windows']")
+    bad = [a for a in args if not isinstance(a, str)]
+    if bad:
+        raise ValueError("args must be strings")
+    py = _embedded_python(cfg)
+    r = subprocess.run([py, "-m", "pip"] + args, capture_output=True, text=True,
+                       timeout=3600)
+    return {"ok": r.returncode == 0, "rc": r.returncode,
+            "python_exe": py,
+            "tail": (r.stdout + "\n" + r.stderr)[-3000:]}
+
+
+_SAGE_TEST = (
+    "import torch\n"
+    "from sageattention import sageattn\n"
+    "q=torch.randn(1,8,128,64,dtype=torch.float16,device='cuda')\n"
+    "k=torch.randn(1,8,128,64,dtype=torch.float16,device='cuda')\n"
+    "v=torch.randn(1,8,128,64,dtype=torch.float16,device='cuda')\n"
+    "o=sageattn(q,k,v,tensor_layout='HND')\n"
+    "print('SAGE_OK', tuple(o.shape), o.dtype)\n")
+
+
+def sage_verify(cfg: dict) -> dict:
+    """The step pip cannot fake: run a REAL sage kernel on the GPU."""
+    r = _run_embedded(cfg, _SAGE_TEST.replace("\\n", "\n"), 180.0)
+    ok = r["rc"] == 0 and "SAGE_OK" in r["stdout"]
+    return {"ok": ok, "stdout": r["stdout"][-800:], "stderr": r["stderr"][-1500:]}
+
+
+def sage_install(cfg: dict, body: dict) -> dict:
+    """Probe the EMBEDDED python, pick the matching prebuilt wheel, install,
+    then verify with a real kernel call. Never reports success unverified."""
+    steps = []
+    env = env_probe(cfg)
+    steps.append(f"env: python {env.get('python')} torch {env.get('torch')} "
+                 f"cuda {env.get('cuda')} sm {env.get('sm')} "
+                 f"triton {env.get('triton')}")
+    torch_v = str(env.get("torch") or "")
+    if torch_v.startswith("MISSING") or not torch_v:
+        return {"ok": False, "steps": steps,
+                "error": "torch missing in the embedded python — wrong python probed? "
+                         "set comfy.python in the helper config"}
+    if not env.get("cuda_available"):
+        return {"ok": False, "steps": steps, "error": "CUDA not available"}
+    # triton first (windows build)
+    if str(env.get("triton", "")).startswith("MISSING"):
+        r = pip_install(cfg, {"args": ["install", "-U", "triton-windows"]})
+        steps.append(f"triton-windows install ok={r['ok']}: {r['tail'][-200:]}")
+        if not r["ok"]:
+            return {"ok": False, "steps": steps, "error": "triton-windows failed"}
+    wheel = (body.get("wheel_url") or "").strip()
+    if not wheel:
+        # pick from woct0rdho prebuilt releases by torch major.minor + cu version
+        tmm = ".".join(torch_v.split("+")[0].split(".")[:2])
+        cu = str(env.get("cuda") or "").replace(".", "")
+        try:
+            with urllib.request.urlopen(
+                    "https://api.github.com/repos/woct0rdho/SageAttention/releases",
+                    timeout=60) as rr:
+                rels = json.loads(rr.read().decode("utf-8"))
+            assets = [a["browser_download_url"] for rel in rels
+                      for a in rel.get("assets", [])
+                      if a["name"].endswith(".whl") and "windows" in a["name"].lower()]
+            cands = [u for u in assets
+                     if f"torch{tmm}" in u.replace("+", "") or tmm in u]
+            cands = [u for u in cands if not cu or f"cu{cu}" in u] or cands
+            if not cands:
+                return {"ok": False, "steps": steps,
+                        "error": f"no prebuilt wheel found for torch {tmm} cu{cu} — "
+                                 f"pass wheel_url explicitly. {len(assets)} assets seen.",
+                        "assets_sample": assets[:10]}
+            wheel = cands[0]
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "steps": steps,
+                    "error": f"could not query wheel releases: {e} — pass wheel_url"}
+    steps.append(f"wheel: {wheel}")
+    r = pip_install(cfg, {"args": ["install", "-U", wheel]})
+    steps.append(f"wheel install ok={r['ok']}: {r['tail'][-300:]}")
+    if not r["ok"]:
+        return {"ok": False, "steps": steps, "error": "wheel install failed"}
+    ver = sage_verify(cfg)
+    steps.append(f"VERIFY (real kernel on GPU): ok={ver['ok']} {ver['stdout'][-120:]}")
+    out = {"ok": ver["ok"], "steps": steps, "verify": ver}
+    if ver["ok"]:
+        out["note"] = ("verified with a real kernel call. Launch ComfyUI with "
+                       "--use-sage-attention (or a node pack that enables it) to use it.")
+    else:
+        out["error"] = ("installed but the kernel FAILED — this is the "
+                        "'says installed, still errors' case: wheel does not match "
+                        "this torch/CUDA/GPU. Try another wheel_url.")
+    return out
+
+
+_HEADER_ZIPS = {
+    # triton needs CPython include/ + libs/ inside the embedded python;
+    # zips published by the triton-windows author, minor version must match.
+    "3.13": "https://github.com/woct0rdho/triton-windows/releases/download/"
+            "v3.0.0-windows.post1/python_3.13.2_include_libs.zip",
+    "3.12": "https://github.com/woct0rdho/triton-windows/releases/download/"
+            "v3.0.0-windows.post1/python_3.12.8_include_libs.zip",
+    "3.11": "https://github.com/woct0rdho/triton-windows/releases/download/"
+            "v3.0.0-windows.post1/python_3.11.9_include_libs.zip",
+}
+
+
+def install_python_headers(cfg: dict, body: dict) -> dict:
+    """v1.219: give the EMBEDDED python its missing include/ + libs/ so
+    triton's runtime compiler can link (-lpythonXYZ). The classic reason
+    SageAttention 'installs but errors' on ComfyUI portable."""
+    py = Path(_embedded_python(cfg))
+    pydir = py.parent
+    if pydir.name.lower() in ("scripts",):          # venv layout: python lives deeper
+        pydir = pydir.parent
+    env = env_probe(cfg)
+    minor = ".".join(str(env.get("python") or "").split(".")[:2])
+    url = (body.get("url") or "").strip() or _HEADER_ZIPS.get(minor)
+    if not url:
+        raise ValueError(f"no known include/libs zip for python {minor} — pass url")
+    steps = [f"python {env.get('python')} at {pydir}", f"zip: {url}"]
+    import io
+    with urllib.request.urlopen(url, timeout=300) as r:
+        blob = r.read()
+    steps.append(f"downloaded {len(blob)} bytes")
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        names = z.namelist()
+        wanted = [n for n in names
+                  if n.replace("\\", "/").lstrip("/").lower()
+                  .startswith(("include/", "libs/"))]
+        if not wanted:
+            raise ValueError(f"zip has no include/ or libs/ at its root: {names[:5]}")
+        z.extractall(str(pydir), members=wanted)
+    steps.append(f"extracted {len(wanted)} files into {pydir}")
+    ok = (pydir / "include" / "Python.h").exists() or \
+         (pydir / "Include" / "Python.h").exists()
+    libs = list((pydir / "libs").glob("python*.lib")) if (pydir / "libs").exists() else []
+    steps.append(f"Python.h present: {ok} · libs: {[p.name for p in libs][:3]}")
+    return {"ok": bool(ok and libs), "steps": steps}
+
+
+def model_download(cfg: dict, body: dict) -> dict:
+    url = (body.get("url") or "").strip()
+    folder = (body.get("folder") or "").strip()
+    if not url.startswith(("https://", "http://")):
+        raise ValueError("url required")
+    if not folder or "/" in folder or "\\" in folder or ".." in folder:
+        raise ValueError("folder must be a plain models subfolder name")
+    fname = (body.get("filename") or url.split("?")[0].rstrip("/").split("/")[-1]).strip()
+    if "/" in fname or "\\" in fname or ".." in fname:
+        raise ValueError("bad filename")
+    dest_dir = _comfy_dir(cfg) / "models" / folder
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / fname
+    did = uuid.uuid4().hex[:8]
+    st = {"id": did, "url": url, "dest": str(dest), "status": "running",
+          "bytes": 0, "total": None, "error": None}
+    _DOWNLOADS[did] = st
+
+    def _dl():
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            req = urllib.request.Request(url)
+            tok = (body.get("token") or "").strip()
+            if tok:
+                req.add_header("Authorization", f"Bearer {tok}")
+            with urllib.request.urlopen(req, timeout=120) as r, tmp.open("wb") as fh:
+                st["total"] = int(r.headers.get("Content-Length") or 0) or None
+                while True:
+                    chunk = r.read(1 << 22)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    st["bytes"] += len(chunk)
+            tmp.replace(dest)
+            st["status"] = "done"
+        except Exception as e:  # noqa: BLE001
+            st.update(status="error", error=f"{type(e).__name__}: {e}")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    threading.Thread(target=_dl, daemon=True).start()
+    return {"started": True, "id": did, "dest": str(dest)}
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  diagnostics — one payload, everything, for pasting into a chat
 # ══════════════════════════════════════════════════════════════════════════
 def diag(cfg: dict) -> dict:
@@ -1003,6 +1325,11 @@ class Handler(BaseHTTPRequestHandler):
                                   "lease": get_lease()})
             if p == "/datasets":
                 return self.json({"datasets": list_datasets()})
+            if p == "/inventory":
+                return self.json(inventory(cfg))
+            if p == "/downloads":
+                return self.json({"downloads": sorted(_DOWNLOADS.values(),
+                                                      key=lambda d: d["id"])})
             if p == "/runs":
                 return self.json({"runs": sorted(_RUNS.values(), key=lambda r: r["id"],
                                                  reverse=True)})
@@ -1092,6 +1419,18 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/runs/([^/]+)/cancel$", p)
             if m:
                 return self.json(cancel_run(m.group(1)))
+            if p == "/install/node":
+                return self.json(install_node(cfg, body))
+            if p == "/install/pip":
+                return self.json(pip_install(cfg, body))
+            if p == "/install/python-headers":
+                return self.json(install_python_headers(cfg, body))
+            if p == "/install/sageattention":
+                return self.json(sage_install(cfg, body))
+            if p == "/verify/sageattention":
+                return self.json(sage_verify(cfg))
+            if p == "/download/model":
+                return self.json(model_download(cfg, body))
             m = re.match(r"^/runs/([^/]+)/install-lora$", p)
             if m:
                 st = _RUNS.get(m.group(1))

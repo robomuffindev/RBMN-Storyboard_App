@@ -466,6 +466,12 @@ app.include_router(charsheet_router)
 from backend.api.forge import router as forge_router  # noqa: E402
 app.include_router(forge_router)
 
+from backend.api.lora_train import router as lora_train_router  # noqa: E402
+app.include_router(lora_train_router)
+
+from backend.api.h3video import router as h3video_router  # noqa: E402
+app.include_router(h3video_router)
+
 # Log registered routes for debugging
 _gen_routes = []
 for route in app.routes:

@@ -29,10 +29,12 @@ import Klein3Panel from './Klein3Panel';
 import LoraPanel from './LoraPanel';
 import CharacterSheetPanel from './CharacterSheetPanel';
 import Text2ImagePanel from './Text2ImagePanel';
+import StudioHubPanel from './StudioHubPanel';
+import VideoLabPanel from './VideoLabPanel';
 
 
 type Phase = 'idle' | 'submitting' | 'polling' | 'ingesting' | 'done' | 'error';
-type Tab = 'text2image' | 'create' | 'clothes' | 'emotions' | 'cloner' | 'poselib' | 'lora' | 'charsheet';
+type Tab = 'studio' | 'text2image' | 'video' | 'create' | 'clothes' | 'emotions' | 'cloner' | 'poselib' | 'lora' | 'charsheet';
 
 const SEXES = ['female', 'male'];
 const BACKGROUNDS = ['Green', 'Blue', 'White', 'Alpha'];
@@ -853,7 +855,7 @@ function ImageLightbox({ src, onClose, version, nav }: {
 
 // ---------------------------------------------------------------------------
 export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'native' | 'klein' }) {
-  const [tab, setTab] = useState<Tab>('create');
+  const [tab, setTab] = useState<Tab>('studio');
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const [existingOutputs, setExistingOutputs] = useState<api.CharacterImagesT['outputs']>([]);
@@ -4978,7 +4980,9 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button style={tabBtn(tab === 'studio')} onClick={() => setTab('studio')}>🏠 Studio</button>
         <button style={tabBtn(tab === 'text2image')} onClick={() => setTab('text2image')}>🧬 Text 2 Image</button>
+        <button style={tabBtn(tab === 'video')} onClick={() => setTab('video')}>🎬 Video Lab</button>
         <button style={tabBtn(tab === 'create')} onClick={() => setTab('create')}>Create</button>
         <button style={tabBtn(tab === 'clothes')} onClick={() => setTab('clothes')}>Clothes</button>
         <button style={tabBtn(tab === 'emotions')} onClick={() => setTab('emotions')}>Emotions</button>
@@ -5023,8 +5027,12 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         </div>
       ) : tab === 'lora' ? (
         <LoraPanel />
+      ) : tab === 'studio' ? (
+        <StudioHubPanel goTo={(t, _slug) => setTab(t as Tab)} />
       ) : tab === 'text2image' ? (
         <Text2ImagePanel />
+      ) : tab === 'video' ? (
+        <VideoLabPanel />
       ) : tab === 'charsheet' ? (
         <CharacterSheetPanel />
       ) : tab === 'poselib' ? (

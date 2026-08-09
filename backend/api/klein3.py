@@ -537,11 +537,28 @@ def _view_prompt(view: str, fields: Dict[str, Any]) -> str:
             f"plain white studio background, even lighting, photorealistic")
 
 
+def _face_prompt(fields: Dict[str, Any]) -> str:
+    """The 🙂 face anchor: a zoomed close-up rendered BEFORE the view set, then
+    fed to every view job as reference image 1 so faces match across the set
+    (Lorenzo, 2026-08-09: generated sets drifted on the face without it)."""
+    extra = ", ".join(str(fields.get(k, "")).strip() for k in ("hair", "eyes", "face")
+                      if str(fields.get(k, "")).strip())
+    return ("The exact same person shown in the reference image(s), a zoomed-in "
+            "close-up PORTRAIT of the face — head and shoulders only, the face "
+            "filling most of the frame, looking straight at the camera with a "
+            "neutral expression, SAME face, SAME eyes, SAME hairstyle and SAME "
+            f"skin tone as the references{', ' + extra if extra else ''}, sharp "
+            "focus on the eyes and facial features, plain white studio "
+            "background, even lighting, photorealistic")
+
+
 class ViewsIn(BaseModel):
     views: List[str]
     seed: Optional[int] = None
     width: int = 832
     height: int = 1216
+    face_first: bool = True            # 🙂 render/reuse a face close-up anchor
+    regen_face: bool = False           # force a fresh face even if one exists
 
 
 @router.post("/characters/{slug}/views/generate")
@@ -565,8 +582,52 @@ async def views_generate(slug: str, body: ViewsIn, request: Request):
     st.update({"status": "running", "detail": f"0/{len(todo)}", "error": None, "done": []})
 
     def _run():
-        jobs = [{"key": v, "prompt": _view_prompt(v, fields), "refs": id_refs,
-                 "w": w, "h": h, "seed": seed0 + i} for i, v in enumerate(todo)]
+        # ── 🙂 phase 1: the face anchor ──────────────────────────────────────
+        # A zoomed face close-up is generated FIRST (or the newest existing
+        # face-tagged ref reused), then leads the reference list of every view
+        # job — the strongest identity signal Klein gets, so the set's faces
+        # match. Failure falls back to the plain identity refs, never blocks.
+        refs_for_views = list(id_refs)
+        total = len(todo)
+        if body.face_first:
+            face_path: List[str] = []
+            existing = [r for r in _refs_by_tag(c, "face")
+                        if (_cdir(slug) / "refs" / f"{r['id']}.png").exists()]
+            if existing and not body.regen_face:
+                face_path = [str(_cdir(slug) / "refs" / f"{existing[-1]['id']}.png")]
+            else:
+                total += 1
+                st["detail"] = f"0/{total} (face anchor first)"
+                fjob = [{"key": "face", "prompt": _face_prompt(fields),
+                         "refs": id_refs, "w": 832, "h": 1024, "seed": seed0 - 1}]
+
+                def on_face(jb, data):
+                    rid = uuid4().hex[:12]
+                    p = _cdir(slug) / "refs" / f"{rid}.png"
+                    _save_png_bytes(data, p)
+                    c2 = _load(slug)
+                    c2.setdefault("refs", []).append(
+                        {"id": rid, "tag": "face",
+                         "name": "generated face close-up (anchor)",
+                         "source": "generated", "created_at": _now()})
+                    _save(slug, c2)
+                    face_path.append(str(p))
+                    st["done"] = st.get("done", []) + ["face"]
+                    st["detail"] = f"{len(st['done'])}/{total}"
+
+                try:
+                    _parallel_klein_edits(disp, fjob, on_face, st)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("klein3 face anchor failed, views proceed "
+                                   "without it: %s", e)
+            if face_path:
+                refs_for_views = ([face_path[0]] +
+                                  [p for p in id_refs if p != face_path[0]])[:3]
+
+        # ── phase 2: the views, face-anchored ───────────────────────────────
+        jobs = [{"key": v, "prompt": _view_prompt(v, fields),
+                 "refs": refs_for_views, "w": w, "h": h, "seed": seed0 + i}
+                for i, v in enumerate(todo)]
 
         def on_result(jb, data):
             rid = uuid4().hex[:12]
@@ -577,7 +638,7 @@ async def views_generate(slug: str, body: ViewsIn, request: Request):
                  "source": "generated", "created_at": _now()})
             _save(slug, c2)
             st["done"] = st.get("done", []) + [jb["key"]]
-            st["detail"] = f"{len(st['done'])}/{len(todo)}"
+            st["detail"] = f"{len(st['done'])}/{total}"
 
         try:
             _parallel_klein_edits(disp, jobs, on_result, st)   # fans across workers
