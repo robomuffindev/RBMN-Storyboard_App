@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import tempfile
+import os
 import threading
 import time
 import urllib.error
@@ -143,16 +144,101 @@ def _hj(path: str, body: Optional[dict] = None, raw: Optional[bytes] = None,
                                      headers={"Content-Type": "application/json"})
     else:
         req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        # ⚠⚠ v1.276.49 — READ THE BODY. `str(HTTPError)` is
+        # "HTTP Error 500: Internal Server Error" and NOTHING ELSE — the helper's
+        # actual explanation is in the response body, which .48 discarded by
+        # re-raising untouched. That cost Lorenzo the reason a SEVEN-HOUR run
+        # failed at its final step: the training was finished and scored, and
+        # all he was told was "500".
+        # Same lesson as .48, one layer in: preserving the status code is not
+        # preserving the error.
+        try:
+            body = e.read().decode("utf-8", "replace")[:800]
+        except Exception:                                        # noqa: BLE001
+            body = ""
+        detail = ""
+        try:
+            j = json.loads(body)
+            detail = str(j.get("error") or j.get("detail") or body)
+        except Exception:                                        # noqa: BLE001
+            detail = body
+        t = _tsettings()
+        raise RuntimeError(
+            f"the worker helper at {t['host']}:{t['port']} refused "
+            f"{path.split('?')[0]} with HTTP {e.code}: "
+            f"{detail or '(the helper sent no explanation)'}") from None
+    except Exception as e:                                       # noqa: BLE001
+        # ⚠⚠ v1.276.48 — NAME THE MACHINE. Lorenzo hit
+        #   "RuntimeError: training: URLError: <urlopen error [WinError 10060]…>"
+        # and had to ask which box it meant. A bare socket error is the least
+        # useful thing this app can say: it names neither the host, the port,
+        # the service, nor what to do. The trainer box had simply REBOOTED.
+        # Every helper call now fails with the address and the check list.
+        t = _tsettings()
+        raise RuntimeError(
+            f"cannot reach the worker helper at {t['host']}:{t['port']} "
+            f"({type(e).__name__}: {e}). The BOX is unreachable or the helper "
+            f"is not running on it. Check, in order: (1) is that machine "
+            f"awake — it reboots and Windows Update can take it down "
+            f"mid-run; (2) is `rbmn_helper.py` running there (its console "
+            f"window closes with the session); (3) has the IP moved — every "
+            f"box here is DHCP, run scripts/find_helper.py to scan; "
+            f"(4) Settings → Worker Helpers to correct the host."
+        ) from None
 
 
 def _app(method: str, path: str, body: Optional[dict] = None, timeout: float = 900.0):
+    """Call THIS app's own HTTP API.
+
+    ⚠⚠ v1.276.41 — NEVER CALL THIS FROM INSIDE AN `async def` ROUTE. It blocks,
+    and the thing it blocks is the single event loop that would have to accept
+    the request it is waiting for. The server deadlocks against itself: the
+    coroutine holds the loop, the self-request is never accepted, and the whole
+    process stops answering ANYTHING until this timeout expires. Then urllib
+    raises, FastAPI has no handler for it, and the client gets a plain-text
+    `Internal Server Error` — which is not JSON, so the UI's error path dies
+    too. That was ⚡ Autogen: it had never once worked.
+
+    From a background THREAD (every `_*_pipeline` in this file) it is fine —
+    the loop is free to serve the call. From a route, use `_app_async`.
+    """
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(APP + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
+
+
+async def _app_async(method: str, path: str, body: Optional[dict] = None,
+                     timeout: float = 60.0):
+    """`_app` off the event loop, with upstream failures kept as JSON.
+
+    Two jobs. The thread is what breaks the deadlock above. The translation is
+    what stops a bad id becoming a 500: a self-call that 404s means the CALLER
+    asked for something that does not exist, so it should reach the user as
+    that 404 with its message intact, not as an opaque server error.
+    """
+    import asyncio
+
+    def _call():
+        try:
+            return _app(method, path, body, timeout)
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", "replace")
+            try:
+                detail = (json.loads(raw) or {}).get("detail") or raw
+            except ValueError:
+                detail = raw
+            raise HTTPException(e.code, str(detail)[:500]) from None
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"internal call to {path} failed: "
+                                     f"{type(e).__name__}: {e}") from None
+
+    return await asyncio.to_thread(_call)
 
 
 @router.get("/trainer-settings")
@@ -402,10 +488,45 @@ def _state_load(fp: Path) -> dict:
 
 
 def _state_save(fp: Path, st: dict) -> None:
+    """Atomically replace a state file.
+
+    ⚠⚠ v1.276.43 — TWO Windows-specific hazards, both hit in practice:
+
+    **(1) The temp name must be UNIQUE.** `fp.with_suffix(".tmp")` is derived
+    from the target, so two writers of the same state file share one temp path
+    and stamp on each other.
+
+    **(2) `os.replace` FAILS ON WINDOWS IF ANYONE HAS THE TARGET OPEN** — even
+    for reading. `PermissionError: [WinError 5] Access is denied`. That is not
+    hypothetical: a status poller reading this file every few seconds while a
+    fast pipeline writes it several times a second WILL collide, and when it
+    did, the write raised, the raise escaped `_stage`, and the job was left
+    stranded at a non-terminal stage forever — a run that looked hung when it
+    had actually finished. A short retry loop covers the microseconds a reader
+    holds the handle.
+
+    Still atomic: a reader sees either the old file or the new one, never a
+    half-written one.
+    """
     fp.parent.mkdir(parents=True, exist_ok=True)
-    tmp = fp.with_suffix(".tmp")
+    tmp = fp.with_name(f"{fp.stem}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(st, indent=2), "utf-8")
-    tmp.replace(fp)
+    last: Optional[Exception] = None
+    for attempt in range(12):                 # ~0.6s of patience, then give up
+        try:
+            tmp.replace(fp)
+            return
+        except PermissionError as e:          # a reader has it open right now
+            last = e
+            time.sleep(0.05)
+        except OSError as e:
+            last = e
+            time.sleep(0.05)
+    try:
+        tmp.unlink()                          # do not leave litter behind
+    except OSError:
+        pass
+    raise RuntimeError(f"could not write {fp.name} after 12 tries: {last}")
 
 
 def _stage(fp: Path, st: dict, stage: str, detail: str = "") -> None:
@@ -417,6 +538,53 @@ def _stage(fp: Path, st: dict, stage: str, detail: str = "") -> None:
 
 
 # ── checkpoint scoring (the never-loss pick, internal) ───────────────────────
+def _weights_for_epoch(run: dict, ds_id: str, epoch: int, st: dict) -> str:
+    """The checkpoint file for an epoch — LOOKED UP, never constructed.
+
+    ⚠⚠ v1.276.49 — THIS IS WHAT COST LORENZO A SEVEN-HOUR RUN. The old code
+    built the name as `f"{ds_id}-{best_epoch:06d}.safetensors"` and posted it,
+    and the helper answered `FileNotFoundError:
+    viv2-auto-62d1c1-000039.safetensors` — a 500 with no body, 29ms after a
+    completed, fully-scored 39-epoch training run.
+
+    **The two halves of the pipeline count epochs from different things.**
+    Scoring reads PREVIEW images (`_e(\\d{6})_00_`); installing wants a WEIGHTS
+    file. That run logged "40 checkpoints" and scored 39 previews, so the two
+    sets are not guaranteed to line up — and a CONSTRUCTED name cannot notice.
+    The artifact list is already in hand; use it.
+
+    Falls back to the nearest LOWER epoch (an earlier checkpoint is a real
+    checkpoint; a guessed filename is not) and records what it did, so a
+    substitution is visible rather than silent. Raises with the actual
+    filenames when nothing matches — the error a person can act on.
+    """
+    arts = [a for a in (run.get("artifacts") or [])
+            if a.get("kind") == "weights" and "-state" not in str(a.get("name", ""))]
+    by_epoch: Dict[int, str] = {}
+    for a in arts:
+        name = str(a.get("name") or "")
+        m = re.search(r"(\d{4,6})\.safetensors$", name)
+        if m:
+            by_epoch[int(m.group(1))] = name
+    if not by_epoch:
+        raise RuntimeError(
+            "the training run produced no checkpoint files this step can read "
+            f"({len(arts)} weight artifacts seen: "
+            f"{', '.join(str(a.get('name')) for a in arts[:5]) or 'none'}). "
+            "Nothing was installed; the run itself is intact on the trainer.")
+    if epoch in by_epoch:
+        return by_epoch[epoch]
+
+    lower = [e for e in by_epoch if e <= epoch]
+    chosen = max(lower) if lower else min(by_epoch)
+    st["install_note"] = (
+        f"epoch {epoch} scored best but has no checkpoint file; installed the "
+        f"nearest available epoch {chosen} instead. Available: "
+        f"{sorted(by_epoch)[:12]}{' …' if len(by_epoch) > 12 else ''}")
+    logger.warning("lora-train: %s", st["install_note"])
+    return by_epoch[chosen]
+
+
 def _score_and_pick(ds_id: str, char_slug: str, run: dict) -> dict:
     from backend.services import likeness as lk
     from backend.api.klein3 import _load as _load_char, _cdir, _refs_by_tag
@@ -520,10 +688,19 @@ def _train_pipeline(ds_id: str, opts: dict) -> None:
         _stage(fp, st, "install",
                f"epoch {pick['best_epoch']} ({pick['best_score']:.4f})")
         stamp = time.strftime("%m%d%H%M")
-        dest = f"{char_slug}-{stamp}-e{pick['best_epoch']}.safetensors"
+        src_name = _weights_for_epoch(run_full, ds_id, pick["best_epoch"], st)
+        # ⚠ Name the file after the epoch ACTUALLY installed, not the one that
+        # scored best. The first cut of this fix produced `…-e39.safetensors`
+        # containing epoch 38's weights — a file that lies about itself is
+        # worse than the crash it replaced, because nothing downstream can
+        # catch it.
+        m_ep = re.search(r"(\d{4,6})\.safetensors$", src_name)
+        real_epoch = int(m_ep.group(1)) if m_ep else pick["best_epoch"]
+        dest = f"{char_slug}-{stamp}-e{real_epoch}.safetensors"
+        st["installed_epoch"] = real_epoch
+        st["best_epoch"] = pick["best_epoch"]
         inst = _hj(f"/runs/{run_id}/install-lora",
-                   body={"name": f"{ds_id}-{pick['best_epoch']:06d}.safetensors",
-                         "dest_name": dest}, timeout=300)
+                   body={"name": src_name, "dest_name": dest}, timeout=300)
         st["installed"] = dest
         st["installed_path"] = inst.get("installed")
         try:
@@ -544,7 +721,9 @@ class TrainIn(BaseModel):
 
 @router.post("/datasets/{ds_id}/train")
 async def train(ds_id: str, body: TrainIn):
-    _app("GET", f"/api/lora/datasets/{ds_id}", timeout=60)     # 404s early on bad id
+    # ⚠ must be _app_async — a blocking self-call here deadlocks the event loop
+    # (see _app's docstring; this route had the same bug ⚡ Autogen did).
+    await _app_async("GET", f"/api/lora/datasets/{ds_id}")     # 404s early on bad id
     key = f"train:{ds_id}"
     if _ACTIVE.get(key):
         raise HTTPException(409, "a training pipeline is already running for this dataset")
@@ -588,7 +767,15 @@ def _autogen_pipeline(slug: str, opts: dict) -> None:
         missing = c.get("missing_views") or []
         if missing:
             _stage(fp, st, "views", f"generating missing views: {missing}")
-            _app("POST", f"/api/klein3/characters/{slug}/views/generate", {}, timeout=120)
+            # ⚠⚠ v1.276.42 — THIS POSTED `{}` AND ALWAYS 400'd. `ViewsIn.views`
+            # is REQUIRED and the handler rejects an empty list outright
+            # (klein3.py "views must be from …"), so the missing-views step
+            # could never once have succeeded — it raised, the pipeline caught
+            # it, and autogen died at step 1 for exactly the characters that
+            # needed this step. Found by inventory, not by a run: the deadlock
+            # in v1.276.41 meant nothing ever got this far.
+            _app("POST", f"/api/klein3/characters/{slug}/views/generate",
+                 {"views": missing, "verify": True, "max_tries": 3}, timeout=180)
 
             def _views_done():
                 cc = _app("GET", f"/api/klein3/characters/{slug}", timeout=60)
@@ -721,7 +908,12 @@ class AutogenIn(BaseModel):
 
 @router.post("/autogen")
 async def autogen(body: AutogenIn):
-    c = _app("GET", f"/api/klein3/characters/{body.char_slug}", timeout=60)
+    # ⚠ _app_async, NOT _app. See _app's docstring: a blocking self-call from a
+    # route deadlocks the single event loop against itself, hangs for the full
+    # timeout and then returns a plain-text 500. That is exactly what this
+    # button did, every time, since it was written — which is why the "first
+    # real Autogen run" never happened.
+    c = await _app_async("GET", f"/api/klein3/characters/{body.char_slug}")
     if not c.get("has_base") and "front" in (c.get("missing_views") or []):
         raise HTTPException(409, "this character needs a front reference/base first — "
                                  "promote one in 🧬 Text 2 Image")
@@ -730,10 +922,23 @@ async def autogen(body: AutogenIn):
         raise HTTPException(409, "autogen already running for this character")
     if not body.dataset_only:
         try:
-            _hj("/health", None, None, 8.0)
+            import asyncio
+            await asyncio.to_thread(_hj, "/health", None, None, 8.0)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(503, f"trainer helper unreachable — fix the IP in Settings "
                                      f"or run with dataset_only. ({e})")
+    # ⭐ Write the state file BEFORE the thread starts. The pipeline's first
+    # real step can be minutes away, and until something is on disk the status
+    # poll returns {} — so the UI had nothing to show and the button looked
+    # dead. A "starting" stage that exists immediately is the difference
+    # between "working" and "broken" from the outside.
+    # ⚠ And it is written BEFORE _ACTIVE is set, not after: a status that only
+    # appears once the work is underway is a status that can lie (v1.276.29).
+    _stage(_AUTO_DIR / f"{body.char_slug}.json",
+           {"character": body.char_slug,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "dataset_only": bool(body.dataset_only)},
+           "starting", "queued — checking views and building the recipe")
     _ACTIVE[key] = True
     threading.Thread(target=_autogen_pipeline,
                      args=(body.char_slug, body.model_dump()), daemon=True).start()

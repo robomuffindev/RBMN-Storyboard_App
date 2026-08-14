@@ -90,6 +90,42 @@ def _model_supports_refs(model: str) -> int:
     return int(WS_MODELS.get(model, {}).get("refs", 0) or 0)
 
 
+def _worker_pool(disp, model: str) -> list:
+    """EVERY worker that can run this model, for fanning a batch across them.
+
+    ⚠ Deliberately not `select_worker` in a loop. That sorts on `in_flight`,
+    which these lanes never increment (they submit straight to the client, not
+    through `submit_job`), so it is a constant function and hands every caller
+    the same box. A list + round-robin at the call site is the only thing that
+    actually spreads the work — the same conclusion costumes reached in
+    v1.276.31. Falls back to the single `_pick_worker` answer so a fleet of one
+    still works.
+    """
+    if not disp:
+        return []
+    cap = WS_MODELS.get(model, {}).get("cap")
+    out: list = []
+    try:
+        # ⚠ `disp.workers` is a DICT keyed by url — iterate `.values()`, or you
+        # get strings and every `getattr` silently returns the default, leaving
+        # an empty pool that falls back to one box and looks like it worked.
+        for w in (getattr(disp, "workers", {}) or {}).values():
+            if not getattr(w, "healthy", False) or getattr(w, "is_runpod", False):
+                continue
+            caps = getattr(w, "capabilities", set()) or set()
+            if cap and cap not in caps:
+                continue
+            cl = disp.clients.get(w.url)
+            if cl:
+                out.append((w.url, cl))
+    except Exception:                                        # noqa: BLE001
+        out = []
+    if out:
+        return out
+    w, c = _pick_worker(disp, model)
+    return [(getattr(w, "url", str(w)), c)] if c else []
+
+
 def _pick_worker(disp, model: str):
     """Healthy worker for a model. Klein/qie need a capability; the plain t2i
     generators run anywhere. Falls back to any worker if the preferred cap has
@@ -339,13 +375,29 @@ async def _run_gen(gid: str, disp, model: str, prompt: str, negative: str, count
         gd = _gen_dir(gid)
         target = max(w, h)
         errs: list[str] = []
-        for i in range(count):
+
+        # ⚠⚠ v1.276.45 — THIS LOOP RENDERED EVERY IMAGE ON ONE BOX, ONE AT A
+        # TIME. `_pick_worker` calls `select_worker`, which sorts on `in_flight`
+        # — and these lanes submit straight to the client instead of through
+        # `submit_job`, so `in_flight` is permanently 0 on every box and the
+        # sort is a constant function. Asking it once per image in a serial loop
+        # therefore returned the SAME worker every time: a 6-image batch used a
+        # third of the fleet for three times as long.
+        # Workers are now assigned ROUND-ROBIN UP FRONT and the images render
+        # concurrently — the same fix costumes got in v1.276.31, for the same
+        # reason. Each render is a `to_thread`, so they genuinely overlap.
+        pool = _worker_pool(disp, model)
+        if not pool:
+            raise RuntimeError(
+                f"no worker online for {WS_MODELS.get(model, {}).get('label', model)}"
+                + (f" (needs '{WS_MODELS[model]['cap']}')"
+                   if WS_MODELS.get(model, {}).get("cap") else ""))
+        st["workers"] = [str(w) for w, _c in pool]
+        _write_gen(gid, st)
+
+        async def _one(i: int) -> None:
+            _worker, client = pool[i % len(pool)]
             try:
-                _worker, client = _pick_worker(disp, model)
-                if not client:
-                    raise RuntimeError(
-                        f"no worker online for {WS_MODELS.get(model, {}).get('label', model)}"
-                        + (f" (needs '{WS_MODELS[model]['cap']}')" if WS_MODELS.get(model, {}).get("cap") else ""))
                 # Upload references fresh to THIS worker (uploads are per-worker).
                 ref_names: list[str] = []
                 for rp in ref_paths:
@@ -375,9 +427,15 @@ async def _run_gen(gid: str, disp, model: str, prompt: str, negative: str, count
             except Exception as e:
                 errs.append(f"#{i + 1}: {type(e).__name__}: {e}")
                 logger.warning(f"[workshop-gen {gid}] image {i} failed: {e}")
-            st["done"] = i + 1
+            # ⚠ `done` counts COMPLETIONS now, not the index — with images
+            # finishing out of order, `i + 1` would make the progress bar jump
+            # around and could report "6/6" while three were still running.
+            st["done"] = len(st["images"]) + len(errs)
             st["error"] = "; ".join(errs[-3:]) if errs else None
             _write_gen(gid, st)
+
+        await asyncio.gather(*(_one(i) for i in range(count)))
+        st["images"].sort(key=lambda r: int(str(r.get("id", "0")).split(".")[0]))
         st["status"] = "done" if st["images"] else "error"
         if not st["images"] and not st["error"]:
             st["error"] = "all generations failed"

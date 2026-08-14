@@ -163,6 +163,13 @@ def _summarize_workers(request: Request) -> list[dict[str, Any]]:
             "capabilities": sorted(getattr(worker, "capabilities", set()) or set()),
             "models": sorted(getattr(worker, "models", set()) or set()),
             "is_runpod": getattr(worker, "is_runpod", False),
+            # ⭐ v1.276.48 — WHEN was `healthy` last actually verified. Until
+            # .48 nothing ever called `health_check_all`, so `healthy` was an
+            # optimistic value set at registration and never revisited: a box
+            # that rebooted read as healthy indefinitely. "Healthy" without
+            # "as of when" is the claim that hid that for months.
+            "last_check": (worker.last_check.isoformat()
+                           if getattr(worker, "last_check", None) else None),
         })
     return out
 

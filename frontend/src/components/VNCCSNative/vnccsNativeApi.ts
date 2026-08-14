@@ -190,6 +190,12 @@ export interface BaseSetViewT {
   view: string;
   state: 'pending' | 'rendering' | 'done' | 'error' | 'skipped';
   host?: string | null; error?: string | null; ready?: boolean;
+  /** Bumped by the backend each time this ONE view is regenerated. The image
+   *  URL is the same on every rev, so the page appends `?rev=` to it — without
+   *  that, a re-render of a single view serves the browser's cached copy and
+   *  looks like the regenerate button did nothing. Same class of bug as the
+   *  reference `?v=` cache buster in v1.276.25. */
+  rev?: number;
 }
 export interface BaseSetStatusT {
   run_id: string; status: 'running' | 'done' | 'cancelled' | 'error';

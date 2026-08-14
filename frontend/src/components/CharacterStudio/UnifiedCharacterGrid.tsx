@@ -119,6 +119,59 @@ export default function UnifiedCharacterGrid(
     navigate(`/studio/vnccs-klein?tab=${tab}&char=${encodeURIComponent(key)}`);
   };
 
+  const [busy, setBusy] = useState('');
+
+  /** Delete a character, telling the truth about what actually goes.
+   *
+   *  The two stores delete differently and clean up different amounts, so the
+   *  confirmation is built per source rather than being one generic "are you
+   *  sure". Klein 3.0 rmtree's the character folder — refs, bases, outfits —
+   *  but its LoRA datasets and character sheets live in OTHER libraries and
+   *  survive as orphans. Saying "deleted" while leaving a 40-image dataset on
+   *  disk would be a lie by omission. */
+  const del = async (c: UnifiedCharT) => {
+    const isK3 = c.source === 'k3';
+    const orphans: string[] = [];
+    if (isK3) {
+      if (c.datasets?.length) orphans.push(`${c.datasets.length} LoRA dataset(s)`);
+      if (c.sheets) orphans.push(`${c.sheets} character sheet(s)`);
+    }
+    const what = isK3
+      ? `Delete "${c.name}"?\n\nThis permanently removes its references, base versions and `
+        + `outfits from disk (${c.ref_count} reference(s)).`
+        + (orphans.length
+          ? `\n\nNOT removed: ${orphans.join(' and ')} — those live in other libraries `
+            + `and will be left behind.`
+          : '')
+      : `Delete "${c.name}"?\n\nThis removes the character${
+          c.capabilities?.includes('vnccs') ? ' and its library images' : ' and its datasets'}.`;
+    if (!window.confirm(what)) return;
+
+    setBusy(c.ref);
+    try {
+      if (isK3) {
+        const r = await fetch(`/api/klein3/characters/${c.id}/delete`, { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+      } else if (c.capabilities?.includes('vnccs')) {
+        // VNCCS characters ALSO have sprite folders on the worker boxes. That
+        // is a separate, slower, irreversible thing — ask separately.
+        const alsoHosts = window.confirm(
+          'ALSO delete this character from the VNCCS worker boxes '
+          + '(node-side sprites/config)?\n\nOK = workers too   ·   Cancel = keep worker files');
+        const r = await fetch(
+          `/api/studio/vnccs/catalog/${c.id}?from_hosts=${alsoHosts}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text());
+      } else {
+        const r = await fetch(`/api/character-studio/characters/${c.id}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text());
+      }
+      await load();
+    } catch (e) {
+      window.alert(`Delete failed: ${(e as Error).message}`);
+    }
+    setBusy('');
+  };
+
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return chars
@@ -243,8 +296,12 @@ export default function UnifiedCharacterGrid(
                 {isK3 ? (
                   <>
                     <button style={btnSm} onClick={() => jump('text2image', c)}>🧬 Open</button>
-                    <button style={btnSm} onClick={() => jump('create', c)}>🧭 Views/Refs</button>
-                    <button style={btnSm} onClick={() => jump('clothes', c)}>👗 Outfits</button>
+                    {/* Klein 3.0 is not a tab — it is `create` + engine klein3.
+                        Refs AND outfits both live there, so both point at it
+                        rather than at the VNCCS Clothes tab, which cannot see
+                        a Klein 3.0 character at all. */}
+                    <button style={btnSm} onClick={() => jump('klein3', c)}>🧭 Views/Refs</button>
+                    <button style={btnSm} onClick={() => jump('klein3', c)}>👗 Outfits</button>
                     <button style={btnSm} onClick={() => jump('lora', c)}>🎓 Dataset</button>
                     <button style={btnSm} onClick={() => jump('charsheet', c)}>🪪 Sheet</button>
                   </>
@@ -260,6 +317,13 @@ export default function UnifiedCharacterGrid(
                     <button style={btnSm} onClick={() => jump('emotions', c)}>😊 Emotions</button>
                   </>
                 )}
+                <div style={{ flex: 1 }} />
+                <button
+                  style={{ ...btnSm, borderColor: '#4a2130', color: '#ff8a8a' }}
+                  title="Delete this character"
+                  disabled={busy === c.ref}
+                  onClick={() => void del(c)}
+                >{busy === c.ref ? '…' : '🗑'}</button>
               </div>
 
               {ds?.trigger && (

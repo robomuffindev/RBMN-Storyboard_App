@@ -1,5 +1,15 @@
 # Character Studio — Design & Phasing
 
+> ## 🧊 FROZEN — historical design doc, v1.44.0 (2026-07-08). Do not read this for current behaviour.
+>
+> This describes the VNCCS/qwen Studio as it was DESIGNED in July. The character lane has been
+> rebuilt several times since and this file documents none of it: **no Klein 3.0, no ＋ New
+> Character picker, no ⚡ Autogen, no costume library.** It is kept because the phasing and the
+> reasoning are still worth reading — not because it is true.
+>
+> **For what the app actually does now:** `docs/OPERATIONS.md` §2 (the modes) and §10 (current
+> state) · `docs/KLEIN3.md` (the character/outfit/costume lane) · `README.md` (the tour).
+
 **Goal:** a first-class app section for creating characters, organizing them by **Story**
 (reusable across projects — series with recurring casts), and producing **idiot-proof LoRA
 training datasets** (correct folders, captions, trigger words) for characters and items.

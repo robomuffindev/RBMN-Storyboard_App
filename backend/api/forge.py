@@ -308,14 +308,78 @@ def _fan_out_klein(disp, slug: str, jobs: List[dict], st: dict) -> None:
         th.join()
 
 
-def _run_krea2_jobs(slug: str, jobs: List[dict], st: dict) -> None:
-    """Sequential on the one Krea 2 box, with the same live task statuses."""
-    host = _krea2_host()
+def _krea2_hosts_for(lora: Optional[str], disp: Any = None) -> List[str]:
+    """Every box that can run THIS Krea 2 job, not just the pinned one.
+
+    ⚠⚠ v1.276.45 — this lane rendered SERIALLY ON ONE BOX and it was habit, not
+    hardware. `costumes.py` proved in v1.276.31 that all three workers have
+    `krea2_turbo_fp8.safetensors`, and `_krea2_core_graph(host, …)` /
+    `_krea2_render(host, …)` have always taken a host. An 8-image batch was
+    using a third of the fleet for three times as long.
+
+    **The one genuine pin is a LoRA.** A character LoRA is installed per box, so
+    a job that names one may only go where that file exists — asked of each
+    candidate directly rather than assumed. A no-LoRA job has no such
+    constraint. Falling back to the pinned host is always safe.
+    """
+    pinned = _krea2_host()
+    hosts: List[str] = []
+    try:
+        from backend.api.klein3 import _klein_workers_all
+        for url, _client in _klein_workers_all(disp):
+            bare = str(url).replace("http://", "").replace("https://", "")
+            h = bare.split(":")[0]
+            if h and h not in hosts:
+                hosts.append(h)
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning("forge: krea2 worker list failed (%s) — using the pin", e)
+    if not hosts:
+        return [pinned]
+    if lora:
+        # ⚠ MEASURED PER BOX, not assumed. Installing a LoRA is a per-worker
+        # action; sending a job to a box without the file is a guaranteed error
+        # that looks like a bad render.
+        ok = []
+        for h in hosts:
+            try:
+                files = {str(f).replace("\\", "/").split("/")[-1].lower()
+                         for f in (_krea2_models(h, "loras") or [])}
+                if str(lora).replace("\\", "/").split("/")[-1].lower() in files:
+                    ok.append(h)
+            except Exception:                                # noqa: BLE001
+                continue
+        if ok:
+            return ok
+        logger.info("forge: LoRA %s found on no worker — falling back to %s",
+                    lora, pinned)
+        return [pinned]
+    return hosts
+
+
+def _run_krea2_jobs(slug: str, jobs: List[dict], st: dict,
+                    disp: Any = None) -> None:
+    """Krea 2 batch, FANNED across every box that can run it (v1.276.45).
+
+    Round-robin assigned UP FRONT, exactly as `costumes.py` does. ⚠ Not by
+    asking the dispatcher inside each thread: `select_worker` sorts on
+    `in_flight`, and these lanes submit straight to the client rather than
+    through `submit_job`, so `in_flight` is permanently 0 and every concurrent
+    caller is handed the SAME box. Round-robin is the only thing that actually
+    spreads the work here.
+    """
+    lora = next((jb.get("lora") for jb in jobs if jb.get("lora")), None)
+    hosts = _krea2_hosts_for(lora, disp)
     tasks = st.setdefault("tasks", {})
-    for jb in jobs:
-        tasks[jb["key"]] = {"worker": host, "status": "queued", "error": None}
-    st["workers"] = [f"{host} (Krea 2 box)"]
-    for jb in jobs:
+    for i, jb in enumerate(jobs):
+        tasks[jb["key"]] = {"worker": hosts[i % len(hosts)], "status": "queued",
+                            "error": None}
+    st["workers"] = list(hosts)
+    st["krea2_fanned"] = len(hosts) > 1
+    if lora and len(hosts) == 1:
+        st["krea2_note"] = (f"pinned to {hosts[0]} — LoRA {lora} is installed "
+                            f"there and a job cannot run where its LoRA is not")
+
+    def _one(i: int, jb: dict, host: str) -> None:
         t = tasks[jb["key"]]
         t["status"] = "running"
         try:
@@ -328,7 +392,19 @@ def _run_krea2_jobs(slug: str, jobs: List[dict], st: dict) -> None:
             t["status"] = "done"
         except Exception as e:  # noqa: BLE001
             t.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
-            logger.warning("forge krea2 job %r failed: %s", jb["key"], e)
+            logger.warning("forge krea2 job %r on %s failed: %s", jb["key"], host, e)
+
+    if len(hosts) == 1:
+        for i, jb in enumerate(jobs):            # nothing to gain from threads
+            _one(i, jb, hosts[0])
+        return
+    threads = [threading.Thread(target=_one, args=(i, jb, hosts[i % len(hosts)]),
+                                daemon=True)
+               for i, jb in enumerate(jobs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 def _record_image(slug: str, data: bytes, jb: dict, st: dict) -> None:
@@ -409,6 +485,18 @@ def _lora_triggers(files: List[str]) -> Dict[str, str]:
                 slug = ds_id.rsplit("-", 1)[0]          # redv1-bca382 -> redv1
                 if slug:
                     cands.append((slug.lower() + "-", trig))
+            # ⚠⚠ v1.276.49 — ALSO match the CHARACTER slug. The installed file is
+            # named `<char_slug>-<stamp>-e<epoch>.safetensors`, so matching only
+            # on the DATASET id works right up until the dataset is not named
+            # after the character — and ⚡ Autogen names every dataset
+            # `<slug>-auto`, whose slug-part is `viv2-auto`, which a file called
+            # `viv2-0812…` does not start with.
+            # Result: his freshly trained LoRA appeared in the list with NO
+            # TRIGGER, i.e. installed but unusable, because the trigger word is
+            # the whole point. Lowest priority so a dataset-id match still wins.
+            cs = str(ds.get("char_slug") or "").strip().lower()
+            if cs:
+                cands.append((cs + "-", trig))
     cands.sort(key=lambda c: -len(c[0]))                # longest prefix wins
     out: Dict[str, str] = {}
     for f in files:
@@ -568,7 +656,9 @@ async def gen(slug: str, body: GenIn, request: Request):
     def _run():
         try:
             if body.engine == "krea2_turbo":
-                _run_krea2_jobs(slug, jobs, st)
+                # `disp` so the batch can fan across every box that has the
+                # model, rather than queueing on the pinned one (v1.276.45).
+                _run_krea2_jobs(slug, jobs, st, disp)
             else:
                 if disp is None:
                     raise RuntimeError("dispatcher not ready")

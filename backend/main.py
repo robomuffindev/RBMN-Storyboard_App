@@ -314,10 +314,96 @@ async def lifespan(app: FastAPI):
         f"{(' (' + _demucs_device.gpu_name + ')') if _demucs_device.gpu_name else ''}"
     )
 
+    # ⚠⚠ v1.276.48 — WORKER HEALTH WAS NEVER RE-CHECKED. `add_worker` sets
+    # `healthy=True` optimistically at registration and `health_check_all()`
+    # existed but **nothing ever called it** — so a box that rebooted, slept or
+    # was switched off stayed "healthy" forever. Lorenzo's trainer rebooted
+    # mid-session and `/api/debug/snapshot` still reported it healthy while
+    # BOTH its ports were timing out.
+    # That matters much more since v1.276.45: the fan-out assigns work
+    # ROUND-ROBIN across every "healthy" worker, so one dead box quietly fails
+    # every Nth image of a batch instead of being skipped.
+    # ⚠ Runs in a THREAD — `health_check_all` is synchronous and talks to three
+    # boxes over the LAN; on the event loop it would stall the whole app for as
+    # long as a dead box takes to time out, which is the v1.276.41 mistake.
+    # ⚠⚠ AND THE SECOND HALF, which is the one that actually bit him:
+    # `add_worker` RAISES when a box is unreachable, so a worker that is down
+    # AT STARTUP is never registered — and the health loop cannot rescue it,
+    # because that loop only iterates workers already in the registry. Net
+    # effect: **a box that is asleep when the backend starts stays invisible
+    # until the next restart.** His trainer rebooted, the backend restarted
+    # while it was still coming up, and .201 simply vanished from the fleet
+    # even after it was back. The loop re-attempts the missing ones.
+    async def _reattach_missing_workers() -> None:
+        from sqlalchemy import select as _select
+
+        from backend.database.models import AppSettings as _AS
+        from backend.services.comfyui.dispatcher import apply_user_caps as _caps
+        d = getattr(app.state, "comfy_dispatcher", None)
+        if not d:
+            return
+        async with async_session() as s:
+            row = (await s.execute(_select(_AS).where(_AS.id == 1))).scalars().first()
+        urls = list((row.comfyui_urls if row else None) or [])
+        caps = (row.comfyui_server_caps if row else None) or {}
+        for url in urls:
+            if url in d.workers:
+                continue
+            try:
+                w = await asyncio.to_thread(d.add_worker, url)
+                _caps(w, caps.get(url, {}))
+                logger.info(f"Worker REJOINED the fleet: {url}")
+            except Exception:  # noqa: BLE001 — still down; try again next sweep
+                logger.debug(f"Worker still unreachable, not registered: {url}")
+
+    async def _worker_health_loop() -> None:
+        while True:
+            await asyncio.sleep(45)
+            try:
+                d = getattr(app.state, "comfy_dispatcher", None)
+                if d:
+                    await asyncio.to_thread(d.health_check_all)
+                await _reattach_missing_workers()
+            except Exception:  # noqa: BLE001 — never let this kill the loop
+                logger.exception("worker health check failed (continuing)")
+
+    app.state.worker_health_task = asyncio.create_task(_worker_health_loop())
+
+    # ⚡ Autogen: re-attach to any run a restart interrupted (v1.276.42).
+    # ⚠ AFTER everything else and just before the yield, because a resumed job
+    # immediately calls this app's own HTTP API — doing it at import time (where
+    # it started life) fires those requests before uvicorn binds the port, so
+    # every resumed job would fail with "connection refused" the instant it
+    # started. A tiny delay is used for the same reason: `lifespan` runs before
+    # the socket accepts, so the drainer waits a moment for the door to open.
+    try:
+        import threading as _thr
+
+        from backend.api.autogen import resume_on_startup as _autogen_resume
+
+        def _late_resume() -> None:
+            import time as _t
+            _t.sleep(5)
+            try:
+                _autogen_resume()
+            except Exception:  # noqa: BLE001
+                logger.exception("autogen: resume failed (continuing)")
+
+        _thr.Thread(target=_late_resume, daemon=True, name="autogen-resume").start()
+    except Exception:  # noqa: BLE001
+        logger.exception("autogen: could not schedule resume (continuing)")
+
     yield
 
     # Shutdown
     logger.info("Shutting down Robomuffin Idea Factory")
+
+    if hasattr(app.state, "worker_health_task"):
+        app.state.worker_health_task.cancel()
+        try:
+            await app.state.worker_health_task
+        except asyncio.CancelledError:
+            pass
 
     # Stop RunPod idle monitor
     await runpod_manager.stop_idle_monitor()
@@ -457,6 +543,12 @@ app.include_router(klein2_router)
 from backend.api.klein3 import router as klein3_router  # noqa: E402
 app.include_router(klein3_router)
 
+# 👗 Costume Library (v1.276.27) — design a costume as an image on a neutral
+# mannequin, reuse it on any character. Registered after klein3 because it
+# imports klein3 helpers at call time.
+from backend.api.costumes import router as costumes_router  # noqa: E402
+app.include_router(costumes_router)
+
 from backend.api.lora import router as lora_router  # noqa: E402
 app.include_router(lora_router)
 
@@ -471,6 +563,20 @@ app.include_router(lora_train_router)
 
 from backend.api.h3video import router as h3video_router  # noqa: E402
 app.include_router(h3video_router)
+
+# ⚡⚡ Autogen v2 (v1.276.42) — a character from a description or photos, to
+# whatever point you toggled: base, views, clothing, sheet, dataset, LoRA.
+# Plus a serial batch queue across characters. Registered AFTER lora_train
+# because it reuses that module's state helpers and _train_pipeline.
+from backend.api.autogen import router as autogen_router  # noqa: E402
+app.include_router(autogen_router)
+# ⚠⚠ Resume is deliberately NOT called here. This block is top-level module
+# code that runs at IMPORT time — before uvicorn has bound the port — and the
+# autogen pipeline drives everything through this app's own HTTP API. A resumed
+# job would fire its first request at a socket nobody is listening on, get
+# "connection refused", and be marked `error` instantly. Every resumed job would
+# fail, by construction. It is called from `lifespan` instead, once the server
+# is actually up. See v1.276.42.
 
 # v1.276.0 — the unified character list. Characters live in two disjoint stores
 # (studio_characters rows vs the klein3 disk store) and nothing joined them, so

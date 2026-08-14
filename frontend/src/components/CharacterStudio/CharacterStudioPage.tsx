@@ -16,14 +16,11 @@ import {
   Trash2,
   Check,
   AlertTriangle,
-  Users,
-  Package,
   RefreshCw,
   Download,
   Upload,
   Send,
   Sparkles,
-  Copy,
 } from 'lucide-react';
 import { CharacterStatusP2T, EngineT, WizardCharacterInfoT } from './characterStudioP2Api';
 import { EngineSelector, PreflightBadges } from './EnginePreflight';
@@ -39,7 +36,9 @@ import { ImageLightbox } from './p2Shared';
 import { BaseEditorModal } from './BaseEditorModal';
 import { CustomBaseModal } from './CustomBaseModal';
 
-import UnifiedCharacterGrid from './UnifiedCharacterGrid';
+import UnifiedCharacterGrid, { FOCUS_KEY } from './UnifiedCharacterGrid';
+import AutogenModal from './AutogenModal';
+import AutogenBoard from './AutogenBoard';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -555,6 +554,12 @@ function StoriesSidebar({
 // Character grid + create card
 // ---------------------------------------------------------------------------
 
+// PARKED 2026-08-11 — CharacterCard / NewCharacterCard were the old DB-only
+// character grid. v1.276.0 replaced that grid with <UnifiedCharacterGrid />
+// (see the render below), and nothing has referenced these two since; they are
+// kept here, commented out, as the reference for the old card language.
+// Un-commenting also needs `Copy` back in the lucide-react import list.
+/*
 function CharacterCard({ character, storyName, onClick, onDelete, onClone }: {
   character: CharacterT; storyName: string | null; onClick: () => void; onDelete: () => void;
   onClone?: () => void;
@@ -647,6 +652,7 @@ function NewCharacterCard({ onClick }: { onClick: () => void }) {
     </div>
   );
 }
+*/
 
 function CreateCharacterForm({
   stories,
@@ -2346,14 +2352,63 @@ function CharacterDetail({
 export default function CharacterStudioPage() {
   const navigate = useNavigate();
   const [stories, setStories] = useState<StoryT[]>([]);
-  const [characters, setCharacters] = useState<CharacterT[]>([]);
+  // the list itself is no longer read here — <UnifiedCharacterGrid /> fetches
+  // its own — but the loads below still run (they surface load errors), so the
+  // setter stays.
+  const [, setCharacters] = useState<CharacterT[]>([]);
   const [catalogs, setCatalogs] = useState<CatalogsT | null>(null);
   const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showModePicker, setShowModePicker] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // v1.276.40 — 🎯 Klein 3.0 is the MAIN mode and was not in this picker at all.
+  // "+ New Character" offered the two VNCCS lanes and a line of small print
+  // saying Klein 3.0 characters get made somewhere else, which is a workaround
+  // wearing a label, not a choice. Klein 3.0 is name-first (POST creates an
+  // empty character, references and views come after), so the picker can make
+  // it here and hand you straight to the panel with it selected.
+  const [k3Name, setK3Name] = useState('');
+  const [k3Busy, setK3Busy] = useState(false);
+  const [k3Err, setK3Err] = useState('');
+  const [showAutogen, setShowAutogen] = useState(false);   // v1.276.42
+
+  /** Create a Klein 3.0 character and open it. A blank name just opens the
+   *  panel — the same name box lives there, so an empty field is a navigation,
+   *  not an error. */
+  const startKlein3 = async () => {
+    const name = k3Name.trim();
+    if (!name) {
+      setShowModePicker(false);
+      navigate('/studio/vnccs-klein?tab=klein3');
+      return;
+    }
+    setK3Busy(true);
+    setK3Err('');
+    try {
+      const r = await fetch('/api/klein3/characters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const j = await r.json().catch(() => ({}));
+      // a duplicate name 409s with a readable detail — show it rather than
+      // navigating to a character this did not create.
+      if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
+      // the panel preselects whatever is under this key (Klein3Panel reads and
+      // clears it on mount) — the same mechanism the grid's jump buttons use.
+      try { window.localStorage.setItem(FOCUS_KEY, j?.slug || name); } catch { /* non-fatal */ }
+      setShowModePicker(false);
+      setK3Name('');
+      navigate('/studio/vnccs-klein?tab=klein3');
+    } catch (e) {
+      setK3Err((e as Error).message);
+    } finally {
+      setK3Busy(false);
+    }
+  };
 
   const loadStories = useCallback(async () => {
     try {
@@ -2386,10 +2441,12 @@ export default function CharacterStudioPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedStoryId]);
 
-  const storyNameFor = (id: string | null | undefined): string | null => {
-    if (!id) return null;
-    return stories.find((s) => s.id === id)?.name || null;
-  };
+  // PARKED 2026-08-11 — fed the `storyName` prop of the old CharacterCard
+  // (commented out above); unreferenced since <UnifiedCharacterGrid /> landed.
+  // const storyNameFor = (id: string | null | undefined): string | null => {
+  //   if (!id) return null;
+  //   return stories.find((s) => s.id === id)?.name || null;
+  // };
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-8">
@@ -2447,13 +2504,17 @@ export default function CharacterStudioPage() {
                   the studio_characters DB table, so anything made in Klein 3.0
                   was invisible here. */}
               <UnifiedCharacterGrid onOpenDbCharacter={(id) => setSelectedCharacterId(id)} />
+              {/* v1.276.42 — the batch board sits with the characters it is
+                  making, not on another page. It renders nothing when there
+                  is nothing queued. */}
+              <div className="mt-2"><AutogenBoard /></div>
               <div className="flex items-center gap-2 mt-1">
                 <button
                   onClick={() => setShowModePicker(true)}
                   className="px-3 py-1.5 rounded-md bg-purple-700 hover:bg-purple-600 text-sm font-medium"
                 >+ New Character</button>
                 <span className="text-xs text-gray-500">
-                  Klein 3.0 characters are created in 🧬 Text 2 Image / 🎯 Klein 3.0.
+                  🎯 Klein 3.0 is the default — start with a name, then add a reference photo.
                 </span>
               </div>
             </div>
@@ -2472,6 +2533,64 @@ export default function CharacterStudioPage() {
           >
             <h2 className="text-lg font-semibold mb-1">New Character</h2>
             <p className="text-sm text-gray-400 mb-4">Pick the creation mode.</p>
+
+            {/* 🎯 Klein 3.0 first and full width — it is the mode this app is
+                built around now. Name-first: this creates the character and
+                opens it, and the reference photo, views, outfits and LoRA all
+                follow inside the panel. */}
+            <div className="border-2 border-purple-600 rounded-lg p-4 mb-3 bg-purple-900/10">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-2xl">🎯</span>
+                <span className="font-medium">Klein 3.0</span>
+                <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-700/70">
+                  main mode
+                </span>
+              </div>
+              <div className="text-xs text-gray-400 mb-3">
+                Reference-driven characters — upload one photo, generate the four base views,
+                then outfits, poses and LoRA datasets. No 3D, no worker sprites.
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  autoFocus
+                  value={k3Name}
+                  onChange={(e) => { setK3Name(e.target.value); setK3Err(''); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !k3Busy) void startKlein3(); }}
+                  placeholder="character name"
+                  className="flex-1 px-2 py-1.5 rounded bg-gray-800 border border-gray-700 text-sm outline-none focus:border-purple-500"
+                />
+                <button
+                  disabled={k3Busy}
+                  onClick={() => void startKlein3()}
+                  className="px-3 py-1.5 rounded-md bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium whitespace-nowrap"
+                >{k3Busy ? 'Creating…' : k3Name.trim() ? 'Create & open' : 'Open Klein 3.0'}</button>
+              </div>
+              {k3Err && <div className="text-xs text-red-400 mt-2">{k3Err}</div>}
+            </div>
+
+            {/* ⚡ Autogen — the same Klein 3.0 character, built for you.
+                Sits directly under the manual option because it is the same
+                destination by a different road: you describe it (or hand it
+                photos) and it runs the chain as far as you tick. */}
+            <div
+              onClick={() => { setShowModePicker(false); setShowAutogen(true); }}
+              className="border border-blue-600 rounded-lg p-4 mb-3 bg-blue-900/10 cursor-pointer hover:border-blue-400 transition-all"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-2xl">⚡</span>
+                <span className="font-medium">Autogen character</span>
+                <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-700/70">
+                  hands off
+                </span>
+              </div>
+              <div className="text-xs text-gray-400">
+                Reference photos or just a description → base character, the four views,
+                clothing, character sheet, LoRA dataset and a trained LoRA. Tick how far
+                to go, see the cost first, and queue a whole batch of characters if you want.
+              </div>
+            </div>
+
+            <div className="text-xs text-gray-500 mb-2">Or the VNCCS lanes:</div>
             <div className="grid grid-cols-2 gap-3">
               <div
                 onClick={() => { setShowModePicker(false); navigate('/studio/vnccs'); }}
@@ -2504,6 +2623,11 @@ export default function CharacterStudioPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {showAutogen && (
+        <AutogenModal onClose={() => setShowAutogen(false)}
+                      onQueued={() => loadCharacters()} />
       )}
 
       {showCreate && (

@@ -1,6 +1,11 @@
 # 🎓 LoRA Dataset Gen
 
-**v1.213.1 (2026-08-04).** The fifth mode, beside Create / Clothes / Emotions / Pose Library.
+**Written v1.213.1 (2026-08-04); CURRENT THROUGH v1.276.53.** ⚠ Sections dated before v1.271
+describe the loop as scripts-only — **the in-app 🚀 Train and ⚡ Autogen buttons shipped in
+v1.271**, and there are now TWO autogen lanes (see the table near the end). Read a claim's
+newest mention.
+
+The fifth mode, beside Create / Clothes / Emotions / Pose Library.
 Turns a Klein 3.0 character into a **training-ready LoRA dataset**: a planned shot list,
 Klein-rendered images, written captions, a vision-model QC pass, a review gallery, and a zip a
 trainer eats directly.
@@ -465,8 +470,12 @@ right scale. That is the whole v1.213 bug.
 
 Everything below this line supersedes "Next step (designed, not built)" and "Why there is no
 'Train' button in the app yet" above — the loop is BUILT and VALIDATED as scripts + helper
-routes. What remains unbuilt is the in-app UI over it (and per standing rule 6, API-only is
-not "done").
+routes.
+
+⚠ **CORRECTION (v1.271, restated here v1.276.43): the in-app UI over this loop SHIPPED.**
+This paragraph used to end "what remains unbuilt is the in-app UI over it", and that has been
+false since v1.271 — 🚀 Train and ⚡ Autogen are both buttons in the LoRA panel. The scripts
+remain the manual/recovery path. See `docs/OPERATIONS.md` §2 item 4.
 
 ## The loop
 
@@ -494,6 +503,32 @@ on ONE set size, so a 20-image set still gets 40 until someone measures one), ev
 saved, and **checkpoints are picked by `checkpoint_score.py`, never by the loss printout.**
 When the scores tie across the plateau (they did: 0.7684/0.7733/0.7594), the pictures decide;
 when the pictures are indistinguishable (they were), the number decides.
+
+### ⚠⚠ SCORING COUNTS EPOCHS FROM PREVIEWS; INSTALLING NEEDS WEIGHTS (v1.276.49)
+
+**They do not have to line up, and when they did not it cost a seven-hour run.**
+`_score_and_pick` reads **PREVIEW IMAGES** (`_e(\d{6})_00_`) — that is where the epoch numbers in
+the table above come from. Installing needs a **`.safetensors` WEIGHTS file**. On a real run the
+previews reached **epoch 39** and the weights stopped at **38**, so the old code — which
+CONSTRUCTED the filename as `f"{ds_id}-{best_epoch:06d}.safetensors"` and posted it blind — asked
+the helper for a file that did not exist and got a bare `HTTP 500` after six hours of training.
+
+**⭐ NEVER CONSTRUCT A FILENAME YOU COULD LOOK UP.** `_weights_for_epoch()`:
+
+- reads the run's own artifact list (`kind == "weights"`, `-state` files excluded);
+- takes the exact epoch when it exists;
+- otherwise falls back to the **nearest LOWER** epoch — an earlier checkpoint is a real
+  checkpoint, a guessed filename is not — and records `install_note`;
+- raises with the ACTUAL filenames when nothing is readable.
+
+⭐ **`install_note` is present ONLY when a substitution happened, so its absence is the good
+news.** The installed file is named from the epoch **actually** installed (an early version of
+this fix wrote epoch 38's weights into a file called `-e39`: **a file that lies about itself is
+worse than the crash it replaced**). Free unit test: `scripts/test_weights_pick.py`.
+
+**⚠ Recovering a failed install WITHOUT retraining:**
+`POST /api/lora/datasets/{id}/train {"run_id": "<the existing run>"}` re-attaches to a finished
+run and redoes only score + install. Know this before anyone retrains seven hours.
 
 ## ⚠ The shared-output-folder trap (v1.265)
 
@@ -555,10 +590,34 @@ from the app machine.
 
 ## What remains
 
-In-app UI over this loop (upload → run → live status → scores → install → exam) in the LoRA
-panel; profile-baseline likeness scoring (profiles score low against frontal refs — confirm on
-character two first); `upper`/`full` separation on the person mask. Shelf: bilingual captions,
-masked training, per-image LR, Fizgig's Repair Studio / LoRA Royale / Extract.
+~~In-app UI over this loop~~ — **SHIPPED in v1.271** (🚀 Train + ⚡ Autogen in the LoRA panel);
+this line was stale for five versions and is kept struck through rather than deleted, because
+a doc that quietly loses a claim teaches nobody. Still open: profile-baseline likeness scoring
+(profiles score low against frontal refs — confirm on character two first); `upper`/`full`
+separation on the person mask. Shelf: bilingual captions, masked training, per-image LR,
+Fizgig's Repair Studio / LoRA Royale / Extract.
+
+## ⚠ TWO autogen lanes — know which one you are reading about
+
+Since v1.276.42 there are two, and they are not variants of each other:
+
+| | `POST /api/lora/autogen` | `POST /api/autogen/run` |
+|---|---|---|
+| module | `backend/api/lora_train.py` | `backend/api/autogen.py` |
+| starts from | a character that ALREADY has a base | **nothing** — photos or a description |
+| ends at | an installed LoRA, always | wherever you toggled (base / views / clothing / sheet / dataset / LoRA) |
+| batch | no | **yes**, a serial queue across characters |
+| cancel | no | yes (except the training stage) |
+| reached from | 🎓 LoRA panel | ＋ New Character → ⚡ Autogen |
+
+**The second CALLS the first's routes rather than duplicating them** — this document describes
+the recipe both of them run. ✅ **The `/api/autogen` lane has since run 8/8 stages clean, end to
+end, unattended** (v1.276.51: `walterv1`, 7.12h, description → installed LoRA). ⏱ **Training is
+92% of that wall clock — the same chain WITHOUT 🚀 LoRA is ~32 minutes**, which is the setting to
+use while iterating on a look.
+⚠ The LoRA-panel one had never once worked before v1.276.41/.42:
+it deadlocked the event loop, and its missing-views step posted `{}` to `views/generate`, which
+400s.
 
 
 ## The standing recipe + the controlled experiment (v1.269.3, 2026-08-08)
@@ -575,8 +634,15 @@ Likeness tracks the dataset column exactly, three for three. **The recipe, defau
 new character:** `face_heavy` 40 · universal face ref · dressed base · ONE targeted re-render
 round on below-match rows (aggregate improves; individual rows are a coin flip — redv1's 0003,
 a left-profile face crop, got worse twice: 0.266→0.240→0.181) · `min_likeness: 0.25` at export
-(a stranger is worse than a gap) · ~23 epochs at 40 images · pick by ArcFace on previews ·
-inference at strength 1.0, outfit always named, LoRA unloaded off-character.
+(a stranger is worse than a gap) · ~23 epochs at 40 images · pick by ArcFace on previews **and
+then install the checkpoint that actually EXISTS** (v1.276.49) · inference at strength 1.0,
+outfit always named, LoRA unloaded off-character.
+
+**A fourth data point, from the first fully automated run (v1.276.51, `walterv1`):** best epoch
+20 of 24 scored, **0.6285**. ⚠ **The top five epochs spanned 0.6264–0.6285** — the curve had
+plateaued and the epoch choice was worth 0.002. The spread BETWEEN characters (0.53 → 0.63 →
+0.81) is an order of magnitude larger than between epochs of one, which is another way of saying
+the DATASET is the lever and epoch selection is not.
 
 Open measurement: three small-set runs ended still climbing — ~900 image-steps is a floor,
 not a ceiling, for sets under 40. Measure before touching `_epochs_for`.

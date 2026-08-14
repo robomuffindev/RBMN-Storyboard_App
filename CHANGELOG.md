@@ -1,3 +1,2581 @@
+## v1.276.54 -- 📌 BATCH MODE IS PARKED BY DECISION; the next big mode supersedes it (2026-08-12)
+
+Lorenzo, after using batch mode for the first time:
+
+> *"Batch mode seems to simply add a character to the batch. I guess that works, it's basically
+> what we do with One mode anyways. So folks can just keep adding new characters to the batch. I
+> think I'll leave this part alone for now as **the next big mode I'll be adding to the app will
+> essentially be what does character generations in larger submissions of items to render at a
+> time**."*
+
+### What this decides, and why it is worth writing down
+
+**Batch mode is FINISHED, not unfinished.** It is the single-character form repeated onto a
+serial queue; he looked at it, judged that sufficient, and moved on.
+
+⚠ **"A multi-character batch is still unexercised" is retired as an open item.** It was listed
+as one in v1.276.49 through .52 — correctly at the time — and is now the wrong framing. Every
+open list has been reworded rather than just having the item deleted, because *why* it closed
+matters: it closed by decision, not by being tested.
+
+⚠ **Do not grow batch mode.** Anything that later looks like "batch mode needs X" is almost
+certainly a requirement for the NEW mode. Building it twice is the waste, and a half-grown batch
+mode would be the thing the new mode has to fight.
+
+**The serial queue IS the primitive.** `backend/api/autogen.py`'s drainer — strictly serial
+across characters, with cancel, resume-after-restart and per-stage state — is exactly what a
+bulk-submission mode needs underneath it. It exists and it is proven. The scaling story belongs
+in the new mode, on top of that queue.
+
+### Why serial still holds at larger scale
+
+Every Autogen stage already fans across all three workers, and costume design holds a single
+global lock. Two characters at once contend for the same GPUs, finish later, and make the costume
+stage 409 unpredictably. **The parallelism lives INSIDE a character, not across characters** — a
+bulk mode should queue depth-first and keep that shape rather than widening it.
+
+### The number that should shape the new mode
+
+    a full character WITH a trained LoRA   ~7.1 h    (training is 92% of it)
+    a full character WITHOUT the LoRA      ~32 min
+
+**A bulk submission of N characters is ~32·N minutes if it stops before training, and roughly
+N × 7 hours if it does not.** That ratio argues for making "train the LoRA" a separate, later,
+batched decision rather than part of each character's chain — which is a design input the new
+mode gets for free from `walterv1`'s measured run.
+
+### Docs + memory
+
+Reworded in all three open lists (README · OPERATIONS §10 · HANDOVER START HERE), noted in
+OPERATIONS §10's Autogen v2 section and beside the roadmap. New memory
+`decision_bulk_submission_mode`; `autogen-v2` and the index updated so a future session cannot
+re-open the batch item by accident.
+
+## v1.276.53 -- 📚 DOC + MEMORY PASS FOR .48–.52 (2026-08-12)
+
+Fourth audit, same method: a subagent checking DOCS against CODE with `file:line`, forbidden to
+edit. Five versions had landed since the last pass. **Nothing was actively false this time** —
+the failures were omissions, which is the harder kind to notice.
+
+### One factual error
+
+`docs/OPERATIONS.md` claimed the epoch story "rides on BOTH routes" including `run_id`.
+`/jobs` carries five keys; **`run_id` reaches `/jobs/{id}` only.** Split.
+
+### The gaps that mattered
+
+- **`docs/LORA_DATASET.md` never mentioned checkpoint PICKING at all** — the lane's own document,
+  silent on the bug that cost a seven-hour run. Now carries the whole thing: scoring counts epochs
+  from **previews**, installing needs **weights**, they differed 39 vs 38 on a real run,
+  `_weights_for_epoch` **looks it up and never constructs it**, `install_note`'s absence is the
+  good news, and **`POST /datasets/{id}/train {"run_id": …}` recovers a failed install WITHOUT
+  retraining.** Also added `walterv1` (0.6285) as a fourth data point to the controlled
+  experiment, with the caveat that the top five epochs spanned 0.002.
+- **OPERATIONS §10 "done this session" stopped at the .46 era** — the section a reader hits first
+  for "what just happened" had nothing from .48–.52. Now leads with the clean 8/8 run and its
+  timing profile.
+- **The ~32-minutes-without-LoRA fact was in the open lists but not where it changes a decision:**
+  the preflight table row and the Autogen v2 section. Both now carry it.
+- **`scripts/test_weights_pick.py` was in no table**, despite guarding the fix that cost the run.
+- **§8 recovery playbook was missing this session's two real failures**: a finished training whose
+  install failed (re-attach, do not retrain) and a box that vanished (it rejoins within 45s).
+- **README's headline** still led with the Video Lab. The largest new fact — an entire character
+  building itself unattended from a sentence — was buried inside the open list. Promoted, with
+  the fleet-health and preflight/likeness paragraphs it was also missing.
+
+### A stale claim my own work created
+
+`preflight_autogen.py`'s table row said "a box down at startup is not registered at all" — true
+when written, half-true since **v1.276.48 re-attaches it within 45s**. It now says to wait and
+re-run rather than restart the backend. Also reconciled "~4s" vs the script's "~10 seconds" (both
+were guesses; it now just says "seconds").
+
+### And a code comment that had been wrong for a long time
+
+`dispatcher.py`'s `priority` docstring claimed the sort key was `(priority, in_flight, …)`. **The
+code sorts `(in_flight, priority, …)`** — the first two reversed. Corrected, with a pointer to
+the v1.276.45 finding that in the image lanes `in_flight` is always 0, so the intended
+"saturate then fall back" behaviour never engages there at all.
+
+### Memory
+
+`autogen-v2` records the clean run, the timing profile, the epoch-story fix and the
+never-construct-a-filename rule; `backend-concurrency-traps` carries the health-check and
+select-worker traps. Index updated, one line per entry.
+
+## v1.276.52 -- ◎ THE BOARD SHOWS THE EPOCH STORY, NOT JUST A FILENAME (2026-08-12)
+
+The cosmetic gap noted in v1.276.51: `installed_epoch`, `best_epoch` and `install_note` were
+written to the TRAIN state (`_train/<ds>.json`), while the ⚡ Autogen board reads the AUTOGEN
+job — so a seven-hour run displayed a filename and nothing else.
+
+**The one thing worth knowing about a trained LoRA is whether the epoch you got is the epoch
+that scored best**, and whether the likeness is any good. Both are now on the board.
+
+- `_s_lora` copies `installed_epoch` / `best_epoch` / `install_note` / `run_id` across as it
+  finishes, plus `best_score` and `epochs_scored` from the pick.
+- The finishing line says it too: *"…installed — usable in 🧬 · epoch 20, likeness 0.6285"*.
+- **Collapsed row:** `◎ 0.629` in green above the 0.45 match band, amber below, with a
+  `⚠ epoch` chip when a substitution happened — because "did the 7 hours produce a good LoRA"
+  should not need a click.
+- **Expanded:** a `likeness` row (`best of N epochs`, flagged when under the band) and an
+  `epoch` row that reads *"20 (the best-scoring epoch)"* or, when they differ,
+  *"38 — substituted, epoch 39 scored best"* in amber.
+
+⭐ **`install_note` exists ONLY when a substitution happened, so its absence is the good news.**
+
+### Backfilled by READING, not by migrating
+
+Runs that finished before this change have the facts only in the train state. `_merge_train_facts()`
+fills the gaps at read time in both `/jobs` and `/jobs/{id}`. That way the two completed runs
+display correctly, a job whose training is re-attached later picks up the new numbers, and there
+is no migration to get wrong. Read-only and best-effort — the job file stays the record.
+
+**Verified on both existing runs, straight from the list route:**
+
+    walterv1   score 0.6285   epoch 20 == best 20   no note      -> "the best-scoring epoch"
+    ViV2       score 0.5306   epoch null            note present -> the substitution is explained
+
+⚠ ViV2 has the note but no epoch numbers: its recovery install ran before those fields were
+being written. The note carries the meaning, and the UI shows the note without the epoch row
+rather than inventing one.
+
+## v1.276.51 -- ✅ A FULL AUTOGEN RAN CLEAN, END TO END, FIRST TIME (2026-08-12)
+
+*"the process completed fully with no errors. walterv1"*
+
+**Every stage, no errors, no intervention.** The first completely clean run of the whole chain —
+the previous one (viv2) got to hour seven and died on the install step.
+
+    character · base · views · gate · clothing · dataset · charsheet · lora     8/8
+    trigger   rbmnwalterv1 person
+    installed walterv1-08122203-e20.safetensors
+    total     7.12 h
+
+### ⏱ WHERE THE SEVEN HOURS ACTUALLY GO — the first real profile
+
+    lora       23684.7s   6.58 h    92.4%   <-- training. everything else is noise.
+    clothing     937.9s   15.6 min   3.7%   4 outfits designed, adopted and worn
+    dataset      880.9s   14.7 min   3.4%   40 images rendered, captioned, QC'd
+    views         90.1s    1.5 min   0.4%
+    gate          20.4s              0.1%   free, CPU
+    charsheet      1.0s              0.0%   free, PIL
+    character      0.1s   ·  base     0.9s
+
+⭐ **The practical consequence: a full character WITHOUT the LoRA is ~32 minutes, not 7 hours.**
+Training is 92% of the wall clock. If you are iterating on a character's look, leave 🚀 LoRA
+unticked and you get base → views → clothing → sheet → dataset in about half an hour; tick it
+only when the character is settled. That is what the toggles are for, and this is the first run
+that makes the trade-off concrete.
+
+### Quality
+
+    base gate    4 views checked, 0 failed
+    charsheet    built with ZERO empty cells
+    dataset      40 rendered, 3 flagged (7.5%), 0 artifacts
+    LoRA         24 epochs scored, best epoch 20 at 0.6285
+
+**0.6285 is comfortably above the 0.45 match band** — and better than viv2's 0.5306. ⚠ The top
+five epochs span 0.6264–0.6285, i.e. **the curve had plateaued and the epoch choice was worth
+0.002.** Worth remembering before anyone tunes epoch selection: on this run it was not the lever.
+
+### The v1.276.49 fixes held
+
+`installed_epoch 20 == best_epoch 20` — the exact best epoch had a checkpoint, so no substitution
+was needed and `install_note` is absent. The fallback did not fire, which is the correct outcome;
+it exists for the case that killed the previous run.
+
+⚠ **One reporting gap found while verifying:** `installed_epoch` / `best_epoch` / `install_note`
+are written to the TRAIN state (`_train/<ds>.json`) but not copied onto the AUTOGEN job, so the
+Autogen board shows the filename without the epoch story. Cosmetic, noted, not yet fixed.
+
+### Still unexercised
+
+A **multi-character BATCH**. Single characters now have two full runs behind them; the serial
+queue across characters has only ever been exercised by the free smoke test.
+
+## v1.276.50 -- 🚦 PREFLIGHT: check the 7-hour run's dependencies in 4 seconds (2026-08-12)
+
+*"all the workers have now restarted… I am going to do another full autogen including the lora
+gen with a new character."*
+
+Before a run that costs seven hours, every dependency it needs was verified by hand — and then
+turned into `scripts/preflight_autogen.py` so it never has to be done by hand again.
+
+**Every failure this session was a condition that was ALREADY TRUE when the button was pressed.**
+The trainer had rebooted (v1.276.48). The fleet was quietly two boxes instead of three, because a
+worker down at startup is not registered at all (also .48). Neither needed seven hours to
+discover — only a look.
+
+    ✅ backend · no run already in flight · queue depth
+    ✅ 3 boxes registered, all healthy, all reporting the `klein` capability
+    ✅ Ollama vision (captions · QC · wardrobe · costume drafting)
+    ✅ ArcFace — the FREE base-set gate AND the epoch scoring that picks the LoRA
+    ✅ trainer helper online · token set · Fizgig root + python · comfy start cmd
+    ✅ trigger word free · character slug new (an existing one RESUMES, it does not replace)
+    -> ✅ GO / 🟡 GO with notes / ❌ NO-GO
+
+**Live result before his second run: GO on all 14 checks.** Notably `.201` had rejoined the
+fleet on its own — the v1.276.48 re-attach loop working unprompted, in the wild.
+
+⚠ **It states what it cannot check**, which is the point of a preflight rather than a promise:
+free disk on the trainer (the helper does not report it), and whether the boxes will STAY up —
+one has already rebooted mid-run.
+
+## v1.276.49 -- 🎓 A SEVEN-HOUR RUN DIED ON ITS LAST STEP, AND THE ERROR SAID NOTHING (2026-08-11)
+
+*"i ran a full autogen with lora gen and it seems to have run and finished after 7 hours but our
+system shows the following error: RuntimeError: training: HTTPError: HTTP Error 500"*
+
+**His LoRA had trained fine.** 39 epochs, all scored, best 0.5306. Only the final INSTALL failed —
+and everything about how that was reported was wrong.
+
+    04:34:24.510  install epoch 39 (0.5306)
+    04:34:24.539  error HTTPError: HTTP Error 500      <- 29ms later. Not a timeout.
+
+### ① The 500's BODY was thrown away — one layer deeper than v1.276.48
+
+.48 taught `_hj` to name the machine on a CONNECTION failure, but deliberately re-raised
+`HTTPError` untouched ("a real answer; let it through"). **`str(HTTPError)` is
+`"HTTP Error 500: Internal Server Error"` and nothing else** — the helper's explanation lives in
+the response body, which was being discarded. Reading it turned an opaque 500 into:
+
+    FileNotFoundError: viv2-auto-62d1c1-000039.safetensors
+
+⭐ **Preserving the status code is not preserving the error.** Same lesson as .48, one layer in.
+
+### ② THE ACTUAL BUG: the checkpoint filename was CONSTRUCTED, not looked up
+
+    dest = f"{ds_id}-{pick['best_epoch']:06d}.safetensors"     # and posted blind
+
+**The two halves of the pipeline count epochs from different things.** `_score_and_pick` reads
+**PREVIEW images** (`_e(\d{6})_00_`); install needs a **WEIGHTS file**. Nothing guarantees the two
+sets line up — and measured on his run, they did not: **previews reached epoch 39, weights stopped
+at 38.** A constructed name cannot notice that; it just posts a path that does not exist, after
+seven hours of GPU time.
+
+New `_weights_for_epoch()` **looks the file up** in the artifact list that was already in hand,
+falls back to the nearest LOWER epoch (an earlier checkpoint is a real checkpoint; a guessed
+filename is not), records the substitution in `install_note` so it is visible rather than silent,
+and raises with the ACTUAL filenames when nothing matches.
+
+**Recovered his run without retraining** — `POST /datasets/{id}/train {run_id}` re-attaches, so
+scoring and installing re-ran against the existing 6-hour training:
+
+    installed: viv2-08121147-e39.safetensors
+    note: epoch 39 scored best but has no checkpoint file; installed epoch 38 instead
+
+### ③ ⚠ MY OWN FIX SHIPPED A FILE THAT LIED ABOUT ITSELF
+
+The first cut kept `dest` computed from `best_epoch`, so it installed epoch 38's weights into a
+file named `…-e39.safetensors`. **A file that lies about itself is worse than the crash it
+replaced**, because nothing downstream can catch it. The destination is now named from the epoch
+ACTUALLY installed, and both numbers are published (`installed_epoch`, `best_epoch`).
+
+### ④ …and then it was installed but UNUSABLE, because it had no trigger
+
+`forge._lora_triggers` maps an installed filename back to its dataset by DATASET-ID prefix. The
+installed file is named `<char_slug>-<stamp>-e<epoch>`, which works right up until the dataset is
+not named after the character — and **⚡ Autogen names every dataset `<slug>-auto`**, whose
+slug-part is `viv2-auto`, which `viv2-0812…` does not start with. So his LoRA appeared in the
+picker **with no trigger word**, which is the whole point of it. Now also matched on `char_slug`,
+at lowest priority so a dataset-id match still wins.
+
+    BEFORE  viv2 trigger -> (nothing)
+    AFTER   viv2-08121147-e39.safetensors -> "rbmnviv2 person"    (other 3 unchanged)
+
+### Free test
+
+`scripts/test_weights_pick.py` — no worker, no GPU, no network. Covers exact match, the
+missing-epoch fallback, 4- vs 6-digit names, `-state` files being ignored, and the
+no-checkpoints error naming what it saw. **Run it after touching the train pipeline.**
+
+## v1.276.48 -- 🩺 THE ERROR DIDN'T NAME THE MACHINE, AND WORKER HEALTH WAS NEVER RE-CHECKED (2026-08-11)
+
+Lorenzo, mid-run: *"i just got this error… i think its at the lora part and im not sure what
+machine or what the issue is?"* — `RuntimeError: training: URLError: <urlopen error
+[WinError 10060] …>`. He then found it himself: **the trainer box had rebooted.**
+
+He should not have had to. Diagnosing it took four probes, and every one of them is something
+the app already knew and did not say.
+
+### ① The error named nothing. Now it names everything.
+
+`_hj()` — every worker-helper call — let a raw socket error escape. `WinError 10060` identifies
+neither the host, the port, the service, nor the remedy. It now fails with the address and an
+ordered check list: is the machine awake · is `rbmn_helper.py` running · has the IP moved (every
+box here is DHCP — `scripts/find_helper.py` scans) · Settings → Worker Helpers.
+
+### ② The helper was checked at the START of a run that reaches training HOURS later
+
+`POST /autogen` preflights the trainer helper before queueing — a check that is stale by the
+time the chain gets to `lora`. A box can reboot, sleep, or take a Windows Update in between,
+which is precisely what happened. `_s_lora` now preflights immediately before training and says
+the thing that actually matters: **nothing is lost** — the dataset is built and recorded, so
+↻ retry resumes at the training stage instead of re-rendering forty images.
+
+### ③ ⚠⚠ WORKER HEALTH WAS NEVER RE-CHECKED. `health_check_all()` HAD NO CALLERS.
+
+`add_worker` sets `healthy=True` optimistically at registration; `health_check_all()` existed,
+correct and complete — and **nothing in the codebase ever called it.** So `healthy` was a
+startup snapshot that never expired. Measured live: `/api/debug/snapshot` reported .201 healthy
+while BOTH its ports were timing out.
+
+**This matters far more since v1.276.45**, which spread rendering ROUND-ROBIN across every
+"healthy" worker: one dead box no longer means "one idle box", it means **every Nth image of
+every batch fails**. A 45s loop now runs it, in a THREAD — `health_check_all` is synchronous and
+talks to three boxes, so on the event loop a dead box would stall the whole app for its timeout,
+which is the v1.276.41 mistake in a new place. Transitions are logged loudly
+(`Worker WENT DOWN` / `Worker RECOVERED`) and the steady state quietly, because warning every
+45s about a box that is simply off buries the moment it went down.
+
+### ④ …and a worker that is DOWN AT STARTUP was gone until the next restart
+
+The other half, and the one still biting when this was written: `add_worker` RAISES on an
+unreachable box, so it is never registered — and the health loop cannot rescue it, because that
+loop only iterates workers already in the registry. His trainer rebooted, the backend restarted
+while it was still coming up, and **.201 vanished from the fleet even after it returned.** The
+loop now re-attempts registration for any configured-but-missing worker each sweep, logging
+`Worker REJOINED the fleet`.
+
+### `last_check` is published
+
+`/api/debug/snapshot` now carries `last_check` per worker. **"Healthy" without "as of when" is
+exactly the claim that hid this**, and it is how the loop was verified:
+
+    22:04:14 / 22:04:18   two workers, different timestamps (registration)
+    22:06:16 / 22:06:16   both advanced, and now IDENTICAL — one sweep, as designed
+
+### ⚠ Live state at time of writing: .201 is HALF up
+
+    helper   192.168.12.201:8765  ✅ up   (ZOMAIN01, helper 1.219.0)
+    ComfyUI  192.168.12.201:8188  ❌ down (timed out)
+
+So the trainer can accept a training run but **cannot render**, and the fleet is 2 boxes, not 3.
+The helper can start it: `POST /comfy/start` on `:8765` (`lora_train.py` already does this after
+a training run to hand the GPU back).
+
+## v1.276.47 -- 📚 DOC/MEMORY PASS FOR .45/.46, and a number I got wrong twice (2026-08-11)
+
+Third audit with the same method — a subagent checking DOCS against CODE with `file:line`,
+forbidden to edit. The v1.276.44 pass left the docs current; this covers what .45 (fan-out) and
+.46 (verbose status) made stale.
+
+### ⚠ THE ONE I GOT WRONG, TWICE, AND REPORTED TO HIM BOTH TIMES
+
+I quoted the smoke suite as **"31 PASS"** and then **"30 PASS"**. Both were inflated. The suite
+has **30 `check()` call sites**, and a typical run is **29 PASS + 1 SKIP** (the fan-out evidence
+check SKIPs when `_JOBS` is empty after a restart). **31 is not a reachable number.**
+
+The cause is my measuring instrument, not the suite: I counted output lines containing the
+string `PASS`, and the summary line `ALL PASS` counts itself. A grep that matches its own
+footer inflates by exactly one, every time, silently — which is precisely the class of error
+this repo's rules are supposed to catch, applied to my own reporting rather than to the code.
+**Count the assertions in the source, not the lines in the output.** Corrected in all five
+places it had propagated to (README, OPERATIONS ×3, HANDOVER).
+
+### Stale claims fixed
+
+- **`docs/OPERATIONS.md` §2 still said Krea 2 "renders on the training box"** — false since
+  .45, and §2 is the current-state description a reader hits first. (§1's hardware table
+  legitimately calls .201 the Krea 2 box; that stays.)
+- **`docs/KLEIN3.md` said "forge.py renders it on one host"** in the present tense.
+- **`docs/IMAGE_WORKSHOP.md` described one worker per batch** and carried a v1.199.2 header on a
+  file whose rendering changed in .45. Now documents the round-robin pool, the `in_flight`
+  reason it was needed, and that `done` counts COMPLETIONS not the loop index.
+- **`docs/LORA_DATASET.md` carried a v1.213.1 header** on a current-state doc whose content was
+  corrected in .44 — now says CURRENT THROUGH, with a warning that pre-v1.271 sections describe
+  a scripts-only loop.
+- **The .46 status fields were undocumented**: `stage_times`, `elapsed_s`, `stage_started_at`,
+  `elapsed_human`, `stage_elapsed_s`, `log[]`, `log_total`, `queued`, `log_lines`, and the
+  `?log=N` parameter. Added to §10 with the two caveats that matter (elapsed is computed against
+  the wall clock for a running job; `_tick` logs only on change).
+- **New state keys documented where they are read**: `phases` (outfits — which views run in
+  parallel, which are deferred, and why) and `aux_renders` (upscales — what/worker/engine, which
+  is what lets an Autogen cancel reach a GAN upscale).
+- **README had ZERO mention of .45 or .46.** Added a paragraph each.
+
+### Open lists
+
+Verified identical in content and order across all three — no drift this time. All three
+carried the same wrong check count, now fixed. "558 files, ~45 versions unpushed" re-measured
+with `publish_clean.ps1`'s own logic: still correct.
+
+### Memory
+
+`backend-concurrency-traps` gained trap 5 — **`select_worker` does not load-balance**, with the
+`in_flight`-is-always-0 explanation and the two fixes that do work. `autogen-v2` gained the
+verbose/timing section and the check-count correction. Index updated; still one line per entry.
+
+## v1.276.46 -- 🔍 VERBOSE STATUS + ⏱ ELAPSED TIME (2026-08-11)
+
+*"can you make the status output more verbose? Maybe like a toggle to see more details… Also
+how long its been running so we can keep track."*
+
+### ⏱ Timing lives on the SERVER, not in the browser
+
+A client-side stopwatch is wrong the moment you reload the page, close the tab, or the backend
+restarts — and this pipeline runs for hours **precisely when you are not watching it**. So
+`_stage()` now records, in the state file: `t0`, `stage_started_at`, `elapsed_s`, and a
+**`stage_times` map with a duration for every stage that has finished**.
+
+⚠ **`elapsed_s` in the file is only as fresh as the last WRITE**, and a stage can sit quiet for
+minutes between ticks. For a job that is actually running, `GET /jobs` and `GET /jobs/{id}`
+compute it against the wall clock instead — **a frozen timer on a live run is exactly the "is
+this thing stuck?" question the timer exists to answer**, so it must not lie by omission.
+
+### 🗒 The fine-grained log — new `_tick()`
+
+Progress lines like `rendering 12/40` used to overwrite `detail` and vanish, so a verbose view
+would have had nothing but stage transitions to show for a four-hour dataset render. `_tick()`
+writes them to the log **only when the text actually changes** — logging every poll would be
+spam (one every 20s for four hours), and a line that changes is a line where something
+happened. Every progress probe in the pipeline now goes through it, and several got more
+useful: candidate/render ticks name **how many workers** the underlying job is using.
+
+Log entries carry `{at, t (elapsed at that moment), stage, detail, tick}` — so a run reads as a
+timeline rather than a list. Capped at 400; `GET /jobs/{id}?log=-1` returns all of them,
+`?log=0` none.
+
+### 🔍 The board: a verbose toggle, per-job expand, and a live clock
+
+- **🔍 verbose** in the header, **persisted to localStorage** — whichever level you want, you
+  will want it again.
+- **▸ / ▾ per job**, so one run can be opened without turning everything on.
+- Expanded shows: the **stage chain with a duration on every completed stage** (and a live
+  duration on the one in flight), the character/dataset/trigger/installed LoRA, the **base gate
+  result with the reason each view failed**, candidate scores, outfits, the character sheet
+  link, QC flag counts, estimate vs reality, and the **full timestamped log** with ticks dimmed
+  so the shape of the run reads at a glance instead of being a wall of identical lines.
+- **⏱ elapsed** on every row: blue and ticking while running, grey and frozen when done.
+  ⚠ It animates only BETWEEN polls and **re-syncs to the server's number on every poll**, so a
+  backgrounded tab or a restart cannot drift it.
+- The 🎓 LoRA panel's ⚡ Autogen box got an elapsed clock too, from `started_at` — which the
+  route writes BEFORE the thread starts, so it is honest even for a run that has not reported a
+  stage yet. ⚠ Documented in the helper: the backend writes LOCAL time with no timezone suffix,
+  so if a clock ever reads hours off, that is the first thing to check.
+
+### Verified
+
+    log after a cancel + retry, read back from the state file:
+       0.0s  queued     waiting for the queue
+       0.1s  cancelled  removed from the queue before it started
+       3.2s  queued     re-queued (keeping 0 completed stage(s))
+       3.2s  character  creating 'SmokeAutogen b655'
+       3.5s  base       references attached, base set from the first
+       3.5s  done       finished: character, base
+    stage_times {'queued': 0.0, 'cancelled': 3.1, 'character': 0.0, 'base': 0.3}
+
+Internal bookkeeping (`_stage_t0`) is stripped from the response rather than shipped to the UI.
+`autogen_smoke.py` 30 PASS / 0 FAIL; tsc clean; frontend rebuilt.
+
+## v1.276.45 -- ⚡ FAN-OUT AUDIT: two lanes were using one box out of habit (2026-08-11)
+
+*"make sure we are fanning out across workers when we can… I just want to make sure this isnt
+locked to just one worker for the whole process."*
+
+Mapped every render lane against the code rather than assuming. Most of them fan correctly. Two
+did not, and the reason they did not turns out to be one shared fact.
+
+### ⚠⚠ THE FACT BEHIND EVERY PIN: `in_flight` is always 0, so `select_worker` is a constant
+
+These image lanes submit straight to the ComfyUI client and **never go through
+`dispatcher.submit_job`**, which is the only thing that increments `in_flight`. So `in_flight`
+is permanently 0 on all three boxes, and `select_worker`'s sort key
+`(in_flight, priority, -last_check)` — with every priority at the default 100 — collapses to
+"whichever box was health-checked most recently."
+
+**Consequence: asking the dispatcher for a worker once per image, in a loop, does not
+load-balance. It pins.** Every remaining single-box call site is a hard pin wearing the costume
+of a soft preference. This is the same root cause as the v1.276.31 costumes bug, and the fix is
+the same: a worker LIST with **round-robin assigned UP FRONT**.
+
+### The two lanes that were pinned for no reason
+
+**① `forge._run_krea2_jobs` — an 8-image Krea 2 batch rendered SERIALLY ON ONE BOX.** Its own
+docstring said "sequential on the one Krea 2 box", and that premise was retired in v1.276.31:
+all three workers have `krea2_turbo_fp8.safetensors`, and `_krea2_core_graph(host, …)` /
+`_krea2_render(host, …)` have always taken a host. It was using a third of the fleet for three
+times as long. Now round-robin + threads.
+⚠ **The one genuine pin, kept and made explicit:** a job naming a **character LoRA** may only go
+where that `.safetensors` is installed — asked of each box directly via `_krea2_models`, not
+assumed. Published as `krea2_fanned` / `krea2_note` so the reason is visible instead of looking
+like the bug that was just fixed.
+
+**② The Image Workshop rendered N images one at a time on one box** — a serial `for i in
+range(count)` calling `_pick_worker` each iteration, which per the fact above returns the same
+worker every time. Now a round-robin pool + `asyncio.gather`. ⚠ `done` counts COMPLETIONS now,
+not the loop index: with images finishing out of order, `i + 1` would have reported "6/6" while
+three were still rendering.
+
+### One lane that serialised more than its dependency required
+
+The outfit set ran **four phases** — front → face crop → back+left → right — with a maximum
+width of two on a three-box fleet. `right` is split out because it needs the finished LEFT
+render, mirrored, as its garment reference. **But that split was unconditional**, so with
+`sibling_ref` OFF the right view waited for nothing at all. It now only becomes its own phase
+when it is actually waiting, and `st["phases"]` publishes which views are parallel, which are
+deferred, and WHY.
+
+### Visibility, because a render nobody can see is a render nobody can debug
+
+`_upscale_file` published **nothing** — not a worker, not a task — so a stalled GAN upscale was
+invisible and, worse, `autogen`'s cancel could not reach it. It now records `aux_renders`
+(what / which box / which engine) and `_note_workers` reads both that and the singular
+`st["worker"]` the upscale lanes use, so ⏹ stop can interrupt them.
+Also annotated `_run_klein_edit_sync`'s `workers[0]` — dead code, but it is a hidden pin and the
+next person to reach for it should be told.
+
+### Proved, not asserted
+
+One throwaway character, four renders:
+
+    front -> .163    back -> .224    left -> .201     three boxes, one pass
+    right -> .163    deferred — it waits for left, which is correct
+
+`scripts/autogen_smoke.py` gained a **§6b fan-out section** (free — it reads worker assignments
+jobs already recorded, and renders nothing): more than one healthy box · a past multi-view run
+really used more than one · **every healthy box reports the `klein` capability**, because
+`_klein_workers_all` silently degrades to a ONE-worker pool if none do and nothing in the status
+says the pool shrank.
+⚠ Its first version reported "no evidence" as **FAIL** — klein3's `_JOBS` is in-memory, so a
+restart wipes it. **A test that fails for lack of data teaches people to ignore it**; it SKIPs
+now, and says why. Suite: **31 PASS / 0 FAIL.**
+
+## v1.276.44 -- 📚 DOCUMENTATION + MEMORY AUDIT: 33 required edits, 4 of them live lies (2026-08-11)
+
+*"make sure all memories readme, documentation, handover docs, etc are up to date."*
+
+Audited the same way that has worked twice before: **a subagent checking the DOCS against the
+CODE, required to cite `file:line`, forbidden to edit.** It returned 33 concrete edits. The
+interesting ones are not the stale version headers.
+
+### The four claims that were actively WRONG, not merely old
+
+**① `docs/OPERATIONS.md` and `scripts/build_frontend.bat` both said `npm run build` "has never
+once succeeded — 16 pre-existing type errors".** **I made that false myself in v1.276.41** by
+clearing all 21 errors. `npx tsc --noEmit` now exits 0. Both corrected in place, and the reason
+to prefer `build_frontend.bat` restated honestly: it is a POLICY choice (it runs exactly what
+`run.bat` ships) rather than an impossibility.
+⚠ **And `README.md:643` instructed `npm run build`** — directly contradicting the "never" three
+files away. Now `npx vite build`, with a note saying why.
+
+**② `docs/LORA_DATASET.md` said the in-app training UI was unbuilt — in TWO places.** False
+since **v1.271**, five versions before this session started. `docs/OPERATIONS.md` described the
+shipped UI correctly the whole time, so the lane's OWN doc was the one lying. Struck through
+rather than deleted: a doc that quietly loses a claim teaches nobody.
+
+**③ The two Autogen lanes were nowhere disambiguated.** `/api/lora/autogen` (starts from a
+character that already has a base) and `/api/autogen/*` (starts from nothing, batches, and CALLS
+the first) now carry an explicit comparison table in `docs/LORA_DATASET.md` and cross-references
+in OPERATIONS §2, §6 and §7. Also: `/api/autogen/*` and `/api/costumes/*` were **entirely absent
+from the §7 API surface list**.
+
+**④ `docs/CHARACTER_STUDIO.md` is a July design doc with no Klein 3.0, no picker and no
+Autogen.** Not wrong — SILENT, which is worse, because a reader sent to "the Character Studio
+doc" gets a 2026-07-08 architecture and no signal that it is frozen. It now opens with a
+🧊 FROZEN banner pointing at the current docs.
+
+### The open lists had drifted AGAIN
+
+README carried 4 items where HANDOVER and OPERATIONS carried 6 — it had silently dropped
+`face_first` and the `nOutfit` finding. All three are identical again. ⚠ **Third occurrence;
+this is now a standing check, not an incident.** Also reconciled: the publishable file count
+was quoted as **552 / 556 / 558** in three places (558 is correct, measured with
+`publish_clean.ps1`'s own logic), and the smoke-test check count as **26** in four places when
+the .43 run produces 28 — with the RIGHT number sitting BELOW the wrong one in reading order,
+which is precisely the failure this repo keeps having.
+
+### Memory
+
+Two new files — **`autogen-v2`** (the new lane, the decisions Lorenzo made, and the three bugs
+found in other people's code while building it) and **`backend-concurrency-traps`** (four traps
+that each presented as something else: the self-call deadlock, the Windows `os.replace` reader
+collision, the drainer lost-wakeup, and `asyncio.create_task` off the loop). A third,
+**`docs-discipline`**, collects the rules these audits keep re-deriving.
+`measure-dont-infer` gained the adversarial-review method **including the part where one of the
+reviewer's 22 findings was WRONG and complying would have broken working code** — a review is
+evidence, not a verdict. `klein3-reference-mode` gained the verified fresh-character result.
+
+⚠ **The index had grown past its own read limit** (20.8KB against a 24.4KB cap), which would
+have made it unreadable — the one file whose whole job is to be read first. Compacted to one
+line per entry with the detail pushed down into topic files; no entry dropped.
+
+## v1.276.43 -- 🔍 ADVERSARIAL REVIEW OF v1.276.42: 21 defects, 3 of them fatal (2026-08-11)
+
+He asked me to double-check my work, so I had a subagent try to PROVE the new Autogen broken
+rather than reading it again myself. It found **22 issues; 21 were real.** Everything below was
+verified against source before it was changed — and one finding was rejected on evidence.
+
+### The three that meant it could not have worked at all
+
+**① `GET /api/klein3/characters/{slug}/jobs` returns the job map DIRECTLY** —
+`{"views": {...}}`, **not** `{"jobs": {...}}` (klein3.py:3623), while `GET /characters/{slug}`
+nests the same map under `jobs` (klein3.py:862). The view and outfit wait loops read the nested
+shape, got `{}`, whose status is `None`, which both loops treat as "still starting" — so they
+**could never terminate**, and any spec with `do_views` or `do_clothing` (i.e. the default) would
+have sat for 90 minutes per stage and then reported a timeout. `_k3_job()` now accepts either
+shape rather than betting on one.
+
+**② `_wait` swallowed EVERY probe exception, making all in-probe error detection dead code.**
+Catching broadly is right — a transient failure to reach a status route must not kill a
+four-hour render — but it also ate `raise RuntimeError("candidate render failed…")` and its
+three siblings. A forge or costume run that reported `status:"error"` did not fail the job; it
+span for the full timeout and then lied about why. New `Fatal` exception passes through; ordinary
+exceptions still do not.
+
+**③ Resume ran at IMPORT time, so every resumed job failed by construction.** The call sat in
+`main.py`'s top-level router block — which executes *before uvicorn binds the port*. A resumed
+job's first act is an HTTP call to this app, so it got "connection refused" and was marked
+`error` instantly. Moved into `lifespan`, on a short delay, because lifespan itself completes
+before the socket accepts.
+
+### And one the reviewer got WRONG — checked, not taken on trust
+
+It reported `lora_train._views_done` reading a `jobs` key that `_public_char` does not return.
+**`_public_char` DOES return `jobs` (klein3.py:862)** when `full=True`, which is what
+`GET /characters/{slug}` uses. No change made. A review is evidence, not a verdict.
+
+### The rest, briefly
+
+**MAJOR** — the free gate ran *before* the views it gates, so on a fresh character it checked
+the one front reference, passed trivially, and guarded nothing (`gate` now sits after `views`,
+and the smoke test asserts that ordering *and says why*) · every outfit handed to the dataset was
+silently dropped, because `lora._norm_outfits` skips entries with an empty `desc` — the clothing
+stage's whole contribution to the LoRA was going nowhere · `POST /fields` REPLACES rather than
+merges, so a re-run **wiped age/sex/hair/body** and every view prompt built from them · the forge
+gallery is sorted NEWEST FIRST and the code took the tail, i.e. the OLDEST candidates · a
+lost-wakeup race could strand the queue (the drainer clears itself *under the lock at the moment
+it decides to exit*) · a cancel arriving before `_ACTIVE` was set was lost, and the UI said
+"cancelled" while the GPUs kept going (the flag is now set unconditionally and checked as the
+runner's first act) · the LoRA discovery did **blocking LAN I/O on the event loop** — the
+v1.276.41 failure class in a brand-new place, up to 15s of total unresponsiveness whenever the
+Krea 2 box was off — now refreshed on a background thread · and its own "never flap the badge
+off" guard was unreachable, because `_krea2_models` swallows the connection error and returns
+`[]`, so an empty list is now treated as no answer.
+
+**MINOR** — the base was copied from a reference before its background upscale landed (the
+v1.276.29 pattern again) · a bare IP with no port made `interrupt()` hit port 80 · a partially
+committed batch when validation failed on character 5 · a no-op `generate` returning
+`{"started": false}` would have waited FOUR HOURS on an already-complete dataset · a corrupt
+state file became a permanent red row · the wardrobe route floors its count at 2, so the estimate
+was off by an outfit. ⚠ **The `lora` stage remains the one place ⏹ stop cannot reach** —
+`_train_pipeline` waits in a bare `while True: sleep(60)` with no cancel hook. Documented rather
+than pretended away; the cancel check happens at the last honest moment, before training starts.
+
+### ⚠⚠ AND THE BUG THE RE-RUN FOUND, WHICH WAS THE BEST ONE
+
+The suite passed in 10s, then the *same binary* hung for 609s. A race — so I read the log instead
+of theorising:
+
+    PermissionError: [WinError 5] Access is denied:
+      '…\_libraries\autogen\jobs\smokeautogen-2049-146419.tmp' -> '…json'
+
+**`_state_save`'s atomic write is not safe on Windows.** Two faults, both live: the temp name is
+derived from the target, so two writers of one state file share a temp path; and **`os.replace`
+fails on Windows if anyone has the target open AT ALL, including for reading** — which a status
+poller does every few seconds while a fast pipeline writes several times a second. When it blew,
+the exception escaped `_stage`, the job was **stranded at a non-terminal stage forever**, and
+every poller waited on a run that had actually finished. Unique temp names, a ~0.6s retry, and a
+second line of defence in `_run_one` so a job ALWAYS reaches a terminal stage even if its state
+file cannot be written. ⚠ This bug was latent in `lora_train._state_save` all along — fixed at
+the source, so `_train` and the old `_autogen` state files get it too.
+
+### Verified
+
+    autogen_smoke.py: 28 PASS / 0 FAIL, FOUR consecutive runs (9.9s, 10.0s, 10.0s, 10.0s)
+
+Four runs, not one, **because the bug it found was a race** and a single green run proves nothing
+about those. `npx tsc --noEmit` clean; frontend rebuilt.
+
+## v1.276.42 -- ⚡⚡ AUTOGEN v2: a character from nothing, as far as you want, in batches (2026-08-11)
+
+Lorenzo asked for one thing with five parts: an **Autogen character** option on the New
+Character screen that takes reference images *or just a description*; **toggles** for base /
+clothing / dataset / character sheet / LoRA so a run can stop wherever he needs; **auto-generated
+clothing** from described sets, individual descriptions, or optional photographs; a **Batch
+Autogen Mode** for many characters at once; and "if I'm missing something, add it."
+
+### The shape
+
+    photos OR a description
+      -> character record + front reference + base
+      -> the four base views          (verified, retried)
+      -> clothing                     (designed, approved, adopted, worn)
+      -> character sheet
+      -> LoRA dataset                 (rendered, captioned, QC'd, repaired)
+      -> trained + installed LoRA
+
+Every arrow is a toggle, and ticking one **truncates** the chain rather than skipping a link in
+the middle of it — each stage is the next one's input, so there is no coherent "dataset but no
+views". Ticking 🚀 LoRA forces 🎓 dataset ON and *says so on the toggle* instead of quietly
+charging for it.
+
+### New: `backend/api/autogen.py` + `POST /api/autogen/{run,batch,estimate,refs}`
+
+A new module rather than an extension of `lora_train._autogen_pipeline`. That one starts at "a
+character that already has a base" and ends at a LoRA; its job is the dataset recipe and it does
+it well. This one starts at nothing, ends anywhere, and has to run a QUEUE across characters.
+Bolting both onto one function would have produced something that does two jobs and neither
+clearly — **so this module CALLS the same routes that one does**, in the same order.
+
+**No photo? Then it makes one.** `forge` renders `candidates` images from the description and
+the best is picked **for free, on the CPU**. ⚠ Deliberately scored for USABILITY, not likeness,
+and it must not be described as likeness: a character invented from a sentence has nothing to
+*be* like. What is measurable is whether the image can do the job a base reference has to do —
+exactly one person, a confident detection, facing the camera, face big enough to crop an anchor
+from. If nothing clears the bar the run STOPS and says which way it failed.
+
+**Clothing, three ways in, all optional:** a sentence (the TEXT model drafts the 13 slots), the
+slots typed directly, or photographs (the garment is vision-scanned OFF the image, because a
+typed description and a photograph can disagree and at cfg=1 the words win — v1.276.34).
+`clothing_auto_count: N` means "invent N that suit them". Each design is approved, adopted onto
+the character and rendered across the five outfit views.
+
+⚠ **On auto-approval, which is narrow on purpose.** Costume designs land as unapproved
+candidates and `adopt` 409s on a candidate — that gate is what keeps the shared library from
+filling with experiments. Autogen approves **only the ids it just created, by id**. A costume
+designed by hand in the studio is untouched and still needs approval. The gate stays meaningful
+and the chain still runs.
+
+**Batch is STRICTLY SERIAL**, and that is a decision rather than a simplification: every stage
+already fans across all three boxes, and the costume design lane holds a single GLOBAL lock. Two
+characters at once would contend for the same GPUs, finish later, and make the costume stage
+409 unpredictably.
+
+### The four things that did not exist anywhere in this lane
+
+1. **CANCEL.** `grep -n "cancel"` across klein3 / forge / costumes / lora / lora_train /
+   charsheet found nothing — once started, the only stop was killing the backend. The flag is
+   checked between stages **and inside every wait loop** (a check only between stages would
+   ignore a cancel for the four hours a dataset render can take, which is indistinguishable
+   from a button that does not work), and the workers the run touched get `interrupt()` so the
+   render in flight actually stops.
+2. **A COST PREVIEW.** `POST /estimate` returns per-stage renders and a rough wall time before
+   you commit. It states its own caveat: retries and repair rounds are not in it.
+3. **A FREE GATE.** After the views, `views/verify` (CPU insightface, no GPU, no worker) runs
+   and a failing base set STOPS the run — rather than spending forty dataset renders on a base
+   the dataset, the wardrobe and the LoRA would all inherit the errors of.
+4. **RESUME.** State files always survived a restart; nothing read them back, so a batch stopped
+   at character 7 of 10 was lost. `resume_on_startup()` re-queues anything non-terminal, and
+   `completed` is recorded **per stage** so a run resumes where it stopped instead of
+   re-rendering views it already has.
+
+### ⚠⚠ AND A BUG THAT MEANT THE OLD AUTOGEN COULD NEVER HAVE WORKED EITHER
+
+`_autogen_pipeline` step 1 posted **`{}`** to `views/generate`. `ViewsIn.views` is REQUIRED and
+the handler 400s on an empty list — **so the missing-views step could not once have succeeded.**
+It raised, the pipeline caught it, and autogen died at step 1 for exactly the characters that
+needed that step. Found by inventory, not by a run: v1.276.41's deadlock meant nothing ever got
+this far to reveal it. Fixed in place; the new module names the views explicitly.
+
+### ⚠ Trigger collision, found and closed
+
+`lora.py` derives the default trigger from the dataset NAME and validates nothing — no
+uniqueness, no charset check. Autogen names every dataset `<slug>-auto`, so **running it twice
+on one character produced two datasets with different ids and the SAME trigger**: two LoRAs
+answering to one word, and an ambiguous reverse-lookup in the installed-LoRA display.
+`_unique_trigger()` checks what is already in use and suffixes.
+
+### 🎓 "it doesnt show a lora was made for that character"
+
+His, mid-session, and correct. The card asked ONE source — `_train/<ds_id>.json` — which only
+exists for runs the in-app 🚀 Train button drove. **His first LoRAs were trained from `scripts/`,
+so the state file never existed and three real installed LoRAs read as "no LoRA".** The file on
+the worker is the ground truth, so `characters_all` now asks the box and matches filenames back
+the way `forge._lora_triggers` already does, cached 120s because that grid polls every 20.
+⚠ And it is the UNION with the dataset rows, not a replacement — squeezing discovered files
+through dataset rows LOSES some: redv1 has two installed LoRAs and one dataset row.
+
+    BEFORE  redv1 []                                  dorian []
+    AFTER   redv1 [redv1-bca382-000036, redv1-v2-e21]  dorian [dorian-v1-b1966f-000016]
+
+### Verified — 26 checks, ZERO renders
+
+**`scripts/autogen_smoke.py`.** The expensive stages are the ones that ask a GPU for a picture;
+everything that makes this a *system* — the queue, the serial drainer, state files, resume,
+cancel, retry, batch — is free to exercise and is also the half most likely to be wrong. So the
+smoke test runs a spec whose only stage is `base` FROM A PHOTOGRAPH and drives the rest around
+it. It creates real throwaway characters and deletes them again.
+
+    26 PASS, 0 FAIL, 9.9s: health · the chain truncates · the LoRA pulls the dataset in ·
+    photos make the base row free · a description costs one render per candidate ·
+    /refs upload · run -> queued -> done with completed=[character,base] ·
+    the character really has a front ref AND an active base · 400 with no source ·
+    400 on a blank name · batch of 2 · cancel a queued job · THE OTHER ONE STILL FINISHED ·
+    retry -> done · the board lists them · cleanup
+
+⚠ **One failure on the first run was MY TEST, not the feature**: it asserted the whole estimate
+was 0 for a spec with photos, but `do_views` defaults to TRUE so the views legitimately cost 4.
+It now asserts the BASE ROW. A test that reads the wrong number reports the wrong bug.
+
+**NOT yet run: the expensive path.** No description-to-candidates render, no clothing design, no
+dataset, no training has gone through this module. The machinery is proven; the renders are not.
+
+## v1.276.41 -- ⚡ THE AUTOGEN BUTTON DEADLOCKED THE SERVER AGAINST ITSELF (2026-08-11)
+
+Lorenzo: *"when I create a new character, add the references, then create the missing views,
+then go to lora dataset gen and click autogen after selecting the character, theres no
+indication anything is happening… after awhile it says: Unexpected token 'I', "Internal S"…
+is not valid JSON"*
+
+**Three symptoms, ONE cause, and it explains why "the first real ⚡ Autogen run" never happened
+— the button has never once worked.**
+
+### The mechanism
+
+`backend/api/lora_train.py` has `_app()`: a helper that calls **this app's own HTTP API**. That
+is fine from the `_*_pipeline` background threads, which is where all twenty-odd calls live.
+
+But **two `async def` ROUTES also called it** — `POST /autogen` (line 724) and
+`POST /datasets/{id}/train` (line 547). A route coroutine runs ON the event loop, and `_app` is
+a **blocking** `urllib` call. So the loop sits inside a synchronous wait for a request that
+**only that same loop could accept**. The server deadlocks against itself:
+
+    click -> route blocks the loop -> loop cannot accept its own request ->
+    nothing responds AT ALL -> 60s timeout -> urllib raises -> no handler ->
+    plain-text "Internal Server Error" -> the UI calls r.json() on it -> his error
+
+Every symptom falls out of that. "No indication anything is happening" is the loop being held.
+"After a while" is the 60-second timeout. And the message he saw is not the real error at all —
+it is the UI's *error path* failing, because it assumed a failure body is JSON.
+
+### Proved before and after, for free — no renders, no pipeline start
+
+A slug that does not exist should 404 instantly. Instead:
+
+    BEFORE   POST /api/lora/autogen {"char_slug": "nosuchcharacter_zz"}
+             -> 60.0s, HTTP 500, body: Internal Server Error
+    AFTER    same request
+             ->  0.0s, HTTP 404, body: {"detail": "character 'nosuchcharacter_zz' not found"}
+
+### The fix
+
+- **`_app_async()`** — runs `_app` via `asyncio.to_thread` (the loop stays free, so the self-call
+  can be served) AND translates an upstream `HTTPError` into a real `HTTPException`, so a bad id
+  reaches the user as its own 404 with its message, not as an opaque 500. Both routes use it.
+  The trainer-helper `/health` probe in `/autogen` was moved off the loop too.
+- **`_app`'s docstring now carries the rule**: never call it from an `async def` route.
+  It is the only self-calling helper in the backend — `grep` for `APP +` finds nothing else.
+- **The state file is written BEFORE the thread starts.** The pipeline's first real step can be
+  a minute away, and until something was on disk the status poll returned `{}`, so the panel had
+  nothing to show. There is now a `starting` stage immediately. ⚠ Written before `_ACTIVE` is
+  set, not after — **a status that only appears once the work is underway is a status that can
+  lie** (the v1.276.29 lesson).
+
+### The UI half — its error path was destroying the error
+
+`AutogenBox.go()` did `setMsg((await r.json()).detail)` on a FAILED response. Any non-JSON error
+body — which is exactly what an unhandled exception returns — made the error handler throw, and
+his message was that secondary failure. New `errText()` reads the body as TEXT first and only
+then tries to parse it, so a plain-text 500 now reports as `HTTP 500 — Internal Server Error`.
+Also: a **busy state** (`⏳ starting…`, button disabled), the poll cut from **15s to 4s**, an
+immediate re-poll on success instead of waiting a full interval, and a line for the case where
+the run is active but has not written a stage yet.
+
+### 🧹 And the typecheck is CLEAN for the first time
+
+All 21 `tsc` errors gone (v1.276.40 found them; this clears them). **Four were real type bugs,
+not noise** — the frontend was reading fields its own interfaces did not declare:
+`FlagsT` was missing **eight** keys `backend/api/lora.py::_flag_summary` has always sent
+(including `arcface_scored`, which the panel *renders*); `BaseSetViewT` was missing `rev`, the
+per-view cache-buster; and `versionMode` referenced a bare `BaseVersionT` instead of
+`api.BaseVersionT`. The rest were unused bindings and two blocks of superseded code
+(`CharacterCard`/`NewCharacterCard`, replaced by `UnifiedCharacterGrid`, and a dead Library-tab
+cluster) — **commented out with a note, not deleted**, per this repo's habit of keeping parked
+code. `npx tsc --noEmit` now exits 0.
+
+⚠ **Found while doing it, NOT fixed — a real one:** `LoraPanel`'s `nOutfit` state has **no
+setter wired to any control**, so the new-dataset "outfit" field always submits `''`. That looks
+like unfinished wiring rather than a decision.
+
+**Not yet run:** the full ⚡ Autogen pipeline end to end. The route is proven; the pipeline
+behind it costs 40+ renders and is still open item (1).
+
+## v1.276.40 -- 🎯 Klein 3.0 was missing from "+ New Character" (2026-08-11)
+
+Lorenzo: *"i just opened the app and am viewing the main page for it with the character list.
+when i click new it gives me vnccs native or vnccs klein hybrid mode, no klein 3.0 mode, which
+is our main mode now."*
+
+**He is right, and the small print underneath the button proves it was known:** it read *"Klein
+3.0 characters are created in 🧬 Text 2 Image / 🎯 Klein 3.0."* That is a workaround wearing a
+label. The picker has offered exactly two VNCCS lanes since v1.276.0, while the mode the app is
+now built around could only be reached by knowing to go somewhere else first.
+
+### The fix
+
+🎯 **Klein 3.0 is now the first option, full width, marked `main mode`**, with the two VNCCS
+lanes demoted to a row underneath. Klein 3.0 is **name-first** — `POST /api/klein3/characters`
+creates an empty character and the references, views, outfits and datasets all come after — so
+the picker takes the name inline, creates it, and opens the panel with it already selected.
+
+- Enter submits. A blank name is a navigation, not an error: it just opens the Klein 3.0 panel,
+  where the same name box lives.
+- A duplicate name 409s with a readable message and the modal STAYS PUT, rather than navigating
+  to a character it did not create.
+- Selection reuses the existing focus key (`rbmn_focus_char`, read and cleared by `Klein3Panel`
+  on mount) — the same mechanism the grid's 🧭/👗 jump buttons already use. No new plumbing.
+
+### ⚠ And a trap found while verifying it: `npm run build` has NEVER worked here
+
+The frontend build is `tsc && vite build`, and **`tsc` reports 16 pre-existing errors** across
+`LoraPanel`, `VNCCSNativePage` and `CharacterStudioPage` (unused vars, plus `arcface_scored`,
+`rev` and `BaseVersionT` missing from their types). None of them stop vite, and none of them are
+new — `run.bat` ships `npx vite build` with no typecheck, which is why nothing has ever noticed.
+
+New **`scripts/build_frontend.bat`**: the same `npx vite build` the app actually ships, with its
+output VISIBLE and its exit code meaningful, then `tsc --noEmit` afterwards as information
+rather than as a gate. Gating on tsc would mean this frontend can never be built at all.
+It exists because `run.bat` rebuilds with `>nul 2>&1` and, on failure, serves the OLD `dist/`
+behind a one-line warning — the app looks fine, the version banner is right, and the change is
+simply absent.
+
+**Verified:** build OK, new bundle `index-DylBLZR0.js`, and it greps positive for `main mode`,
+`Create & open`, `Open Klein 3.0`, `Reference-driven characters` and `Or the VNCCS lanes` —
+with the old *"Klein 3.0 characters are created in…"* string gone. The silent-vite check.
+
+## v1.276.39 -- ⭐ a BRAND-NEW character built its whole base set in one press (2026-08-11)
+
+The last untested path in the view code, and the one ⚡ Autogen sits directly on top of: a
+character that has **nothing** — no views, no anchor, no base — asked for front, back, left and
+right in a single call.
+
+### Why it had never run
+
+The `deferred` second pass (v1.276.19) exists because a side view's direction reference is *the
+opposite profile, mirrored*, and a brand-new character has neither side. The branch fires only
+when `right` is requested, has no angle reference, and `left` is in the same batch. Every
+character in the library already had both sides, so **that code had never once executed.**
+
+### The instrument first: `scripts/k3_new_char_from_ref.py`
+
+Seeds a throwaway character from an existing one's **uploaded** references, over the backend's
+own HTTP API — no project-dir path derivation, so the `cfg.project_dir` DB-override gotcha
+cannot apply. ⚠ Uploads only: handing a lane its own generated output back as source material is
+the drift loop this repo has been bitten by four separate ways (v1.275.9, v1.276.16, .17, .19).
+`--delete` removes the throwaway. Test mutations belong on throwaway records — the v1.276.35
+lesson, where a rename test landed on a live entry.
+
+    python scripts/k3_new_char_from_ref.py --from dorian --name "ViewTest01"
+
+### The run
+
+    viewtest01  <- one 1024x1536 front photograph + 9 description fields, nothing else
+    deferred    ["right"]                                    the branch fired
+    refs_used   front / back / left   [face_crop, front_upload]
+                right                 [face_crop, front_upload, dir_c9dec9da5673]
+                c9dec9da5673 IS the left view's ref id, so the direction reference is
+                genuinely the mirrored LEFT — cited at slot 3 (angle_ref right: 3)
+    attempts    front +0.08 · back "no face — correct for a back view"
+                left -3.36 (yaw -69.2) · right +2.91 (yaw +72.4)
+                ALL ok on attempt 1 — no retry, no mirror route needed
+    anchor      0.9640, "cropped from upload (GAN)"
+    fanned      .163 / .224 / .201 in the first pass, .163 for the deferred one
+
+**Eyeballed as well as measured** — the v1.276.17 lesson is that a number and a picture answer
+different questions. The four-view turnaround is correct, and the garments hold across all of
+them (dirty t-shirt, stained black shorts, white socks, black sandals), which is
+`_character_garments()` from v1.276.14 doing its job on a character it had never seen.
+
+### ⚠ One number deliberately NOT claimed
+
+`k3_face_audit.py` scored the generated **front at 0.9509** against the upload, where
+clonejoan's recorded fronts sit at 0.33–0.45. It is tempting to read as a large win. It is
+**confounded three ways**: a different character, a different source photograph, and a
+reference pool of `[face crop, front upload]` containing **no generated material at all** — a
+state only a fresh character is ever in. Worth a real A/B; **not a result.** Profiles scored
+left 0.5685 / right 0.5904, low against a frontal baseline by construction.
+
+### Docs
+
+Open list updated in `HANDOVER_PROMPT.md`, `docs/OPERATIONS.md` and `README.md` — the three had
+drifted apart once before (v1.276.38) and are kept identical. New script added to the loop-script
+table in OPERATIONS §6; `docs/KLEIN3.md`'s `deferred` paragraph now records that the branch has
+actually run, and the degradation worth knowing about — **if LEFT fails all its retries the
+deferred RIGHT still renders, blind, with no direction reference.** It degrades quietly rather
+than failing, so check `angle_ref` before trusting a right view whose left sibling is missing.
+
+## v1.276.38 -- 📚 handover restructured for a fresh session, + a second doc audit (2026-08-11)
+
+Lorenzo is moving to a new chat, so the question is no longer "are the docs written" but **"can
+a session that knows nothing pick this up cold."**
+
+### 🚀 HANDOVER_PROMPT.md now OPENS with what a new session needs
+
+It had grown to 961 lines with ~40 version blockquotes stacked at the top — and the **STATE
+block was at line 933**. A new session reads the top, so the top was the wrong content.
+
+It now begins with a **🚀 START HERE** section: what the app is, the current state and the DHCP
+warning, **how to reach the LAN at all** (the agent, inbox/outbox, and that `agent.bat` dies
+with its window), **the five rules that cost the most to relearn**, a short **do-not-re-litigate
+list** (closed and measured), the git-mutation prohibition, and the open list in priority
+order. The version log follows underneath as history.
+
+The trailing STATE block had also accumulated layered "his next test" text from several
+sessions, half of it already closed. Replaced with a clean one.
+
+### 🔎 Second audit — 4 contradictions, all fixed
+
+Docs checked against code again with file:line evidence. Version headers agree; the v1.276.37
+upscale-then-crop behaviour is implemented as documented; `_upscale_file` is genuinely
+non-destructive; the START HERE section carries what it claims to. But:
+
+1. **README described the outfit face view as a fifth render.** It is a CROP of the front —
+   the whole reason it cannot disagree with the costume. Rewritten, and the v1.276.37
+   upscale-before-crop behaviour added (README had no mention of it).
+2. **`docs/OPERATIONS.md` §2 said an outfit "renders … face close-up"** with the crop caveat
+   only appearing 55 lines later in §3. The caveat now sits where the view is first described.
+3. **`docs/KLEIN3.md`'s v1.276.24 close-up section still read as current** when it is now only
+   the FALLBACK path (no front render yet, or no face found). Marked as such at its heading.
+4. **The handover cited "crop-first since v1.276.7"** — it is **v1.275.7**, per the code and
+   `docs/KLEIN3.md`.
+
+Also: **`docs/OPERATIONS.md` claimed the repo was published** under "done this session" while
+the handover listed publishing as open — both true of different moments, misleading together.
+It now says published ONCE on 2026-08-09, **not pushed since, 552 files, ~37 versions ahead**.
+And the three open lists (README / OPERATIONS / HANDOVER) disagreed in length and order; they
+now carry the same six items with a note to keep them in sync.
+
+**Same lesson as v1.276.36, one layer out:** it is not enough for a correction to exist
+somewhere. It has to exist **where the reader will hit it first** — which is why §2 mattered
+more than §3, and why the README wording mattered at all.
+
+## v1.276.37 -- 🔬 upscale the FRONT before cropping the face out of it (2026-08-11)
+
+Lorenzo: *"during our outfit generation, are we upscaling the front view that occurs first,
+then doing the face crop, and then upscaling that … wasnt sure if we were already doing that
+or not."*
+
+**We were not — only the second half.** v1.276.29 cropped the face out of the raw 832×1216
+front render and upscaled the *crop*. His original suggestion had two upscales in it and I
+built one.
+
+### Why the missing half matters
+
+A head-and-shoulders box is about 15% of an 832×1216 frame, so cropping first hands the
+upscaler a **~180×220 source** and asks it to invent 16× the pixels. Upscaling the front to
+2048 first makes that same box **~440×540 of real detail** before anything is invented.
+
+`_upscale_file()` is a new **non-destructive** helper — it writes to a temp path rather than
+in place, because `_start_ref_upscale` would have overwritten the outfit's own front render,
+an image he has already approved. Failure returns None and the crop falls back to the
+original: a smaller source beats no source.
+
+### Measured, same outfit, same seed, only the crop source differs
+
+    ARM A  crop from the raw front        ->   712 × 876
+    ARM B  upscale front to 2048, then crop -> 1192 × 1464
+
+At matched display size the difference is visible where it matters: individual hair strands
+separate and the goggle-strap edges are clean, where A is smoothed. On by default
+(`upscale_front_first`), costing one extra GAN upscale per outfit face view and **no extra
+Klein render**.
+
+### ⚠ And I nearly reported a false negative
+
+The first A/B run produced two identical 712×876 results and no `big_*` cache file, which
+looked like the feature silently failing. It was not: **both requests had 404'd** —
+`"garment reference image not found"`, because I reused a `garment_ref` id from a ref I had
+deleted during an earlier cleanup. I was comparing the same stale image against itself.
+
+I only caught it by checking the queued job's *response*, which I had not looked at. **A test
+that reports "no difference" needs its request verified before its result is believed** — the
+same lesson as the thumbnail in v1.276.17, in a different disguise.
+
+## v1.276.36 -- 📚 documentation audit: 18/18 code claims pass, 4 stale passages fixed (2026-08-11)
+
+A full sweep at Lorenzo's request. Rather than re-read my own edits, the docs were audited
+**against the code** — the same method that caught a real bug in v1.276.23.
+
+### ✅ 18 of 18 code claims verified
+
+Every documented behaviour was checked against source with file:line evidence: all 14 costume
+routes exist; `costume_list` really does take `stage`/`wearer`/`q` and return `by_wearer` +
+`ref_images`; adopt 409s on a candidate; designs save `approved: False`; **Krea 2 genuinely
+fans out** with workers assigned round-robin *before* the threads start; the reference scan
+fires when refs are present and no prompt is typed; a custom prompt is wrapped unless
+`raw_prompt`; `_start_ref_upscale(blocking=True)` runs inline; the outfit face view really is
+a crop; `_back_garments` strips front detail; `_ref_url` carries the mtime buster; **no
+unfiltered costume fetch remains in the panel**; the reference uploader is gated on model
+capacity. No drift between docs and code.
+
+### ⚠ But four passages were wrong, and one was live
+
+**`docs/KLEIN3.md` still asserted "minimal swimwear does not render on this mannequin with
+Krea 2".** That claim was retracted in v1.276.34 — his own run produced a clean bikini — and
+the retraction reached the CHANGELOG, the handover and the source comment, **but not the
+current-state doc**, which is the one a future session actually reads. Fixed, and the
+retraction is now stated there in full.
+
+Also corrected:
+- **The character face anchor** was described as rendering first from the identity refs. It
+  has been **crop-first by default since v1.276.7** (`face_from_crop`), generating only when
+  the crop misses `_ANCHOR_MIN`.
+- **The outfit close-up** was still described as "rendered FROM that front" fifteen lines
+  below the section explaining it is now cropped.
+- **`HANDOVER_PROMPT.md`** carried two superseded claims inside its v1.276.30 block — Krea 2
+  being single-box, and the swimwear limit. Both now marked **SUPERSEDED**/**RETRACTED**
+  inline, pointing at the entry that overturned them, rather than silently contradicting the
+  newer text above them.
+
+**The lesson worth keeping:** a correction is not finished when the CHANGELOG records it. The
+CHANGELOG is a log — the current-state docs are what get read first, and a retraction that
+only lands in the log leaves the wrong answer in the place someone will look.
+
+### 📚 And the rest of the sweep
+
+- **README** — a "newest first" index at the top of Status, and the costume section promoted
+  to a real heading so it can be linked.
+- **`docs/OPERATIONS.md` §10** — the costume library and the self-checking outfit sets are now
+  in "done and measured"; a new block lists the **standing rules this session produced** (name
+  only what is in view · never feed a lane a contradicting reference · a close-up copies its
+  reference's framing · in-place upscales need versioned URLs · `create_task` raises off the
+  event loop · a correct API does not mean a correct screen). §2 heading span corrected.
+- **Publish check** — 1504 tracked/new → **552 publishable** (was 550; +`backend/api/costumes.py`
+  and +`scripts/k3_side_compare.py`, both legitimate source). No token, `.env`, `_diag`,
+  `VNCCS302` or handover paths in the set.
+
+## v1.276.35 -- 🔎 the costume library becomes browsable: rename, filter, search, ℹ info (2026-08-11)
+
+Lorenzo: *"make it so we can change costume names, and also make it so we can filter costumes
+by men, women, and unisex cuts because as this gets more populated we will want to be able to
+sort, filter and search. also make it so we can see the prompt or reference maybe by clicking
+an info button so we can see the information used to generate the costume … incase we want to
+reference or reuse that data."*
+
+All three are the same underlying point: **a wardrobe you cannot search is a folder of
+pictures.** He is designing for the state this reaches in a month, not the state it is in
+today, which is the right instinct — there are already 26 candidates from one afternoon.
+
+### 🔎 Filter and search
+
+`GET /api/costumes` takes `wearer` (woman | man | unisex) and `q`. The search is deliberately
+wide — it matches the **name, the prompt, every garment slot, the model and the wearer** — so
+"coat" finds a costume whose name never mentions one. `by_wearer` counts come back with every
+response so the filter chips can show totals without a second call.
+
+    all       26   by_wearer {woman: 25, man: 0, unisex: 1}
+    woman     25
+    man        0
+    q=bikini  22
+    q=coat     4
+
+### ✏️ Rename, and fix a mis-set cut
+
+`POST /{cid}/rename` now takes an optional `wearer` too — a costume saved as unisex that is
+plainly a women's cut can be corrected without re-rendering it.
+
+### ℹ️ Info: everything that made the image
+
+An ℹ button on each library card expands to show the **model, seed, wearer, every garment
+slot, the reference images it was built from** (clickable into the lightbox) and the **full
+prompt**, with a 📋 copy button. That is the whole provenance of the design, which is what
+makes it reusable rather than just re-viewable.
+
+### ⚠ And an apology in the record
+
+I tested rename against a live library entry and renamed his **"Pink Swim Suit V1"** to
+"Desert scavenger coat". Restored immediately, name and wearer both. Test mutations belong on
+throwaway records; I had one available and used his instead.
+
+## v1.276.34 -- 📷 with a reference, READ the garment off the image (2026-08-11)
+
+Lorenzo: *"i just uploaded a bathing suit picture used klein and it didnt make the correct
+clothing at all. are we doing our llm scan to describe it and not relying on a prompt here.
+when we have a reference image we shouldnt need the prompt if im logically thinking about
+this, unless you have a counter point."*
+
+**He is right, and there was no vision scan on that path — the reference went to the model
+while the words came from whatever was in the form.** A typed description and a photograph can
+disagree, and at cfg=1 the words win, which is how a bathing-suit reference produced something
+else entirely.
+
+### The counterpoint, and it is narrow
+
+The prompt cannot go away completely, because **the reference cannot say "put this on a plain
+grey mannequin, cut for a woman, on a white floor"**. The photograph supplies the GARMENT; the
+prompt supplies the STAGING. What it should never do is ask him to describe a garment he has
+already shown us.
+
+So: when references are attached and no custom prompt is typed, the first reference is
+**vision-scanned** and the garment text is built from what it actually contains. The mannequin
+and wearer framing wraps it as always, and the references are still cited by slot number.
+`scan_refs: false` opts out; a typed prompt still wins outright.
+
+The scan result is published on the job as `scanned` and **stored on the costume record's
+slots**, so a design made from a photo arrives in the library already described — which is
+what makes it reusable rather than an anonymous picture.
+
+### Verified — no prompt typed at all
+
+Reference: a green bikini on a mannequin. Design call carried `refs` and nothing else.
+
+    scanned  {"top": "a green halterneck bikini top",
+              "bottom": "a green high-waisted bikini bottom"}
+    2 designs on Klein, .163 / .224 — both reproduced the green halterneck
+    bikini faithfully, same cut, same colour.
+
+### ⚠ And a correction to v1.276.30
+
+I wrote that *"minimal swimwear does not render on this mannequin with Krea 2"* after four
+failed renders. **That was too strong.** Lorenzo's own "Bikini Check 2" run produced a clean
+green bikini on a mannequin with Krea 2 — the very image used as the reference above. The
+honest statement is that swimwear is *less reliable* than a coat, not that it fails; and with
+a reference image plus the scan it now works directly. The docs are corrected.
+
+## v1.276.33 -- 🖼 costumes from a photograph: reference images for the edit models (2026-08-11)
+
+Lorenzo: *"in the costume library we can add an image or images as a reference when creating a
+costume that only shows up if an edit model is used like klein or qwen. This way we can create
+reusable costumes from image references as part of our costume library."*
+
+### The uploader appears only where it can be used
+
+`GET /api/costumes/models` now returns each model's **reference capacity** —
+`klein 5 · qie 2 · krea2 0 · z_image 0 · anima 0` — and the modal shows the upload block only
+when that number is above zero. Krea 2 and Z-Image are pure text-to-image; an upload box on
+them would just be a lie. If you already have references loaded and then switch to a text-only
+model, an amber note says they will be ignored and which models can use them.
+
+`POST /api/costumes/refs` (multipart) stashes an image; `GET|POST /refs/{rid}/image|delete`
+serve and remove it. Chosen references ride on the design call as `refs: [id, …]`, are capped
+to what the model accepts, and are **stored on the costume record**, so a design remembers
+what it was built from.
+
+⚠ Uploads are **per-worker**, so each reference goes up fresh to whichever box that image was
+assigned to by the round-robin. And the prompt **cites the references by slot number** — Klein
+and QIE address them positionally, so "image 1" is what makes them evidence rather than
+something averaged in.
+
+### Verified end to end
+
+A full-body character photo uploaded as a reference, then 2 designs on **Klein** with
+`refs: ["7a2ba9e18048"]`:
+
+    workers   .163 and .224 (round-robin, in parallel)
+    refs used 1
+    prompt    "…The garments are exactly the ones shown in image 1 — the same cut,
+               the same colours, the same fabric and the same fastenings, now worn
+               by the mannequin."
+
+The patched canvas coat, its leather straps and buckles came through onto a clean grey
+mannequin, with the person gone — which is exactly the point: a costume you can now put on any
+character in the cast, built from a photograph rather than from a paragraph.
+
+## v1.276.32 -- 🧪 the poll that put every candidate back in the library (2026-08-11)
+
+Lorenzo, twice now: *"its still adding the unapproved costumes to the costume library… when i
+look at our costume library its our approved costumes and all candidates in the same grid.
+very wierd."*
+
+**He was right both times, and I was wrong to close it last version.**
+
+I checked the API, saw `{candidates: 17, library: 1}`, concluded the gate was working and
+called it a stale page. The API *was* right. The bug was three seconds downstream of it.
+
+The design-job poller refreshes the lists while a run is going. It fetched the **unfiltered**
+list — `GET /api/costumes?t=…`, no `stage` — and assigned the result to **`setCsLib`**. So the
+library grid was correctly drawn with 1 approved costume, and then overwritten with all 29
+every three seconds. The split existed on the server and in the initial load; the polling loop
+undid it on a timer, which is exactly why it looked "very weird" rather than simply broken.
+
+Fixed: the poll issues the same two stage-scoped queries as the initial load, and sets both
+lists. There are now **no unfiltered costume fetches left in the panel** — that is the thing
+to grep for if this ever recurs.
+
+    library query      1   (Desert scavenger, approved=True)
+    candidates query  28
+    unfiltered        29   <- what the poll was assigning to the library grid
+
+### The lesson, and it is mine
+
+Last version I verified the BACKEND, found it correct, and stopped — writing "a fix for a
+working feature is a new bug" as though that settled it. It was the right instinct applied one
+layer too early: **a correct API does not mean a correct screen.** He reported a UI symptom and
+I tested a server contract. When the user describes what they SEE, the check has to reach the
+thing they are looking at.
+
+## v1.276.31 -- 🧵 Krea 2 fans out after all, and the untitled costumes (2026-08-11)
+
+Three reports. One was a real single-box limit I had inherited without checking, one was a
+naming default, one was a polling choice — and one of the three turned out not to be a bug.
+
+### 🧵 "the images are not fanning out… they seem to be going to the same one"
+
+**True, and for two separate reasons.**
+
+**Krea 2 was pinned to ONE box.** `forge.py` has always rendered Krea 2 on `_krea2_host()`
+alone, and v1.276.30 inherited that as "Krea 2 lives on one box, fanning would just queue four
+jobs on the same GPU". **I never checked whether that was still true.** It is not:
+
+    /models/diffusion_models on all three workers
+      192.168.12.201  krea2_turbo_fp8.safetensors
+      192.168.12.163  krea2_turbo_fp8.safetensors
+      192.168.12.224  krea2_turbo_fp8.safetensors
+
+The single-box rule was a habit, not a hardware limit — and both `_krea2_core_graph(host, …)`
+and `_krea2_render(host, …)` already took a host. Krea 2 now fans out like everything else.
+
+**And the generic path had a race.** Each thread asked the dispatcher for a worker *inside*
+the thread, all at the same instant, before any load had registered — so they could all be
+handed the same box. Workers are now assigned **round-robin up front**, which is the only way
+to guarantee a spread.
+
+**Measured:** 3 images on Krea 2 → `.163`, `.224`, `.201`, all running simultaneously, whole
+batch done inside one 16-second poll instead of three sequential renders. The job publishes
+`workers` and the modal shows the spread.
+
+### 🏷 "and is untitled"
+
+The design call took its name from the **outfit form's** name field, so designing before
+naming the outfit saved everything as `untitled costume`. The Costume Studio has its own
+**Costume name** box now, seeded from the outfit name when you open it.
+
+### 👀 "they are not showing up as they are generated"
+
+The poller only refreshed the candidate list when the whole job finished. Each image is filed
+the moment it lands, so it now refreshes on every tick while running — they appear one by one.
+
+### ✅ And the one that was not a bug
+
+*"the clothing that's coming up is going into the costume library and not under candidates"* —
+the staging gate was working: `{"candidates": 17, "library": 1}` at the time of the report, and
+the only library entry was the one design deliberately approved during testing. This was
+almost certainly a stale page from before the v1.276.30 restart. Checked before changing
+anything, because a "fix" for a working feature is a new bug.
+
+## v1.276.30 -- 🧪 candidates, live per-image status, and the prompt box that ate the mannequin (2026-08-11)
+
+Three asks and one bug, and the bug was mine.
+
+### ⚠ "I did a set of female bathing suits and they did not appear on a mannequin"
+
+He is right, and the cause was in the field label. The **Custom prompt** box was a FULL
+override — `prompt = body.prompt or _slots_to_prompt(...)` — so the moment anyone typed in it,
+the entire mannequin framing was discarded. The stored prompt for his bathing-suit run was
+exactly what he typed and nothing else:
+
+    "a 2 piece high waist string bikini set with no footwear"
+
+No mannequin wording anywhere. He got flat product shots and one cropped body, which is
+precisely what that prompt asks for. **Nobody wants that box to cost them the mannequin.** It
+now describes the GARMENTS and the framing is still added; `raw_prompt: true` is the real
+escape hatch, clearly labelled as advanced.
+
+*(Also worth noting from his prompt: "with **no** footwear" is a negation, and at cfg=1 that
+invites footwear. Describe what IS worn.)*
+
+### 👤 Who is it cut for
+
+His follow-up: *"make it so we have to define if its for a woman, man, or if its unisex?"* —
+`wearer` on the design call, three mannequin forms. Only the PROPORTIONS change; the figure
+stays blank-headed and matte grey so nothing identifying enters the reference.
+
+### 🧵 Fanned across workers, with per-image status
+
+*"make sure costume generation can be fanned across workers and we have the ability to see the
+status of whats going on and what step of what image its at."*
+
+Each image is its own thread across the klein pool, and the job publishes an `items` array —
+per image: queued / running / done / error, which worker took it, and the error if any. The
+modal renders that as a live list.
+
+⚠ **Krea 2 stays sequential** and deliberately so: it runs on ONE box (`forge.py` has always
+rendered it that way), so fanning four jobs out would just queue them on the same GPU. The
+status is per-image either way.
+
+### 🧪 Candidates, and nothing reaches the library unapproved
+
+*"the generated images we do with the prompt are in their own testing area and we approve
+which ones we want to add to the actual costume library … This is going to get really messy
+fast."* — Four renders a click; he is right.
+
+Every design lands as a **candidate**. `GET /api/costumes?stage=candidates|library|all`,
+`POST /{cid}/approve` (with an optional rename as you promote it), and
+`POST /candidates/clear` to bin the rejects. **`adopt` now 409s on an unapproved candidate** —
+the library is the only thing a character can be dressed from. Verified: adopt a candidate →
+409, approve → 200, adopt → 200, counts move 10/0 → 9/1.
+
+### ⚠ AND A FAILED EXPERIMENT, recorded so it is not repeated
+
+The bikini still came back as a floor-length dress even with the mannequin restored. Theory:
+~60 words of staging before the garment dilutes it. So I tried **garments first**.
+
+**It was worse — bare mannequins wearing nothing at all, twice, at the same seed.** Reverted;
+mannequin-first is the wording the Desert scavenger set was built with and it reliably clothes
+the figure.
+
+**The honest limitation is narrower than the ordering: minimal swimwear does not render on
+this mannequin with Krea 2.** Neither wording produced a bikini. For swimwear, try another
+model in the picker or use the 🖼 photo-scan path. Four renders spent establishing that, and
+it is written down rather than left as a mystery.
+
+## v1.276.29 -- 🙂 the face view is now a CROP of the front, not a second guess (2026-08-11)
+
+Lorenzo: *"when I reran the desert scavenger set, the face pose has different torso clothing
+than the front… are we not just simply upscaling the front image, then cropping the face and
+upscaling that as well to be used as reference for everything else? Would make sense unless
+you have better logic."*
+
+**His logic is better than mine was, and it removes the whole class of bug.**
+
+### What was wrong
+
+The close-up was its own Klein render, given the outfit's front render as a reference and
+asked to match it. That is a *request*, not a guarantee — and it lost. He also spotted the
+proof in the UI: the face job's references were the character's **base** face and **base**
+front standing pose, not the costume front at all.
+
+### What it is now
+
+For the `face` view, if this outfit already has a `front` render, the close-up is a **crop of
+that render**, then upscaled. No Klein render at all.
+
+It **cannot** disagree with the costume, because it *is* the costume. It costs **zero extra
+Klein renders** — only a cheap upscale to bring the cropped region back to a useful reference
+size. And it deletes the ordering machinery that existed purely to make a generated close-up
+agree with the front. Falls back to the render path when there is no front yet, and
+`face_from_front: false` restores the old behaviour.
+
+Verified: front 832×1216 → face crop 178×219 → **712×876**, same goggles, same collar, same
+necklace, `built_from` naming the exact front render it came from.
+
+### ⚠ Two real bugs found while proving it
+
+**1. A background thread cannot `asyncio.create_task`.** `_start_ref_upscale` sets the job
+status to "running" and then calls `_spawn()`, which uses `asyncio.create_task` — and that
+needs a running event loop **in the calling thread**. Called from the outfit job's worker
+thread there is none, so the spawn raised, the caller's `except` swallowed it, and the status
+sat at **"running" forever** while the workers were idle with `in_flight 0`. It looked exactly
+like a slow upscale. `blocking=True` now runs the work inline when the caller is already off
+the event loop.
+
+**A status set before the work is scheduled is a status that can lie** — that is the general
+lesson, and it is worth more than the fix.
+
+**2. The step reported done before its output was usable.** The first working version kicked
+the upscale off in the background, so the outfit finished with the face reference still a raw
+**182×225** crop — and everything downstream that read it would have got that. The upscale is
+now part of the step, and the job publishes `face_size` so the finished size is visible rather
+than assumed. GAN rather than SeedVR2 here: SeedVR2 sat on a 182px crop for over four minutes.
+
+## v1.276.28 -- 🦵 the mannequin's stand was being worn by the character (2026-08-11)
+
+Lorenzo: *"the bar thats part of the manequine … is coming through in the pictures of the
+character wearing the outfit. I just tried the desert scavenger outfit generation on my
+clonejoan character and the bar is showing from the costume image."*
+
+Exactly right, and it is the same mechanism as everything else in this lane: **whatever is in
+a reference gets copied.** v1.276.27 described the costume as *"a plain dress form … standing
+on a slim metal stand"* — so the stand is in the picture, and Klein reproduced it faithfully
+onto a character who does not need one.
+
+### The fix is at the source, because the alternative is a negation
+
+Telling the outfit prompt to leave the pole out would be *"no stand"*, and at cfg=1 with no
+negative-prompt node that paints a stand. This repo has measured that rule three separate ways
+already.
+
+So the mannequin **stops being the kind of object that has a stand**: it is now a FULL-BODY
+mannequin with arms, legs and feet, standing upright on both bare feet on a seamless floor,
+weight on its own legs. A figure that stands on its own feet has nowhere to put a pole. It
+also gives the footwear actual feet to sit on, which a dress form never had — the boots in the
+old renders were floating next to the base.
+
+The outfit prompt was tightened to match, affirmatively: **ONLY the garments** from the
+costume image, *"worn by her and fitted to her own body while she stands on her own two feet
+on a clean empty floor"* — the render is given somewhere else to put the weight rather than
+being told what not to draw.
+
+### Measured, same seed (8801), only the mannequin wording changed
+
+    BEFORE   dress form on a slim metal stand   -> pole clearly visible between the legs
+    AFTER    full-body mannequin on its feet    -> no pole, 2 of 2 renders
+    THEN     character rendered from the new costume reference -> NO BAR,
+             and the coat, patches, straps, goggles and boots all transferred
+
+### ⚠ Existing costume designs still contain their stand
+
+The fix changes what gets GENERATED; it cannot retouch pictures already in the library. Any
+costume designed before this version still has a pole in it and will still hand that pole to
+a character. Re-generate those designs — the seed and the slots are stored on every library
+entry, so the same costume comes back without the stand.
+
+## v1.276.27 -- 👗 THE COSTUME LIBRARY: describe it, design it, reuse it (2026-08-11)
+
+Lorenzo, after confirming a full costume set came out well: *"when creating a new outfit we
+also have 2 additional options: 1. describe an outfit and the llm … should fill the fields…
+2. an option after describing the outfit … to generate an image of the outfit … so we can
+modify the descriptions as well as custom prompt … Once done we can choose one of the renders
+… to use as reference for the costume creation on our character … Also KREA2 should be the
+default."*
+
+### ✍ Describe it → the slots fill themselves
+
+`POST /api/costumes/draft` — a sentence in, thirteen named slots out, using the **text** model
+(there is no image yet, so the vision one is the wrong tool). It **merges** into the form
+rather than clobbering what you typed, exactly like the photo scan.
+
+The draft prompt carries this lane's hard-won rule into the LLM itself: *do NOT use character
+or franchise names — describe the shapes, colours and materials literally.* The measured
+reason is in v1.276.22 ("supergirl leotard" → glasses on 5 of 5 renders).
+
+Verified: *"a battered post-apocalyptic desert scavenger outfit: long dusty canvas coat,
+goggles, wrapped boots, lots of leather straps"* → four correctly-named slots.
+
+### 🎨 The Costume Studio
+
+`POST /api/costumes/design` renders candidate costume images, then you pick one and it becomes
+that outfit's garment reference. **Krea 2 is the default**, with Z-Image, Anima and Klein
+selectable; count, size and a full custom-prompt override are all in the modal.
+
+**On a neutral mannequin, his call, and the right one.** A matte-grey dress form carries the
+garment and nothing else — where a person would carry a face, a body and a facing into
+whatever it is later used as a reference for, which is a mistake this lane has now made four
+separate ways. The mannequin description is affirmative throughout, because these graphs run
+at cfg=1 where "no face" paints a face.
+
+**⚠ Krea 2 does NOT go through the generic text-to-image path — and finding that out cost the
+first two renders.** They came back `400 Bad Request` from the worker. Krea 2 has its own lane
+in `forge.py` because the Krea 2 box has no decorator custom nodes *and* the unet filename
+baked into `KREA2_TURBO_T2I.json` is not what is installed — `_krea2_unet()` **discovers** it
+on the host and caches it. The design path now calls `_krea2_core_graph()` / `_krea2_render()`
+for Krea 2 and the generic builder for everything else.
+
+### 📚 A shared library, not a per-character folder
+
+His call: a costume designed once should dress a whole cast. Designs live in
+`<project>/_libraries/costumes/`. Adopting one **copies** it into the character as a `garment`
+reference — copied, not linked, so deleting a design from the library can never orphan an
+outfit that was already rendered from it.
+
+### ⚠ And the mannequin got scanned as clothing
+
+Adopting rescans the picked image back into the slots (his call — the text should describe
+what was *rendered*, not what was asked for). The first live adopt returned **four phantom
+garments**: "gray long-sleeved shirt", "gray tights", "gray leggings", "gray pants". All of
+them were **the mannequin's own body**.
+
+Telling the vision model the grey form is a dress form cut it from four to two. Not solved —
+a matte-grey torso genuinely looks like a grey top — so the remainder is filtered **in code**,
+and only for slots the costume never asked for: design an actually-grey shirt and it survives,
+because it is in the request. Nine-case check on the heuristic before it shipped:
+
+    "light grey long-sleeved shirt"          -> mannequin, dropped
+    "dark grey tights or leggings"           -> mannequin, dropped
+    "a grey wool turtleneck sweater"         -> a real garment, kept
+    "grey cotton undershirt"                 -> a real garment, kept
+
+Final adopt: six real slots, no phantom greys.
+
+## v1.276.26 -- 🔗 side-to-side garment continuity: the experiment, and it worked (2026-08-10)
+
+The open item from v1.276.24: *"side views look pretty good although a little inconsistent
+when compared as some details dont match on each side."* He asked for it to be tested rather
+than assumed, so it was.
+
+### First: an instrument, because "a little inconsistent" is not measurable
+
+**Attempt 1 failed and is recorded so it is not retried.** Asking the vision model to "list
+the differences" between the two side images returned an **empty list for both baseline
+outfits** — including ones with a visibly different shoe colour. A 7B vision model comparing
+two images holistically answers "same costume" and stops.
+
+What works is the prompt already proven in `outfits/scan`: describe ONE image into named
+slots. `scripts/k3_side_compare.py` scans each side separately (mirroring the right so both
+face the same way), then diffs the two slot dicts **in code**, where the comparison is exact
+and cannot be talked out of a difference. Free — two CPU-side vision calls, no GPU.
+
+⚠ It is still noisy: some of the score is the model describing one side more thoroughly
+("hooded cape" vs "fabric") rather than a real garment difference. Read the score as a trend,
+not a truth.
+
+### The mechanism
+
+A side view had no garment evidence at all — it was inventing trims from words, independently
+of the other side. The fix had to respect what this lane already learned twice: a frontal
+render behind a side view drags the facing (v1.276.16), and so does the opposite profile
+(v1.276.17). But **the opposite profile MIRRORED faces the same way as the target**
+(v1.276.19) — so the other side's finished render, flipped, is garment evidence at the
+correct facing. Cited by slot number. RIGHT renders after LEFT so there is a sibling to
+mirror.
+
+### Measured — same outfit, SAME SEED (31000), A/B via `sibling_ref`
+
+    ARM A  sides rendered independently        MISMATCH SCORE 5
+           (incl. a real one: brown leather shoes on the left,
+            red knee-high boots on the right)
+    ARM B  sibling mirrored garment reference  MISMATCH SCORE 1
+           (a spurious "underlayer" the scan saw on one side only)
+
+**Facing survived** — left faces left, right faces right, confirmed visually. That was the
+risk, and it is the reason the reference is mirrored rather than passed as-is.
+
+**Identity did not drop.** A side view with a sibling carries 4 references, and v1.275.10
+measured 4 refs as *worse* for base-view identity — so it was checked rather than assumed:
+
+    ARM A sides  0.2621 / 0.3318   mean 0.2970
+    ARM B sides  0.3231 / 0.3081   mean 0.3156
+
+Slightly higher, comfortably inside noise at n=2 per arm. No cost detected; no gain claimed.
+
+### Shipped on by default, with the switch left in
+
+`sibling_ref` defaults true and is exposed on `POST /outfits` — it is how the A/B was run and
+it is how the next one will be. **n=1 outfit pair**, so this is a promising result rather than
+a settled one; the switch exists precisely so it can be turned off if a costume disagrees.
+
+## v1.276.25 -- 🔍 the upscale that was working, and the UI that never showed it (2026-08-10)
+
+Lorenzo: *"I also mentioned upscaling the references if they are not a good size when we
+upload or very blurry in the details because they are small… when I click on the reference
+image we now see in the outfit UI it shows the original size and not the upscaled size that
+should be used."*
+
+Two separate things, and he is right about both.
+
+### ⚠ The image on disk was correct. The UI was showing a stale copy.
+
+An upscale replaces the file **in place, under the same id** — deliberately, so every job that
+reads that slot gets the better image without anything having to choose between two versions.
+But the URL never changed either, so the browser kept serving the copy it already had.
+Nothing was broken in the pipeline; the panel was lying about it.
+
+`_ref_url()` now appends the file's mtime as `?v=`, so the URL changes whenever the file does,
+on every path that serves a reference — the ref cards, outfit views, `built_from` thumbnails,
+the garment photo and the download links. `?v=` is ignored by the route. The panel also
+re-fetches when a `refup` job finishes, so an upscale visibly refreshes instead of looking
+like it did nothing.
+
+Verified: `…/refs/8d4a26301f64/image?v=1786318031`, and his upscaled front reference reports
+**2560×3840** — it had been upscaled correctly all along.
+
+### 📏 And now the size is on screen
+
+Every reference card shows its real pixel dimensions, and anything under the useful threshold
+is flagged **amber with a ⚠**. That question — *is this big enough to be a reference?* — was
+previously unanswerable without downloading the file. The tooltip explains the actual reason:
+everything is scaled to ~1MP before it reaches the model, so a small file is scaled **up** out
+of detail that is not in it.
+
+`_public_char` now carries `size`, `orig_size`, `upscaled_engine` and `small` per reference —
+and the ⬆ badge's tooltip says which engine ran and what it came from.
+
+### ⬆ Auto-upscale now covers the ORDINARY upload path
+
+v1.276.22 wired the size check into `outfits/scan` only. That missed **"⬆ Upload reference"**,
+which is where a small web grab is most likely to enter a character in the first place — and
+is exactly the case he hit. `POST /characters/{slug}/refs` now measures the upload and starts
+a background upscale below `_REF_MIN_SIDE` (768), same as the scan path, `engine="auto"` so
+SeedVR2 is preferred where a worker has it. `upscale` / `min_side` are form fields if you want
+to override, and the response reports what it did.
+
+## v1.276.24 -- 🔄 the backwards costume, the bust shot, and showing the sources (2026-08-10)
+
+Lorenzo, reviewing a full outfit set: *"the face closeup seems to be a bust closeup and the
+back view is the character facing the right way but the costume is backwards. I tried 2
+different runs and the back view always comes out wrong… side views look pretty good although
+a little inconsistent… Also if our costume was based on a reference or multiple reference
+images we should show them somehow so we can compare the output with the reference costume
+images."*
+
+### 🙂 The close-up was a bust shot — it was copying its reference's framing
+
+v1.276.21 hands the close-up the outfit's own FRONT render so it carries that costume's
+collar and jewellery. That render is a **full body**, and Klein reproduces a reference's
+framing as readily as its content — so the "close-up" pulled out to chest level on two
+different costumes.
+
+`_headshot_of()` crops that front render to head-and-shoulders first, reusing the same
+`_face_crop_box` geometry as the character face anchor, so every close-up in the lane frames
+the head the same way. The garment evidence survives; the framing does not follow it in.
+**Verified: properly framed head-and-shoulders, collar and pendant still legible.**
+
+### 🔄 The backwards costume — and the fix that did NOT work first
+
+The chest emblem was printing across her **back**. My first attempt appended a clause saying
+the emblem "belongs on the front of the costume, turned away from the camera and out of
+shot". **It did not work** — the emblem came back in the same place.
+
+The cause is the same one that produced the glasses, one layer down: **the garment list still
+said "a blue long-sleeved leotard with a red and yellow diamond shield emblem ON THE CHEST".**
+Klein renders what is named and puts it where it can be seen. Contradicting it afterwards is
+arguing with a description instead of changing it.
+
+`_back_garments()` strips front-only detailing out of each garment for the back view — clauses
+introduced by "with / featuring / bearing / emblazoned", or a trailing comma-clause, that
+mention an emblem, logo, print, shield, crest, badge, zip, button, buckle, pocket, collar or
+neckline:
+
+    "a blue long-sleeved leotard with a red and yellow
+     diamond shield emblem on the chest"          ->  "a blue long-sleeved leotard"
+    "a cropped red leather biker jacket with silver zips"
+                                                  ->  "a cropped red leather biker jacket"
+    "a long red cape hanging from the shoulders"  ->  unchanged (nothing front-only in it)
+
+**Verified: back view now clean — no emblem, skirt and boots correct.** The rule, for the
+third time in this lane: *describe what is in view; do not name what is not.*
+
+⚠ The verifier is now **view-aware** for the same reason. It was judging a back view against
+the full costume list and reporting the chest emblem as "missing" from a photo of someone's
+back — a false failure that would spend a retry proving it. `_outfit_expected(…, view)` uses
+the back-stripped list for a back view and only `_FACE_VISIBLE_SLOTS` for a close-up.
+
+### 🔍 The references are shown next to the result
+
+Every outfit view now records `built_from` — the reference images that job actually received —
+and the wardrobe shows them as a thumbnail strip under each render, clickable into the
+lightbox. The scanned source photo, when there is one, is shown larger and outlined. Derived
+inputs (mirrored direction refs, generated head crops) are excluded, since they are not
+references anybody chose.
+
+### Still open, and honestly reported
+
+**Side-view inconsistency between left and right is NOT fixed.** He is right that details
+differ between the two sides; they are independent renders sharing a garment description
+rather than pixels, so small divergence is expected. Feeding each side the other side's
+finished render as a garment reference is the obvious next thing to try, and it is untested —
+it may equally drag the facing, which is a problem this lane has already had four times.
+
+## v1.276.23 -- 🔐 .gitignore audit: one file was leaking, and one nearly stopped shipping (2026-08-10)
+
+A full documentation and publishing sweep. The docs were straightforward; the `.gitignore`
+audit found two real problems, in opposite directions.
+
+### ⚠ The working repo tracks 953 files that .gitignore excludes
+
+Not a regression — the documented trap: **.gitignore does not untrack anything already
+committed.** `_diag/` (683 files), `VNCCS302/` (266), the restore zip and
+`HANDOVER_PROMPT.md` are all still in the index here. That is fine *provided* the publish
+step drops them, which it did — via `$DROP_DIRS` / `$DROP_FILES`, a **hand-maintained list**.
+
+**Two sources of truth that can drift. They already had:**
+
+    backend/data/character_studio/face_detection_yunet_2023mar.onnx
+
+is tracked, matches the `*.onnx` rule added in v1.276.4, and appears on **neither** drop list
+— so `ls-files --cached` listed it and it would have published as an unreviewed 232 KB binary.
+
+### …except it SHOULD publish, which is the more interesting half
+
+That file is a real runtime dependency: the app checks for it at startup
+(`_YUNET_MODEL_PATH.exists()`) and face detection in VNCCS native mode needs it. It was
+publishing **only because it was grandfathered into the index before the `*.onnx` rule
+existed.** One `git rm --cached` cleanup and a fresh clone would have silently lost face
+detection, with nothing failing at push time to say so.
+
+So `.gitignore` now keeps it **on purpose**:
+
+    *.onnx
+    !backend/data/**/*.onnx      # 232 KB, shipped, checked for at startup
+
+### 🔒 And the drop list no longer has to be remembered
+
+`scripts/publish_clean.ps1` now derives its drops from `git ls-files --cached --ignored
+--exclude-standard` — **anything tracked AND ignored is excluded automatically.** The
+hand-written `$DROP_DIRS` / `$DROP_FILES` stay as a second, explicit check. `.gitignore` is
+now genuinely the single source of truth it was always described as, and adding a rule there
+is enough; nobody has to remember to mirror it into the script.
+
+**Verified by simulating the publish set:**
+
+    tracked in the working repo        1502
+    would publish after filtering       550   (matches the last real push)
+    HANDOVER_PROMPT.md                  excluded
+    scripts/helper_token.txt            excluded
+    PUBLISH_TO_GITHUB.bat / .ps1        excluded
+    backend/data/**/yunet .onnx         KEPT
+
+### 📚 Documentation
+
+README, `docs/OPERATIONS.md`, `docs/KLEIN3.md`, `HANDOVER_PROMPT.md` and the memory index
+carried up to date through v1.276.22 (outfit verification, the franchise-name finding, the
+reference-size upscale, the outfit close-up and its render order). All version headers agree
+with `VERSION`. `MEMORY.md` was compacted — the Klein 3.0 entry had grown to ~7 KB inside an
+index file and was crowding out everything else; the detail lives in the topic file.
+
+## v1.276.22 -- 👁 outfit verification, and WHY the glasses were there (2026-08-10)
+
+Lorenzo: *"verify that the views came out correctly with outfits as well… in one instance it
+kept adding glasses to the character. very interesting, but I would like to have it verify
+against the original clothing references. For this example it was a supergirl costume. it got
+the cape color wrong and the glasses were never in the source."*
+
+Two different failure modes in one report, and only one of them is the kind a prompt review
+could ever find:
+
+- **WRONG** — the cape is the wrong colour: an item that exists, rendered badly.
+- **EXTRA** — glasses nobody asked for. **Nothing in the request mentions them**, so no amount
+  of re-reading the prompt finds it. It has to be *seen*.
+
+### 👁 The check
+
+`POST /outfits` now vision-checks every finished view against the garment list
+(`_outfit_verdict`, the same Ollama vision model as the garment scan) and returns
+`{missing, extra, wrong_colour}`. Failures re-render; `max_tries` defaults to 2. An unusable
+reply counts as OK — spending a render on a maybe is worse than keeping the image, the same
+rule the facing verifier uses. Unlike a base view, a flawed outfit view is **kept and
+flagged** rather than left missing: a wardrobe entry with a wrong-coloured cape still beats a
+hole, and it is not upstream of a LoRA.
+
+**Live, first run, exactly his bug:** *"EXTRA not in the outfit: glasses"*. I pulled the image
+— the glasses are unmistakably there. **No false positive.**
+
+### ⚠ The correction clause is AFFIRMATIVE, and the phrasing had to be audited
+
+"No glasses" injects glasses at cfg=1 with no negative node — the oldest measured rule in this
+lane. So an unwanted item is countered by describing the correct state of the body part it
+occupies: glasses → *"her bare eyes and eyebrows fully visible and unobstructed"*. 24 such
+phrases, all checked programmatically for negation tokens.
+
+**One of my own drafts failed that check:** bags read *"nothing hanging from her shoulder"* —
+which names the very object it is trying to displace. Rewritten to *"both hands open and
+empty, her shoulders and back clear"*.
+
+### ⭐⭐ AND THE ACTUAL CAUSE, which is not a bug at all
+
+**The correction did not work.** Appended to the prompt: glasses 3/3. Moved to the leading
+position (the only emphasis lever at cfg=1): glasses 3/3 again. **Five renders, five pairs of
+glasses.** So I stopped correcting and tested the obvious hypothesis instead:
+
+    slots said "a blue SUPERGIRL leotard …"                  -> glasses, 5 of 5
+    same costume, same seed (90210), described literally:
+    "a blue long-sleeved leotard with a red and yellow
+     diamond shield emblem"                                  -> NO glasses, check clean, 1st try
+
+**A franchise or character NAME inside a garment slot drags that character's entire costume in
+with it, accessories included.** The word "supergirl" was summoning Clark Kent's glasses, and
+every correction was treating a symptom. This is the same family as the category-word rule —
+Klein responds to what a phrase *evokes*, not only to what it lists.
+
+So the app now says so, in both places it matters: a **live warning under the slot fields**
+when a slot contains a character name, and the same warning appended to a flagged result when
+EXTRA items appear alongside one. The rule is in `docs/KLEIN3.md` and `docs/OPERATIONS.md`:
+**describe the garment, do not name the franchise.**
+
+### 🔍 Small references get upscaled
+
+*"maybe check the size of the reference, and if its smaller than is optimal, we upscale it so
+it is a far better reference. the seedvr upscaler does like miracles."*
+
+Right, and for a concrete reason: every reference is scaled to ~1MP before it reaches Klein,
+so a 400px web grab is being scaled **up** by the graph out of detail that was never in the
+file — the buttons, the weave and the trim cannot be copied because they do not exist.
+`outfits/scan` now measures the upload and, when the short side is under `_REF_MIN_SIDE`
+(768 — conservative, fires on web thumbnails and phone crops, never on this app's own
+832×1216), kicks off a background upscale with `engine="auto"`, which prefers SeedVR2 when a
+capable worker is online because it restores rather than sharpens. Reported as `size` and
+`upscaling` on the scan response. `min_side` / `upscale` are form fields if you want to
+override.
+
+`ref_upscale`'s body was extracted into `_start_ref_upscale(slug, rid, disp, engine, …)` so the
+scan path and the button share one implementation.
+
+## v1.276.21 -- 🙂 the outfit close-up, and "regenerate all" meaning ALL (2026-08-10)
+
+### ① "if I regenerate all it only generates 2 of the images"
+
+*"it should act like our base image process and ensure all views are created when we render."*
+
+`regenerate all` sent `Object.keys(v.views)` — **the views the outfit already had.** So an
+outfit that came out 3-of-4 could never recover the 4th, however many times you pressed it;
+the button re-rendered the gap-free views and left the gap. It now sends the whole set.
+
+The backend was complicit: a view with no base image to dress was **silently dropped** from
+`sources`, which is how a 5-view request could finish "done" having produced 3 and say
+nothing. Skipped views are now reported — `skipped` on the response and on the job, and the
+job ends `done_with_errors` with *"no base view to dress for: right — generate those views
+first"*.
+
+### ② 🙂 A face close-up per outfit
+
+*"we should also do a closeup face render as well for outfits given if we add jewelry or
+anything."*
+
+Earrings, a necklace, glasses, a hat brim and a collar are all decided at head height and are
+a handful of pixels in an 832×1216 full body. The one thing a wardrobe most needs to show is
+the one thing the body views cannot. `face` is now a fifth outfit view.
+
+It is not the same prompt zoomed in. `_FACE_VISIBLE_SLOTS` limits the naming to what a
+head-and-shoulders crop can actually contain (headwear, eyewear, jewellery, accessories,
+outerwear, top, underlayer) — naming boots in a portrait is not neutral at cfg=1, it invites
+the model to pull them into frame.
+
+### ⭐ ③ And then Lorenzo corrected the ORDER, which was the better idea
+
+*"use the first front generation to get the face closeup, and then use that as reference for
+the rest, so we ensure the larger face is being noted for reference with the styling the
+clothing adds to it."*
+
+I had built the close-up as the LAST pass. His order is right, and the reason is the one I
+had missed: **the character's plain face crop knows the face but nothing about this outfit.**
+The outfit's own close-up knows both. So the job now runs in three passes:
+
+    1. FRONT   — the outfit, rendered
+    2. 🙂 FACE  — a close-up FROM that front, so it carries this outfit's own
+                 collar, earrings and necklace
+    3. the rest — back / left / right, each given THAT close-up as its face
+                 reference instead of the plain character crop
+
+`styled_face` switches the prompt clause accordingly: *"take the face AND the jewellery from
+image 2"* rather than *"take the face"* — otherwise the model treats a styled reference as
+identity-only and re-invents the earrings at 40 pixels. Back views still get no face
+reference; there is no face in them.
+
+**Costs no extra render** — pass 3 still fans across every worker. Verified live, 5 of 5:
+
+    front  refs [front base, outfit face close-up, left base]
+    face   refs [face crop, THE NEW FRONT RENDER, front upload]
+    left   refs [left base,  THE NEW CLOSE-UP,    front upload]
+    right  refs [right base, THE NEW CLOSE-UP,    front upload]
+    back   refs [back base,  left base, right base]        (no face — correct)
+
+The close-up came back with the silver hoops and the cross pendant clearly legible, and both
+profiles faced the correct way.
+
+## v1.276.20 -- 🙂 the outfit render's face, and three things a doc audit caught (2026-08-10)
+
+### 🙂 "are we including the face reference image to ensure max likeness?"
+
+Lorenzo: *"we also seem to get some face likeness drift when doing the outfit renders… The
+view we are trying to use for reference won't be enough to dial in the face."*
+
+**The second sentence is the whole diagnosis.** An outfit render is an EDIT of a view, so
+reference 1 is a GENERATED image that already sits around 0.33–0.41 against the upload. Take
+the face from image 1 and you are copying a copy, and the error compounds every generation.
+
+The face crop *was* in the list — but only by tag ORDER, and **the prompt never mentioned
+it**. Klein addresses references POSITIONALLY (this repo's own rule), so an uncited reference
+is just something it averages in. A garment photo could also displace it: v1.276.17 inserted
+the garment at slot 2, which is exactly where the identity reference was.
+
+**Fixed:** the face crop is PINNED to slot 2 on every view that has a face in it, the prompt
+names that slot — *"Her face is exactly the face in image 2 … take the face from image 2, not
+from image 1"* — and the garment photo now goes in BEHIND it (a garment is easier to carry in
+words than a face is, so the face wins the higher slot). `_outfit_ref_paths` returns
+`(paths, face_slot)`; the job publishes `face_ref` and per-view `prompts`.
+
+**Measured (ArcFace vs the uploaded front):**
+
+    front outfit view   BEFORE 0.5766, 0.5193   ->   AFTER 0.6574
+    left  outfit view   BEFORE 0.3845, 0.3378   ->   AFTER 0.3984
+
+⚠ **n=1 per cell after the change.** Both views moved the right way and the front moved a
+lot, but this is one sample each and should not be quoted as a settled number. Back views are
+unaffected by design — there is no face in them, so no face reference is passed.
+
+### 🔎 A documentation audit, and it found a real bug
+
+Ran the docs against the code rather than trusting my own edits. It caught three stale
+sentences — and one place where the docs were right about the intent and the CODE was wrong:
+
+**⚠ `POST /characters/{slug}/base/upscale` never got the v1.276.14 fix.** Its `model_name`
+defaulted to `None` with the comment *"default from workflow"* — and the workflow's baked-in
+default is the ANIME model. The face-crop and per-reference upscale paths were fixed in
+v1.276.14; **the ACTIVE BASE upscale was quietly still posterising skin and drawing line-art
+hair.** Now `None` means `_GAN_MODEL_DEFAULT`, same as the other two, and the job publishes
+which model it used.
+
+Also fixed:
+- `_view_ref_paths` still declared `-> List[str]` after it started returning a tuple.
+- `views/generate` computed `int(body.ref_count or 4)` while the field defaults to 3 and the
+  outfit lane uses `or 3` — an explicit `0` silently became 4. The two lanes agree now, on 3,
+  which is the measured value (v1.275.10).
+
+### 📚 Documentation brought current
+
+- **README** — added the direction reference, free per-view verification, and the rebuilt
+  outfits panel (photo scan, editor, per-view ↻ / 🗑 / ＋ missing). The "Next:" line no longer
+  lists work that has shipped.
+- **docs/OPERATIONS.md** — §2 now covers outfit scan/update and the whole v1.276.18/.19 view
+  pipeline; §7 documents `views/verify`, `outfits/scan`, `outfits/update`, `only_missing` and
+  `garment_ref`; §10 reordered (the Autogen run is unblocked and first now).
+- **docs/KLEIN3.md, HANDOVER_PROMPT.md** — the "the opposite profile is DROPPED" rule is
+  marked SUPERSEDED where it appears, since v1.276.19 mirrors it back in instead. Three
+  present-tense "view generation APPENDS" sentences corrected to past tense.
+- Klein3Panel's header comment listed the ref tags without `garment`, and its upscale comment
+  still named the anime model.
+
+## v1.276.19 -- ⭐ THE DIRECTION REFERENCE: 1-in-4 becomes 5-of-5 (2026-08-10)
+
+Lorenzo: *"the right pose still comes out incorrect most of the time even with max retries…
+the weird thing is I even had it have the head flipped the correct way in one… the validator
+is only a failsafe and I don't want to have super unrefined methods generating our bases.
+I'm sure it's just a small change… maybe it's the references we are passing during
+generation."*
+
+**He was right, and the "head correct, body wrong" detail is what gave it away.**
+
+### The cause: a side view was being rendered with two FRONTAL references
+
+v1.276.17 stopped the RIGHT job being handed a LEFT profile by dropping the opposite view
+from the list. That fixed the active sabotage and left a vacuum: the list became
+`[face crop, front upload]` — **two frontal images, neither of which says which way to
+turn.** The direction had to come from the prompt alone, against a model prior, and the
+prior won most of the time. A head that turned while the body did not is exactly what
+partial compliance with a words-only instruction looks like.
+
+It also explains why the v1.276.18 🪞 mirror retry helped so much less than expected:
+**mirroring a frontal reference is very nearly a no-op.** The flip only carries information
+if the image being flipped has a direction in it, and neither of those two did.
+
+### The fix: give it a picture of the direction
+
+The opposite profile is no longer dropped — it is **MIRRORED and put back as reference 3**.
+A mirrored LEFT profile *is* a RIGHT-facing body, which is the one thing that was missing.
+`_view_prompt` cites it **by slot number** ("copy that body orientation and camera angle
+from image 3 exactly, while keeping the face and body of the other reference images"),
+because Klein addresses references positionally.
+
+Mirroring costs nothing here: it rides as a POSE reference only. Identity still comes from
+the face crop and the front upload, so the character's real chirality is carried by images 1
+and 2. This is just the mode's founding premise applied to its own base set — *the person
+from image 1 in the pose from image 2.*
+
+### Measured — single attempt each, no retries, so the number is the RAW rate
+
+    BEFORE (v1.276.18, no direction ref)   right view   ~1 of 4   (his count)
+    AFTER  (direction ref, seeds 7101/7102/7105/7106/7301)
+                                           right view    5 of 5   kps +2.21 +2.47 +2.76 +2.87 +3.88
+    control: LEFT view with the same change              1 of 1   kps -2.96  (unharmed)
+
+**Identity: no clear signal at this n.** The new right profiles score 0.269–0.381 against
+the front baseline, the left profile 0.327, and the pre-change right 0.381. Profiles score
+low against a frontal baseline by construction (§1 open item), and the spread overlaps
+completely — this neither confirms nor denies an identity cost, and it should not be quoted
+as if it did.
+
+### Ordering: a brand-new character has no opposite view to mirror
+
+Generating all four views at once on a fresh character would leave both sides blind. So the
+RIGHT view is **deferred to a second pass** and rendered after the left exists, using it
+mirrored. Left goes first because it is the direction this model reaches for unprompted —
+his 1-in-4 report was the right view, and the left has never been reported wrong. **This
+costs no extra render**; it only serialises one job that used to run in parallel.
+
+### 🗂 Regenerating a view SUPERSEDES instead of stacking
+
+Falling out of the testing: clonejoan finished with **ten `right` refs**, because view
+generation appends. The pickers were choosing among them by recency. Now an accepted view
+demotes the older GENERATED refs of the same tag to `other` + `superseded`, so exactly one
+is live. **Nothing is deleted, and an UPLOAD or a CROP is never touched** — those are source
+material, not a claim under test. Verified live: 10 right refs → 1 active + 10 superseded,
+view still present, nothing missing.
+
+### ✅ CONFIRMED BY LORENZO (2026-08-10)
+
+*"confirmed the correct view image is now being generated."* Independent of my five test
+renders — this is his own set, on his own characters, through the UI.
+
+### Where this leaves the verifier
+
+Exactly where he wanted it: a failsafe. The retry loop from v1.276.18 is unchanged and still
+on by default, but it should now rarely fire on side views.
+
+## v1.276.18 -- 🧭 VERIFY & RETRY: the base set now checks its own work (2026-08-10)
+
+Lorenzo, after the v1.276.17 fix landed: *"1 of 4 of the generations came out correct for
+the right view. Maybe look into why that's occurring and fix it before we add my idea to
+verify and retry. I basically want the retry option so when we auto gen characters it does
+this itself and we won't end up with an incorrect base as that will poison all the other
+additional tasks in the autogen chain."*
+
+He is right about the priority order and right about the stakes. The base set is upstream of
+datasets, LoRAs, character sheets and every outfit, so one wrong-facing base view is not one
+bad image — it is a bad ingredient in everything built afterwards.
+
+### Why it is 1 in 4: nothing is varying except the seed
+
+Checked first, as asked. After v1.276.17 the reference list for a right-view job is
+`[face crop, front upload]` on every run (`refs_used` confirms it), and the prompt is a pure
+function of the character's fields. **Nothing differs between runs but the seed.** So the
+model simply has a strong prior toward left-facing profiles and lands on the requested one
+some fraction of the time. There is no bug left to fix — which is exactly why the retry loop
+is the right answer rather than a workaround.
+
+### The check is FREE
+
+`_facing_verdict(path, view)` — insightface on the CPU, already installed, no worker and no
+GPU. It reads `kps_yaw` (nose offset from the eye midpoint, in half-eye-spans), which needs
+no 3D model and so cannot fail the way `yaw` can. NEGATIVE = nose toward the LEFT edge.
+
+    front  face detected, |kps| < 1.0 and |yaw| < 40
+    left   |kps| >= 1.2 and kps NEGATIVE
+    right  |kps| >= 1.2 and kps POSITIVE
+    back   NO face detected -- that absence IS the verification
+
+Validated against nine cases with known values before a single render was spent: correct
+front, correct left, wrong-way right, correct right, back, back-that-turned-around,
+front-that-came-out-as-a-profile, barely-turned side, and side-with-no-face. **9/9.**
+
+A view that cannot be measured is reported OK, not retried — spending his renders on an
+unmeasurable maybe is worse than accepting it, and "not measured" in the status is worth
+more than a coin flip.
+
+### 🪞 The mirror route
+
+Retrying with a fresh seed alone converges slowly at p≈0.25. So retries alternate with a
+different strategy: **flip the references, ask the model for the OTHER side (the direction
+it is good at), then flip the result back.** Two flips cancel, so the character keeps its
+real chirality — hair parting, a scar, which hand holds what. This is NOT the same as
+mirroring a finished left view, which would swap all of that.
+
+**Measured, and the samples are small — stated so it is not read as more than it is:**
+
+    plain route    1 of 4  (his count) + 2 of 4 (mine, mixed prompts)
+    🪞 mirror       3 of 4  (mine)
+
+Suggestive, not conclusive. So `_MIRROR_FIRST` stays **False** and attempts **alternate** —
+plain, mirror, plain, mirror — because three attempts covering both routes beats three
+attempts of whichever looked better in a sample of four. The knob is exposed
+(`mirror_first`) for when there is more data.
+
+### ⚠ What happens when every attempt fails
+
+**The view is left MISSING.** It is not filed under its tag with a warning attached. A
+missing right view is a problem autogen can see and stop on; a wrong-facing one tagged
+`right` is a problem it silently builds a dataset, a LoRA and a wardrobe on top of. Failures
+are kept on disk, tagged `other`, flagged `rejected`, named
+`REJECTED right view — facing the WRONG WAY (kps -3.72, yaw -80.0)` so he can look at what
+was thrown away instead of being told it happened. `st["failed"]` and the job error report
+it explicitly.
+
+⚠ **`_refs_by_tag` now filters out rejected refs.** Without that, a wrong-facing view the
+verifier had just caught would come straight back as an identity reference on the next run
+via the `other` tag — the same drift loop this lane has now re-learned four times.
+
+### 🧭 Verify what you already have — also free
+
+`POST /characters/{slug}/views/verify` `{demote}` checks every existing view reference and
+reports per-ref verdicts. `demote: true` files the failures away so they stop being used AND
+the view reads as missing again, ready to refill. In the UI: **🧭 Verify current views
+(free)** with **⤵ set aside the bad ones** appearing only when something failed.
+
+**Run live on clonejoan the moment it existed: 8 checked, 2 failed — and one of the two was
+from a run of his, not mine.** After demoting: 6 checked, 0 failed, no views missing.
+
+### Live end-to-end
+
+    attempt 1  plain    kps -2.73  ->  WRONG WAY, rejected, retry queued automatically
+    attempt 2  🪞 mirror kps +3.02  ->  correct right profile, kept
+
+### Also
+
+- `_parallel_klein_edits` accepts a follow-up job returned from `on_result` and re-queues it,
+  so retries fan across workers like everything else. Worker threads now drain against an
+  outstanding counter instead of exiting the moment the queue looks empty — otherwise a
+  retry produced by one thread could be dropped by another that had already gone home.
+- New ref fields (`verified`, `verify_note`, `attempts`, `mirrored`, `rejected`,
+  `wanted_view`) are named in the `_public_char` whitelist. That whitelist is what swallowed
+  `upscaled` in v1.276.9; it now has a comment saying so.
+- `verify` defaults ON with 3 tries. The checkbox and the try count are in the References
+  column, next to the generate buttons they affect.
+
+## v1.276.17 -- 🧭 the RIGHT view that faced left, 🖼 outfits from a photo, ✎ an outfit EDITOR (2026-08-10)
+
+### ① "it won't give me the right side view, it keeps giving me a left facing pose"
+
+**Same shape of bug as the last two, third lane.** `views_generate` built ONE reference list
+and handed the identical list to every view job. On a character that already had a left
+view that list was `[face, front, LEFT]` — so the **RIGHT** job was shown a left profile and
+produced a left-facing pose. Klein has no way to read a reference as "identity only, ignore
+the facing"; a profile in the list is a profile in the answer.
+
+`_view_ref_paths()` filters the list per view. The rule is deliberately narrow — **drop the
+OPPOSITE profile, nothing else** — because a side reference genuinely helps a FRONT render
+(measured v1.275.9: slot 3 = left view took front views 0.3637 → 0.4498). Shortening the
+list is fine; a two-ref list beats a three-ref list containing a contradiction. `refs_used`
+is now per-view, with `refs_pool` showing the unfiltered pool it came from.
+
+`_VIEW_PROMPTS` for the sides also names the body parts instead of only the shot class:
+"her RIGHT shoulder and RIGHT arm nearest the camera, her nose and the toes of both shoes
+pointing to the viewer's right".
+
+**MEASURED with `scripts/k3_face_audit.py` (free, CPU) — head yaw, negative = nose toward
+the LEFT edge:**
+
+    left  ref   (unchanged)          yaw -73.4   correct
+    right ref   BEFORE the fix       yaw -72.6   WRONG -- his bug, exactly
+    right ref   AFTER the fix        yaw +82.0   correct
+
+### ⚠ AND I READ THE RESULT WRONG BEFORE I MEASURED IT
+
+I built a side-by-side of the full-body renders, looked at it, and reported to Lorenzo that
+the fix had **failed** — "still facing the same way in every case". Then I spent another
+render on a rewritten prompt chasing a bug that was already fixed.
+
+The audit says otherwise, and head crops at 4× the size say otherwise: the post-fix render
+faces right, plainly. **Profile direction is not reliably readable in a 340px full-body
+thumbnail, and I treated my glance at one as evidence.** There was a free, already-built
+instrument in the repo that answers this exact question numerically, and I ran it second.
+
+The second prompt ("facing the RIGHT EDGE of the picture") did not fix anything extra and it
+**broke the standing pose** — feet apart, body turned three-quarter. Reverted. Both renders
+it cost are on me.
+
+### ② 🖼 Outfits from a photograph
+
+`POST /characters/{slug}/outfits/scan` (multipart: `file`, optional `keep`). The vision model
+(`qwen2.5vl:7b`, same `_ollama_cfg` as every other wizard) names what it can see into the 13
+slots as **editable text**, and the photo is saved as a ref tagged **`garment`**.
+
+Two stages, and Lorenzo chose both: the text is correctable before a render is spent and
+reusable on any character; the photo then rides into the render as **image 2** so Klein
+copies the actual cut, fabric and hardware instead of a paraphrase. `_outfit_prompt` points
+at it **by slot number** — Klein addresses references positionally, so "the garment photo"
+would be meaningless where "image 2" is not.
+
+- `keep` narrows the scan — *"just the hat"* — because a photo is usually shown for one item
+  in it.
+- Negative answers are stripped from the result (`"none"`, `"no hat"`, `"not visible"`):
+  at cfg=1 with no negative node, writing "no hat" into a prompt puts a hat on.
+- A scan **merges** into the form; it never clobbers slots already typed.
+- `garment_ref` is stored on the outfit, so ↻ regenerate reproduces the same jacket later.
+- Verified live: a red-leather render scanned back as
+  `{outerwear: "a red leather biker jacket", bottom: "black jeans", shoes: "black leather ankle boots"}`.
+
+### ③ The outfits panel is an EDITOR now
+
+*"i dont see an Add new outfit button, and you should be able to click in the outfit area to
+bring up its details… there should also be a save button… For variations there should be a
+button that opens the options for a new variation as currently its kind of confusing."*
+
+- **＋ New outfit** — an empty form. Starting a second outfit previously meant hand-clearing
+  thirteen fields.
+- **Click any outfit row** to load it into the form. A bar above the fields says what is
+  loaded (`✎ Editing "Red Leather / jacket off"`) or that nothing is, and the loaded row is
+  highlighted in the list. That ambiguity was the confusing part.
+- **💾 Save changes** → `POST /outfits/update`. **Metadata only — no worker is contacted and
+  no image changes**, so fixing a typo does not cost four renders. A **rename moves the
+  existing renders onto the new name** (his call), and renaming onto an existing
+  (name, variant) **409s** rather than silently merging two wardrobes.
+- **＋ new variation** on an outfit copies the base look's slots in and clears the variant
+  name, so a variation is one field and a button instead of a re-type.
+- The garment photo shows as a thumbnail on the outfit row and in the form, with
+  **✕ detach photo** to fall back to text-only rendering.
+
+## v1.276.16 -- 👗 OUTFIT SETS: four views that were all the same view (2026-08-09)
+
+Lorenzo: *"when we create a clothing set many of the views are identical or don't work. the
+clothing is looking great, just the position of the character is off."*
+
+**He was right, and it was worse than "many".** Downloaded the Red Leather set off his
+character before touching anything: front, back, left and right were **all four frontal**.
+The "back view" was a picture of her face. The clothing was excellent in every one of them.
+
+### The cause: the same category-word bug, for the third time
+
+`_outfit_prompt` built **ONE prompt for the whole set**, and that prompt said:
+
+    identical standing pose, camera angle and framing
+
+**"camera angle" is a category word.** Klein has no negative-prompt node and runs at cfg=1;
+it reads named things and ignores classes of things. This is the same failure as "SAME
+outfit" in `_view_prompt` (v1.276.14, yesterday) and "clothing" in the pose prompts
+(measured 2026-08-04). So a left-side job received its own left image as reference 1, two
+FRONT-facing identity refs behind it, and **not one word saying which way she faces** — and
+it did what the majority of its evidence said. Front.
+
+**Fixed: the prompt is built PER VIEW** and names the facing with the same `_VIEW_PROMPTS`
+vocabulary the base view set already uses ("seen directly from BEHIND — a full back view
+showing the back of the head…"). `prompts` is published on the job and in the response, so
+what each view was actually asked for is answerable.
+
+### The second cause, found by reading `refs_used`: the drift loop, wearing a jacket
+
+The prompt fix turned the back view into a real back view immediately. The left view moved
+only to three-quarter. `refs_used` said why:
+
+    left  ->  [left base view, face crop, OUTFIT-RIGHT RENDER]
+
+That third reference is **this app's own earlier render of the image being replaced** — and
+every one of them was frontal, so the left job was handed a frontal picture as evidence of
+what "left" looks like. Exactly the v1.275.9 reference-list drift loop, in a different lane:
+`_identity_ref_paths` was never meant to feed outfit jobs, and nobody checked what it
+returned when it did.
+
+**Fixed with `_outfit_ref_paths` — the refs are chosen RELATIVE TO THE TARGET VIEW:**
+
+- reference 1 is always that view's own image (it carries pose, framing and facing);
+- `outfit`-tagged refs are **never** identity references here;
+- the **opposite profile** is dropped outright (it fights the facing);
+- the **front full-body is demoted to a fallback** for side views — it is a competing
+  composition, not neutral identity evidence;
+- for a **back** view the face crop is dropped too: no face is visible from behind, so a
+  face close-up is not identity evidence there, it is an instruction to turn around.
+
+### Measured, on his character, 4 renders
+
+    BEFORE          front / back / left / right  -- all four frontal
+    + named facing  back  -> a real back view. left -> three-quarter.
+    + no outfit ref left  -> holds its source. right -> full profile.
+
+**And then the last surprise, which is not a bug in this lane at all.** Comparing each
+finished outfit view against the base view it was dressed from:
+
+    base LEFT  = three-quarter   ->   outfit LEFT  = three-quarter   (faithful)
+    base RIGHT = full profile    ->   outfit RIGHT = full profile    (faithful)
+
+**His LEFT base view was never a full profile.** The outfit lane is now reproducing its
+source correctly in both cases — the remaining asymmetry is upstream, in the ⭐ core set, and
+the fix is to regenerate that one base view. Worth stating plainly because the old code hid
+this: when everything comes back frontal, a bad base view is invisible.
+
+### 🗑 / ↻ / ＋ per view — his second ask
+
+*"we should have the ability to remove individual view images for an image set and
+regenerate them individually or regenerate all that are missing."*
+
+- **`only_missing: true`** on `POST /characters/{slug}/outfits` renders **only** the views
+  that (name, variant) has no image for. A view counts as present only if its FILE is still
+  on disk, so deleting a bad view is what makes it eligible. It **409s rather than spending
+  renders** if nothing is missing.
+- Every view of the set now gets a tile in the wardrobe, present or not. A missing one is a
+  dashed placeholder with **＋ render**, the same shape as the ⭐ core set — a gap looks like
+  a gap instead of simply not being there.
+- Each existing tile gets **↻** (re-render only this view) and **🗑** (delete only this
+  view). Per-view delete already existed on `/outfits/delete` and had no button.
+- The variant row gets **＋ missing (n)** beside **↻ regenerate all**.
+
+So the loop for one bad render is: 🗑 the view → ＋ missing → done, and the three views that
+came out well are never touched. Slot semantics make this safe: one image per
+(name, variant, view), replaced in place.
+
+### Also
+
+- The view's source image now prefers an **upload over a crop over a generated** ref, the
+  same rule as everywhere else. It was taking whatever was newest.
+- `refs_used` is published on outfit jobs (per view), matching view generation.
+
+## v1.276.14/.15 -- ⭐ THE BASE SET: an anime upscaler, an ignored outfit, and a dead link (2026-08-09)
+
+Lorenzo built a character from scratch to test the new upscale path and reported two things
+wrong with the result. Both had specific causes and both were mine.
+
+### ① The face crop had "thick black lines" — the upscaler was an ANIME model
+
+`STUDIO_UPSCALE.json` ships with **`4x_APISR_GRL_GAN_generator.pth`** baked in as the node
+default, and every caller inherited it. **APISR is "Anime Production Inspired Real-world
+Super Resolution."** Run on a photoreal face it posterises skin into flat cel-shaded
+patches and draws hard black line-art strokes through hair — exactly what he saw. The boxes
+already carry two photoreal models that nothing was ever selecting:
+
+    4x-ClearRealityV1.pth        photoreal   <- new default
+    4x_foolhardy_Remacri.pth     photoreal
+    4x_APISR_GRL_GAN_generator   ANIME       <- was the default
+    RealESRGAN_x4plus_anime_6B   anime
+
+**It was not only cosmetic. The face-crop anchor scored 0.8440 with the anime model and
+0.9840 with the photoreal one** — the wrong upscaler was destroying 0.14 of measured
+identity on the image that seeds everything downstream. Nobody would have found that by
+looking at a thumbnail.
+
+### ② The side views wore different clothes — a CATEGORY WORD, again
+
+Front: blue jeans, brown belt, brown boots, cross necklace. Sides: black trousers, black
+boots, no belt, no necklace. The prompt said:
+
+    "SAME face, SAME hairstyle, SAME outfit and SAME body proportions as the references"
+
+**"outfit" is a category word, and Klein ignores category words.** That is this repo's own
+standing rule, measured 2026-08-04 and written into the Klein 3.0 docs — and `_view_prompt`
+broke it. Worse: `additional_details` already held *"olive green t-shirt, high-waisted blue
+jeans, brown belt, brown boots, cross necklace"*, and `_view_prompt` read only `hair` and
+`body`. **The description we already had was being thrown away.**
+
+New `_character_garments()` pulls the named clothing (`clothing` / `outfit` / `wardrobe` /
+`additional_details`, first hit wins) and the view prompt now says *"wearing exactly the same
+clothing as the reference images: &lt;named garments&gt;, identical garments in identical
+colours"*. **Verified on his character: the regenerated sides came back in blue jeans with a
+brown belt and brown boots.**
+
+### ③ The face anchor was crowding out the body
+
+His ask, and he was right: a view job must see the face AND the body. The anchor is a
+head-and-shoulders crop — it carries **nothing below the collar** — and with the 3-ref cap
+it could push the full-body front out of the list entirely. The front reference is now
+**pinned explicitly right behind the anchor** before anything else competes for slots, and
+the job publishes `refs_used` so what a run actually received is answerable rather than
+assumed. Verified: `[face_crop, front_body, left]`.
+
+### ④ Every jump from the Character Studio landed on the wrong tab (v1.276.15)
+
+"I click to open or view refs and it defaults to the STUDIO tab, which is just another list
+of the characters." Correct, and embarrassing: **the grid had been putting `?tab=` in the URL
+since it was built and nothing ever read it.** Three faults, not one:
+
+- `?tab=` is now honoured, with **`klein3` as a pseudo-tab** — Klein 3.0 is not a tab, it is
+  tab `create` plus `createEngine: klein3`, so a caller cannot express it any other way.
+- **Klein3Panel never read the shared focus key** that Text 2 Image and Character Sheet
+  already use, so it opened on whichever character sorted first. Now it does.
+- 🧭 Views/Refs and 👗 Outfits pointed at the VNCCS **Clothes** tab, which structurally
+  cannot see a Klein 3.0 character. Both now target Klein 3.0.
+
+Also: the ⬆ button's tooltip still said "GAN-upscale" after the engine picker landed above
+it. It now reads back the selected engine and target, and says the original is kept.
+
+## v1.276.11/.12/.13 -- ⬆ Upscale engine choice, amount, and an undo (2026-08-09)
+
+### The escaping bug (v1.276.11) — mine
+
+`\u270E`, `\u21BB`, `\uD83D\uDDD1` and `\u2B07` were rendering as literal text in the
+Klein 3.0 outfit buttons. I had written them as escape sequences inside **JSX text**, where
+they are six literal characters, not an escape — the form only unescapes inside a string
+literal. Replaced with real glyphs (✏️ ↺ 🗑 ⬇) and verified gone from the built bundle.
+(The 53 `\uXXXX` left in the bundle are library regex character-classes, not ours.)
+
+### Amount, then engine
+
+**Amount (v1.276.11):** the GAN model is a fixed **4x**
+(`4x_APISR_GRL_GAN_generator.pth` — the graph has no scale input), so the amount is the long
+side it is fitted back to. Picker in the ⭐ Core set header: 1536 / **2048 default** / 2560 /
+3072 / full 4x. Verified: requesting 1536 produced `3328x4864 -> 1051x1536`, and the job line
+reports both numbers so what you got is never a guess.
+
+**Engine (v1.276.12):** `auto | seedvr2 | gan`, reusing the Character Studio's existing
+vocabulary rather than inventing a second one. `auto` prefers SeedVR2 when a capable worker
+is online. **An explicit SeedVR2 request FAILS LOUDLY** when no box has the node pack —
+"I picked SeedVR2 and silently got GAN output" is exactly the quiet mismatch this codebase
+keeps hunting. SeedVR2 selects on the `seedvr2` capability rather than the generic klein
+pool, and gets a 600s timeout against the GAN's 300s.
+
+**Probed before building the UI:** `SeedVR2VideoUpscaler` is present on all three boxes
+(the node is not called "SeedVR2" — checking the obvious name first returned nothing).
+**First successful SeedVR2 run in this mode: `2048x2992 -> 1402x2048` on the trainer.**
+
+### ⚠ The flaw that mattered more (v1.276.13)
+
+In-place upscaling is right — every render reads that slot, and a second copy would just
+make `_identity_ref_paths` choose between two versions of one view. But it made the
+operation **irreversible and NOT idempotent**: upscale with the GAN, then try SeedVR2, and
+the second run upscales an upscale. **You cannot compare engines and you cannot go back.**
+
+Now the pristine source is preserved once as `<id>.orig.png` on first upscale, and **every
+later upscale re-runs FROM IT** rather than from the previous output. Plus
+`POST /refs/{rid}/revert-upscale` to restore it and clear the flags. Sidecars are never
+listed as refs (the list comes from char.json, not a disk glob) and both delete paths take
+them with the ref so they cannot orphan.
+
+**Verified end to end:** SeedVR2 upscale → `.orig.png` kept (858 KB beside the 2326 KB
+result) → revert → back to 832x1216 with `upscaled` cleared. A ref upscaled BEFORE this
+shipped correctly reports "no pre-upscale original kept" rather than pretending.
+
+## v1.276.9/.10 -- ⭐ Core set separated, outfits manageable, references upscalable (2026-08-09)
+
+Four of Lorenzo's asks, and two bugs the testing caught.
+
+### ⭐ The core set is now its own thing
+
+The reference list was every ref flat, so **the four images that actually drive every render
+sat among outfit renders and one-off close-ups with nothing to distinguish them.** Now:
+**⭐ Core set** (front · back · left · right · face) rendered first, with a dashed
+placeholder tile for any view that does not exist yet — a missing angle is visible as an
+absence rather than being something you have to notice is not there. **Other references**
+follow, collapsed. **Outfit renders are excluded entirely** (his point: the Outfits panel
+already shows them, grouped properly) with a one-line note saying where they went.
+
+### 👗 Outfits: delete and regenerate
+
+- **`POST /outfits/delete`** {name, variant?, view?} — whole outfit, one variant, or one
+  view. Files are removed too; an outfit view is a generated render, and orphan PNGs are
+  how a disk quietly fills up.
+- **Outfits now use SLOT SEMANTICS**, the same model as the Strip SET: one image per
+  (name, variant, view). **Re-running REPLACES that slot in place.** So "regenerate after I
+  changed the base images" is the same button as generate, and a wardrobe never accumulates
+  six versions of the same jacket. **Verified live:** regenerating "Red Leather" produced
+  new image ids (`9c848c8e→b4204ff3`, `2eeaa672→f4ec732d`) with the view count still exactly
+  2 and the variant count still 1.
+- UI: **↻ regenerate** and **🗑** per variant, **🗑 outfit** for the whole entry.
+
+### ⬆ Upscale any core reference
+
+`POST /characters/{slug}/refs/{rid}/upscale` — the same proven STUDIO_UPSCALE GAN graph the
+base upscaler has used since v1.208, which until now could ONLY be applied to the active
+base. The core set — the images every downstream render actually reads — could not be
+sharpened at all. Replaces in place (a second copy would just make `_identity_ref_paths`
+choose between two versions of the same view) and records provenance.
+
+**Two bugs the live test caught, both of which would have shipped silently:**
+
+1. **The GAN returns 4x.** 832x1216 became **3328x4864 and 5.33 MB** — and a reference is
+   uploaded to a worker on EVERY render that reads it, so that is upload time on every job
+   and disk forever, for detail Klein resamples away. Now capped at `max_side` 2048:
+   measured **3328x4864 -> 1401x2048, 0.72 MB**, sharpening kept, bloat gone.
+2. **`_public_char` WHITELISTS ref fields**, so `upscaled` was written to char.json
+   correctly and never reached the UI — the ⬆ badge could never have appeared. Added
+   `upscaled`, `upscaled_at` and `outfit` to the exposed shape. Verified: 2 refs now report
+   the flag. **Worth remembering: adding a field to a ref record is not enough; it has to be
+   named in `_public_char` too.**
+
+## v1.276.8 -- 🗑 Delete characters from the Studio grid (2026-08-09)
+
+A 🗑 on every card. The interesting part is the confirmation, because the two stores delete
+differently and clean up different amounts, so one generic "are you sure" would be lying:
+
+- **Klein 3.0** `rmtree`s the character folder — references, base versions, outfits. But its
+  **LoRA datasets and character sheets live in OTHER libraries and survive as orphans.** The
+  dialog names them: *"NOT removed: 1 LoRA dataset(s) and 2 character sheet(s) — those live
+  in other libraries and will be left behind."* Reporting "deleted" while leaving a 40-image
+  dataset on disk is a lie by omission, and this app has a standing rule against exactly
+  that class of quiet mismatch.
+- **VNCCS** characters also have sprite folders on the worker boxes. That is separate,
+  slower and irreversible, so it is a **second, explicit prompt** rather than a silent
+  cascade — the same shape the old grid used, kept deliberately.
+- **Plain Character Studio** rows delete with their datasets, which the route already does.
+
+All three routes verified against the live `/openapi.json` before shipping — including that
+`from_hosts` really is a query parameter on the VNCCS delete. (My first check reported the
+VNCCS route MISSING; that was my own string comparison using `{char_id}` when the spec says
+`{character_id}`. The path shape was always correct. Worth recording: a verification that
+fails should be suspected before the code is.)
+
+## v1.276.7 -- 👗 The Outfits UI, and a publish workflow (2026-08-09)
+
+### The wardrobe panel (Klein 3.0)
+
+Everything built in v1.276.2/.3 was API-only until now. The 👗 Outfits section sits full
+width under the three columns:
+
+- **Name + Variant** side by side. Variant blank = the base look.
+- **4 core slots visible** (outerwear / top / bottom / shoes) with the **9 detail slots
+  behind `＋ more detail`** — the simple case stays four fields, the detailed case is one
+  click away. Each field carries its example as a placeholder.
+- **Views as toggle chips**, all four on by default.
+- Each rendered outfit lists as **outfit → variants → per-view thumbnails**, every one
+  opening the zoom/pan lightbox with its own **⬇ download** (the meaningfully-named file
+  from v1.276.1).
+- **✎ edit / new variant** loads a saved variant back into the form, so spinning "jacket
+  off" off an existing look does not mean retyping thirteen fields.
+- The panel states the rule that trips people up: *leave a slot blank to leave it out
+  entirely — Klein has no negative prompt, so "no hat" would put a hat on her.*
+
+The outfit job runs in the background, so the wardrobe list refreshes on
+`jobs.outfit` transitions — otherwise renders land on disk while the panel still says
+"No outfits yet". Verified against the live API: 13 slots (4 core / 9 more), and the
+existing "Red Leather" reads back as base-look (2 views) + "jacket off" (1 view, 7 slots)
+with working image and download URLs.
+
+**Decision recorded:** Lorenzo originally went looking in the **Clothes tab**, but that tab
+dresses a `StudioCharacter` using VNCCS worker sprites and a Klein 3.0 character has
+neither. Rather than make one tab silently behave as two different engines depending on the
+selected character, the real UI lives in Klein 3.0 — where the character lives.
+
+### Publishing workflow
+
+`PUBLISH_TO_GITHUB.bat` + `scripts/publish_clean.ps1`: develop in the working folder,
+publish a curated copy to the clean repo that GitHub sees. **`.gitignore` is the single
+source of truth** — the file set is `git ls-files --cached --others --exclude-standard`,
+i.e. everything .gitignore permits, tracked or not, so a brand-new file publishes without
+needing `git add` first. The only extra list is the paths still TRACKED in the working repo
+that must never ship, because .gitignore cannot exclude a tracked file.
+
+Safety, since the target is a public repo: reads the working repo (never a git mutation in
+it), shows the plan including deletions and asks y/N, then **re-verifies the clean folder
+for any dropped path or `helper_token.txt` and aborts before committing** if anything
+leaked. Verified the selection: 550 files, matching the clean repo exactly, with every
+must-publish present and the token sidecar, handover and tooling excluded.
+
 ## v1.276.6 -- 🧪 The history clean, REHEARSED (2026-08-09)
 
 Not predicted — run. A throwaway clone in a sandbox, filter-repo applied, results measured.

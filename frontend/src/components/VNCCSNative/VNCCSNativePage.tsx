@@ -1194,11 +1194,14 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const [wizBusy, setWizBusy] = useState(false);
   const [wizMsg, setWizMsg] = useState('');
 
-  // Library (catalog + project-linking)
-  const [catalog, setCatalog] = useState<api.CatalogItemT[]>([]);
-  const [projects, setProjects] = useState<api.ProjectLiteT[]>([]);
-  const [linkProject, setLinkProject] = useState('');
-  const [libMsg, setLibMsg] = useState('');
+  // PARKED 2026-08-11 — Library (catalog + project-linking) state. The Library
+  // tab's JSX is gone (no `tab === 'library'` branch remains), so nothing reads
+  // these and nothing calls loadLibrary / doDeleteCatalog / doLink (also parked,
+  // below). Kept together, commented out, so the tab can be restored as a unit.
+  // const [catalog, setCatalog] = useState<api.CatalogItemT[]>([]);
+  // const [projects, setProjects] = useState<api.ProjectLiteT[]>([]);
+  // const [linkProject, setLinkProject] = useState('');
+  // const [libMsg, setLibMsg] = useState('');
 
   const [phase, setPhase] = useState<Phase>('idle');
   const [statusText, setStatusText] = useState('');
@@ -2007,7 +2010,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // characters stops the old poll loop and shows the new character's status).
   const watchTokRef = useRef(0);
   const displayedRunCharRef = useRef<string>('');
-  const watchQueueRun = async (rid: string, jobIds: string[], step: VNCCSStepT,
+  const watchQueueRun = async (_rid: string, jobIds: string[], step: VNCCSStepT,
                                charName: string, started: number) => {
     const myTok = ++watchTokRef.current;
     displayedRunCharRef.current = charName;
@@ -3213,6 +3216,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   };
 
   // --- Library tab ----------------------------------------------------------
+  // PARKED 2026-08-11 — see the parked Library state above. The Library tab's
+  // JSX no longer exists, so loadLibrary / doDeleteCatalog / doLink have no
+  // callers anywhere in the file. Left intact, commented out, as a unit.
+  /*
   const loadLibrary = useCallback(async () => {
     setLibMsg('');
     try { setCatalog(await api.getCatalog()); } catch { setCatalog([]); }
@@ -3244,6 +3251,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       setLibMsg(`Link failed: ${(e as Error).message}`);
     }
   };
+  */
   const loadIntoCreate = useCallback(async (c: api.CatalogItemT) => {
     setName(c.name);
     setClothesChar(c.name);
@@ -3361,6 +3369,22 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       }).catch(() => { /* ignore */ });
       return;
     }
+    // v1.276.15 — HONOUR ?tab=. The Character Studio grid has always sent a
+    // tab in the URL, and nothing here read it, so every jump landed on the
+    // default 🏠 Studio tab: you picked a character from a list and were shown
+    // the same list again. `klein3` is a pseudo-tab because Klein 3.0 is not a
+    // tab at all — it is tab `create` plus createEngine `klein3`.
+    const want = (searchParams.get('tab') || '').toLowerCase();
+    if (want) {
+      if (want === 'klein3') { setTab('create'); setCreateEngine('klein3'); }
+      else if (want === 'klein2') { setTab('create'); setCreateEngine('klein2'); }
+      else if (want === 'qwen') { setTab('create'); setCreateEngine('qwen'); }
+      else if (['studio', 'text2image', 'video', 'create', 'clothes',
+                'emotions', 'poselib', 'lora', 'charsheet'].includes(want)) {
+        setTab(want as Tab);
+      }
+    }
+
     const cname = searchParams.get('char');
     if (!cname) return;
     api.getCatalog().then((cat) => {
@@ -3387,7 +3411,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   // renders) or inferred from its view count (older ones). Drives the set-tabs
   // above the preview so you can flip between the single / 4-view / mesh-ready
   // renders you've generated.
-  const versionMode = (v?: BaseVersionT): 'single' | 'set' | 'mesh' => {
+  const versionMode = (v?: api.BaseVersionT): 'single' | 'set' | 'mesh' => {
     const gm = (v?.gen_meta || {}) as Record<string, unknown>;
     const m = String(gm.base_mode || '').toLowerCase();
     if (m === 'mesh' || m === 'set' || m === 'single') return m;
@@ -6825,7 +6849,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       )}
       {helpTopic && HELP_TOPICS[helpTopic] && (() => {
         const h = HELP_TOPICS[helpTopic];
-        const sec = (t: string) => ({ fontSize: 13, fontWeight: 700 as const, color: '#8ab4ff', margin: '16px 0 6px' });
+        const sec = (_t: string) => ({ fontSize: 13, fontWeight: 700 as const, color: '#8ab4ff', margin: '16px 0 6px' });
         return (
           <div onClick={() => setHelpTopic('')}
                style={{ position: 'fixed', inset: 0, zIndex: 3000, background: 'rgba(4,6,10,0.72)',

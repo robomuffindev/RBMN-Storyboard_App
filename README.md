@@ -4,9 +4,16 @@ A local desktop application for creating AI-powered music videos and narration v
 
 ![Robomuffin Idea Factory](Screenshots/robomuffin_idea_factory_screenshot.webp)
 
-## Status (v1.276.4, 2026-08-09)
+## Status (v1.276.54, 2026-08-12)
 
-**🎬 The Video Lab is validated on the GPU, and the character studio is now one place.**
+**⚡ An entire character — from a sentence to a trained LoRA — now builds itself, unattended.**
+A full run took 7.12 hours and completed all eight stages with no intervention; **training is 92%
+of that, so the same chain without the LoRA is about half an hour.** Alongside it: the Video Lab
+is validated on the GPU, the character base set checks its own work, and
+costumes are now a library you design in.**
+
+*Newest first: [costume library](#-design-a-costume-before-anyone-wears-it) · outfit sets that
+verify themselves · a base set that measures its own facing · MiniMax H3 on local workers.*
 
 **MiniMax H3 runs locally on our own workers** — all five modes in-app (text→video,
 image→video, first+last frame, last-frame, references→video with up to 9 image / 3 video /
@@ -34,7 +41,92 @@ layer, belt, legwear, gloves, jewellery, accessories, carried items), and it ren
 every view so a costume is consistent front, back and both sides. **Variants** capture one
 look within an outfit ("jacket off") without a second wardrobe entry. Each view is a
 standalone image, so any of them can be used as a reference elsewhere — and **a dataset can
-now train from a chosen outfit** instead of only the character's default base.
+now train from a chosen outfit** instead of only the character's default base. Outfits are
+deletable per-variant or whole, and **↻ regenerate** re-renders one against your current
+base images, replacing those views in place rather than stacking copies.
+
+**⭐ The core set is its own thing.** A character's reference list now separates the images
+that actually drive every render — front, back, left, right, face — from everything else,
+with a placeholder tile marking any view you have not made yet. Outfit renders are not
+repeated there; they live in the Outfits panel. And **any core reference can be
+GAN-upscaled in place** to give every downstream render a sharper source.
+
+**🖼 …and then we actually looked at it.** Three defects hid in a single upscaled reference.
+The upscale workflow had **an anime model baked in** — beautiful on line art, ruinous on a
+face, where it flattens skin into cells and draws black lines through hair; it now defaults
+to a photoreal model (**pick your own**, and SeedVR2 if a worker has it), which took a face
+crop's identity score from 0.84 to 0.98. Side views asked for "the same **outfit** as the
+references", and the model does not read category words — so it invented its own trousers;
+views now name every garment. And the face close-up could push the full-body reference out
+of the list, so a side render had a face but nothing to dress; the body is pinned, and every
+render reports which references it actually used.
+
+**🧭 …and the base set now gets its own facing right.** ⭐ Asking for a right-side view produced
+a left-facing pose about three times in four. The cause was a missing picture, not a missing
+word: after an earlier fix removed the *wrong* side reference, a side view was being rendered
+from two frontal images, so nothing in the job said which way to turn and the model's own
+habit decided. The opposite profile is now **mirrored and passed back as a direction
+reference**, cited by slot number — a mirrored left profile is a right-facing body. **Right
+views went from roughly 1 in 4 to 5 of 5 on the first attempt**, confirmed on real
+characters. Identity still comes from the face and front references, so nothing is flipped
+that shouldn't be.
+
+**✅ Every view is checked, free.** After each view renders, the app measures which way it is
+actually facing — CPU only, no worker, no GPU — and re-renders it if it is wrong. A back view
+is verified by the *absence* of a face. If every attempt fails, the view is left **missing**
+rather than saved as the wrong thing: a gap is something an automated run can stop on, a
+wrong image is something it would quietly build a dataset, a LoRA and a wardrobe on top of.
+There is also a **🧭 Verify current views** button for sets you already have — the first time
+it ran it found a bad view nobody had noticed. Regenerating a view now supersedes the old one
+instead of stacking copies.
+
+**👗 Outfits, rebuilt around how you actually use them.** Build one **from a photograph** —
+the vision model names what it sees into the thirteen slots as editable text, and the photo
+itself is passed to the render so the cut and hardware are copied rather than paraphrased
+(tell it *"just the hat"* if that is all you want from the picture). The panel is a proper
+editor: **＋ New outfit**, click any outfit to load it, **💾 Save** for text-only changes that
+cost no renders, **＋ new variation** to spin off a look. Every view has its own tile whether
+it exists or not — **↻** re-renders one, **🗑** deletes one, **＋ missing** fills only the
+gaps. One bad render is two clicks to replace, and the views that came out well are never
+touched.
+
+**🙂 Every outfit gets a face close-up.** Earrings, a necklace, glasses and a collar are
+decided at head height and are a handful of pixels in a full-body shot — the thing a wardrobe
+most needs to show is the thing the body views cannot. So an outfit is five images now, and they
+come in a deliberate order: the front view renders first, then the close-up is **cropped out
+of that very render** — so it cannot disagree with the costume, because it *is* the costume —
+and the remaining views use that close-up as their face reference. The front is upscaled
+before the crop is taken, so the close-up starts from real detail rather than a hundred and
+eighty pixels. The styling propagates instead of being re-invented, and the close-up costs no
+extra render at all. "Regenerate all" now means the whole set, too — it used to
+re-render only the views that already existed, so a gap could never close itself.
+
+**👁 Outfits are checked against what you asked for.** A vision model looks at every finished
+view and compares it to your garment list — what is missing, what came out the wrong colour,
+and the one a prompt review can never catch: **something present that nobody asked for.** That
+last case is what surfaced a real finding. A Supergirl costume kept adding glasses, and the
+cause was not the reference list or the prompt builder — it was the *word*. **A character name
+in a garment slot brings that character's accessories with it**: "a blue supergirl leotard"
+produced glasses on five renders out of five, and no correction removed them, while the same
+costume described literally at the same seed produced none on the first try. The app now warns
+you as you type. And a reference photo that is too small to carry detail gets upscaled before
+it is used, since every reference is resized to about a megapixel anyway.
+
+### 👗 Design a costume before anyone wears it
+ Describe an outfit in a sentence and the LLM
+fills the thirteen garment slots for you. Then open the **Costume Studio**: render the costume
+as an image — on a plain grey full-body mannequin standing on its own feet, so the reference carries the clothes and nothing else — not even a display stand
+— with the model of your choice (Krea 2 by default) and a custom prompt if you want one. Pick
+the render you like and it becomes that outfit's reference, with the slot text rescanned from
+the image so the words and the picture agree. If you pick an edit-capable model (Klein or Qwen-Image-Edit) you can also **upload reference
+photographs** — shoot a real garment and the design copies its cut, colour and fastenings
+instead of guessing them from words; the uploader stays hidden for text-only models, where it
+would do nothing. Every render lands in a **candidates** tray first — you approve the ones worth keeping, so the
+library stays a wardrobe rather than a dumping ground. Costumes live in a shared library, so one
+design can dress a whole cast, and you say up front whether it is cut for a woman, a man or
+unisex — then filter by that, search across names, prompts and garments, rename anything, and
+open an **ℹ info** panel on any costume to see exactly what made it: the model, the seed, the
+garment list, the reference photos and the full prompt, ready to copy.
 
 **🔍 One image viewer, everywhere.** Click any generated image for a full-screen lightbox
 with cursor-anchored zoom, drag-pan, arrow-key stepping and download.
@@ -43,9 +135,55 @@ with cursor-anchored zoom, drag-pan, arrow-key stepping and download.
 🧪 Klein 1.0 and 🚀 Klein 2.0 — from the mode picker. Their code is intact and kept for
 later use; they are simply not in the way.
 
-Next: the outfit and base-outfit UI, the first real ⚡ Autogen run, and H3's four untested
-modes (i2v, first+last, last-frame, references→video). See **`docs/OPERATIONS.md`** (the
-runbook), `CHANGELOG.md` (the decision log) and `HANDOVER_PROMPT.md`.
+**🆕 A brand-new character makes its whole base set in one press** (v1.276.39, verified end to
+end): upload one photograph and the four views come back correct — the right-facing profile
+waits for the left one, then copies its direction from a mirror of it.
+
+**＋ New Character leads with 🎯 Klein 3.0** (v1.276.40) — the mode the app is built around is
+the first, full-width option, and it takes the name inline so you land in the panel with the
+character already made and selected. The two VNCCS lanes sit underneath.
+
+**⚡⚡ Autogen — a character from nothing, as far as you want** (v1.276.42/.43). ＋ New Character
+→ ⚡ Autogen: hand it reference photos *or just a description*, tick how far to go — base
+character, the four views, clothing, character sheet, LoRA dataset, trained LoRA — and it runs
+the chain and stops where you said. It shows the render cost before you commit, checks the base
+set for free and stops rather than spending forty renders on a bad one, can be stopped mid-run,
+and resumes where it left off after a restart. **Batch mode** queues many characters and runs
+them one after another.
+
+**⚡ The whole fleet gets used** (v1.276.45). Independent renders fan across all three workers;
+only a render that genuinely needs another render's output waits for it. Two lanes were quietly
+using a single box — a Krea 2 batch and the Image Workshop — because asking the dispatcher for a
+worker once per image returns the *same* box every time. Both now spread the work.
+
+**🩺 The fleet looks after itself** (v1.276.48). Worker health is re-checked every 45 seconds:
+a box that dies is dropped from the fan-out instead of silently failing every third image, and a
+box that was asleep when the app started rejoins on its own rather than staying invisible until
+the next restart.
+
+**🔍 Verbose status and an ⏱ elapsed clock** (v1.276.46). The Autogen board has a persisted
+verbose toggle and a per-job expander: the stage chain with a duration on every stage, the
+base-set gate verdict, what it produced, and the full timestamped log. Timing comes from the
+server, so it survives a page reload or a backend restart — which is exactly when an hours-long
+run needs it.
+
+**🚦 Preflight and ◎ likeness at a glance** (v1.276.50/.52). `scripts/preflight_autogen.py`
+checks every dependency of a long run in seconds and answers GO / NO-GO, and the Autogen board
+shows each run's likeness score — warning you when the epoch installed was not the best-scoring
+one.
+
+Next, in order (the same list as `docs/OPERATIONS.md` §10 and `HANDOVER_PROMPT.md` — they are
+kept identical): (1) ✅ done — a full ⚡ Autogen + LoRA ran clean end to end in v1.276.51 (7.12 hours, all eight
+stages, a trained LoRA at 0.6285 likeness); note that training is 92% of that, so a full
+character without the LoRA takes about half an hour. Batch mode is deliberately left as-is —
+a bulk-submission mode is planned that supersedes it; (2) publishing — 558 files, ~45 versions unpushed; (3) the
+base-outfit picker in the LoRA panel; (4) H3's four untested modes (i2v, first+last,
+last-frame, references→video); (5) whether 🙂 `face_first` earns its keep at all; (6)
+`LoraPanel`'s `nOutfit` has no setter wired to any control, so a new dataset's "outfit" field
+always submits `''`. See
+**`docs/OPERATIONS.md`** (the runbook), `docs/KLEIN3.md` (the character/outfit/costume lane),
+`CHANGELOG.md` (the decision log — it records retractions, so read a claim's newest mention)
+and `HANDOVER_PROMPT.md`.
 
 ### Previous status (v1.271.2, 2026-08-08)
 
@@ -131,6 +269,12 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
   LoRA dataset can be pointed at an outfit instead of the character's default base.
 - **🔍 Image lightbox everywhere** — click any generated image for full-screen review with
   cursor-anchored zoom, drag-pan, ←/→ through the gallery, and download.
+- **⭐ Core reference set** — front / back / left / right / face shown apart from extras,
+  with a placeholder for any view not yet made, and **⬆ GAN upscale on any single
+  reference** so the images every render reads from can be sharpened.
+- **🗑 Delete characters** from the Studio grid. The confirmation names what actually goes:
+  Klein 3.0 removes the character folder but its LoRA datasets and character sheets live
+  elsewhere and survive, and VNCCS characters ask separately about worker-side sprites.
 - **⚙ Experimental Modes** (Settings, off by default) — reveals the parked development
   lanes (🧪 Klein 1.0, 🚀 Klein 2.0). Their code is intact and kept for later use such as
   game-asset export; this only controls whether they appear in the mode picker.
@@ -530,8 +674,12 @@ pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -e ".[dev]"
 
 # Frontend
-cd frontend && npm install && npm run build && cd ..
+cd frontend && npm install && npx vite build && cd ..
 ```
+
+> `npx vite build` rather than `npm run build`, because that is exactly what `run.bat` ships —
+> a build that passes here is the build the app serves. `scripts\build_frontend.bat` does the
+> same thing with its output visible and a typecheck afterwards.
 
 ### 2. Configure
 

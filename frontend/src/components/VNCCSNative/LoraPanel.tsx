@@ -68,10 +68,20 @@ interface RunT {
   history?: Array<{ round: number; rendered: number; flagged: number | null }>;
   summary?: FlagsT;
 }
+/** Mirrors the dict built in `backend/api/lora.py::_flag_summary`.
+ *
+ *  ⚠ v1.276.41 — this was missing eight keys the backend has always sent, and
+ *  `arcface_scored` was already being READ in the panel, so `tsc` failed on it.
+ *  The build ships `vite build` with no typecheck, so it never surfaced. If you
+ *  add a counter to that dict, add it here. */
 interface FlagsT {
   flagged: number; checked: number; artifacts: number;
   angle_off: number; angle_measured?: number; angle_unmeasured?: number;
   framing_off?: number; framing_measured?: number; framing_unmeasured?: number;
+  crop_off?: number; crop_measured?: number; crop_unmeasured?: number;
+  bare_skin?: number; wardrobe_measured?: number; wardrobe_unmeasured?: number;
+  outfit_off?: number; arcface_scored?: number; no_face?: number;
+  back_low_likeness?: number;
   expression_off: number;
   not_checked?: string[]; unreliable?: string[];
   not_one_person: number; face_unclear: number; identity_off: number; stuck: number;
@@ -115,7 +125,7 @@ export default function LoraPanel() {
   const [nClass, setNClass] = useState('man');
   const [nTarget, setNTarget] = useState('krea2');
   const [nCount, setNCount] = useState(40);
-  const [nOutfit, setNOutfit] = useState('');
+  const [nOutfit] = useState('');   // no setter wired up yet — read-only default
   const [wardrobe, setWardrobe] = useState<OutfitT[]>([]);
   const [charRefs, setCharRefs] = useState<CharRefT[]>([]);
   const [wbBusy, setWbBusy] = useState('');
@@ -1057,35 +1067,82 @@ function TrainBox({ dsId }: { dsId: string }): React.ReactElement {
   );
 }
 
+/** "2m 14s" from a backend timestamp.
+ *
+ *  ⚠ The backend writes `time.strftime("%Y-%m-%dT%H:%M:%S")` — LOCAL time with
+ *  NO timezone suffix. `new Date()` on a bare string like that treats it as
+ *  local, which is right here and would be an hours-off lie if the backend
+ *  ever started writing UTC. If a clock reads absurdly, this is why. */
+function elapsedSince(ts: string): string {
+  const t0 = new Date(ts).getTime();
+  if (!Number.isFinite(t0)) return '';
+  const s = Math.max(0, (Date.now() - t0) / 1000);
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+  return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+}
+
 function AutogenBox({ chars }: { chars: CharT[] }): React.ReactElement {
   const [slug, setSlug] = useState('');
   const [mode, setMode] = useState<'dominant' | 'flexible'>('dominant');
   const [dsOnly, setDsOnly] = useState(false);
   const [st, setSt] = useState<Record<string, unknown>>({});
   const [msg, setMsg] = useState('');
+  // v1.276.41 — the button had NO busy state, so the whole gap between the
+  // click and the first status tick looked like nothing happening. It was
+  // worse than that: the request was deadlocking the server for 60s.
+  const [busy, setBusy] = useState(false);
+  const [tick, setTick] = useState(0);        // forces an immediate re-poll
   useEffect(() => {
-    if (!slug) return;
+    if (!slug) { setSt({}); return; }
+    let stop = false;
     const load = async () => {
       try {
         const r = await fetch(`${BASE}/autogen/${slug}/status`);
-        if (r.ok) setSt(await r.json());
-      } catch { /* ignore */ }
+        if (r.ok && !stop) setSt(await r.json());
+      } catch { /* ignore — a poll failure is not worth a message */ }
     };
     void load();
-    const t = window.setInterval(load, 15000);
-    return () => window.clearInterval(t);
-  }, [slug]);
+    // 15s was too slow to feel connected to a button press. 4s while it is
+    // running, 15s when it is idle — the poll is a tiny local read.
+    const t = window.setInterval(load, 4000);
+    return () => { stop = true; window.clearInterval(t); };
+  }, [slug, tick]);
+
+  /** Read an error body that may not be JSON.
+   *
+   *  ⚠ This is the bug Lorenzo saw as `Unexpected token 'I', "Internal S"...
+   *  is not valid JSON`. The old code called `r.json()` on a FAILED response;
+   *  an unhandled server exception returns the plain text `Internal Server
+   *  Error`, so the error path threw its own error and buried the real one. */
+  const errText = async (r: Response): Promise<string> => {
+    const raw = await r.text().catch(() => '');
+    try {
+      const j = JSON.parse(raw);
+      return String(j?.detail || raw || `HTTP ${r.status}`);
+    } catch {
+      return `HTTP ${r.status} — ${(raw || 'no response body').slice(0, 200)}`;
+    }
+  };
+
   const go = async () => {
-    setMsg('');
+    if (!slug || busy) return;
+    setMsg('⏳ starting…');
+    setBusy(true);
     try {
       const r = await fetch(`${BASE}/autogen`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ char_slug: slug, outfit_mode: mode, dataset_only: dsOnly }),
       });
-      if (!r.ok) { setMsg((await r.json()).detail || `${r.status}`); return; }
+      if (!r.ok) { setMsg(`❌ ${await errText(r)}`); return; }
       setMsg('⚡ running — views → dataset → render → QC → fix rounds → export' +
              (dsOnly ? '' : ' → train → install') + '. Walk away; status updates here.');
-    } catch (e) { setMsg(String((e as Error).message || e)); }
+      setTick((n) => n + 1);            // show a stage now, not in 15 seconds
+    } catch (e) {
+      setMsg(`❌ ${String((e as Error).message || e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
   const stage = String(st.stage || '');
   return (
@@ -1115,8 +1172,8 @@ function AutogenBox({ chars }: { chars: CharT[] }): React.ReactElement {
           {dsOnly ? '☑' : '☐'} dataset only
         </button>
         <div style={{ flex: 1 }} />
-        <button style={btn} disabled={!slug || Boolean(st.active)} onClick={() => void go()}>
-          {st.active ? '⏳ running…' : '⚡ Autogen'}
+        <button style={btn} disabled={!slug || busy || Boolean(st.active)} onClick={() => void go()}>
+          {busy ? '⏳ starting…' : st.active ? '⏳ running…' : '⚡ Autogen'}
         </button>
       </div>
       {stage && (
@@ -1124,6 +1181,24 @@ function AutogenBox({ chars }: { chars: CharT[] }): React.ReactElement {
                     color: stage === 'error' ? '#ff8a8a' : stage === 'done' ? '#5ee08a' : '#9cc2ff' }}>
           {stage}: {String(st.detail || '')}
           {typeof st.dataset === 'string' && st.dataset ? ` (dataset ${st.dataset})` : ''}
+          {/* ⏱ how long it has been going. `started_at` is written by the
+              route BEFORE the thread starts, so this is honest even for a run
+              that has not reported a stage yet — and it survives a page
+              reload, which a client-side stopwatch would not. */}
+          {typeof st.started_at === 'string' && st.started_at ? (
+            <span style={{ color: '#8d97a5' }}>
+              {'  ⏱ '}{elapsedSince(String(st.started_at))}
+            </span>
+          ) : null}
+          {Boolean(st.active) && stage !== 'error' && stage !== 'done' ? ' …' : ''}
+        </p>
+      )}
+      {/* A running pipeline with nothing written yet is still running. Saying
+          so beats an empty box, which is what "no indication anything is
+          happening" actually looked like. */}
+      {!stage && Boolean(st.active) && (
+        <p style={{ ...hint, margin: '6px 0 0', color: '#9cc2ff' }}>
+          running — waiting for the first stage to report…
         </p>
       )}
       {msg && <p style={{ ...hint, margin: '4px 0 0' }}>{msg}</p>}

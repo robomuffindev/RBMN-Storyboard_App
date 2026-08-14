@@ -1,7 +1,8 @@
 # Image Workshop — free-form model playground + shared gallery
 
-*Status as of v1.199.2 (2026-07-20). Built + syntax-verified; final render
-validation is on a live LAN worker (Lorenzo's) — see the caveats at the end.*
+*Written at v1.199.2 (2026-07-20); **rendering updated in v1.276.45** — see "Worker
+selection" below. Built + syntax-verified; final render validation is on a live LAN worker
+(Lorenzo's) — see the caveats at the end.*
 
 The **Image Workshop** is a project-independent place to experiment with any of
 our image models outside a single character's flow: type a freestyle prompt (or
@@ -94,6 +95,15 @@ code. References are uploaded to the chosen worker fresh before each render
 (ComfyUI uploads are per-worker). Worker selection: Klein needs the `klein`
 capability, Qwen-Image-Edit the `vnccs` capability (best-effort, falls back to any
 worker so a real error surfaces); the plain t2i models run on any healthy worker.
+
+**⚡ A BATCH FANS ACROSS THE FLEET (v1.276.45).** It used to render N images SERIALLY on ONE
+box: the loop called `select_worker` per image, and because these lanes submit straight to the
+client instead of through `dispatcher.submit_job`, `in_flight` is permanently 0 and that sort
+is a constant function — **asking per image in a loop pins rather than balances.** `_worker_pool()`
+now returns every capable worker, images are assigned **round-robin up front** and rendered
+concurrently via `asyncio.gather`. The run publishes `st["workers"]`.
+⚠ `done` counts **COMPLETIONS**, not the loop index — with images finishing out of order, `i+1`
+would have reported "6/6" while three were still rendering.
 
 ## Storage
 

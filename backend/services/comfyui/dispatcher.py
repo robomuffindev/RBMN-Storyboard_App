@@ -121,12 +121,18 @@ class ComfyWorker:
     is_runpod: bool = False  # True if this worker was added via RunPod integration
     # User-configurable per-worker priority.  Lower number = picked
     # first (high priority).  Higher number = used last (low priority).
-    # The dispatcher sort key uses (priority, in_flight, -last_check)
-    # so among idle workers the highest-priority one wins, but once a
-    # high-priority worker saturates (in_flight rises), lower-priority
-    # workers get picked up — the "slower fallback" semantics the user
-    # asked for.  Default 100 puts new workers in the middle so
-    # explicitly-prioritized workers naturally sort around them.
+    # ⚠ The real sort key is (in_flight, priority, -last_check) — this comment
+    # used to claim (priority, in_flight, …), first two reversed. The CODE is
+    # authoritative (see select_worker).
+    # Intent: among idle workers the highest-priority one wins, but once a
+    # high-priority worker saturates (in_flight rises), lower-priority workers
+    # get picked up — the "slower fallback" semantics the user asked for.
+    # Default 100 puts new workers in the middle so explicitly-prioritized
+    # workers naturally sort around them.
+    # ⚠⚠ v1.276.45: in the IMAGE lanes that intent never takes effect —
+    # they submit straight to the client instead of `submit_job`, so
+    # `in_flight` is permanently 0 and the key collapses. Those lanes spread
+    # work with round-robin instead. See docs/OPERATIONS.md §6b.
     priority: int = 100
 
     def __hash__(self):
@@ -226,6 +232,13 @@ class ComfyDispatcher:
                     self.clients[url] = client
 
                 stats = client.get_system_stats()
+                # ⭐ v1.276.48 — a worker coming BACK is worth one line. This
+                # loop was dead code until .48 (nothing called it), so a box
+                # that rebooted stayed "healthy" forever and the fan-out kept
+                # feeding it. Now that it runs, the transitions are the signal:
+                # silence means nothing changed.
+                if not worker.healthy:
+                    logger.info(f"Worker RECOVERED: {url}")
                 worker.healthy = True
                 worker.last_check = now
 
@@ -241,10 +254,18 @@ class ComfyDispatcher:
                 logger.debug(f"Health check passed: {url}")
 
             except Exception as e:
+                # ⚠ Log the TRANSITION loudly and the steady state quietly —
+                # a box that is off stays off, and warning about it every 45s
+                # buries the moment it actually went down.
+                if worker.healthy:
+                    logger.warning(
+                        f"Worker WENT DOWN: {url} ({type(e).__name__}: {e}) — "
+                        f"it will be skipped by the fan-out until it returns")
+                else:
+                    logger.debug(f"Worker still down: {url}: {e}")
                 worker.healthy = False
                 worker.last_check = now
                 results[url] = False
-                logger.warning(f"Health check failed for {url}: {e}")
 
         return results
 
