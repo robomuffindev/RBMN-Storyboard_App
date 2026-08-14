@@ -1,3 +1,9 @@
+## v1.277.5 -- 🔍 STYLE SAMPLES OPEN IN THE LIGHTBOX (2026-08-14)
+
+Frontend-only. Clicking a style sample used to download it; it now opens the SHARED
+zoom/pan lightbox with the whole set loaded (←/→ steps between samples — reviewing a style
+means comparing, not saving). A separate 📥 button per sample keeps the download path.
+
 ## v1.277.4 -- 🎨 STYLE SAMPLES ACTUALLY RENDER + ↻ REGENERATE A CAST MEMBER (2026-08-14)
 
 *"i just did the generate style samples and nothing is showing up."* Two bugs, one measured

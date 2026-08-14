@@ -337,6 +337,7 @@ export default function StoryWorldPage() {
 function StyleCard({ w, meta, llmBody, note, reload }: {
   w: WorldT; meta: MetaT; llmBody: object; note: (m: string) => void; reload: () => void;
 }) {
+  const lb = useLightbox();
   const s: StyleT = w.style || {};
   const presets = meta.style_presets || [];
   const models = meta.sample_models || ['krea2'];
@@ -482,14 +483,18 @@ function StyleCard({ w, meta, llmBody, note, reload }: {
       )}
       {!!samples.length && (
         <div className="flex flex-wrap gap-2 mt-3">
-          {samples.map(sm => (
+          {samples.map((sm, i) => (
             <div key={sm.id} className="w-40">
-              <a href={`${B}${sm.url.replace('/api/storyworld', '')}?download=1`} target="_blank" rel="noreferrer">
-                <img src={sm.url} alt={sm.prompt} title={`${sm.prompt}\n(${sm.model}${sm.worker ? ` on ${sm.worker}` : ''})`}
-                     className="w-full rounded border border-gray-800" />
-              </a>
+              {/* click → the shared zoom/pan lightbox (whole set, ←/→ steps);
+                  the 📥 button below is the download path */}
+              <img src={sm.url} alt={sm.prompt}
+                   title={`click to zoom + pan\n${sm.prompt}\n(${sm.model}${sm.worker ? ` on ${sm.worker}` : ''})`}
+                   className="w-full rounded border border-gray-800 cursor-zoom-in"
+                   onClick={() => lb.open(samples.map(x => x.url), i, sm.prompt)} />
               <div className="flex items-center gap-1">
                 <div className="text-[10px] text-gray-600 truncate flex-1" title={sm.prompt}>{sm.prompt}</div>
+                <a href={`${sm.url}?download=1`} download
+                   className="text-[10px] text-blue-300" title="download PNG">📥</a>
                 <button className="text-[10px] text-red-400" title="delete"
                         onClick={async () => { await post(`/worlds/${w.id}/style/samples/${sm.id}/delete`); void loadSamples(); }}>🗑</button>
               </div>
@@ -497,6 +502,7 @@ function StyleCard({ w, meta, llmBody, note, reload }: {
           ))}
         </div>
       )}
+      {lb.node}
     </div>
   );
 }
