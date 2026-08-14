@@ -1065,16 +1065,52 @@ async def _run_sample_gen(gen_id: str, disp, kind: str, model: str, raw_prompt: 
             pass
 
 
+def _sample_worker_pool(disp, model: str) -> list:
+    """EVERY worker that can run this model, for fanning the batch.
+
+    ⚠ v1.277.2 — this loop used to call `_pick_image_worker` PER IMAGE, which is
+    `select_worker` in a loop: `in_flight` is never incremented on this path, so
+    it is a constant function and all 8 samples rendered SERIALLY ON ONE BOX
+    (the v1.276.45 disease in one more place, found by a fleet audit). Pool up
+    front + round-robin + gather, the image_workshop pattern.
+    """
+    if not disp:
+        return []
+    need_cap = "klein" if model == "klein" else None
+    out: list = []
+    try:
+        for w in (getattr(disp, "workers", {}) or {}).values():
+            if not getattr(w, "healthy", False) or getattr(w, "is_runpod", False):
+                continue
+            if need_cap and need_cap not in (getattr(w, "capabilities", set()) or set()):
+                continue
+            cl = disp.clients.get(w.url)
+            if cl:
+                out.append((w.url, cl))
+    except Exception:                                        # noqa: BLE001
+        out = []
+    if out:
+        return out
+    _w, c = _pick_image_worker(disp, model)
+    return [(getattr(_w, "url", str(_w)), c)] if c else []
+
+
 async def _do_sample_loop(gen_id: str, disp, model: str, aug_prompt: str, neg: str,
                           count: int, w: int, h: int, base_seed: int, gd: Path, st: dict,
                           errs: list) -> None:
-    for i in range(count):
+    pool = _sample_worker_pool(disp, model)
+    if not pool:
+        st["status"] = "error"
+        st["error"] = ("klein-capable worker unavailable" if model == "klein"
+                       else "no image worker online")
+        _write_gen_status(gen_id, st)
+        return
+    st["workers"] = sorted({u for u, _c in pool})     # WHERE, per the standing rule
+    _write_gen_status(gen_id, st)
+
+    async def _one(i: int) -> None:
+        url, client = pool[i % len(pool)]              # assigned UP FRONT
         try:
-            _worker, client = _pick_image_worker(disp, model)
-            if not client:
-                raise RuntimeError(
-                    "klein-capable worker unavailable" if model == "klein"
-                    else "no image worker online")
             wf = _prepare_sample_workflow(model, aug_prompt, neg, w, h, base_seed + i)
             outputs, _pid = await asyncio.to_thread(_run_prompt_blocking, client, wf, 300)
             imgs = _images_from_outputs(outputs)
@@ -1085,13 +1121,17 @@ async def _do_sample_loop(gen_id: str, disp, model: str, aug_prompt: str, neg: s
                                            pick.get("subfolder", ""), pick.get("type", "output"))
             name = f"{i}.png"
             (gd / name).write_bytes(data)
-            st["images"].append({"id": name, "name": name})
-        except Exception as e:
+            st["images"].append({"id": name, "name": name, "worker": url})
+        except Exception as e:                                   # noqa: BLE001
             errs.append(f"#{i + 1}: {type(e).__name__}: {e}")
-            logger.warning(f"[sample-gen {gen_id}] image {i} failed: {e}")
-        st["done"] = i + 1
+            logger.warning(f"[sample-gen {gen_id}] image {i} failed on {url}: {e}")
+        # ⚠ count COMPLETIONS, not the loop index — finishes are out of order
+        # now (the v1.276.45 workshop lesson).
+        st["done"] = int(st.get("done") or 0) + 1
         st["error"] = "; ".join(errs[-3:]) if errs else None
         _write_gen_status(gen_id, st)
+
+    await asyncio.gather(*(_one(i) for i in range(count)))
 
     st["status"] = "done" if st["images"] else "error"
     if not st["images"] and not st["error"]:

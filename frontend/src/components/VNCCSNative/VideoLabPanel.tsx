@@ -9,6 +9,8 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
+import CharacterImagePicker from './CharacterImagePicker';
+
 const BASE = '/api/h3';
 
 const box: React.CSSProperties = {
@@ -77,6 +79,8 @@ export default function VideoLabPanel(): React.ReactElement {
   const [err, setErr] = useState('');
   const fileRef = useRef<HTMLInputElement | null>(null);
   const pendingRef = useRef<{ kind: string; slot: string } | null>(null);
+  // 📚 v1.277.2 — which slot the character-image picker is filling, or null
+  const [charPickSlot, setCharPickSlot] = useState<string | null>(null);
 
   const loadOv = useCallback(async () => {
     try {
@@ -131,6 +135,33 @@ export default function VideoLabPanel(): React.ReactElement {
       else if (p.slot === 'refimg') setRefImgs((v) => [...v, up]);
       else if (p.slot === 'refvid') setRefVids((v) => [...v, { up, use_audio: false }]);
       else if (p.slot === 'refaud') setRefAuds((v) => [...v, up]);
+    } catch (ex) { setErr(String((ex as Error).message || ex)); }
+  };
+
+  /** 📚 a picked character image → fetched as a blob → registered as an H3
+   *  upload → routed into the same slot the file picker would fill. The
+   *  backend only accepts upload ids, so re-uploading the bytes is the
+   *  clean same-origin bridge (no new backend surface needed). */
+  const useCharImage = async (url: string, name: string) => {
+    const slot = charPickSlot;
+    setCharPickSlot(null);
+    if (!slot) return;
+    setErr('');
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`image fetch ${resp.status}`);
+      const blob = await resp.blob();
+      const fd = new FormData();
+      fd.append('file', new File([blob], name || 'character.png',
+        { type: blob.type || 'image/png' }));
+      fd.append('kind', 'image');
+      const r = await fetch(`${BASE}/upload`, { method: 'POST', body: fd });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || `${r.status}`);
+      const up: UpT = { id: j.id, kind: j.kind, orig: name || j.orig };
+      if (slot === 'first') setFirstUp(up);
+      else if (slot === 'last') setLastUp(up);
+      else if (slot === 'refimg') setRefImgs((v) => [...v, up]);
     } catch (ex) { setErr(String((ex as Error).message || ex)); }
   };
 
@@ -327,7 +358,11 @@ export default function VideoLabPanel(): React.ReactElement {
                   <span style={hint}>First frame:</span>
                   {firstUp
                     ? <UpChip up={firstUp} onKill={() => setFirstUp(null)} />
-                    : <button style={btnSm} onClick={() => pickFile('image', 'first')}>➕ image</button>}
+                    : <>
+                        <button style={btnSm} onClick={() => pickFile('image', 'first')}>➕ image</button>
+                        <button style={btnSm} title="pick a character sheet, view or dataset render — with a preview"
+                                onClick={() => setCharPickSlot('first')}>📚 character</button>
+                      </>}
                 </div>
               )}
               {needsLast && (
@@ -335,7 +370,11 @@ export default function VideoLabPanel(): React.ReactElement {
                   <span style={hint}>Last frame:</span>
                   {lastUp
                     ? <UpChip up={lastUp} onKill={() => setLastUp(null)} />
-                    : <button style={btnSm} onClick={() => pickFile('image', 'last')}>➕ image</button>}
+                    : <>
+                        <button style={btnSm} onClick={() => pickFile('image', 'last')}>➕ image</button>
+                        <button style={btnSm} title="pick a character sheet, view or dataset render — with a preview"
+                                onClick={() => setCharPickSlot('last')}>📚 character</button>
+                      </>}
                 </div>
               )}
               {mode === 'ref2v' && (
@@ -347,7 +386,11 @@ export default function VideoLabPanel(): React.ReactElement {
                               onKill={() => setRefImgs((v) => v.filter((_, k) => k !== i))} />
                     ))}
                     {refImgs.length < caps.ref_images && (
-                      <button style={btnSm} onClick={() => pickFile('image', 'refimg')}>➕</button>
+                      <>
+                        <button style={btnSm} onClick={() => pickFile('image', 'refimg')}>➕</button>
+                        <button style={btnSm} title="pick a character sheet, view or dataset render — with a preview"
+                                onClick={() => setCharPickSlot('refimg')}>📚</button>
+                      </>
                     )}
                   </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -449,6 +492,11 @@ export default function VideoLabPanel(): React.ReactElement {
           </div>
         ))}
       </div>
+
+      {charPickSlot && (
+        <CharacterImagePicker onPick={(url, name) => void useCharImage(url, name)}
+                              onClose={() => setCharPickSlot(null)} />
+      )}
     </div>
   );
 }

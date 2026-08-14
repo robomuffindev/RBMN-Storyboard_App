@@ -84,6 +84,9 @@ _ROOT = _LORA_DS_ROOT.parent.parent / "autogen"
 _JOB_DIR = _ROOT / "jobs"
 _REF_DIR = _ROOT / "refs"
 _QUEUE_FP = _ROOT / "queue.json"
+# ⏸ v1.277.2 — the pause flag lives ON DISK deliberately: its whole reason to
+# exist is "pause, reboot the app, come back" without losing a large batch.
+_PAUSE_FP = _ROOT / "paused.json"
 
 # in-memory liveness + the cancel flags. The state FILE is the real record;
 # these two only say "a thread is alive right now".
@@ -368,7 +371,7 @@ def _interrupt_workers(jid: str) -> None:
             logger.info("autogen %s: could not interrupt %s", jid, h)
 
 
-def _note_workers(jid: str, obj: Any) -> None:
+def _note_workers(jid: str, obj: Any, st: Optional[dict] = None) -> None:
     """Remember which boxes a job status says it used, so cancel can reach them.
 
     Every job dict in this codebase publishes its workers one of two ways —
@@ -376,6 +379,11 @@ def _note_workers(jid: str, obj: Any) -> None:
     Both are read here rather than picking one, because the lanes genuinely
     differ and a cancel that only understands half of them is a cancel that
     half works.
+
+    v1.277.1 — when `st` is passed, the boxes are ALSO persisted onto the job
+    state as `workers_used`. `_WORKERS_TOUCHED` is in-memory and dies with the
+    process, so "where did this render" was unanswerable for a finished run —
+    exactly the benchmarking record the board is supposed to keep.
     """
     if not isinstance(obj, dict):
         return
@@ -417,6 +425,13 @@ def _note_workers(jid: str, obj: Any) -> None:
                 h = f"{h}:8188"
             norm.add(h)
         _WORKERS_TOUCHED.setdefault(jid, set()).update(norm)
+        # durable record for the board + future benchmarking. Saved only when
+        # something NEW appeared — this runs on every status poll.
+        if st is not None:
+            cur = set(st.get("workers_used") or [])
+            if not norm <= cur:
+                st["workers_used"] = sorted(cur | norm)
+                _state_save(_fp(jid), st)
 
 
 def _wait(jid: str, probe: Callable[[], Optional[Any]], timeout_s: int,
@@ -593,7 +608,7 @@ def _s_base(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
 
     def _done():
         r = _app("GET", f"/api/forge/characters/{slug}/status", timeout=30)
-        _note_workers(jid, r)
+        _note_workers(jid, r, st)
         _tick(jid, st, f"candidates {r.get('done', 0)}/{r.get('total', n)}"
                        + (f" on {', '.join(sorted(r.get('workers') or []))}"
                           if r.get("workers") else ""))
@@ -698,7 +713,7 @@ def _s_views(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
 
     def _done():
         v = _k3_job(slug, "views")
-        _note_workers(jid, v)
+        _note_workers(jid, v, st)
         if v.get("status") == "error":
             raise Fatal(f"view generation failed: {v.get('error')}")
         if v.get("detail"):
@@ -820,7 +835,7 @@ def _s_clothing(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
 
         def _done():
             j = _app("GET", "/api/costumes/job", timeout=30)
-            _note_workers(jid, j)
+            _note_workers(jid, j, st)
             if j.get("status") == "error":
                 raise Fatal(f"costume design failed: {j.get('error')}")
             return j if j.get("status") in ("done", "done_with_errors") else None
@@ -859,7 +874,7 @@ def _s_clothing(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
 
         def _outfit_done():
             o = _k3_job(slug, "outfit")
-            _note_workers(jid, o)
+            _note_workers(jid, o, st)
             if o.get("status") == "error":
                 raise Fatal(f"outfit render failed: {o.get('error')}")
             if o.get("detail"):
@@ -956,7 +971,7 @@ def _s_dataset(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
         def _rendered():
             d = _app("GET", f"/api/lora/datasets/{ds_id}", timeout=60)
             run = d.get("run") or {}
-            _note_workers(jid, run)
+            _note_workers(jid, run, st)
             if run.get("status") == "error":
                 raise Fatal(f"dataset render failed: {run.get('error')}")
             _tick(jid, st, f"rendering {run.get('done', 0)}/{run.get('total', total)}"
@@ -978,7 +993,7 @@ def _s_dataset(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
     def _qc_done():
         d = _app("GET", f"/api/lora/datasets/{ds_id}", timeout=60)
         run = d.get("run") or {}
-        _note_workers(jid, run)
+        _note_workers(jid, run, st)
         _tick(jid, st, f"QC {run.get('done', 0)}/{run.get('total', total)}")
         return d if run.get("status") not in ("running", None) else None
 
@@ -993,7 +1008,7 @@ def _s_dataset(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
         def _repaired():
             dd = _app("GET", f"/api/lora/datasets/{ds_id}", timeout=60)
             run = dd.get("run") or {}
-            _note_workers(jid, run)
+            _note_workers(jid, run, st)
             _tick(jid, st, f"repair round {run.get('round', '?')}/"
                            f"{run.get('rounds', '?')} · "
                            f"{run.get('done', 0)}/{run.get('total', '?')}")
@@ -1228,6 +1243,19 @@ def _queue_push(jid: str) -> None:
         _queue_write(q)
 
 
+def _queue_paused() -> bool:
+    try:
+        return bool(json.loads(_PAUSE_FP.read_text("utf-8")).get("paused"))
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+def _set_paused(paused: bool, note: str = "") -> None:
+    _ensure_dirs()
+    _state_save(_PAUSE_FP, {"paused": bool(paused), "at": _now(),
+                            "note": note})
+
+
 def _drain() -> None:
     """Run queued jobs one after another until the queue is empty.
 
@@ -1243,6 +1271,12 @@ def _drain() -> None:
     global _DRAINER
     while True:
         with _QUEUE_LOCK:
+            # ⏸ checked BEFORE popping, so a pause never interrupts the job
+            # that is already rendering — it stops the NEXT one from starting.
+            # The drainer exits; unpause (and any later push) restarts it.
+            if _queue_paused():
+                _DRAINER = None
+                return
             q = _queue_read()
             if not q:
                 _DRAINER = None
@@ -1322,7 +1356,8 @@ async def health():
     return {"ok": True, "stages": STAGES,
             "queue": len(_queue_read()),
             "active": [k for k, v in _ACTIVE.items() if v],
-            "drainer": bool(_DRAINER and _DRAINER.is_alive())}
+            "drainer": bool(_DRAINER and _DRAINER.is_alive()),
+            "paused": _queue_paused()}
 
 
 @router.post("/estimate")
@@ -1440,6 +1475,23 @@ async def jobs(limit: int = 50):
     out.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     return {"jobs": out[:max(1, min(limit, 500))],
             "queue": _queue_read(),
+            "running": [k for k, v in _ACTIVE.items() if v],
+            "paused": _queue_paused()}
+
+
+class PauseIn(BaseModel):
+    paused: bool
+
+
+@router.post("/queue/pause")
+async def queue_pause(body: PauseIn):
+    """⏸ Hold the queue AFTER the current job finishes — nothing new starts
+    until unpaused. Persisted on disk, so it survives a backend restart: pause,
+    reboot, fix whatever needed fixing, unpause, and the batch carries on."""
+    _set_paused(body.paused)
+    if not body.paused:
+        _ensure_drainer()            # wake the queue back up
+    return {"paused": _queue_paused(), "queue": len(_queue_read()),
             "running": [k for k, v in _ACTIVE.items() if v]}
 
 

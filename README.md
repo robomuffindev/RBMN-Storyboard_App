@@ -151,6 +151,17 @@ set for free and stops rather than spending forty renders on a bad one, can be s
 and resumes where it left off after a restart. **Batch mode** queues many characters and runs
 them one after another.
 
+**🌍 Story / World Builder — the narrative layer** (v1.277.0). A home-page mode (`/worlds`)
+where a WORLD holds the setting sheet, any number of STORIES, a shared CAST and your
+lyrics/narrations. Every field is LLM-enhanceable (pick which configured brain per task), a
+story's cast can be LLM-proposed under a cap you set, and ⚡ Big Bang turns one idea — a
+sentence or three paragraphs — into a filled world, stories and a proposed cast without
+overwriting anything you typed. Cast members are PAPER until you submit them: pick a depth
+(details only → base → views → clothing → sheet → dataset → LoRA per item) and the whole
+selection goes through the ⚡ Autogen serial queue in one batch, with the cost estimated
+first. This is the bulk-submission mode that batch mode was parked for. Worlds attach to
+projects; projects pulling characters/story/texts from a world is the designed next step.
+
 **⚡ The whole fleet gets used** (v1.276.45). Independent renders fan across all three workers;
 only a render that genuinely needs another render's output waits for it. Two lanes were quietly
 using a single box — a Krea 2 batch and the Image Workshop — because asking the dispatcher for a
@@ -173,14 +184,14 @@ shows each run's likeness score — warning you when the epoch installed was not
 one.
 
 Next, in order (the same list as `docs/OPERATIONS.md` §10 and `HANDOVER_PROMPT.md` — they are
-kept identical): (1) ✅ done — a full ⚡ Autogen + LoRA ran clean end to end in v1.276.51 (7.12 hours, all eight
-stages, a trained LoRA at 0.6285 likeness); note that training is 92% of that, so a full
-character without the LoRA takes about half an hour. Batch mode is deliberately left as-is —
-a bulk-submission mode is planned that supersedes it; (2) publishing — 558 files, ~45 versions unpushed; (3) the
-base-outfit picker in the LoRA panel; (4) H3's four untested modes (i2v, first+last,
-last-frame, references→video); (5) whether 🙂 `face_first` earns its keep at all; (6)
-`LoraPanel`'s `nOutfit` has no setter wired to any control, so a new dataset's "outfit" field
-always submits `''`. See
+kept identical): (1) 🌍 Story/World Builder follow-through — exercise the LLM enhance lanes
+against a live model and a real multi-character submission above `details` level, then build
+projects PULLING characters/story/texts from an attached world (designed, not built); (2)
+✅ publishing — done at v1.277.3 (2026-08-14), the gate lifted once the mode was proven;
+(3) the base-outfit picker in the LoRA panel; (4) H3's four
+untested modes (i2v, first+last, last-frame, references→video); (5) whether 🙂 `face_first`
+earns its keep at all; (6) `LoraPanel`'s `nOutfit` has no setter wired to any control, so a
+new dataset's "outfit" field always submits `''`. See
 **`docs/OPERATIONS.md`** (the runbook), `docs/KLEIN3.md` (the character/outfit/costume lane),
 `CHANGELOG.md` (the decision log — it records retractions, so read a claim's newest mention)
 and `HANDOVER_PROMPT.md`.

@@ -584,6 +584,14 @@ app.include_router(autogen_router)
 from backend.api.characters_all import router as characters_all_router  # noqa: E402
 app.include_router(characters_all_router)
 
+# 🌍 Story / World Builder (v1.277.0) — worlds contain stories, a shared cast
+# and texts (lyrics/narrations). LLM-enhance everything; the cast board submits
+# PAPER characters to the autogen serial queue in bulk via a direct _enqueue
+# call (same-process — never an HTTP self-call from a route; see v1.276.41).
+# Registered after autogen because it bridges into that module's queue.
+from backend.api.storyworld import router as storyworld_router  # noqa: E402
+app.include_router(storyworld_router)
+
 # Log registered routes for debugging
 _gen_routes = []
 for route in app.routes:

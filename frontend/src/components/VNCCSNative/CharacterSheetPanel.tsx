@@ -6,6 +6,11 @@
  * (MiniMax H3 and friends). Composited on the backend from the character's
  * identity-scored LoRA dataset renders, tagged refs and active base — no GPU,
  * no worker, no extra LoRA needed.
+ *
+ * v1.277.2 — 🧥 per-OUTFIT sheets: build a sheet from one outfit's five
+ * rendered views (never the dataset), so the character can be referenced in a
+ * specific attire. The "Previous sheets" grid is the sheet LIBRARY: every
+ * generated sheet is stored, labelled, downloadable, usable as a reference.
  */
 import React, { useCallback, useEffect, useState } from 'react';
 
@@ -49,7 +54,10 @@ interface CellT { cell: string; source: string; identity_score: number | null }
 interface SheetT {
   file: string; url: string; bytes?: number; preset?: string; labels?: boolean;
   size?: number[]; cells?: CellT[]; missing?: string[]; created_at?: string;
+  outfit?: { name: string; variant: string } | null;
 }
+/** outfit option, from GET /api/klein3/characters/{slug}/outfits */
+interface OutfitOptT { name: string; variant: string; label: string; views: number }
 
 export default function CharacterSheetPanel(): React.ReactElement {
   const [chars, setChars] = useState<CharT[]>([]);
@@ -61,7 +69,10 @@ export default function CharacterSheetPanel(): React.ReactElement {
       return f;
     } catch { return ''; }
   });
-  const [preset, setPreset] = useState<'standard' | 'turnaround'>('standard');
+  const [preset, setPreset] = useState<'standard' | 'turnaround' | 'outfit'>('standard');
+  const [outfits, setOutfits] = useState<OutfitOptT[]>([]);
+  // JSON [name, variant] — outfit names contain spaces, so no string splitting
+  const [outfitKey, setOutfitKey] = useState('');
   const [labels, setLabels] = useState(false);
   const [width, setWidth] = useState<'full' | '2048'>('full');
   const [busy, setBusy] = useState(false);
@@ -88,12 +99,51 @@ export default function CharacterSheetPanel(): React.ReactElement {
   useEffect(() => { void loadChars(); }, [loadChars]);
   useEffect(() => { setLatest(null); void loadSheets(slug); }, [slug, loadSheets]);
 
+  // 🧥 the character's rendered outfits, for per-outfit sheets
+  useEffect(() => {
+    if (!slug) { setOutfits([]); return; }
+    let stop = false;
+    (async () => {
+      try {
+        interface OVarT { variant: string; label: string; views: Record<string, unknown> }
+        interface OT { name: string; variants: OVarT[] }
+        const r = await j<{ outfits: OT[] }>(
+          await fetch(`/api/klein3/characters/${slug}/outfits`));
+        if (stop) return;
+        const opts: OutfitOptT[] = [];
+        for (const o of r.outfits || []) {
+          for (const v of o.variants || []) {
+            const n = Object.keys(v.views || {}).length;
+            if (n > 0) {
+              opts.push({
+                name: o.name, variant: v.variant,
+                label: `${o.name}${v.variant ? ` · ${v.label}` : ''} (${n} views)`,
+                views: n,
+              });
+            }
+          }
+        }
+        setOutfits(opts);
+        setOutfitKey((k) => opts.some((o) => JSON.stringify([o.name, o.variant]) === k)
+          ? k : (opts[0] ? JSON.stringify([opts[0].name, opts[0].variant]) : ''));
+      } catch { if (!stop) setOutfits([]); }
+    })();
+    return () => { stop = true; };
+  }, [slug]);
+
   const generate = async () => {
     if (!slug) return;
     setBusy(true); setErr('');
     try {
       const body: Record<string, unknown> = { slug, preset, labels };
       if (width === '2048') body.width = 2048;
+      if (preset === 'outfit') {
+        try {
+          const [n, v] = JSON.parse(outfitKey) as [string, string];
+          body.outfit_name = n || '';
+          body.outfit_variant = v || '';
+        } catch { setErr('pick an outfit first'); setBusy(false); return; }
+      }
       const r = await j<SheetT>(await fetch(`${BASE}/generate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -145,14 +195,39 @@ export default function CharacterSheetPanel(): React.ReactElement {
 
           <div style={{ marginTop: 10 }}>
             <span style={label}>Layout</span>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               <button style={chip(preset === 'standard')} onClick={() => setPreset('standard')}>
                 Standard (8 cells)
               </button>
               <button style={chip(preset === 'turnaround')} onClick={() => setPreset('turnaround')}>
                 Turnaround (4)
               </button>
+              <button style={{ ...chip(preset === 'outfit'),
+                               opacity: outfits.length ? 1 : 0.5 }}
+                      title="a sheet built from ONE outfit's rendered views — reference the character in a specific attire"
+                      disabled={!outfits.length}
+                      onClick={() => setPreset('outfit')}>
+                🧥 Outfit ({outfits.length ? `${outfits.length} available` : 'none rendered'})
+              </button>
             </div>
+            {preset === 'outfit' && (
+              <div style={{ marginTop: 8 }}>
+                <span style={label}>Outfit</span>
+                <select style={input} value={outfitKey}
+                        onChange={(e) => setOutfitKey(e.target.value)}>
+                  {outfits.map((o) => (
+                    <option key={`${o.name}|${o.variant}`}
+                            value={JSON.stringify([o.name, o.variant])}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ ...hint, marginTop: 4 }}>
+                  Uses only this outfit&apos;s rendered views — never the dataset — so the
+                  attire on the sheet is exactly this outfit.
+                </div>
+              </div>
+            )}
           </div>
 
           <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
@@ -164,8 +239,8 @@ export default function CharacterSheetPanel(): React.ReactElement {
             </button>
           </div>
           <div style={{ ...hint, marginTop: 4 }}>
-            Text on a sheet can leak into generations — keep “No text” when the sheet is a
-            model input.
+            Text on a sheet can leak into generations — keep &ldquo;No text&rdquo; when the
+            sheet is a model input.
           </div>
 
           <div style={{ marginTop: 10 }}>
@@ -210,7 +285,9 @@ export default function CharacterSheetPanel(): React.ReactElement {
           {shown ? (
             <>
               <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
-                <span style={hint}>{shown.file}</span>
+                <span style={hint}>
+                  {shown.outfit?.name ? `🧥 ${shown.outfit.name}` : ''} {shown.file}
+                </span>
                 <div style={{ flex: 1 }} />
                 <a href={`${shown.url}?download=1`} download>
                   <button style={btn}>📥 Download PNG</button>
@@ -226,15 +303,22 @@ export default function CharacterSheetPanel(): React.ReactElement {
           )}
         </div>
 
-        {sheets.length > 1 && (
+        {sheets.length > 0 && (
           <div style={box}>
-            <span style={label}>Previous sheets</span>
+            <span style={label}>Sheet library — every generated sheet, downloadable</span>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {sheets.map((s) => (
                 <div key={s.file} style={{ width: 180 }}>
                   <img src={s.url} alt={s.file}
                        style={{ width: '100%', borderRadius: 6, background: '#fff', cursor: 'pointer' }}
                        onClick={() => setLatest(s)} />
+                  <div style={{ ...hint, fontSize: 10, marginTop: 2, whiteSpace: 'nowrap',
+                                overflow: 'hidden', textOverflow: 'ellipsis' }}
+                       title={s.file}>
+                    {s.outfit?.name
+                      ? `🧥 ${s.outfit.name}${s.outfit.variant ? ` · ${s.outfit.variant}` : ''}`
+                      : (s.preset || 'sheet')}
+                  </div>
                   <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
                     <a href={`${s.url}?download=1`} download style={{ flex: 1 }}>
                       <button style={{ ...btnGhost, width: '100%', padding: '3px 6px', fontSize: 11 }}>📥</button>

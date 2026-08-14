@@ -1,3 +1,162 @@
+## v1.277.3 -- 🖼 CAST CARDS GET FACES (2026-08-14)
+
+Frontend-only. Every cast card on /worlds now carries the character's thumbnail (the
+klein3 active base, cache-busted by `updated_at` so a queue completion refreshes it in
+place), click → the SHARED zoom/pan lightbox (one lightbox app-wide, the v1.276.0 rule).
+Paper members show a 📄 placeholder. The 5s status poll already reloads the world on any
+member's status change, so thumbnails appear as the queue finishes each character —
+verified against his live 7-character batch. First publish to the public repo since
+v1.276.09 goes out with this version, by his decision now that the mode is proven.
+
+## v1.277.2 -- ⏸ QUEUE PAUSE · 🧥 OUTFIT SHEETS · 📚 CHARACTER PICKER FOR VIDEO · 🎨 WORLD VISUAL STYLE · fleet audit (2026-08-14)
+
+Five asks in one pass, delivered while his first real Big Bang batch (7 characters) ran on
+the queue — which itself proved the serial queue, the resume-after-restart and the new
+SKIP-aware smoke in production.
+
+### ⏸ Queue pause (survives a reboot)
+
+`POST /api/autogen/queue/pause {paused}` — the flag lives ON DISK (`_libraries/autogen/
+paused.json`) because its whole reason to exist is "pause, reboot the app, fix things, come
+back" without losing a large batch. Checked in the drainer BEFORE popping, so the running
+job always finishes; unpause (or any push) restarts the drainer. Surfaced on `/jobs`,
+`/health`, and as a ⏸/▶ button + amber chip on the Autogen board.
+
+### 🧥 Character sheets PER OUTFIT + the sheet library
+
+- `POST /api/charsheet/generate` takes `outfit_name`/`outfit_variant`; a new 5-cell
+  `outfit` preset (front/left/right/back/face) composes from THAT outfit's rendered views
+  via klein3's `_outfit_ref_for_view` — never the dataset, never the base look, because
+  mixed clothes defeat the sheet's purpose. Files named `sheet_outfit_<outfit>_<ts>.png`,
+  outfit recorded in the sidecar + the sheets list.
+- The panel: a 🧥 Outfit layout chip + outfit dropdown (counts rendered views), and the
+  "Previous sheets" grid is now the labelled SHEET LIBRARY (outfit badges, downloads).
+
+### 📚 Pick a character image as a video reference — with a preview
+
+New `CharacterImagePicker` (frontend): character list from `/api/characters`, then tabs
+🪪 Sheets / 🧭 Views & refs (incl. outfit views + active base) / 🎓 Dataset renders — grid,
+big preview, "Use this image". Wired into the 🎬 Video Lab as 📚 buttons on first frame,
+last frame and ref2v image slots (his MiniMax character-sheet-as-reference flow). The
+picked image is fetched same-origin and re-registered as an H3 upload — zero new backend
+surface. DB (VNCCS) characters supported via the catalog images route.
+
+### 🎨 World visual style — preset, custom, or YOUR OWN images' style
+
+- `_STYLE_PRESETS` (anime · manga · photorealistic · cartoon · comic · watercolour · oil ·
+  pixel · CGI · cinematic · custom) + free-text. The style text is injected into
+  `_ctx_world`, so EVERY LLM call for that world writes for that medium.
+- `POST /worlds/{wid}/style/ref` — upload a style image; the VISION model describes its
+  ARTISTIC STYLE (not its content) and that description joins the style. One or two images
+  of someone's own style are enough to keep creating in it.
+- `POST /worlds/{wid}/style/samples` — visual-guide images of THIS world in ITS style.
+  With a style ref: Klein citing it positionally. Without: t2i (krea2/z_image/anima/klein)
+  with the style text. Scene prompts come from the LLM (template fallback). Fanned across
+  workers, with the FULL live-status contract (status/done/elapsed/workers/log) per the
+  standing rule, and every sample records prompt+worker+model.
+
+### ⚡ Fleet audit (his ask: "confirm we use idle workers")
+
+Read-only audit of EVERY render lane: **the fleet is clean** — klein3 views/outfits/pose,
+lora render/QC/repair, forge (incl. Krea 2), costumes, workshop, vnccs base sets, klein2
+pose library all fan correctly; singles/serial lanes all justified. **Two wastes found,
+one fixed**: `tools.py` pose/expression samples ran up to 8 images serially on ONE box
+(per-image `select_worker` = the v1.276.45 constant-function disease) — now pool up front
++ round-robin + gather + `workers` published. The other is `klein2.py /generate` (same
+pattern, up to 8) — left alone deliberately: the statue lane is PINNED/parked.
+
+### Verified
+
+`storyworld_smoke.py` grew to **46 checks** (style vocab/validation, pause round-trip,
+outfit-sheet validation) — **41 PASS + 1 SKIP with his real batch occupying the queue**
+(the end-to-end wait now SKIPs when real jobs hold the queue rather than failing — a test
+that fails because the user is rendering teaches people to ignore it). Frontend builds
+clean, tsc clean on all touched files.
+
+## v1.277.1 -- ⚡ THE LIVE BOARD ON /worlds + WHERE-IT-RENDERED IS NOW RECORDED (2026-08-13)
+
+His STANDING RULE, verbatim intent: *any generation or autogen process needs a live status I
+can expand — as verbose as possible about what's rendering, WHERE, and for how long — and the
+run should be recorded (duration, what was used) as data for future benchmarking.*
+
+- **The ⚡ Autogen board (v1.276.46) is now embedded on the /worlds 🎭 Cast tab** whenever any
+  member has a job — same component as /studio, so the persisted verbose toggle, per-stage
+  durations, estimate-vs-reality and full timestamped log all apply to Story/World
+  submissions without leaving the page.
+- **⚠ "WHERE did it render" was unanswerable for a finished run.** `_note_workers` fed
+  `_WORKERS_TOUCHED` (in-memory, for cancel) and NOTHING durable — and the board's own header
+  comment promised "the workers it used" while no code rendered it. All 7 call sites now pass
+  the job state and the boxes persist as **`workers_used`** on the job file (written only
+  when a NEW box appears — the probe runs every poll); the board's expander shows a
+  `workers` row. Benchmarking record per run = the job JSON in `_libraries/autogen/jobs/`:
+  spec, estimate, `stage_times`, `elapsed_s`, `workers_used`, the log. Nothing deletes them.
+
+## v1.277.0 -- 🌍 STORY / WORLD BUILDER — the next big mode lands (2026-08-13)
+
+His ask: a main-screen mode for base story/world building — LLM-enhance any field or the
+whole thing, hand-make or LLM-propose the cast, batch-generate the characters at a chosen
+depth through the existing autogen queue, store lyrics/narrations, associate with projects.
+
+### The shape (his three calls, same day)
+
+- **A WORLD contains STORIES** — setting/lore + shared cast at world level, any number of
+  stories (a music video and a narration can share one world and one cast).
+- **Home page card** → `/worlds`, its own full page.
+- **LLM cast generation: the model decides how many characters the story needs**, capped by
+  a per-run max; everything lands as PAPER for review before a single render.
+- (2026-08-13, standing) **LoRA is PER ITEM in each character's chain** via the existing
+  toggle — no end-of-queue training batch, ever. Some projects never need them.
+
+### What shipped
+
+- **`backend/api/storyworld.py`** — `/api/storyworld/*`: worlds/stories/cast/texts/projects
+  CRUD (all merges, never replaces — klein3 `/fields`' REPLACE bite is designed out), a
+  13-field world sheet + 8-field story sheet + cast members carrying klein3's 11 appearance
+  keys + 8 lore keys + outfits. Field vocab is SERVER-DRIVEN via `GET /meta`.
+- **LLM everywhere, per-task brain picker**: `GET /llms` lists what Settings has configured
+  (ollama pool/openai/anthropic/gemini); every enhance call takes an optional `{provider,
+  model}` override. One field (`/enhance/field`), one section (`/enhance/world`,
+  `/enhance/story/{sid}`, `/enhance/cast/{cid}`, fill|overwrite), a proposed cast
+  (`/cast/generate`), or **⚡ Big Bang** (`/bigbang`): idea → world sheet + N stories + cast,
+  FILL semantics throughout. Reuses `concept._call_llm` via `asyncio.to_thread`.
+- **The bridge**: `POST /worlds/{wid}/cast/submit` — level ladder `details` (free, zero
+  renders — klein3 record + fields only) → `base` → `views` → `clothing` → `sheet` →
+  `dataset` → `lora`, builds AutogenSpec per member and calls **autogen `_enqueue` DIRECTLY**
+  (same-process; the v1.276.41 self-HTTP deadlock class cannot apply). `estimate_only:true`
+  prices it first. `GET /cast/status` joins the board to the queue and write-backs terminal
+  results (done → `generated`+slug, error → back to paper with the error kept).
+- **`frontend/src/components/StoryWorld/StoryWorldPage.tsx`** + home card: worlds sidebar,
+  tabs 🌍/📖/🎭/📝/🔗, ✨ per field + per section + per member, cast board with status chips
+  (paper/⏳ stage/✅ slug → jumps to the studio via the focus key), level picker with ⏱
+  estimate and a LoRA hour-math warning, texts editor, project attach.
+
+### Verified — free, then adversarially
+
+- **`scripts/storyworld_smoke.py` — 33 checks, zero renders, zero LLM calls**: CRUD + merge
+  semantics + validations + estimate ladder + a REAL details-level submission through the
+  actual queue (klein3 character created carrying the paper fields, write-back to
+  `generated`, then cleaned up). **4× consecutive ALL PASS** post-fixes.
+- **A subagent was told to prove it broken and found 6 real bugs, 0 fatal** — all fixed:
+  ① "fill" could eat text typed during the LLM call (now re-checked under the lock, and
+  `/enhance/field` takes the CLIENT's live value because clicking ✨ races the blur-save);
+  ② rename had no dup check while submit write-back mapped jobs BY NAME — two members on one
+  name would share one job id and build the same slug twice (dup check added; write-back now
+  POSITIONAL); ③ **double-submit raced**: claim/409/mark all ran on an unlocked snapshot, so
+  a double-click queued every character twice at 32min-7h each (now claimed under the lock
+  BEFORE `_enqueue`, reverted if it fails); ④ status poll reloaded forever after the first
+  success and never noticed errors (now diffs statuses); ⑤ a missing job file wedged a member
+  at `submitted` permanently (now reverts to paper); ⑥ a stale texts body could revert an
+  external edit on a dropdown change (dirty tracking). Plus: `<think>` stripped before JSON
+  slicing (qwen3 is the default brain), `_save` retry capped (it held the module lock inside
+  async routes), field-name validation on `/enhance/field`.
+- **First smoke run caught route shadowing**: `POST /cast/{cid}` declared before the literal
+  `/cast/submit`/`/cast/generate` swallowed both as cid values — 7 failures, one cause.
+  The parameterized route is now declared LAST with a comment saying why.
+
+⚠ NOT yet exercised: the LLM enhance routes against a live model (only their validation), and
+a multi-character submission above `details` level. The projects tab ATTACHES worlds; projects
+actually PULLING characters/texts from a world is the designed next step, not built.
+
 ## v1.276.54 -- 📌 BATCH MODE IS PARKED BY DECISION; the next big mode supersedes it (2026-08-12)
 
 Lorenzo, after using batch mode for the first time:

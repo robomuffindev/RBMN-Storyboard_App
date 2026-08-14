@@ -10,6 +10,7 @@ import BatchesDashboard from '@/components/BatchMode/BatchesDashboard';
 import BatchRunDetail from '@/components/BatchMode/BatchRunDetail';
 import ShortcodeRedirect from '@/components/Chapters/ShortcodeRedirect';
 import CharacterStudioPage from './components/CharacterStudio/CharacterStudioPage';
+import StoryWorldPage from './components/StoryWorld/StoryWorldPage';
 import ToolsPage from './components/Tools/ToolsPage';
 import ImageWorkshopPage from './components/ImageWorkshop/ImageWorkshopPage';
 import VNCCSNativePage from './components/VNCCSNative/VNCCSNativePage';
@@ -34,6 +35,7 @@ function App() {
         <Route path="/project/:id/storyboard" element={<StoryboardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/studio" element={<CharacterStudioPage />} />
+        <Route path="/worlds" element={<StoryWorldPage />} />
         <Route path="/studio/vnccs" element={<VNCCSNativePage />} />
         <Route path="/studio/vnccs-klein" element={<VNCCSNativePage variant="klein" />} />
         <Route path="/tools" element={<ToolsPage />} />

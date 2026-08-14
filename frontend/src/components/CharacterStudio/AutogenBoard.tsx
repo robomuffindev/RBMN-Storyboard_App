@@ -39,6 +39,7 @@ interface JobT {
 }
 interface JobFullT extends JobT {
   log?: LogT[]; log_total?: number; stage_elapsed_s?: number;
+  workers_used?: string[];
   installed_epoch?: number | null; best_epoch?: number | null;
   install_note?: string | null; best_score?: number | null; epochs_scored?: number;
   spec?: Record<string, unknown>;
@@ -169,6 +170,12 @@ function Detail({ jid }: { jid: string }): React.ReactElement {
           `${j.dataset_flags.flagged ?? 0} flagged of ${j.dataset_flags.checked ?? 0}`)}
         {j.estimate?.renders !== undefined && row('estimated',
           `${j.estimate.renders} renders / ${j.estimate.human}`)}
+        {/* v1.277.1 — WHERE it rendered, persisted on the job state so a
+            finished run still answers it (benchmarking data, not just live) */}
+        {!!j.workers_used?.length && row('workers',
+          <span style={mono}>
+            {j.workers_used.map((h) => h.replace(/^https?:\/\//, '')).join(' · ')}
+          </span>)}
       </div>
 
       {/* the log — the actual answer to "what is it doing" */}
@@ -208,6 +215,7 @@ function Detail({ jid }: { jid: string }): React.ReactElement {
 export default function AutogenBoard({ compact }: { compact?: boolean }): React.ReactElement | null {
   const [jobs, setJobs] = useState<JobT[]>([]);
   const [queue, setQueue] = useState<string[]>([]);
+  const [paused, setPaused] = useState(false);
   const [msg, setMsg] = useState('');
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [verbose, setVerbose] = useState<boolean>(() => {
@@ -225,6 +233,7 @@ export default function AutogenBoard({ compact }: { compact?: boolean }): React.
       const j = await r.json();
       setJobs(j.jobs || []);
       setQueue(j.queue || []);
+      setPaused(!!j.paused);
       setSyncedAt(Date.now());
     } catch { /* a failed poll is not worth a message */ }
   }, []);
@@ -283,7 +292,30 @@ export default function AutogenBoard({ compact }: { compact?: boolean }): React.
           {running.length ? `${running.length} running` : 'idle'}
           {queue.length ? ` · ${queue.length} waiting` : ''}
         </span>
+        {paused && (
+          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 999,
+                         border: '1px solid #c9a227', color: '#c9a227' }}
+                title="the running job finishes; nothing new starts until you resume">
+            ⏸ paused{running.length ? ' — finishing the current job' : ''}
+          </span>
+        )}
         <div style={{ flex: 1 }} />
+        {/* ⏸ v1.277.2 — survives a restart: pause, reboot the app, come back,
+            resume — the batch is exactly where you left it */}
+        <button style={{ ...btnSm, borderColor: paused ? '#2f6b45' : '#c9a227',
+                         color: paused ? '#5ee08a' : '#c9a227' }}
+          title={paused
+            ? 'let the queue continue'
+            : 'finish the current job, then hold everything — safe across a reboot'}
+          onClick={() => void (async () => {
+            await fetch(`${BASE}/queue/pause`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ paused: !paused }),
+            });
+            void load();
+          })()}>
+          {paused ? '▶ resume queue' : '⏸ pause queue'}
+        </button>
         <label style={{ ...hint, display: 'flex', gap: 5, alignItems: 'center', cursor: 'pointer' }}
                title="Show the stage chain with timings, the full log, and everything the run produced">
           <input type="checkbox" checked={verbose} onChange={(e) => setV(e.target.checked)} />

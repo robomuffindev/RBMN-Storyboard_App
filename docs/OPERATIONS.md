@@ -348,7 +348,31 @@ now checks the capability count for exactly this reason — free, no renders.
   characters — and it CALLS these routes rather than duplicating them.
 - **`/api/autogen/*`** — ⚡ Autogen v2: `run` · `batch` · `estimate` · `refs` ·
   `refs/{rid}/image` · `jobs` · **`jobs/{id}?log=N`** (−1 all, 0 none) ·
-  `jobs/{id}/cancel|retry|delete` · `queue/clear` · `health`. Timing + log fields in §10.
+  `jobs/{id}/cancel|retry|delete` · `queue/clear` · **`queue/pause` {paused}** (v1.277.2 —
+  ON-DISK flag; the running job finishes, nothing new starts; survives a reboot, so pause →
+  restart → resume keeps a large batch intact) · `health`. `workers_used` persists per job
+  (v1.277.1). Timing + log fields in §10.
+- **`/api/storyworld/*`** (v1.277.0) — 🌍 Story / World Builder, home page → `/worlds`:
+  `meta` (server-driven field vocab) · `llms` (the per-task brain picker) · `worlds` CRUD +
+  `rename|world|llm` · `stories`/`texts`/`cast` CRUD (all MERGE, never replace) ·
+  `enhance/world|story/{sid}|cast/{cid}|field` (fill|overwrite, optional `{provider,model}`
+  override) · `cast/generate` (LLM proposes ≤cap, lands as PAPER) · `bigbang` (idea → world +
+  stories + cast) · **`cast/submit`** (level `details`…`lora`, `estimate_only`, builds
+  AutogenSpecs and calls autogen `_enqueue` IN-PROCESS — the bulk-submission producer) ·
+  `cast/status` (joins the board to the queue, write-backs terminal results). Worlds live in
+  `_libraries/storyworld/worlds/`. Free suite: `scripts/storyworld_smoke.py` (33 checks).
+  ⚠ `POST /cast/{cid}` is declared LAST in the module — route order is load-bearing
+  (literal `/cast/submit`·`/cast/generate` must match first).
+  🎨 **Visual style** (v1.277.2): `style` {preset, custom_text} · `style/ref` (multipart —
+  the VISION model describes the artistic STYLE, never the content) · `style/samples`
+  {count, model, direction} (klein+ref when a style ref exists, else t2i; fanned; live
+  status at `style/job`) · `style/samples` GET/list · `style/samples/{sid}/image|delete`.
+  The style text is injected into every LLM context for that world.
+- **`/api/charsheet/*`** additions (v1.277.2): `generate` takes `outfit_name`/
+  `outfit_variant` — the `outfit` preset (5 cells) composes ONLY from that outfit's
+  rendered views; the sheets list carries `outfit` metadata. The Video Lab's 📚 buttons
+  open `CharacterImagePicker` (sheets/views/dataset, preview-first) and re-register the
+  picked image as an H3 upload.
 - `/api/costumes/*` — 👗 the shared costume library: `draft` · `design` · `job` · `models` ·
   `refs` · list/filter · `{cid}/approve|adopt|rename|delete` · `candidates/clear`. See §2a.
 - `/api/forge/*` — 🧬: characters (name-first), generate, edit, gallery, promote, lore(+
@@ -559,12 +583,13 @@ url · `asyncio.create_task` raises off the event loop, and a status set before 
 scheduled can LIE · a correct API does not mean a correct screen.
 
 **Open, in order** (same list as `HANDOVER_PROMPT.md`'s START HERE — keep them in sync):
-(1) ✅ **CLOSED** — the ⚡ Autogen lane is done for now: a full run went end to end clean
-(v1.276.51 `walterv1`, 7.12h, 8/8 stages, 0.6285); training = 92% of it, so without the LoRA a
-full character is ~32 min. **📌 Batch mode is PARKED BY DECISION (Lorenzo, 2026-08-12) — it is
-one-mode repeated, which is enough, and a bulk-submission mode will supersede it. Do not
-"improve" it.** · (2) **PUBLISH** — 558 files,
-~45 versions unpushed · (3) LoRA panel **base-outfit picker** (route built + tested, no UI) ·
+(1) 🌍 **Story/World Builder follow-through** (the mode itself SHIPPED in v1.277.0 — it IS the
+bulk-submission mode batch mode was parked for): exercise the LLM enhance lanes against a live
+model and a real multi-character submission above `details` level, then build projects PULLING
+characters/story/texts from an attached world (designed, not built) ·
+(2) ✅ **PUBLISH — DONE at v1.277.3 (2026-08-14)**, gate lifted by his decision after the
+first real Big Bang batch ran clean ·
+(3) LoRA panel **base-outfit picker** (route built + tested, no UI) ·
 (4) **H3's four untested modes** (i2v / first_last / last_frame / ref2v — only t2v has touched
 the GPU) · (5) whether 🙂 `face_first` earns its keep at all · (6) `LoraPanel`'s `nOutfit` has
 no setter wired, so a new dataset's "outfit" field always submits `''`.

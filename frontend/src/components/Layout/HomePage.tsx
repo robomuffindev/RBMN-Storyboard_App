@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone } from 'lucide-react';
+import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone, Globe2 } from 'lucide-react';
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -28,6 +28,25 @@ export default function HomePage() {
         {/* Section cards grid */}
         <div className="w-full max-w-5xl">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {/* Story / World Builder Card */}
+            <div
+              onClick={() => navigate('/worlds')}
+              className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden hover:border-amber-600 hover:shadow-lg transition-all cursor-pointer group"
+            >
+              <div className="h-32 bg-gradient-to-br from-amber-900/20 to-gray-900 flex items-center justify-center">
+                <Globe2
+                  size={48}
+                  className="text-amber-400 group-hover:text-amber-300 transition-colors"
+                />
+              </div>
+              <div className="p-8">
+                <h2 className="text-2xl font-bold mb-2">Story / World Builder</h2>
+                <p className="text-gray-400">
+                  Build worlds, stories & full casts with LLM help — then batch-generate the characters
+                </p>
+              </div>
+            </div>
+
             {/* Projects Card */}
             <div
               onClick={() => navigate('/projects')}
