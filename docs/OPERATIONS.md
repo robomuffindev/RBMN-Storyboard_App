@@ -218,6 +218,11 @@ after any dead session** (queued jobs then run). Claude writes JSON into
 | `download` | URL → repo (confined) | `{"kind":"download","path":"/api/…/image","to":"scripts/_diag/x.png"}` |
 | `restart` | run.bat cycle + health wait | use after EVERY backend patch |
 
+⚠ **Agent-driven publishes MUST pass `-Yes`**: `{"kind":"script","file":"publish_clean.ps1",
+"args":["-Yes","-Message","release vX.Y.Z - ..."]}`. Without it the script's
+`Read-Host "Proceed? (y/N)"` blocks forever headless — a publish hung a full hour on it
+(v1.277.3) until the agent's 3600s script timeout killed it.
+
 ## 5. The worker helpers (v1.219, on ALL boxes)
 
 `rbmn_helper.py` :8765 on every worker — dataset/training lifecycle on the trainer, plus

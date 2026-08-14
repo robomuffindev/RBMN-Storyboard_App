@@ -358,19 +358,32 @@ function StyleCard({ w, meta, llmBody, note, reload }: {
   }, [w.id]);
   useEffect(() => { void loadSamples(); }, [loadSamples]);
 
-  // 📊 the standing rule: a live, expandable, verbose status for any render
+  // 📊 the standing rule: a live, expandable, verbose status for any render.
+  // ⚠ Fetched ON MOUNT too — the first version only polled while a LOCAL flag
+  // was set, so navigating away and back hid a failed run entirely ("nothing
+  // is showing up" with no error anywhere, 2026-08-14). The server's job state
+  // is the truth; adopt it whenever the card appears.
   const running = job.status === 'running' || job.status === 'starting';
   useEffect(() => {
-    if (!running) return;
-    const iv = window.setInterval(async () => {
+    let stop = false;
+    const tick = async () => {
       try {
         const r = await get<{ job: StyleJobT }>(`/worlds/${w.id}/style/job`);
+        if (stop) return;
         setJob(r.job || {});
-        if (r.job?.status === 'done' || r.job?.status === 'error') void loadSamples();
       } catch { /* transient */ }
+    };
+    void tick();                       // on mount: recover a running/failed job
+    if (!running) return () => { stop = true; };
+    const iv = window.setInterval(async () => {
+      await tick();
     }, 2500);
-    return () => window.clearInterval(iv);
-  }, [running, w.id, loadSamples]);
+    return () => { stop = true; window.clearInterval(iv); };
+  }, [running, w.id]);
+  // reload the gallery when a run reaches a terminal state
+  useEffect(() => {
+    if (job.status === 'done' || job.status === 'error') void loadSamples();
+  }, [job.status, loadSamples]);
 
   const saveStyle = async (preset?: string) => {
     try {
@@ -801,7 +814,9 @@ function CastTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
               )}
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <input type="checkbox" checked={!!sel[c.id]} disabled={c.status !== 'paper'}
+                  {/* generated members stay selectable — that IS the regenerate path */}
+                  <input type="checkbox" checked={!!sel[c.id]} disabled={c.status === 'submitted'}
+                    title={c.status === 'generated' ? 'select to REGENERATE this character' : ''}
                     onChange={e => { setSel(p => ({ ...p, [c.id]: e.target.checked })); setEst(null); }} />
                   <span className="font-semibold truncate">{c.name}</span>
                   <span className="text-[11px] text-gray-500">{c.importance}</span>
@@ -820,6 +835,20 @@ function CastTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
               <button className={btnCls} disabled={!!busyKeys[`cm.${c.id}`]}
                 title="LLM fills every empty appearance + lore field"
                 onClick={() => enhanceMember(c)}>{busyKeys[`cm.${c.id}`] ? '⏳' : '✨ Fill'}</button>
+              {c.status === 'generated' && (
+                <button className={btnCls} disabled={!!busyKeys['cast.submit']}
+                  title={`re-run this character through the queue at "${level}" — a new version of their base/views/etc; edits to the paper details apply`}
+                  onClick={async () => {
+                    if (!window.confirm(`Regenerate "${c.name}" at "${level}"? The character keeps its slug — this renders a NEW version of its images.`)) return;
+                    busyFn('cast.submit', true);
+                    try {
+                      const r = await post<{ queue: number }>(`/worlds/${w.id}/cast/submit`,
+                        { cast_ids: [c.id], level });
+                      note(`↻ ${c.name} queued — queue depth ${r.queue}`);
+                      reload();
+                    } catch (e) { note(`⚠ ${e}`); } finally { busyFn('cast.submit', false); }
+                  }}>↻</button>
+              )}
               <button className={`${btnCls} ml-auto text-red-300`} onClick={async () => {
                 if (!window.confirm(`Remove "${c.name}" from the cast? A generated character stays in the library.`)) return;
                 await post(`/worlds/${w.id}/cast/${c.id}/delete`); reload();

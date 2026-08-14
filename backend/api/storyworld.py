@@ -1476,6 +1476,41 @@ def _run_style_samples(wid: str, disp, count: int, model: str,
 
             _log(f"rendering {count} via klein with the style reference")
             _parallel_klein_edits(disp, jobs, _on_result, st)
+        elif model == "krea2":
+            # ⚠⚠ Krea 2 NEVER uses the generic t2i workflow file — the unet
+            # name baked into KREA2_TURBO_T2I.json is not what is installed,
+            # and every box 400s the raw graph (measured 2026-08-14: 4 samples
+            # → 400 on all three workers — the v1.276.27 lesson relearned).
+            # forge's lane DISCOVERS the unet per host; use it.
+            from backend.api.forge import (_krea2_core_graph, _krea2_hosts_for,
+                                           _krea2_render)
+            hosts = _krea2_hosts_for(None, disp)
+            if not hosts:
+                raise RuntimeError("no Krea 2 capable worker online")
+            st["workers"] = sorted(hosts)
+            _log(f"rendering {count} via forge's krea2 lane across "
+                 f"{len(hosts)} worker(s)")
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _one_k2(i: int) -> None:
+                host = hosts[i % len(hosts)]
+                try:
+                    p = (f"{prompts[i % len(prompts)]}, {style_txt}. "
+                         f"No text or captions in the image.")
+                    g = _krea2_core_graph(host, p, 1024, 576, 41000 + i,
+                                          None, 1.0)
+                    data = _krea2_render(host, g, 300)
+                    sid = uuid4().hex[:10]
+                    (out_dir / f"{sid}.png").write_bytes(data)
+                    made.append({"id": sid, "prompt": p, "model": "krea2",
+                                 "worker": host, "created_at": _now()})
+                except Exception as e:                           # noqa: BLE001
+                    _log(f"sample #{i + 1} failed on {host}: {e}")
+                st["done"] = int(st.get("done") or 0) + 1
+                _log(f"sample {st['done']}/{count} finished")
+
+            with ThreadPoolExecutor(max_workers=max(1, len(hosts))) as ex:
+                list(ex.map(_one_k2, range(count)))
         else:
             # style TEXT → plain t2i on the chosen model, pooled up front
             from backend.api.tools import (_images_from_outputs,

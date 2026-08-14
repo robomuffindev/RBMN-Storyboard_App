@@ -1,3 +1,27 @@
+## v1.277.4 -- 🎨 STYLE SAMPLES ACTUALLY RENDER + ↻ REGENERATE A CAST MEMBER (2026-08-14)
+
+*"i just did the generate style samples and nothing is showing up."* Two bugs, one measured
+cause and one UX hole:
+
+- **⚠⚠ Krea 2 hit the generic t2i path AGAIN — the v1.276.27 lesson relearned.** The style
+  sample renderer used tools' `KREA2_TURBO_T2I.json` workflow raw, whose baked-in unet name
+  is not what's installed, and **all three boxes 400'd every sample** (log, 09:45:02: four
+  `POST /prompt: 400` across `.201/.224/.163`). Krea 2 samples now go through **forge's
+  krea2 lane** (`_krea2_hosts_for` + `_krea2_core_graph` + `_krea2_render`), which DISCOVERS
+  the unet per host — round-robin across every krea2-capable box. ⚠ tools' own sample
+  generator still carries the raw-workflow krea2 path — noted as a known gap, use
+  z_image/anima/klein there until it is routed the same way.
+- **The failure was INVISIBLE.** The style card only polled while a local "I just pressed
+  the button" flag was set, so navigating away and back hid the error completely. The job
+  state is now fetched ON MOUNT — a running run resumes its live status, a failed run shows
+  its error and log. (In-memory job: a backend restart clears it; the samples themselves
+  are on disk either way.)
+- **↻ Regenerate per cast member** (his ask): generated members are selectable again (that
+  IS the regenerate path — only `submitted` locks the checkbox), plus a per-card ↻ button
+  that re-queues just that character at the chosen level. The slug is kept — forge's create
+  RESUMES on an existing character, so a regen renders new versions of its images; edits
+  made to the paper details apply.
+
 ## v1.277.3 -- 🖼 CAST CARDS GET FACES (2026-08-14)
 
 Frontend-only. Every cast card on /worlds now carries the character's thumbnail (the
