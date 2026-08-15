@@ -292,7 +292,7 @@ def _build_graph(mode: str, prompt: str, w: int, h: int, frames: int,
                  first_name: Optional[str], last_name: Optional[str],
                  ref_imgs: List[str], ref_vids: List[dict],
                  ref_auds: List[str], ref_image_size: str,
-                 prefix: str) -> dict:
+                 prefix: str, draft: bool = False) -> dict:
     g: dict = {}
     unet = UNET_REF2VA if mode == "ref2v" else UNET_FL2VA
     g["1"] = {"class_type": "UNETLoader",
@@ -316,10 +316,14 @@ def _build_graph(mode: str, prompt: str, w: int, h: int, frames: int,
 
     g["8"] = {"class_type": "KSamplerSelect",
               "inputs": {"sampler_name": "euler" if turbo else "res_multistep"}}
+    # 🏃 draft (v1.277.9): the v1.0 8-step lora is documented to also run at 4
+    # steps — roughly half the sampling time for a rougher look. Testing knob,
+    # only meaningful on the turbo path.
     g["9"] = {"class_type": "BasicScheduler",
               "inputs": {"model": model_ref,
                          "scheduler": "beta" if turbo else "simple",
-                         "steps": 8 if turbo else 20, "denoise": 1.0}}
+                         "steps": (4 if draft else 8) if turbo else 20,
+                         "denoise": 1.0}}
     g["10"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
 
     if mode == "ref2v":
@@ -719,6 +723,9 @@ class GenerateIn(BaseModel):
     aspect: str = "16:9"                   # 16:9|9:16|1:1 (i2v: image wins)
     size_from_image: bool = True           # i2v/first_last: derive dims from 1st frame
     turbo: bool = True
+    draft: bool = False                    # 🏃 turbo lora at 4 steps — ~half the
+                                           # sampling time, rougher look; for
+                                           # TESTING an idea, not the final take
     spectrum: bool = False
     seed: Optional[int] = None
     first_frame: Optional[str] = None      # upload id
@@ -811,12 +818,14 @@ async def generate(body: GenerateIn):
     graph = _build_graph(mode, body.prompt, gw, gh, frames, seed,
                          body.turbo, body.spectrum, first_name, last_name,
                          ref_imgs, ref_vids, ref_auds,
-                         body.ref_image_size, prefix)
+                         body.ref_image_size, prefix,
+                         draft=bool(body.draft))
     job = {"id": jid, "mode": mode, "label": body.label or prefix,
            "prompt": body.prompt, "host": w["host"], "worker": w["name"],
            "width": gw, "height": gh, "frames": frames,
            "duration_s": round(frames / 24, 2), "seed": seed,
            "turbo": body.turbo, "spectrum": body.spectrum,
+           "draft": bool(body.draft and body.turbo),
            "refs": {"first": bool(first_name), "last": bool(last_name),
                     "images": len(ref_imgs), "videos": len(ref_vids),
                     "audios": len(ref_auds)},

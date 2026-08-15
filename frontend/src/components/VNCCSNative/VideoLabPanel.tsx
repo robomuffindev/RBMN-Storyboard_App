@@ -51,7 +51,7 @@ interface RefVidT { up: UpT; use_audio: boolean }
 interface JobT {
   id: string; mode: string; label: string; prompt: string; worker: string;
   width: number; height: number; frames: number; duration_s: number;
-  turbo: boolean; spectrum: boolean; status: string; error?: string | null;
+  turbo: boolean; draft?: boolean; spectrum: boolean; status: string; error?: string | null;
   elapsed_s: number; at: string;
   refs?: { first: boolean; last: boolean; images: number; videos: number; audios: number };
 }
@@ -69,6 +69,8 @@ export default function VideoLabPanel(): React.ReactElement {
   const [aspect, setAspect] = useState('16:9');
   const [sizeFromImage, setSizeFromImage] = useState(true);
   const [turbo, setTurbo] = useState(true);
+  // "draftMode" because `draft` is already the 🧠 prompt-drafting function
+  const [draftMode, setDraftMode] = useState(false);
   const [spectrum, setSpectrum] = useState(false);
   // v1.275.11: default ON. H3 rounds frames to f%17==5, LTX's upscaler can only
   // carry f=8k+1 and FLOORS -- so a 124f clip comes back 121f, losing the tail
@@ -199,7 +201,7 @@ export default function VideoLabPanel(): React.ReactElement {
       const body = {
         mode, prompt, worker_id: workerId || null, duration_s: duration,
         resolution, aspect, size_from_image: sizeFromImage,
-        turbo, spectrum, plan_upscale: planUpscale, ref_image_size: refImageSize,
+        turbo, draft: draftMode, spectrum, plan_upscale: planUpscale, ref_image_size: refImageSize,
         first_frame: firstUp?.id || null, last_frame: lastUp?.id || null,
         ref_images: refImgs.map((u) => u.id),
         ref_videos: refVids.map((v) => ({ id: v.up.id, use_audio: v.use_audio })),
@@ -339,6 +341,13 @@ export default function VideoLabPanel(): React.ReactElement {
                 <input type="checkbox" checked={turbo} onChange={(e) => setTurbo(e.target.checked)} />
                 ⚡ Turbo lora (8-step)
               </label>
+              {turbo && (
+                <label style={{ ...hint, display: 'flex', gap: 4, alignItems: 'center' }}
+                       title="the v1.0 turbo lora also runs at 4 steps — roughly half the sampling time, rougher look. For testing an idea, not the final take.">
+                  <input type="checkbox" checked={draftMode} onChange={(e) => setDraftMode(e.target.checked)} />
+                  🏃 Draft (4-step, ~half the time)
+                </label>
+              )}
               <label style={{ ...hint, display: 'flex', gap: 4, alignItems: 'center' }}>
                 <input type="checkbox" checked={spectrum} onChange={(e) => setSpectrum(e.target.checked)} />
                 🌀 SPECTRUM speedup <span style={{ color: '#e0b05e' }}>⚠ quality may suffer</span>
@@ -461,7 +470,7 @@ export default function VideoLabPanel(): React.ReactElement {
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <b style={{ color: '#e6e9ee', fontSize: 13 }}>{j.label}</b>
               <span style={hint}>{j.mode} · {j.width}×{j.height} · {j.duration_s}s ({j.frames}f)
-                · {j.turbo ? '⚡turbo' : '20-step'}{j.spectrum ? ' · 🌀spectrum' : ''} · {j.worker}</span>
+                · {j.turbo ? (j.draft ? '🏃draft 4-step' : '⚡turbo') : '20-step'}{j.spectrum ? ' · 🌀spectrum' : ''} · {j.worker}</span>
               <span style={{
                 fontSize: 12, fontWeight: 700,
                 color: j.status === 'done' ? '#5ee08a'

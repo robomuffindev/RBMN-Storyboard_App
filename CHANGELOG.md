@@ -1,3 +1,12 @@
+## v1.277.9 -- 🏃 DRAFT MODE: the v1.0 turbo lora at 4 steps (2026-08-14)
+
+The v1.0 8-step lora is documented to also run at 4 steps — roughly half the sampling time
+for a rougher look. New 🏃 Draft checkbox in the Video Lab (visible only when ⚡ Turbo is
+on): same lora, `steps: 4`, everything else identical. For TESTING an idea — framing,
+motion, prompt readings — before spending the full 8-step render on the real take. The
+job records `draft` and the Renders row shows `🏃draft 4-step`, so benchmark times stay
+attributable.
+
 ## v1.277.8 -- ⚡ THE TURBO LORA GROWS UP: 8-step v1.0 replaces the 4-step preview (2026-08-14)
 
 His catch: the app's turbo path samples at 8 steps but the lora was
