@@ -1,3 +1,24 @@
+## v1.277.8 -- ⚡ THE TURBO LORA GROWS UP: 8-step v1.0 replaces the 4-step preview (2026-08-14)
+
+His catch: the app's turbo path samples at 8 steps but the lora was
+`minimax_h3_turbo_4step_ckpt500_comfyui_pruned` — an early v0.1-era 4-STEP preview
+checkpoint. On 2026-08-11 Lightx2v/ModelTC shipped **Turbo v1.0** with a checkpoint
+**distilled at 8 NFE** — made for exactly our step count:
+`minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors`
+([lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo)).
+
+- **New `scripts/install_h3_turbo_v1.py`** — drives every helper's `/download/model`, then
+  verifies against **ComfyUI's own /models/loras listing** ("downloaded" is the helper's
+  claim; the worker's listing is the proof). Idempotent; `--check` mode. Ran clean:
+  **3/3 boxes installed and listed** (~12.7 min total, direct from HF).
+- `LORA_TURBO` switched; the old filename is kept as `LORA_TURBO_OLD` for reference/rollback.
+- ⚠ Kijai's repack repo (`Kijai/MiniMax-H3_comfy/loras`) was checked at his suggestion: it
+  carries only the **v0.1 4-step** files (full 1.96 GB + rank-21 315 MB pruned) — the
+  generation this replaces. When a pruned 8-step v1.0 repack appears, swapping is a
+  one-line constant change.
+- Wiki guidance worth keeping: 4–8 steps is the useful range, past 8 adds artifacts;
+  the 8-step file also works at 4 steps if a faster draft mode is ever wanted.
+
 ## v1.277.7 -- 🎬 VIDEO LAB MOVES TO THE HOME SCREEN + RENDER TIMES SHOWN (2026-08-14)
 
 - **The Video Lab is a top-level destination now** (`/video-lab`, home-page card): his

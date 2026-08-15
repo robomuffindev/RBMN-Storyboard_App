@@ -16,8 +16,8 @@ Modes (mirrors the ultra workflow's section groups):
               audios                                      (REFERENCES TO VIDEO)
 
 Speed options (exactly the workflow's toggle groups):
-  turbo=True     Power-Lora turbo path: minimax_h3_turbo_4step lora @1.0,
-                 euler + beta/8 steps (the TURBOLORA workflow's settings).
+  turbo=True     Turbo path: the Lightx2v 8-step v1.0 turbo lora @1.0,
+                 euler + beta/8 steps (distilled AT 8 NFE — v1.277.8).
   turbo=False    res_multistep + simple/20 steps (the non-turbo workflow).
   spectrum=True  SPECTRUM SPEED ENHANCER subgraph (SigmaShift 12.19/3.0 →
                  SpectrumApplyMiniMaxH3) — quality may suffer; default OFF.
@@ -82,7 +82,12 @@ UNET_REF2VA = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 CLIP_QWEN = "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
 VAE_VIDEO = "minimax_h3_video_vae_fp16.safetensors"
 VAE_AUDIO = "minimax_h3_audio_vae_fp32.safetensors"
-LORA_TURBO = "minimax_h3_turbo_4step_ckpt500_comfyui_pruned.safetensors"
+# v1.277.8 — Lightx2v/ModelTC Turbo v1.0 (2026-08-11), DISTILLED AT 8 NFE —
+# made for exactly the 8 steps the turbo path samples. Replaces the v0.1-era
+# 4-step ckpt500 preview that was being run at 8 steps. Installed on all three
+# boxes via scripts/install_h3_turbo_v1.py (verified in each ComfyUI listing).
+LORA_TURBO = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+LORA_TURBO_OLD = "minimax_h3_turbo_4step_ckpt500_comfyui_pruned.safetensors"
 
 # LTX 2.3 upscale stage (tempworkflows/LTX-2-3_ULTRA_WORKFLOW-V3.json, the
 # VIDEO ENHANCER UPSCALER group — all files verified on the boxes 2026-08-09)
@@ -304,7 +309,7 @@ def _build_graph(mode: str, prompt: str, w: int, h: int, frames: int,
         g["5"] = {"class_type": "LoraLoaderModelOnly",
                   "inputs": {"lora_name": LORA_TURBO, "strength_model": 1.0,
                              "model": model_ref},
-                  "_meta": {"title": "H3 turbo 4-step lora"}}
+                  "_meta": {"title": "H3 turbo 8-step v1.0 lora"}}
         model_ref = ["5", 0]
     if spectrum:
         model_ref = _spectrum_nodes(g, model_ref)
