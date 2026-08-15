@@ -4916,7 +4916,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <button style={tabBtn(tab === 'studio')} onClick={() => setTab('studio')}>🏠 Studio</button>
         <button style={tabBtn(tab === 'text2image')} onClick={() => setTab('text2image')}>🧬 Text 2 Image</button>
-        <button style={tabBtn(tab === 'video')} onClick={() => setTab('video')}>🎬 Video Lab</button>
+        {/* 🎬 Video Lab moved to the HOME screen (/video-lab, v1.277.7) — it
+            consumes characters rather than creating them. The tab union,
+            ?tab=video whitelist and render branch stay, so old deep links
+            still work; only the strip button is gone. */}
         <button style={tabBtn(tab === 'create')} onClick={() => setTab('create')}>Create</button>
         <button style={tabBtn(tab === 'clothes')} onClick={() => setTab('clothes')}>Clothes</button>
         <button style={tabBtn(tab === 'emotions')} onClick={() => setTab('emotions')}>Emotions</button>

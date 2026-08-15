@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone, Globe2 } from 'lucide-react';
+import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone, Globe2, Clapperboard } from 'lucide-react';
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -100,6 +100,25 @@ export default function HomePage() {
                 <h2 className="text-2xl font-bold mb-2">Character Studio</h2>
                 <p className="text-gray-400">
                   Create reusable characters, organize them by story, and build LoRA training datasets
+                </p>
+              </div>
+            </div>
+
+            {/* Video Lab Card */}
+            <div
+              onClick={() => navigate('/video-lab')}
+              className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden hover:border-rose-600 hover:shadow-lg transition-all cursor-pointer group"
+            >
+              <div className="h-32 bg-gradient-to-br from-rose-900/20 to-gray-900 flex items-center justify-center">
+                <Clapperboard
+                  size={48}
+                  className="text-rose-400 group-hover:text-rose-300 transition-colors"
+                />
+              </div>
+              <div className="p-8">
+                <h2 className="text-2xl font-bold mb-2">Video Lab</h2>
+                <p className="text-gray-400">
+                  MiniMax H3 video generation — text, image & reference modes, with LTX upscaling
                 </p>
               </div>
             </div>

@@ -36,6 +36,14 @@ const pill = (on: boolean): React.CSSProperties => ({
   color: on ? '#fff' : '#cbd2dc', borderColor: on ? '#3b82f6' : '#2a2f3a',
 });
 
+/** seconds → "47s" / "3m 12s" / "1h 04m" — render times reads at a glance */
+const fmtDur = (s?: number): string => {
+  if (!s || s <= 0) return '';
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, '0')}s`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
+};
+
 interface WorkerT { id: string; name: string; host: string; is_trainer: boolean }
 interface ModeT { key: string; name: string }
 interface UpT { id: string; kind: string; orig?: string }
@@ -459,9 +467,11 @@ export default function VideoLabPanel(): React.ReactElement {
                 color: j.status === 'done' ? '#5ee08a'
                   : j.status === 'error' ? '#ff8a8a' : '#9cc2ff',
               }}>
-                {j.status === 'done' ? '✓ done'
-                  : j.status === 'error' ? '✕ error'
-                    : `⏳ ${j.status} ${j.elapsed_s ? `${Math.round(j.elapsed_s)}s` : ''}`}
+                {/* the run TIME is part of the record (the standing rule) —
+                    live while rendering, final once done, kept for benchmarks */}
+                {j.status === 'done' ? `✓ done${j.elapsed_s ? ` · took ${fmtDur(j.elapsed_s)}` : ''}`
+                  : j.status === 'error' ? `✕ error${j.elapsed_s ? ` · after ${fmtDur(j.elapsed_s)}` : ''}`
+                    : `⏳ ${j.status} ${fmtDur(j.elapsed_s)}`}
               </span>
               <div style={{ flex: 1 }} />
               {j.status === 'done' && (

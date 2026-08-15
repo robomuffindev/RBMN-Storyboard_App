@@ -1,3 +1,15 @@
+## v1.277.7 -- 🎬 VIDEO LAB MOVES TO THE HOME SCREEN + RENDER TIMES SHOWN (2026-08-14)
+
+- **The Video Lab is a top-level destination now** (`/video-lab`, home-page card): his
+  call — video generation consumes characters rather than creating them, so it doesn't
+  belong inside the character studio. The panel itself is untouched (still in
+  `VNCCSNative/`, wrapped by `VideoLab/VideoLabPage.tsx`); the studio strip button is
+  removed but the `?tab=video` deep link still works, so nothing breaks.
+- **Every video render shows its TIME** (the standing rule): live `⏳ running 47s` while
+  rendering (the backend has always updated `elapsed_s` during the poll — the UI just never
+  showed the final number), `✓ done · took 3m 12s` when finished, `✕ error · after …` on
+  failure. The job records persist in `_libraries/h3video/jobs.json` — benchmark data.
+
 ## v1.277.6 -- 🔄 SAMPLES APPEAR WITHOUT A REFRESH — the poll raced the prompt-writing (2026-08-14)
 
 *"i currently need to refresh the browser for those images to appear."* A race with a name:
