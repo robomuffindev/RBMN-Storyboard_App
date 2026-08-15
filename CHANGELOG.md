@@ -1,3 +1,15 @@
+## v1.277.6 -- 🔄 SAMPLES APPEAR WITHOUT A REFRESH — the poll raced the prompt-writing (2026-08-14)
+
+*"i currently need to refresh the browser for those images to appear."* A race with a name:
+the route registered the job only AFTER the LLM wrote the scene prompts (up to a minute on
+local Ollama), so the card's first poll saw the PREVIOUS run's "done", concluded nothing was
+running, and stopped polling — the new run rendered with nobody watching. **A status that
+appears only once work is underway is a status that can lie** — the v1.276.29 rule,
+relearned in a new place. The job now registers at route ENTRY (with a "writing scene
+prompts" log line, and error-reset so a prompt failure can't wedge it at "starting" → 409
+forever), and the frontend sets its local state only AFTER the POST returns, so a stale
+fetch can no longer kill the polling. Button shows the prompt-writing phase distinctly.
+
 ## v1.277.5 -- 🔍 STYLE SAMPLES OPEN IN THE LIGHTBOX (2026-08-14)
 
 Frontend-only. Clicking a style sample used to download it; it now opens the SHARED

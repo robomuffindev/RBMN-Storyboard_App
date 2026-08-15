@@ -349,6 +349,7 @@ function StyleCard({ w, meta, llmBody, note, reload }: {
   const [scanning, setScanning] = useState(false);
   const [samples, setSamples] = useState<SampleT[]>([]);
   const [job, setJob] = useState<StyleJobT>({});
+  const [launching, setLaunching] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { setCustom(s.custom_text || ''); setRefDesc(s.ref_description || ''); }, [w.id]);  // eslint-disable-line react-hooks/exhaustive-deps
@@ -409,12 +410,18 @@ function StyleCard({ w, meta, llmBody, note, reload }: {
     setScanning(false);
   };
   const gen = async () => {
+    // ⚠ the local job state is set only AFTER the POST returns — setting it
+    // before let the poll fetch the PREVIOUS run's "done" while the request
+    // was still in flight, stop polling, and never show the new samples
+    // without a browser refresh (2026-08-14)
+    setLaunching(true);
     try {
-      setJob({ status: 'starting', total: count, done: 0 });
       await post(`/worlds/${w.id}/style/samples`,
         { count, model, direction: dir, ...llmBody });
+      setJob({ status: 'starting', total: count, done: 0 });
       note('🎨 rendering style samples — watch the status below');
-    } catch (e) { setJob({}); note(`⚠ ${e}`); }
+    } catch (e) { note(`⚠ ${e}`); }
+    setLaunching(false);
   };
 
   return (
@@ -459,8 +466,9 @@ function StyleCard({ w, meta, llmBody, note, reload }: {
         <input className={`${inputCls} max-w-xs`} value={dir}
                placeholder="optional: what the samples should show…"
                onChange={e => setDir(e.target.value)} />
-        <button className={btnAmber} disabled={running} onClick={() => void gen()}>
-          {running ? '⏳ rendering…' : '🎨 Generate style samples'}
+        <button className={btnAmber} disabled={launching || running} onClick={() => void gen()}>
+          {launching ? '⏳ writing scene prompts…'
+            : running ? '⏳ rendering…' : '🎨 Generate style samples'}
         </button>
       </div>
       {(running || job.status === 'error') && (

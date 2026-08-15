@@ -1574,7 +1574,7 @@ async def style_samples(wid: str, body: SamplesIn, request: Request,
     reference; otherwise plain t2i on the chosen model with the style text."""
     w = _load(wid)
     cur = _STYLE_JOBS.get(wid)
-    if cur and cur.get("status") == "running":
+    if cur and cur.get("status") in ("starting", "running"):
         raise HTTPException(409, "a sample render is already running for "
                                  "this world")
     count = max(1, min(int(body.count or 4), 8))
@@ -1593,34 +1593,52 @@ async def style_samples(wid: str, body: SamplesIn, request: Request,
     if rid and (_STYLE_REF_DIR / f"{rid}.png").exists():
         ref_path = _STYLE_REF_DIR / f"{rid}.png"
 
-    # scene prompts: ask the LLM for distinct views of THIS world; fall back
-    # to templates if the model is unavailable — samples must not require it
-    prompts: List[str] = []
+    # ⚠⚠ The job is registered BEFORE the LLM writes the scene prompts. The
+    # first version registered it AFTER — and that call can take a minute on
+    # local Ollama, so a poller arriving in that window saw the PREVIOUS
+    # run's "done", concluded nothing was running, and stopped polling: the
+    # new samples rendered with nobody watching and only a browser refresh
+    # showed them. A status that appears only once work is underway is a
+    # status that can lie — v1.276.29, relearned (2026-08-14).
+    import time as _t
+    _STYLE_JOBS[wid] = {"status": "starting", "total": count, "done": 0,
+                        "t0": _t.time(),
+                        "log": [{"t": 0.0, "detail": "writing scene prompts "
+                                                     "(LLM, template fallback)"}]}
     try:
-        system = ("You write one-line IMAGE prompts. Return ONLY a JSON "
-                  "array of strings — each a single concrete scene from the "
-                  "world below, visually distinct from the others, no "
-                  "characters' names, no text in the scene." )
-        user = (f"{_ctx_world(w)}\n\n"
-                + (f"DIRECTION: {body.direction}\n" if body.direction.strip()
-                   else "")
-                + f"Write exactly {count} scene prompts.")
-        got = await _ask_json(session, body.llm or _pick_of(w), system, user,
-                              want="array", max_tokens=1200, timeout_s=180)
-        prompts = [_flat(x, 400) for x in got if _flat(x, 400)][:count]
-    except HTTPException:
-        prompts = []
-    if not prompts:
-        sheet = w.get("world") or {}
-        prompts = [
-            f"a wide establishing shot of {sheet.get('setting') or 'the world'}",
-            f"a street-level view of daily life, {sheet.get('culture') or 'its people going about their day'}",
-            f"a dramatic moment: {sheet.get('logline') or 'the story begins'}",
-            f"one of its key places: {sheet.get('locations') or 'a landmark'}",
-        ][:count] * (1 + count // 4)
-        prompts = prompts[:count]
+        # scene prompts: ask the LLM for distinct views of THIS world; fall
+        # back to templates if the model is unavailable
+        prompts: List[str] = []
+        try:
+            system = ("You write one-line IMAGE prompts. Return ONLY a JSON "
+                      "array of strings — each a single concrete scene from "
+                      "the world below, visually distinct from the others, no "
+                      "characters' names, no text in the scene.")
+            user = (f"{_ctx_world(w)}\n\n"
+                    + (f"DIRECTION: {body.direction}\n"
+                       if body.direction.strip() else "")
+                    + f"Write exactly {count} scene prompts.")
+            got = await _ask_json(session, body.llm or _pick_of(w), system,
+                                  user, want="array", max_tokens=1200,
+                                  timeout_s=180)
+            prompts = [_flat(x, 400) for x in got if _flat(x, 400)][:count]
+        except HTTPException:
+            prompts = []
+        if not prompts:
+            sheet = w.get("world") or {}
+            prompts = [
+                f"a wide establishing shot of {sheet.get('setting') or 'the world'}",
+                f"a street-level view of daily life, {sheet.get('culture') or 'its people going about their day'}",
+                f"a dramatic moment: {sheet.get('logline') or 'the story begins'}",
+                f"one of its key places: {sheet.get('locations') or 'a landmark'}",
+            ][:count] * (1 + count // 4)
+            prompts = prompts[:count]
+    except Exception as e:
+        # never leave the job wedged at "starting" — that would 409 forever
+        _STYLE_JOBS[wid] = {"status": "error", "total": count, "done": 0,
+                            "error": f"prompt writing failed: {e}"}
+        raise
 
-    _STYLE_JOBS[wid] = {"status": "starting", "total": count, "done": 0}
     threading.Thread(target=_run_style_samples,
                      args=(wid, disp, count, body.model, prompts, style_txt,
                            ref_path),
