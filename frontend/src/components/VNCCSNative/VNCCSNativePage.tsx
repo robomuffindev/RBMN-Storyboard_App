@@ -1240,7 +1240,12 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         : ['on', 'true', '1', 'yes', 'set'].includes(s) ? 'set' : 'single'; })());
     setBaseSetAnchor(String(st.klein_base_set_anchor ?? 'fresh').toLowerCase() === 'approved' ? 'approved' : 'fresh');
     setBaseDeriveMethod(String(st.klein_base_derive_method ?? 'reference').toLowerCase() === 'matchpose' ? 'matchpose' : 'reference');
-    setCreateEngine(String(st.vnccs_create_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein');
+    // ⚠ v1.277.10 — this async settings load used to STOMP a deep-linked
+    // 'klein3' back to 'klein', unmounting Klein3Panel after it had already
+    // consumed the one-shot focus key; the remounted panel then fell back to
+    // whichever character sorted first. Never downgrade klein3 here.
+    setCreateEngine((prev) => prev === 'klein3' ? prev
+      : (String(st.vnccs_create_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein'));
     setClothesSub(String(st.vnccs_clothes_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein');
     setEmotionsSub(String(st.vnccs_emotions_engine ?? 'klein').toLowerCase() === 'qwen' ? 'qwen' : 'klein');
     setQwenRefWeight(st.qwen_ref_weight !== undefined ? String(st.qwen_ref_weight) : '');

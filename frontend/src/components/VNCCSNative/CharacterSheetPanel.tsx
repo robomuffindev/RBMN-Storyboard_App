@@ -14,6 +14,7 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 
+import { consumeFocusChar, setCurrentChar } from '../shared/currentChar';
 import useLightbox from '../shared/useLightbox';
 const BASE = '/api/charsheet';
 
@@ -62,13 +63,10 @@ interface OutfitOptT { name: string; variant: string; label: string; views: numb
 export default function CharacterSheetPanel(): React.ReactElement {
   const [chars, setChars] = useState<CharT[]>([]);
   const lb = useLightbox();
-  const [slug, setSlug] = useState(() => {
-    try {
-      const f = window.localStorage.getItem('rbmn_focus_char') || '';
-      window.localStorage.removeItem('rbmn_focus_char');
-      return f;
-    } catch { return ''; }
-  });
+  // v1.277.10: focus jump wins, else the persistent current character —
+  // switching tabs no longer loses who you were working on
+  const [slug, _setSlug] = useState(() => consumeFocusChar());
+  const setSlug = (v: string) => { setCurrentChar(v); _setSlug(v); };
   const [preset, setPreset] = useState<'standard' | 'turnaround' | 'outfit'>('standard');
   const [outfits, setOutfits] = useState<OutfitOptT[]>([]);
   // JSON [name, variant] — outfit names contain spaces, so no string splitting

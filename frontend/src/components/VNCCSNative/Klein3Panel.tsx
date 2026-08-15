@@ -16,6 +16,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ImageLightbox } from '../CharacterStudio/p2Shared';
+import { consumeFocusChar, setCurrentChar } from '../shared/currentChar';
 
 const BASE = '/api/klein3';
 const BASE_COS = '/api/costumes';   // v1.276.27 shared costume library
@@ -175,16 +176,17 @@ const CORE_TAGS = ['front', 'back', 'left', 'right', 'face'];
 export default function Klein3Panel() {
   // characters
   const [chars, setChars] = useState<CharT[]>([]);
-  // v1.276.15: honour the shared focus key, the way Text 2 Image and Character
-  // Sheet already do — otherwise arriving here from the Character Studio grid
-  // dropped you on whichever character happened to sort first.
-  const [slug, setSlug] = useState(() => {
-    try {
-      const f = window.localStorage.getItem('rbmn_focus_char') || '';
-      if (f) window.localStorage.removeItem('rbmn_focus_char');
-      return f;
-    } catch { return ''; }
-  });
+  // v1.277.10: focus jump wins, else the PERSISTENT current character — so a
+  // remount (the settings-load race) or a tab switch keeps the character.
+  const [slug, _setSlug] = useState(() => consumeFocusChar());
+  // every character change here becomes the studio-wide current character
+  const setSlug = useCallback((v: React.SetStateAction<string>) => {
+    _setSlug((prev) => {
+      const next = typeof v === 'function' ? (v as (p: string) => string)(prev) : v;
+      setCurrentChar(next);
+      return next;
+    });
+  }, []);
   const [cur, setCur] = useState<CharT | null>(null);
   const [newName, setNewName] = useState('');
   const [msg, setMsg] = useState('');

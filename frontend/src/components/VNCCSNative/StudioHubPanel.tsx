@@ -54,7 +54,10 @@ export default function StudioHubPanel({ goTo }: { goTo: (tab: string, slug: str
   const lb = useLightbox();
 
   const jump = (tab: string, slug: string) => {
-    try { window.localStorage.setItem(FOCUS_KEY, slug); } catch { /* ignore */ }
+    try {
+      window.localStorage.setItem(FOCUS_KEY, slug);
+      if (slug) window.localStorage.setItem('rbmn_current_char', slug);
+    } catch { /* ignore */ }
     goTo(tab, slug);
   };
 

@@ -5,7 +5,9 @@
  * workers, caption it, run a vision QC pass, review every image + caption in a
  * gallery, then export a training-ready zip.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+
+import { consumeFocusChar } from '../shared/currentChar';
 
 const BASE = '/api/lora';
 const K3 = '/api/klein3';
@@ -108,6 +110,12 @@ interface RecipeT {
 }
 
 export default function LoraPanel() {
+  // v1.277.10 — this panel NEVER honoured the focus/current character: arriving
+  // from a character card left the character dropdown on whoever sorted first
+  // and no dataset opened. Now the focused character seeds the ➕ New form AND
+  // auto-opens their newest dataset.
+  const [focusChar] = useState(() => consumeFocusChar());
+  const autoOpened = useRef(false);
   const [chars, setChars] = useState<CharT[]>([]);
   const [recipe, setRecipe] = useState<RecipeT | null>(null);
   const [list, setList] = useState<DsSummaryT[]>([]);
@@ -157,7 +165,23 @@ export default function LoraPanel() {
       setChars(c.characters || []);
       setList(l.datasets || []);
       setRecipe(r);
-      if (!nChar && (c.characters || []).length) setNChar(c.characters[0].slug);
+      if (!nChar && (c.characters || []).length) {
+        const want = focusChar &&
+          (c.characters || []).some((x) => x.slug === focusChar)
+          ? focusChar : c.characters[0].slug;
+        setNChar(want);
+      }
+      // auto-open the focused character's newest dataset — "the lora dataset
+      // isn't selected" was half of the report. ⚠ ONCE per mount (a ref, not
+      // state: load() re-runs on every poll/action and the stale `ds` closure
+      // would stomp whatever dataset the user opened by hand).
+      if (focusChar && !autoOpened.current) {
+        autoOpened.current = true;
+        const mine = (l.datasets || [])
+          .filter((d) => d.char_slug === focusChar)
+          .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+        if (mine.length) void openDs(mine[0].id);
+      }
     } catch (e) { setErr((e as Error).message); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

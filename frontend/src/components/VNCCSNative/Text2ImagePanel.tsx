@@ -8,6 +8,7 @@
  * Poses, LoRA, Character Sheet) takes over.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { consumeFocusChar, setCurrentChar } from '../shared/currentChar';
 import useLightbox from '../shared/useLightbox';
 
 const BASE = '/api/forge';
@@ -91,13 +92,11 @@ const LORE_KEYS: { key: string; name: string; rows: number }[] = [
 
 export default function Text2ImagePanel(): React.ReactElement {
   const [chars, setChars] = useState<CharT[]>([]);
-  const [slug, setSlug] = useState(() => {          // '' = home screen
-    try {                                           // 🏠 hub jump: preselect
-      const f = window.localStorage.getItem('rbmn_focus_char') || '';
-      window.localStorage.removeItem('rbmn_focus_char');
-      return f;
-    } catch { return ''; }
-  });
+  // '' = home screen. v1.277.10: focus jump wins, else the persistent current
+  // character; picking a character here updates the studio-wide current one
+  // (going back to All characters does NOT clear it — '' is not a character).
+  const [slug, _setSlug] = useState(() => consumeFocusChar());
+  const setSlug = (v: string) => { setCurrentChar(v); _setSlug(v); };
   const [engines, setEngines] = useState<EngineT[]>([]);
   const [err, setErr] = useState('');
 

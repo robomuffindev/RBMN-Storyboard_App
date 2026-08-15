@@ -115,7 +115,12 @@ export default function UnifiedCharacterGrid(
   /** Jump into a VNCCS/Klein tab with this character preselected. */
   const jump = (tab: string, c: UnifiedCharT) => {
     const key = c.slug || c.name;
-    try { window.localStorage.setItem(FOCUS_KEY, key); } catch { /* non-fatal */ }
+    // v1.277.10: BOTH keys — focus is the one-shot jump, current is the
+    // persistent studio-wide character every tab now defaults to
+    try {
+      window.localStorage.setItem(FOCUS_KEY, key);
+      window.localStorage.setItem('rbmn_current_char', key);
+    } catch { /* non-fatal */ }
     navigate(`/studio/vnccs-klein?tab=${tab}&char=${encodeURIComponent(key)}`);
   };
 

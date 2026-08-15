@@ -2399,7 +2399,10 @@ export default function CharacterStudioPage() {
       if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
       // the panel preselects whatever is under this key (Klein3Panel reads and
       // clears it on mount) — the same mechanism the grid's jump buttons use.
-      try { window.localStorage.setItem(FOCUS_KEY, j?.slug || name); } catch { /* non-fatal */ }
+      try {
+        window.localStorage.setItem(FOCUS_KEY, j?.slug || name);
+        window.localStorage.setItem('rbmn_current_char', j?.slug || name);
+      } catch { /* non-fatal */ }
       setShowModePicker(false);
       setK3Name('');
       navigate('/studio/vnccs-klein?tab=klein3');

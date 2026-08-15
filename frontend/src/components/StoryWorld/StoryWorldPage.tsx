@@ -770,7 +770,10 @@ function CastTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
       return <button className="text-[11px] px-1.5 py-0.5 rounded bg-green-900 text-green-300"
         title="open in the studio"
         onClick={() => {
-          try { localStorage.setItem('rbmn_focus_char', c.char_slug); } catch { /* ok */ }
+          try {
+            localStorage.setItem('rbmn_focus_char', c.char_slug);
+            localStorage.setItem('rbmn_current_char', c.char_slug);
+          } catch { /* ok */ }
           navigate('/studio/vnccs-klein?tab=klein3');
         }}>✅ {c.char_slug}</button>;
     if (c.status === 'submitted')

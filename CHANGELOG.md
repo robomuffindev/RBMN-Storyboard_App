@@ -1,3 +1,30 @@
+## v1.277.10 -- 🎯 EVERY STUDIO TAB DEFAULTS TO THE CHARACTER YOU OPENED (2026-08-14)
+
+*"When we are inside an individual's screen of tabs, all those tabs should default to that
+character's information."* The one-shot `rbmn_focus_char` key was fragile THREE ways, found
+by tracing rather than guessing:
+
+- **① Klein3Panel was being UNMOUNTED AND REMOUNTED** — an async settings load
+  (`applyKleinSettings`) stomped a deep-linked `createEngine='klein3'` back to `'klein'`,
+  the panel remounted, and the one-shot key was already consumed → whoever sorted first was
+  selected. The load can no longer downgrade klein3.
+- **② Switching tabs INSIDE the studio lost the character** — the key was consume-once and
+  nothing re-wrote it.
+- **③ The 🎓 LoRA tab NEVER read the key at all** — no character preselect, no dataset.
+
+**The fix: a persistent current character** (`shared/currentChar.ts`): `rbmn_focus_char`
+stays as the one-shot jump (every existing writer works), and a new `rbmn_current_char` is
+persistent — written on every jump AND whenever a character is picked in any panel, never
+deleted. Panels read jump-first-else-current, so remounts and tab switches keep the
+character. LoRA panel now seeds the ➕ form with the focused character AND auto-opens their
+newest dataset (once per mount, by ref — `load()` re-runs on every poll and would have
+stomped a hand-opened dataset). Text2Image "← All characters" deliberately does NOT clear
+the current character ('' is not a character).
+
+Also this session: 🪪 **outfit charsheet verified END TO END on a real character** before
+his run — `gideon-vale` × "Tin Star Return": all 5 cells sourced from that outfit's own
+views, 0 missing, outfit recorded in meta, 3968×1208.
+
 ## v1.277.9 -- 🏃 DRAFT MODE: the v1.0 turbo lora at 4 steps (2026-08-14)
 
 The v1.0 8-step lora is documented to also run at 4 steps — roughly half the sampling time
