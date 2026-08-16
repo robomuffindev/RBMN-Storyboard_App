@@ -1,3 +1,75 @@
+## v1.277.15 -- 🎬 LTX 2.5 GRAPHS LIVE-WIRED · 🎵 ACE VERIFIED 3/3 · 🔍 THE TRUNCATED-MODEL FORENSICS (2026-08-16)
+
+Post-restart go-live session: "make sure everything is where it needs to be and get the
+graphs created for this and test."
+
+### 🔍 The forensics first, because everything else depended on it
+
+- **Filename presence LIES.** The post-restart sweep said every staged model was
+  "present" — but the first ACE render died loading the checkpoint (shape mismatch), and
+  the byte-size audit told the real story: **the restart killed the big HF downloads
+  mid-stream, and the pre-v1.221 helper promoted PARTIAL files as "done"** (a dropped
+  connection reads as clean EOF; the loop never compared bytes to Content-Length).
+  Worse: the LAN peer-copies then faithfully replicated the trainer's truncated
+  transformer to every box — byte-exact garbage, 3/3.
+- **`scripts/audit_model_integrity.py`** — the new instrument: local size via helper
+  `/serve/model`'s Content-Length (a stat) vs the HF original's `x-linked-size`, per
+  file per box; `--fix` starts repairs (LAN peer when any box has a good copy, HF once
+  otherwise). Found **14 bad copies across 11 staged files**.
+- **Helper v1.221**: the download loop now RAISES on `bytes != total` instead of
+  promoting the partial, and `GET /cleanup/parts` lists (+`?delete=1` removes) orphaned
+  `*.part` files. In repo — boxes still run v1.220 until the next helper redeploy.
+- **The trainer's E: drive is FULL** — its re-downloads died on "No space left on
+  device"; ~34 GB of known-truncated files are listed for manual deletion. The fresh HF
+  pulls were re-pointed at ZOAI1 (disk room), to LAN-fan-out from there.
+
+### 🎵 Audio engines: from 0 to verified
+
+- **ACE-Step 1.5: RENDERS CLEAN ON ALL THREE BOXES** (live: 23.0s / 18.8s / 20.9s for a
+  20-second track). Two graph fixes en route: `_inputs_with_defaults` now understands
+  V3-schema COMBO inputs (`["COMBO", {"options": [...]}]` — `timesignature`/`keyscale`
+  carried no `default` key and validation failed on required_input_missing), plus a
+  type-based last-resort fill; `timesignature` forced to "4" (the combo default lands
+  on "2"). And `_jpost` finally reads the HTTPError BODY — the v1.276.49 lesson
+  relearned on this module's very first render: the body IS the answer.
+- **MiniMax Music 3 graph wired** (official template shape: int8 DiT via UNETLoader,
+  CLIPLoader type "minimax", TextEncode's own `seconds` output driving the latent,
+  VAEDecodeAudioTiled) — first render pending its text encoder landing (ZOAI1 pull).
+
+### 🎬 LTX 2.5: real graphs, wired end to end
+
+- The updated workers bundle official LOCAL 2.5 templates (`video_ltx2_5_t2v/i2v/flf2v`)
+  — UI-format subgraphs. **`backend/services/jobs/ltx25_graphs.py`** reproduces the
+  netlist link-by-link in API form: the distilled TWO-PASS pipeline (half-res 8-step
+  base → spatial-upsampler x2 → 3-step refine, euler_ancestral, DualCFG 1/1, ManualSigmas
+  verbatim), audio riding the AV latent the whole way, single CLIPLoader "ltxv" for the
+  with-proj gemma4 (2.3 needed DualCLIPLoader), staged mirror filenames (video VAE is
+  the `-conv-` repack). Prompt-enhancer branch intentionally omitted — spec-verbatim
+  drafting, same policy as H3. i2v uses core ImageScaleToTotalPixels instead of the
+  V3 dynamic-combo resize node.
+- **Dispatcher lane live**: `video_engine="ltx_2.5"` now routes `ltx_i2v`-family jobs to
+  `ltx25_i2v` (chosen frame → in-place conditioning; honest t2v fallback), transitions/
+  v2v stay on 2.3; RunPod skip + model-audio sidecar extraction + caps/models maps all
+  cover `ltx25_*`. First live render queued behind the model re-downloads: the graph
+  VALIDATED on a worker (submission accepted; it failed only at loading the truncated
+  text encoder — which is the model problem above, not the graph).
+- `scripts/ltx25_live_test.py` — free-standing first-render harness (worker-direct).
+- 📌 **His call, mid-session (2026-08-16): LTX 2.5 is IN PLACE, NOT A FOCUS** — *"we may
+  not use it for quite some time. Just get stuff in place… minimax h3 and the music
+  models are the focus."* The graphs + dispatcher lane above ARE the "in place"; do not
+  chase its model staging or deeper app integration until he asks.
+
+### ✅ Post-restart verifications + hand-off scripts
+
+- **MiniMax H3 stack re-verified after the fleet restart**: Video Lab draft t2v
+  (768x448, 2s, 8-step turbo @ 4 steps) rendered clean in 5m19s on the trainer.
+- **`scripts/mm3_first_render.py`** — self-contained MM3 go/no-go: byte-audits the text
+  encoder on every box, submits a 15s track through the Audio Lab on the first READY box,
+  polls to done. Run it once the ZOAI1/trainer text-encoder downloads finish.
+- He freed space on the trainer's E: mid-session — its MM3 text-encoder + LTX re-pulls
+  resumed and are progressing (both it and ZOAI1 are pulling; first clean copy wins and
+  LAN-fans-out).
+
 ## v1.277.14 -- 🎧 AUDIO LAB · 📍 LOCATIONS · 🧠 PROMPT-LLM · 🩹 CLEAN BASE LOOKS · 📦 PEER MODEL COPY (2026-08-15)
 
 The final wave of the week — all research-backed (searched current community consensus,

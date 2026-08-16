@@ -678,8 +678,10 @@ class JobDispatcher:
             _wf_now = str(job.parameters.get("_effective_workflow_type")
                           or job.parameters.get("workflow_type") or "")
             # H3 jobs need the MiniMax nodes/models — a video RunPod pod is an
-            # LTX pod and would get a mangled graph (reviewer finding #4)
-            if rp_manager.is_configured and not _wf_now.startswith("h3_"):
+            # LTX pod and would get a mangled graph (reviewer finding #4).
+            # ltx25_ likewise: pods carry 2.3, not the 2.5 staged set.
+            if rp_manager.is_configured and \
+                    not _wf_now.startswith(("h3_", "ltx25_")):
                 service_type = "video" if job.job_type == "video" else "image"
                 pods = rp_manager.get_pods_for_service(service_type)
                 logger.info(f"[{job_id_str}] RunPod enabled, {len(pods)} pod(s) configured for '{service_type}'")
@@ -1498,6 +1500,35 @@ class JobDispatcher:
             except Exception as _h3_err:
                 logger.warning(f"H3 engine routing check failed (continuing "
                                f"on LTX): {_h3_err}")
+
+        # 🎬 LTX 2.5 engine routing (v1.277.15): same shape as the H3 block.
+        # The 2.5 lane is the OFFICIAL distilled two-pass pipeline (half-res
+        # base → spatial-upsample x2 → refine) built as an API graph in
+        # ltx25_graphs.py; i2v anchors on the scene's chosen frame, everything
+        # else falls back honestly to t2v. Transitions/v2v stay on 2.3.
+        if (job and job.project_id and workflow_type
+                and workflow_type.startswith("ltx_")
+                and workflow_type not in ("ltx_transition",)):
+            try:
+                async with self._session_factory() as _l5_session:
+                    _l5_project = await _l5_session.get(Project, job.project_id)
+                    _l5_st = (_l5_project.settings or {}) if _l5_project else {}
+                    if _l5_st.get("video_engine") == "ltx_2.5":
+                        _map25 = {"ltx_i2v": "ltx25_i2v",
+                                  "ltx_av_native": "ltx25_i2v",
+                                  "ltx_fflf": "ltx25_i2v",
+                                  "ltx_v2v_extend": "ltx25_i2v",
+                                  "ltx_seq_i2v": "ltx25_i2v",
+                                  "ltx_seq_fflf": "ltx25_i2v"}
+                        _new25 = _map25.get(workflow_type)
+                        if _new25:
+                            logger.info(f"[{job.id}] LTX 2.5 routing: "
+                                        f"{workflow_type} -> {_new25}")
+                            workflow_type = _new25
+                            params["workflow_type"] = _new25
+            except Exception as _l5_err:
+                logger.warning(f"LTX 2.5 engine routing check failed "
+                               f"(continuing on 2.3): {_l5_err}")
 
         return await self._build_builtin_workflow(workflow_type, params, job)
 
@@ -2839,6 +2870,9 @@ class JobDispatcher:
         if workflow_type in ("h3_i2v", "h3_first_last", "h3_ref2v", "h3_t2v"):
             return await self._build_h3_workflow(workflow_type, params, job)
 
+        if workflow_type in ("ltx25_t2v", "ltx25_i2v"):
+            return await self._build_ltx25_workflow(workflow_type, params, job)
+
         raise Exception(f"Unknown workflow type: {workflow_type}")
 
     async def _build_h3_workflow(self, workflow_type: str, params: dict,
@@ -2918,6 +2952,38 @@ class JobDispatcher:
         logger.info(f"[{job.id if job else '?'}] H3 graph: mode={mode} "
                     f"{width}x{height} f={frames} refs={len(ref_imgs)} "
                     f"audio_ref={bool(ref_auds)} turbo={turbo}")
+        return graph
+
+    async def _build_ltx25_workflow(self, workflow_type: str, params: dict,
+                                    job) -> dict:
+        """A scene video on LTX 2.5 (v1.277.15). i2v anchors on the scene's
+        chosen first frame (the uploader converts the local path into a worker
+        upload, same as the H3 lane); without one, honest t2v. The graph is
+        the official distilled two-pass pipeline — see ltx25_graphs.py."""
+        from backend.services.jobs.ltx25_graphs import build_ltx25_graph
+
+        width = int(params.get("width") or 1280)
+        height = int(params.get("height") or 720)
+        duration = max(1.0, min(15.0, float(params.get("duration") or 5.0)))
+        seed = int(params.get("seed") or 0) or int(time.time()) % 2**31
+
+        first_frame = await self._resolve_single_asset_path(
+            params.get("first_frame_asset_id"))
+        if not first_frame:
+            resolved = await self._auto_resolve_video_assets(job, params)
+            first_frame = resolved.get("first_frame")
+
+        kind = "i2v" if (workflow_type == "ltx25_i2v" and first_frame) else "t2v"
+        graph = build_ltx25_graph(
+            kind, str(params.get("prompt") or ""),
+            width=width, height=height, seconds=duration, fps=24, seed=seed,
+            image_name=(first_frame if kind == "i2v" else None),
+            filename_prefix=f"video/LTX25PROJ_{str(job.id)[:8] if job else 'x'}")
+        self._record_params(params, _effective_workflow_type=workflow_type,
+                            ltx25_kind=kind, ltx25_seconds=duration)
+        logger.info(f"[{job.id if job else '?'}] LTX 2.5 graph: kind={kind} "
+                    f"{width}x{height} {duration}s seed={seed} "
+                    f"first_frame={bool(first_frame)}")
         return graph
 
     def _record_params(self, params: dict, **kv) -> None:
@@ -4967,6 +5033,10 @@ class JobDispatcher:
             "h3_first_last": set(),
             "h3_ref2v": set(),
             "h3_t2v": set(),
+            # LTX 2.5 (v1.277.15): same reasoning — 2.5 models are staged on
+            # every box (audit_model_integrity.py verifies byte-exact).
+            "ltx25_t2v": set(),
+            "ltx25_i2v": set(),
             "klein_inpaint": {"klein"},
             "studio_qie_edit": {"vnccs"},
             "studio_rmbg2": {"vnccs"},
@@ -5043,10 +5113,10 @@ class JobDispatcher:
             return {vid_model}
         if workflow_type in ("lipsync_latentsync", "lipsync_musetalk", "lipsync_sonic"):
             return set()  # dedicated lip-sync engines gate on capability, not model slot
-        if workflow_type in ("h3_i2v", "h3_first_last", "h3_ref2v", "h3_t2v"):
-            # MiniMax H3 (v1.277.12): every box on this fleet carries the H3
-            # models (the Video Lab has run on all of them) — no model-slot
-            # constraint; capability gating below is what routes it.
+        if workflow_type in ("h3_i2v", "h3_first_last", "h3_ref2v", "h3_t2v",
+                             "ltx25_t2v", "ltx25_i2v"):
+            # MiniMax H3 (v1.277.12) + LTX 2.5 (v1.277.15): every box on this
+            # fleet carries the models — no model-slot constraint.
             return set()
         return set()
 
@@ -5650,7 +5720,7 @@ class JobDispatcher:
                             and scene_id
                             and (params.get("workflow_type") == "ltx_av_native"
                                  or str(params.get("workflow_type") or "")
-                                 .startswith("h3_"))
+                                 .startswith(("h3_", "ltx25_")))
                         ):
                             try:
                                 from backend.services.video.ffmpeg import extract_audio_track

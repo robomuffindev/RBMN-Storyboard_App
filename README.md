@@ -207,15 +207,20 @@ shows each run's likeness score — warning you when the epoch installed was not
 one.
 
 Next, in order (the same list as `docs/OPERATIONS.md` §10 and `HANDOVER_PROMPT.md` — they are
-kept identical): (1) LTX 2.5 graphs — models staging fleet-wide via `install_ltx25.py`;
-the engine slot is live but 2.5 projects render on the 2.3 pipeline until API-format graphs
-are exported from a worker and wired; (2) MiniMax H3 project lane — first LIVE end-to-end
-scene render pending (smoke + review verified); and tools.py's sample generator still
-carries the broken raw-workflow krea2 path (use z_image/anima/klein there); (3) the
-adopt-k3 cast watcher doesn't survive a restart — re-adopt by hand after a reboot mid-cast;
-(4) the base-outfit picker in the LoRA panel (route built + tested, no UI); (5) H3's
-Video-Lab modes beyond t2v/i2v (first+last, last-frame, references→video); (6) whether 🙂
-`face_first` earns its keep at all; (7) `LoraPanel`'s `nOutfit` has no setter wired to any
+kept identical): (1) model re-staging in flight — the 2026-08-16 restart truncated in-flight
+downloads and helper ≤v1.220 promoted partials as "done"; `audit_model_integrity.py` is the
+byte-size instrument (`--fix` repairs); fresh pulls run on ZOAI1, the trainer's E: models
+drive is FULL (known-garbage list in the v1.277.15 CHANGELOG), helper v1.221 needs redeploy;
+(2) LTX 2.5 — graphs WIRED (`ltx25_graphs.py` + dispatcher lane, validated on a worker),
+first live render pending clean models; (3) MiniMax Music 3 — graph wired, render pending
+its text encoder (ACE-Step 1.5 is DONE, verified 3/3 live); (4) MiniMax H3 project lane —
+first LIVE end-to-end scene render pending (smoke + review verified); and tools.py's sample
+generator still carries the broken raw-workflow krea2 path (use z_image/anima/klein there);
+(5) the adopt-k3 cast watcher doesn't survive a restart — re-adopt by hand after a reboot
+mid-cast; (6) F5-TTS first voice clone needs Lorenzo's 5-15s sample + transcript;
+(7) the base-outfit picker in the LoRA panel (route built + tested, no UI); (8) H3's
+Video-Lab modes beyond t2v/i2v (first+last, last-frame, references→video); (9) whether 🙂
+`face_first` earns its keep at all; (10) `LoraPanel`'s `nOutfit` has no setter wired to any
 control, so a new dataset's "outfit" field always submits `''`. Recently closed: Story/World
 follow-through (pull-from-story is BUILT; the LLM lanes and a real 7-character batch ran
 live) and publishing (normal cadence since v1.277.3). See

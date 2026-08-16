@@ -89,8 +89,15 @@ def _jpost(url: str, body: dict, timeout: float = 60.0):
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"},
                                  method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        # ⚠ str(HTTPError) carries NO body, and the body IS the answer
+        # (the v1.276.49 lesson, relearned here on this module's first render)
+        detail = e.read().decode("utf-8", "replace")[:600]
+        raise RuntimeError(f"HTTP {e.code} from {url.split('/prompt')[0]}: "
+                           f"{detail}") from None
 
 
 def _hosts() -> List[dict]:
@@ -124,6 +131,21 @@ def _inputs_with_defaults(host: str, node: str, values: Dict[str, Any]) -> Dict[
             if isinstance(defn, (list, tuple)) and len(defn) > 1 and \
                     isinstance(defn[1], dict) and "default" in defn[1]:
                 out[name] = defn[1]["default"]
+            elif isinstance(defn, (list, tuple)) and defn and \
+                    isinstance(defn[0], list) and defn[0]:
+                # old-style COMBO: choices list in slot 0, no "default" key
+                out[name] = defn[0][0]
+            elif isinstance(defn, (list, tuple)) and defn and defn[0] == "COMBO" and \
+                    len(defn) > 1 and isinstance(defn[1], dict) and defn[1].get("options"):
+                # new-style COMBO (V3 schema): ["COMBO", {"options": [...]}] —
+                # timesignature/keyscale bit us on the first ACE render
+                out[name] = defn[1]["options"][0]
+            elif section == "required" and isinstance(defn, (list, tuple)) and defn:
+                # last-resort type fallback so validation never sees a hole
+                out[name] = {"STRING": "", "BOOLEAN": False, "INT": 0,
+                             "FLOAT": 0.0}.get(defn[0], None) if isinstance(defn[0], str) else None
+                if out[name] is None:
+                    out.pop(name, None)
     return out
 
 
@@ -165,6 +187,7 @@ def _ace_graph(host: str, tags: str, lyrics: str, seconds: float, seed: int,
     enc = _inputs_with_defaults(host, "TextEncodeAceStepAudio1.5", {
         "clip": ["1", 1], "tags": tags, "lyrics": lyrics or "[instrumental]",
         "seed": seed, "duration": float(seconds),
+        "timesignature": "4",   # combo default would land on "2" — force common time
         **({"bpm": int(bpm)} if bpm else {}),
         **({"keyscale": keyscale} if keyscale else {}),
         **({"language": language} if language else {}),
@@ -189,6 +212,42 @@ def _ace_graph(host: str, tags: str, lyrics: str, seconds: float, seed: int,
               "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
         "8": {"class_type": "SaveAudioMP3",
               "inputs": {"audio": ["7", 0], "filename_prefix": prefix,
+                         "quality": "V0"}},
+    }
+
+
+def _mm3_graph(host: str, caption: str, lyrics: str, seconds: float,
+               seed: int, prefix: str) -> dict:
+    """MiniMax Music 3 — from the official template's subgraph (2026-08-16),
+    inputs verified/filled against this worker's object_info. int8 DiT +
+    TILED audio VAE decode: the low-VRAM path for 16GB boxes."""
+    enc = _inputs_with_defaults(host, "MiniMaxMusic3TextEncode", {
+        "clip": ["2", 0], "caption": caption,
+        "lyrics": lyrics or "[instrumental]",
+        "seed": seed, "max_duration": float(seconds)})
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": MM3_DIT, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": MM3_TE, "type": "minimax",
+                         "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": MM3_VAE}},
+        "4": {"class_type": "MiniMaxMusic3TextEncode", "inputs": enc},
+        "5": {"class_type": "EmptyMiniMaxMusic3LatentAudio",
+              "inputs": {"seconds": ["4", 1], "batch_size": 1}},
+        "6": {"class_type": "ConditioningZeroOut",
+              "inputs": {"conditioning": ["4", 0]}},
+        "7": {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["4", 0],
+                         "negative": ["6", 0], "latent_image": ["5", 0],
+                         "seed": seed, "steps": 30, "cfg": 1.7,
+                         "sampler_name": "euler", "scheduler": "simple",
+                         "denoise": 1.0}},
+        "8": {"class_type": "VAEDecodeAudioTiled",
+              "inputs": {"samples": ["7", 0], "vae": ["3", 0],
+                         "tile_size": 1536, "overlap": 64}},
+        "9": {"class_type": "SaveAudioMP3",
+              "inputs": {"audio": ["8", 0], "filename_prefix": prefix,
                          "quality": "V0"}},
     }
 
@@ -280,10 +339,7 @@ async def music_generate(body: MusicIn):
         sts = {h: _engine_status(h).get(body.engine, {}) for h in hosts}
         raise HTTPException(409, f"no worker is ready for {body.engine}: "
                                  + json.dumps(sts)[:400])
-    if body.engine == "minimax3":
-        raise HTTPException(501, "MiniMax Music 3 nodes detected but the graph "
-                                 "wiring lands after its first live export — "
-                                 "use ace15 for now")
+
     seed = body.seed if body.seed is not None else int(time.time()) % 2**31
     jid = uuid.uuid4().hex[:10]
     st = {"id": jid, "kind": "music", "engine": body.engine,
@@ -299,10 +355,15 @@ async def music_generate(body: MusicIn):
     def _run():
         try:
             st["status"] = "running"
-            _log(jid, f"building ACE-Step graph on {ready}")
-            g = _ace_graph(ready, body.tags, body.lyrics, seconds, seed,
-                           body.bpm, body.keyscale, body.language,
-                           f"RBMN-AUDIO/ace_{jid}")
+            if body.engine == "minimax3":
+                _log(jid, f"building MiniMax Music 3 graph on {ready}")
+                g = _mm3_graph(ready, body.tags, body.lyrics, seconds, seed,
+                               f"RBMN-AUDIO/mm3_{jid}")
+            else:
+                _log(jid, f"building ACE-Step graph on {ready}")
+                g = _ace_graph(ready, body.tags, body.lyrics, seconds, seed,
+                               body.bpm, body.keyscale, body.language,
+                               f"RBMN-AUDIO/ace_{jid}")
             _log(jid, f"rendering {seconds:.0f}s of music")
             fp = _run_graph_job(jid, ready, g)
             st["file"] = fp.name

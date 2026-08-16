@@ -55,7 +55,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = "1.220.0"
+VERSION = "1.221.0"
 IS_WIN = os.name == "nt"
 HERE = Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get("RBMN_HELPER_HOME") or (HERE / "rbmn_helper_data"))
@@ -1095,6 +1095,13 @@ def model_download(cfg: dict, body: dict) -> dict:
                         break
                     fh.write(chunk)
                     st["bytes"] += len(chunk)
+            # v1.221: a dropped connection reads as a clean EOF (b"") — without
+            # this check a PARTIAL file gets promoted and reports "done".
+            # (Bit us fleet-wide on 2026-08-16: LTX 2.5 + MM3 staging files all
+            # truncated at identical byte counts by a mid-download restart.)
+            if st["total"] and st["bytes"] != st["total"]:
+                raise IOError(f"truncated: got {st['bytes']} of "
+                              f"{st['total']} bytes")
             tmp.replace(dest)
             st["status"] = "done"
         except Exception as e:  # noqa: BLE001
@@ -1406,6 +1413,27 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # noqa: BLE001
                     return self.json({"ok": False,
                                       "error": f"{type(e).__name__}: {e}"})
+            # v1.221: report .part orphans (interrupted downloads) under
+            # models/ — the 2026-08-16 disk-full forensics tool. ?delete=1
+            # removes them (only .part files, nothing else).
+            if p == "/cleanup/parts":
+                found = []
+                mroot = _comfy_dir(cfg) / "models"
+                if mroot.is_dir():
+                    for fp in mroot.rglob("*.part"):
+                        e = {"file": str(fp.relative_to(mroot)),
+                             "bytes": fp.stat().st_size}
+                        if (q.get("delete") or [""])[0] in ("1", "true"):
+                            try:
+                                fp.unlink()
+                                e["deleted"] = True
+                            except OSError as ex:
+                                e["deleted"] = False
+                                e["error"] = str(ex)
+                        found.append(e)
+                return self.json({"parts": found,
+                                  "total_gb": round(sum(x["bytes"] for x in
+                                                        found) / 1e9, 2)})
             m = re.match(r"^/runs/([^/]+)/artifacts/(.+)$", p)
             if m:
                 st = _RUNS.get(m.group(1))
