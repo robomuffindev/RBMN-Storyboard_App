@@ -442,6 +442,12 @@ class AppSettings(SQLModel, table=True):
     ollama_available_models: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # cached model list
     # Ollama Vision — multimodal model for describing reference images (reuses ollama_urls pool)
     ollama_vision_model: Optional[str] = Field(default=None)  # e.g. "qwen2.5vl:7b"
+    # 🧠 v1.277.14 — the DEDICATED PROMPT model (global override): when set,
+    # every prompt-generation/enhancement LLM call uses THIS Ollama model
+    # instead of ollama_model. Lets chat/general stay on one model while
+    # prompts run on the best prompt-writer (research pick: qwen3:14b;
+    # unrestricted twin: huihui_ai/qwen3-abliterated:14b).
+    ollama_prompt_model: Optional[str] = Field(default=None)
     ollama_vision_available_models: Optional[list] = Field(default=None, sa_column=Column(MutableList.as_mutable(JSON)))  # cached vision model list
     vision_enabled: bool = Field(default=False)  # global: describe reference images for the prompt LLM
     # ── Chapters / LLM batching ─────────────────────────────────

@@ -55,7 +55,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-VERSION = "1.219.0"
+VERSION = "1.220.0"
 IS_WIN = os.name == "nt"
 HERE = Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get("RBMN_HELPER_HOME") or (HERE / "rbmn_helper_data"))
@@ -1365,6 +1365,47 @@ class Handler(BaseHTTPRequestHandler):
                                   "eof": off + len(chunk) >= size,
                                   "status": st.get("status"),
                                   "text": chunk.decode("utf-8", "replace")})
+            # ── v1.220: peer model serving — download ONCE on one box, then
+            # every other box pulls over the LAN at wire speed instead of
+            # three boxes splitting the WAN pipe. A peer points its own
+            # /download/model at http://this:8765/serve/model/{folder}/{file}
+            # ?token=THIS box's token. Streams in 4MB chunks (files are tens
+            # of GB — read_bytes() would eat the RAM).
+            m = re.match(r"^/serve/model/([^/]+)/(.+)$", p)
+            if m:
+                folder, fname = m.group(1), unquote(m.group(2))
+                if any(x in folder for x in ("/", "\\", "..")) or \
+                        any(x in fname for x in ("/", "\\", "..")):
+                    return self.fail(400, "bad path")
+                fp = _comfy_dir(cfg) / "models" / folder / fname
+                if not fp.exists():
+                    return self.fail(404, f"no {folder}/{fname} here")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(fp.stat().st_size))
+                self.end_headers()
+                with fp.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(1 << 22)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                return
+            # ── v1.220: LLM-worker support — this helper can run on an
+            # Ollama-only box (no ComfyUI config needed); the app reads model
+            # list + liveness through it, same as it debugs render boxes.
+            if p == "/ollama/status":
+                try:
+                    port = (q.get("port") or ["11434"])[0]
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/tags", timeout=10) as r:
+                        tags = json.loads(r.read().decode())
+                    return self.json({"ok": True,
+                                      "models": [m0.get("name") for m0 in
+                                                 (tags.get("models") or [])]})
+                except Exception as e:  # noqa: BLE001
+                    return self.json({"ok": False,
+                                      "error": f"{type(e).__name__}: {e}"})
             m = re.match(r"^/runs/([^/]+)/artifacts/(.+)$", p)
             if m:
                 st = _RUNS.get(m.group(1))

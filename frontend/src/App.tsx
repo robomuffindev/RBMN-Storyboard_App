@@ -12,6 +12,7 @@ import ShortcodeRedirect from '@/components/Chapters/ShortcodeRedirect';
 import CharacterStudioPage from './components/CharacterStudio/CharacterStudioPage';
 import StoryWorldPage from './components/StoryWorld/StoryWorldPage';
 import VideoLabPage from './components/VideoLab/VideoLabPage';
+import AudioLabPage from './components/AudioLab/AudioLabPage';
 import ToolsPage from './components/Tools/ToolsPage';
 import ImageWorkshopPage from './components/ImageWorkshop/ImageWorkshopPage';
 import VNCCSNativePage from './components/VNCCSNative/VNCCSNativePage';
@@ -38,6 +39,7 @@ function App() {
         <Route path="/studio" element={<CharacterStudioPage />} />
         <Route path="/worlds" element={<StoryWorldPage />} />
         <Route path="/video-lab" element={<VideoLabPage />} />
+        <Route path="/audio-lab" element={<AudioLabPage />} />
         <Route path="/studio/vnccs" element={<VNCCSNativePage />} />
         <Route path="/studio/vnccs-klein" element={<VNCCSNativePage variant="klein" />} />
         <Route path="/tools" element={<ToolsPage />} />

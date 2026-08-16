@@ -1,3 +1,65 @@
+## v1.277.14 -- 🎧 AUDIO LAB · 📍 LOCATIONS · 🧠 PROMPT-LLM · 🩹 CLEAN BASE LOOKS · 📦 PEER MODEL COPY (2026-08-15)
+
+The final wave of the week — all research-backed (searched current community consensus,
+not theory; sources in the session notes).
+
+### 🎧 Audio Lab (home destination, `/audio-lab` — `backend/api/audio_lab.py`)
+
+- **🎵 Music**: **ACE-Step 1.5 XL turbo** — the researched pick (4B DiT, commercial-grade,
+  a full song in seconds on this fleet, **EXACT duration control** for pairing tracks to
+  story arcs). Graph built against each worker's OWN `object_info` (nodes verified present;
+  defaults come from the box, killing the widget-order trap). Tags + [tagged] lyrics +
+  length/bpm/key. **MiniMax Music 3** slot auto-detects its nodes/models (its ComfyUI
+  support is 2 days old; the boxes may need a ComfyUI update — the engine says so itself).
+- **🎙 Narration (the non-ElevenLabs answer)**: **F5-TTS** (open-weights quality leader,
+  2026 comparisons) via the ComfyUI-F5-TTS node. **Voice cloning = ONE clean 5-15s sample
+  + its exact transcript** — the guide is in the UI. Long texts split on blank lines and
+  render chunk-by-chunk with a **configurable pause between paragraphs** (ffmpeg concat).
+  Chatterbox Multilingual v3 noted as the fallback pick if F5 output disappoints.
+- Finished tracks: inline player, download, **📥 import into any project as a MUSIC asset**
+  (the existing analysis→scenes→mux→export pipeline takes over). Live per-job status
+  (what/where/how long — the standing rule), jobs persisted as benchmark data.
+- **`scripts/install_audio.py`** stages it all: ACE AIO checkpoint (LAN peer-copy when one
+  box already has it), F5-TTS node via helper `/install/node` (+ComfyUI restart note),
+  `--minimax3` for the Music 3 files.
+
+### 📍 Location sheets (worlds & stories)
+
+Worlds carry LOCATIONS like they carry cast: name/kind + 6-field sheet (description,
+atmosphere, key details, time & light, story role, notes), **story links** so a scene can
+use a SPECIFIC place, ✨ per-location LLM fill, and **📍 Scout** (LLM proposes what the
+story needs, capped, dedup'd). Locations feed the world context, so cast generation, story
+enhancement and style samples all know them. Route order load-bearing again (`/generate`
+before `/{lid}` — declared correctly this time).
+
+### 🧠 Dedicated Prompt-LLM (global override)
+
+`AppSettings.ollama_prompt_model` — a dropdown in Settings → Ollama next to the vision
+model. When set, **every prompt-generation/enhancement call** uses it (resolve_llm_config
+is the single choke point); chat keeps `ollama_model`. Research picks (12 GB tier,
+community-tested): **qwen3:14b** (already the default — validated, not coincidence) and
+**huihui_ai/qwen3-abliterated:14b** as the unrestricted twin (same family = same prompt
+style, one-dropdown switch when guardrails block a legitimate prompt).
+
+### 🩹 Clean base looks (the ink-smudge bug)
+
+Cast/character generation prompts now hard-rule: **appearance = the CLEAN permanent look**
+— wounds/blood/stains/smudges NEVER go in appearance fields, even when the backstory
+implies them (the secret-printer's ink smudge would out her in every scene). Belt-and-
+braces: a server-side sanitizer strips mark phrases from appearance fields on every write
+path (cast gen, enhance, manual edit). Marks belong to outfits/scenes, where they can be
+put on and taken off.
+
+### 📦 Download once, copy across (his bandwidth rule) + helper v1.220
+
+- Helper v1.220: **`GET /serve/model/{folder}/{file}`** streams any model file to peers —
+  one box downloads from the internet at full speed, the rest pull over the LAN.
+  `scripts/copy_models_to_peers.py` drives it. **`GET /ollama/status`** makes the helper
+  useful on LLM-only boxes (deploy the same helper on the Ollama machines; the app can
+  then check/debug them like render workers).
+- ⚠ Helpers can't self-update: copy `scripts/worker/rbmn_helper.py` over each box's
+  install and restart its bat (same as every helper release).
+
 ## v1.277.13 -- 🎯 KLEIN MODE STANDS ALONE: the VNCCS/Klein separation (2026-08-15)
 
 His cleanup: the non-VNCCS studio is now fully independent, so the confusing hybrid is

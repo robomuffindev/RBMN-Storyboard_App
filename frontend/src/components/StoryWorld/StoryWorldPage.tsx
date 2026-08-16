@@ -43,6 +43,12 @@ type MetaT = {
   text_kinds: string[]; importance: string[]; levels: string[];
   style_presets?: { key: string; label: string; prompt: string }[];
   sample_models?: string[];
+  location_fields?: FieldMetaT[];
+  location_kinds?: string[];
+};
+type LocationT = {
+  id: string; name: string; kind: string; fields: Record<string, string>;
+  story_ids: string[]; updated_at?: string;
 };
 type StyleT = {
   preset?: string; custom_text?: string; ref_id?: string; ref_description?: string;
@@ -71,7 +77,8 @@ type MemberT = {
 type TextT = { id: string; kind: string; title: string; body: string; story_id: string };
 type WorldT = {
   id: string; name: string; world: Record<string, string>; stories: StoryT[];
-  cast: MemberT[]; texts: TextT[]; project_ids: string[]; llm: LlmPickT;
+  cast: MemberT[]; locations?: LocationT[]; texts: TextT[];
+  project_ids: string[]; llm: LlmPickT;
   style?: StyleT;
 };
 type ProjT = { id: string; name: string; mode: string };
@@ -165,7 +172,7 @@ export default function StoryWorldPage() {
   const [worlds, setWorlds] = useState<WorldLightT[]>([]);
   const [wid, setWid] = useState('');
   const [w, setW] = useState<WorldT | null>(null);
-  const [tab, setTab] = useState<'world' | 'stories' | 'cast' | 'texts' | 'projects'>('world');
+  const [tab, setTab] = useState<'world' | 'stories' | 'cast' | 'locations' | 'texts' | 'projects'>('world');
   const [msg, setMsg] = useState('');
   const [busyKeys, setBusyKeys] = useState<Record<string, boolean>>({});
   const [newName, setNewName] = useState('');
@@ -288,7 +295,9 @@ export default function StoryWorldPage() {
               {/* tabs */}
               <div className="flex gap-1 mb-4 flex-wrap">
                 {([['world', '🌍 World'], ['stories', `📖 Stories (${w.stories.length})`],
-                   ['cast', `🎭 Cast (${w.cast.length})`], ['texts', `📝 Texts (${w.texts.length})`],
+                   ['cast', `🎭 Cast (${w.cast.length})`],
+                   ['locations', `📍 Locations (${(w.locations || []).length})`],
+                   ['texts', `📝 Texts (${w.texts.length})`],
                    ['projects', `🔗 Projects (${w.project_ids.length})`]] as const).map(([k, label]) => (
                   <button key={k}
                     className={`px-3 py-1.5 rounded-t text-sm ${tab === k
@@ -308,6 +317,10 @@ export default function StoryWorldPage() {
               )}
               {meta && tab === 'cast' && (
                 <CastTab w={w} meta={meta} llmBody={llmBody} busyKeys={busyKeys}
+                  busyFn={busy} note={note} reload={() => loadWorld(w.id)} />
+              )}
+              {meta && tab === 'locations' && (
+                <LocationsTab w={w} meta={meta} llmBody={llmBody} busyKeys={busyKeys}
                   busyFn={busy} note={note} reload={() => loadWorld(w.id)} />
               )}
               {meta && tab === 'texts' && (
@@ -1128,6 +1141,185 @@ function BigBangModal({ wid, llmBody, onClose, onDone }: {
           <button className={btnCls} onClick={onClose} disabled={running}>Cancel</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── 📍 Locations tab (v1.277.14) ─────────────────────────────────────────────
+function LocationsTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
+  w: WorldT; meta: MetaT; llmBody: object; busyKeys: Record<string, boolean>;
+  busyFn: (k: string, on: boolean) => void; note: (m: string) => void; reload: () => void;
+}) {
+  const locs = w.locations || [];
+  const [editing, setEditing] = useState<LocationT | null>(null);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genStory, setGenStory] = useState('');
+  const [genMax, setGenMax] = useState(6);
+  const [genDir, setGenDir] = useState('');
+  const [genBusy, setGenBusy] = useState(false);
+  const fields = meta.location_fields || [];
+
+  const enhance = async (l: LocationT) => {
+    busyFn(`loc.${l.id}`, true);
+    try {
+      const r = await post<{ changed: string[]; note?: string }>(
+        `/worlds/${w.id}/locations/${l.id}/enhance`, { mode: 'fill', ...llmBody });
+      note(r.note || `${l.name}: filled ${r.changed.length} fields`);
+      reload();
+    } catch (e) { note(`⚠ ${e}`); } finally { busyFn(`loc.${l.id}`, false); }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <button className={btnCls} onClick={() => setEditing({
+          id: '', name: '', kind: 'exterior', fields: {}, story_ids: [] })}>＋ Add by hand</button>
+        <button className={btnAmber} onClick={() => setGenOpen(true)}>📍 Scout locations (LLM)</button>
+        <span className="text-xs text-gray-600">
+          location sheets feed prompts + style samples; link them to the stories that use them
+        </span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {locs.map(l => (
+          <div key={l.id} className="rounded border border-gray-800 bg-gray-900/50 p-3">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold truncate">📍 {l.name}</span>
+              <span className="text-[11px] px-1.5 rounded bg-gray-800 text-gray-400">{l.kind}</span>
+              <span className="text-[11px] text-gray-600 ml-auto">
+                {Object.values(l.fields || {}).filter(Boolean).length}/{fields.length} filled
+              </span>
+            </div>
+            <div className="text-xs text-gray-400 mt-1 line-clamp-2">
+              {l.fields?.description || '—'}
+            </div>
+            {l.story_ids?.length > 0 && (
+              <div className="text-[11px] text-blue-300 mt-1 truncate">
+                {l.story_ids.map(sid => w.stories.find(s => s.id === sid)?.title || '?').join(' · ')}
+              </div>
+            )}
+            <div className="flex gap-1 mt-2">
+              <button className={btnCls} onClick={() => setEditing(l)}>✏ Edit</button>
+              <button className={btnCls} disabled={!!busyKeys[`loc.${l.id}`]}
+                title="LLM fills every empty field from the world context"
+                onClick={() => enhance(l)}>{busyKeys[`loc.${l.id}`] ? '⏳' : '✨ Fill'}</button>
+              <button className={`${btnCls} ml-auto text-red-300`} onClick={async () => {
+                if (!window.confirm(`Delete location "${l.name}"?`)) return;
+                await post(`/worlds/${w.id}/locations/${l.id}/delete`); reload();
+              }}>🗑</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {!locs.length && (
+        <div className="text-gray-500 text-sm mt-4">
+          No locations yet. 📍 Scout reads the world (and a story) and proposes the places the
+          scenes need — or add them by hand.
+        </div>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
+             onClick={() => setEditing(null)}>
+          <div className="bg-gray-950 border border-gray-700 rounded-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto p-4"
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2 mb-3">
+              <h3 className="font-bold">{editing.id ? `✏ ${editing.name}` : '＋ New location'}</h3>
+              <button className={`${btnCls} ml-auto`} onClick={() => setEditing(null)}>✕</button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <input className={inputCls} placeholder="name" value={editing.name}
+                     onChange={e => setEditing(p => p && ({ ...p, name: e.target.value }))} />
+              <select className={inputCls} value={editing.kind}
+                      onChange={e => setEditing(p => p && ({ ...p, kind: e.target.value }))}>
+                {(meta.location_kinds || []).map(k => <option key={k} value={k}>{k}</option>)}
+              </select>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+              {fields.map(f => (
+                <div key={f.key}>
+                  <label className="text-[11px] text-gray-500">{f.label}</label>
+                  <textarea className={inputCls} rows={2} placeholder={f.hint}
+                            value={editing.fields[f.key] || ''}
+                            onChange={e => setEditing(p => p && ({
+                              ...p, fields: { ...p.fields, [f.key]: e.target.value } }))} />
+                </div>
+              ))}
+            </div>
+            {w.stories.length > 0 && (
+              <div className="mb-3">
+                <div className="text-xs font-semibold text-amber-300 mb-1">Used in</div>
+                <div className="flex gap-2 flex-wrap">
+                  {w.stories.map(st => (
+                    <label key={st.id} className="text-xs text-gray-300 flex items-center gap-1">
+                      <input type="checkbox" checked={editing.story_ids.includes(st.id)}
+                             onChange={e => setEditing(p => p && ({
+                               ...p,
+                               story_ids: e.target.checked
+                                 ? [...p.story_ids, st.id]
+                                 : p.story_ids.filter(x => x !== st.id) }))} />
+                      {st.title}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button className={btnAmber} onClick={async () => {
+                if (!editing.name.trim()) { note('⚠ the location needs a name'); return; }
+                try {
+                  const body = { name: editing.name, kind: editing.kind,
+                                 fields: editing.fields, story_ids: editing.story_ids };
+                  if (editing.id) await post(`/worlds/${w.id}/locations/${editing.id}`, body);
+                  else await post(`/worlds/${w.id}/locations`, body);
+                  setEditing(null); reload();
+                } catch (e) { note(`⚠ ${e}`); }
+              }}>💾 Save</button>
+              <button className={btnCls} onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {genOpen && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
+             onClick={() => !genBusy && setGenOpen(false)}>
+          <div className="bg-gray-950 border border-gray-700 rounded-lg w-full max-w-md p-4"
+               onClick={e => e.stopPropagation()}>
+            <h3 className="font-bold mb-1">📍 Scout locations</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              The LLM reads the world (and a story, if picked) and proposes the places the
+              scenes need — sheets only, nothing renders.
+            </p>
+            <label className="text-xs text-gray-400">For</label>
+            <select className={`${inputCls} mb-2`} value={genStory}
+                    onChange={e => setGenStory(e.target.value)}>
+              <option value="">the world as a whole</option>
+              {w.stories.map(st => <option key={st.id} value={st.id}>{st.title}</option>)}
+            </select>
+            <label className="text-xs text-gray-400">At most</label>
+            <input type="number" min={1} max={20} className={`${inputCls} mb-2`} value={genMax}
+                   onChange={e => setGenMax(Math.max(1, Math.min(20, Number(e.target.value) || 6)))} />
+            <label className="text-xs text-gray-400">Direction (optional)</label>
+            <input className={`${inputCls} mb-3`} value={genDir}
+                   placeholder="'the mining side of town', 'places for the heist'…"
+                   onChange={e => setGenDir(e.target.value)} />
+            <div className="flex gap-2">
+              <button className={btnAmber} disabled={genBusy} onClick={async () => {
+                setGenBusy(true);
+                try {
+                  const r = await post<{ made: LocationT[] }>(
+                    `/worlds/${w.id}/locations/generate`,
+                    { story_id: genStory, max_count: genMax, direction: genDir, ...llmBody });
+                  note(`scouted ${r.made.length} locations`);
+                  setGenOpen(false); reload();
+                } catch (e) { note(`⚠ ${e}`); }
+                setGenBusy(false);
+              }}>{genBusy ? '⏳ scouting…' : '📍 Propose locations'}</button>
+              <button className={btnCls} onClick={() => setGenOpen(false)} disabled={genBusy}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

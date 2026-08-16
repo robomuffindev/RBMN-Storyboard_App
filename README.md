@@ -4,7 +4,7 @@ A local desktop application for creating AI-powered music videos and narration v
 
 ![Robomuffin Idea Factory](Screenshots/robomuffin_idea_factory_screenshot.webp)
 
-## Status (v1.277.13, 2026-08-15)
+## Status (v1.277.14, 2026-08-15)
 
 **🎬 Projects now choose their VIDEO ENGINE** — **LTX 2.3** (the proven pipeline, still the
 default), **MiniMax H3** (reference-driven consistency: character sheets, image & audio
@@ -21,7 +21,15 @@ anchor); the 🎬 Video Lab is a home-screen destination with the v1.0 8-step tu
 a 🏃 draft mode, per-render times, a 📚 character-image reference picker and a copyable
 🤖 LLM prompting guide; the ⚡ Autogen queue can be **⏸ paused across a reboot**.
 
-*Newest first: per-project video engines · Klein Mode split · Story/World Builder ·
+**🎧 The Audio Lab** (`/audio-lab`) generates BACKING TRACKS locally (ACE-Step 1.5 XL —
+exact-length songs in seconds, paired to story arcs; MiniMax Music 3 slot auto-detects)
+and NARRATIONS with **voice cloning** (F5-TTS: one clean 5-15s sample + its transcript,
+paragraph-pause control) — the in-app ElevenLabs alternative; tracks import straight
+into projects. Worlds also gained **📍 location sheets** (scouted by LLM, linked to
+stories), a global **🧠 dedicated Prompt-LLM** setting, clean-base-look enforcement
+(no more baked-in ink smudges), and **📦 download-once-LAN-copy** model distribution.
+
+*Newest first: Audio Lab · location sheets · per-project video engines · Klein Mode split · Story/World Builder ·
 per-outfit sheets · queue pause · [costume library](#-design-a-costume-before-anyone-wears-it).*
 
 **⚡ An entire character — from a sentence to a trained LoRA — builds itself, unattended**

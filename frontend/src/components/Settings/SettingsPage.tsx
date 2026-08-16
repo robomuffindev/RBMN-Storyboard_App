@@ -2148,6 +2148,26 @@ export default function SettingsPage() {
                     <p className="text-xs mt-1 text-gray-400">{ollamaRefreshMsg}</p>
                   )}
                 </div>
+                {/* 🧠 v1.277.14 — dedicated PROMPT model: a global override for
+                    every prompt-generation/enhancement call, so chat can stay
+                    on one model while prompts use the best prompt-writer. */}
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Prompt Model <span className="text-xs text-gray-500 font-normal">
+                      — used for ALL prompt generation & enhancement (empty = use Model above).
+                      Research pick: qwen3:14b · unrestricted: huihui_ai/qwen3-abliterated:14b</span>
+                  </label>
+                  <select
+                    value={settings.ollama_prompt_model || ''}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, ollama_prompt_model: e.target.value }))}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 focus:outline-none focus:border-blue-500 text-sm"
+                  >
+                    <option value="">Same as Model (no override)</option>
+                    {(settings.ollama_available_models || []).map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
                 <button
                   onClick={() => testLLMMutation.mutate('ollama')}
                   className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors flex items-center justify-center gap-2"

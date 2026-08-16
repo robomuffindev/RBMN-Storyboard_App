@@ -1,4 +1,4 @@
-# RBMN Operations Runbook (v1.277.13, 2026-08-15)
+# RBMN Operations Runbook (v1.277.14, 2026-08-15)
 
 Everything that exists, where it runs, and how to drive it. This is the "which tool, which
 box, which command" page — the narrative is in `HANDOVER_PROMPT.md`, the decisions in
@@ -405,6 +405,17 @@ now checks the capability count for exactly this reason — free, no renders.
   `POST pull-from-story` (concept/style/cast-with-images/texts→lyrics) ·
   `POST concept/characters/autogenerate` now submits ⚡ AutogenSpecs (real klein3
   characters) with `POST concept/characters/{i}/adopt-k3` as the write-back.
+- **`/api/audio-lab/*` (v1.277.14)** — 🎧: `overview` (per-worker engine detection from
+  object_info + model listings) · `music/generate` (ace15; exact seconds/bpm/key;
+  minimax3 auto-detected, graph pending) · `tts/voices` CRUD (clone = 5-15s clean
+  sample + exact transcript) · `tts/generate` (blank-line chunking, pause_ms between
+  paragraphs) · `jobs`(+{id}) · `media/{id}` · `jobs/{id}/send-to-project` (MUSIC
+  asset). Staging: `scripts/install_audio.py` (+`--minimax3`); F5 node needs a ComfyUI
+  restart after install. Helper v1.220: `/serve/model/{folder}/{file}` (peer copy — 
+  `scripts/copy_models_to_peers.py`) + `/ollama/status` (LLM-only boxes).
+- **`/api/storyworld` locations (v1.277.14)** — `locations` CRUD + `/generate` (scout)
+  + `/{lid}/enhance`; sheets feed world/story/cast LLM context; ⚠ literal `/generate`
+  declared before `/{lid}`.
 - **Dispatcher video workflow types (v1.277.12)**: the `ltx_*` family, plus **`h3_i2v` /
   `h3_first_last` / `h3_ref2v` / `h3_t2v`** — a `minimax_h3` project's LTX-typed jobs are
   REWRITTEN to these in `_build_workflow`; scene `video_refs.urls` + auto outfit sheets

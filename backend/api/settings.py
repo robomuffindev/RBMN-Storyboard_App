@@ -104,6 +104,7 @@ class SettingsResponse(BaseModel):
     ollama_model: Optional[str] = None
     ollama_available_models: Optional[list[str]] = None
     ollama_vision_model: Optional[str] = None
+    ollama_prompt_model: Optional[str] = None
     ollama_vision_available_models: Optional[list[str]] = None
     vision_enabled: bool = False
     # ── Chapters / LLM batching ──
@@ -177,6 +178,7 @@ class SettingsUpdate(BaseModel):
     ollama_urls: Optional[list[str]] = None  # multi-server pool
     ollama_model: Optional[str] = None
     ollama_vision_model: Optional[str] = None
+    ollama_prompt_model: Optional[str] = None
     vision_enabled: Optional[bool] = None
     # ── Chapters / LLM batching ──
     llm_chapter_scene_limit_cloud: Optional[int] = None
@@ -393,6 +395,7 @@ def _build_response(settings: AppSettings) -> SettingsResponse:
         chapter_max_depth=getattr(settings, "chapter_max_depth", 2) or 2,
         ollama_available_models=settings.ollama_available_models,
         ollama_vision_model=settings.ollama_vision_model,
+        ollama_prompt_model=settings.ollama_prompt_model,
         ollama_vision_available_models=settings.ollama_vision_available_models,
         vision_enabled=bool(getattr(settings, "vision_enabled", False)),
     )
@@ -436,11 +439,16 @@ def resolve_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
 
     ollama_urls = _get_ollama_urls(app_settings)
 
+    # 🧠 v1.277.14 — a dedicated PROMPT model beats the general chat model for
+    # every prompt-generation call (this resolver is what all of them use)
+    _prompt_model = (getattr(app_settings, "ollama_prompt_model", None)
+                     or app_settings.ollama_model or "qwen3:14b")
+
     if default == "ollama":
         if ollama_urls:
             # Encode the URL list into the api_key slot
             url_payload = _json.dumps(ollama_urls) if len(ollama_urls) > 1 else ollama_urls[0]
-            return "ollama", url_payload, app_settings.ollama_model or "qwen3:14b"
+            return "ollama", url_payload, _prompt_model
         # Ollama selected but no URL — fall through to cloud providers
 
     # Map of provider -> (key, model, default_model)
@@ -459,7 +467,7 @@ def resolve_llm_config(app_settings: AppSettings) -> tuple[str, str, str]:
     # Fallback: first available provider (try Ollama first if configured)
     if ollama_urls:
         url_payload = _json.dumps(ollama_urls) if len(ollama_urls) > 1 else ollama_urls[0]
-        return "ollama", url_payload, app_settings.ollama_model or "qwen3:14b"
+        return "ollama", url_payload, _prompt_model
 
     for provider, (key, model, fallback_model) in providers.items():
         if key:
@@ -630,6 +638,8 @@ async def update_settings(
             settings.ollama_model = req.ollama_model or None
         if req.ollama_vision_model is not None:
             settings.ollama_vision_model = req.ollama_vision_model or None
+        if req.ollama_prompt_model is not None:
+            settings.ollama_prompt_model = req.ollama_prompt_model or None
         if req.vision_enabled is not None:
             settings.vision_enabled = req.vision_enabled
 
@@ -1387,6 +1397,7 @@ class SettingsExportData(BaseModel):
     ollama_urls: Optional[list[str]] = None
     ollama_model: Optional[str] = None
     ollama_vision_model: Optional[str] = None
+    ollama_prompt_model: Optional[str] = None
     ollama_vision_available_models: Optional[list[str]] = None
     vision_enabled: bool = False
 
@@ -1467,6 +1478,7 @@ async def export_settings(
             ollama_urls=settings.ollama_urls,
             ollama_model=settings.ollama_model,
             ollama_vision_model=settings.ollama_vision_model,
+        ollama_prompt_model=settings.ollama_prompt_model,
             ollama_vision_available_models=settings.ollama_vision_available_models,
             vision_enabled=bool(getattr(settings, "vision_enabled", False)),
         )

@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone, Globe2, Clapperboard } from 'lucide-react';
+import { FolderOpen, Settings, Activity, Users, Wrench, Smartphone, Globe2, Clapperboard, Music } from 'lucide-react';
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -119,6 +119,25 @@ export default function HomePage() {
                 <h2 className="text-2xl font-bold mb-2">Video Lab</h2>
                 <p className="text-gray-400">
                   MiniMax H3 video generation — text, image & reference modes, with LTX upscaling
+                </p>
+              </div>
+            </div>
+
+            {/* Audio Lab Card */}
+            <div
+              onClick={() => navigate('/audio-lab')}
+              className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden hover:border-emerald-600 hover:shadow-lg transition-all cursor-pointer group"
+            >
+              <div className="h-32 bg-gradient-to-br from-emerald-900/20 to-gray-900 flex items-center justify-center">
+                <Music
+                  size={48}
+                  className="text-emerald-400 group-hover:text-emerald-300 transition-colors"
+                />
+              </div>
+              <div className="p-8">
+                <h2 className="text-2xl font-bold mb-2">Audio Lab</h2>
+                <p className="text-gray-400">
+                  Local music generation (ACE-Step) & narration with voice cloning (F5-TTS)
                 </p>
               </div>
             </div>

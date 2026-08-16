@@ -103,6 +103,18 @@ _CAST_LORE_FIELDS: List[Dict[str, str]] = [
 _TEXT_KINDS = ["lyrics", "narration", "script", "poem", "notes"]
 _IMPORTANCE = ["lead", "support", "background"]
 
+# 📍 location sheets (v1.277.14) — worlds carry LOCATIONS the way they carry
+# cast; stories link the ones they use, so a scene can name a SPECIFIC place.
+_LOCATION_FIELDS: List[Dict[str, str]] = [
+    {"key": "description",    "label": "Description",    "hint": "what this place IS — layout, scale, materials, landmarks"},
+    {"key": "atmosphere",     "label": "Atmosphere",     "hint": "mood, sounds, smells, weather, crowd"},
+    {"key": "key_details",    "label": "Key details",    "hint": "the recognisable specifics a shot should show"},
+    {"key": "time_and_light", "label": "Time & light",   "hint": "typical time of day and how the light behaves"},
+    {"key": "story_role",     "label": "Story role",     "hint": "what happens HERE in the stories"},
+    {"key": "notes",          "label": "Notes",          "hint": "anything else"},
+]
+_LOCATION_KINDS = ["exterior", "interior", "landmark", "vehicle", "region", "other"]
+
 # 🎨 visual-style presets — the common looks the models handle well, plus
 # custom. The prompt is what the style CONTRIBUTES to image prompts and to
 # every LLM call's context.
@@ -218,6 +230,7 @@ def _light(w: dict) -> dict:
             "logline": (w.get("world") or {}).get("logline") or "",
             "stories": len(w.get("stories") or []),
             "cast": len(w.get("cast") or []),
+            "locations": len(w.get("locations") or []),
             "texts": len(w.get("texts") or []),
             "project_ids": w.get("project_ids") or [],
             "updated_at": w.get("updated_at")}
@@ -231,6 +244,29 @@ def _find(items: List[dict], iid: str, what: str) -> dict:
 
 
 # ── sanitising what an LLM hands back ────────────────────────────────────────
+#: 🩹 v1.277.14 — temporary marks that keep leaking into BASE appearances (an
+#: ink smudge on the secret printer's face gives her away in every scene; blood
+#: spatter bakes into all four views). The base look must be CLEAN — marks
+#: belong to outfits/scenes where they can be worn and removed.
+_TEMP_MARK_RE = None
+
+
+def _strip_temp_marks(text: str) -> str:
+    """Remove wound/stain phrases from an APPEARANCE value. Conservative:
+    drops the clause containing the mark, keeps the rest of the sentence."""
+    global _TEMP_MARK_RE
+    if _TEMP_MARK_RE is None:
+        words = (r"blood|bloodied|bloody|wound|wounded|scratch(?:es|ed)?|"
+                 r"bruise[sd]?|bandage[sd]?|band-aid|stitches|"
+                 r"smudge[sd]?|smear(?:s|ed)?|stain(?:s|ed)?|splatter(?:s|ed)?|"
+                 r"ink[- ]stain|soot|grime|grimy|dirt[- ]streak|dirty face|"
+                 r"black eye|split lip|scab[s]?|gash(?:es)?|cut[s]? on")
+        _TEMP_MARK_RE = re.compile(
+            rf"[^,.;]*\b(?:{words})\b[^,.;]*[,.;]?\s*", re.IGNORECASE)
+    cleaned = _TEMP_MARK_RE.sub("", text or "").strip(" ,;.")
+    return cleaned if cleaned else text
+
+
 def _flat(v: Any, cap: int = 4000) -> str:
     """One plain string out of whatever shape the model chose."""
     if v is None:
@@ -365,6 +401,19 @@ def _ctx_world(w: dict) -> str:
     return "\n".join(lines)
 
 
+def _ctx_locations(w: dict, story_id: str = "") -> str:
+    locs = w.get("locations") or []
+    if story_id:
+        locs = [l for l in locs if story_id in (l.get("story_ids") or [])] or locs
+    if not locs:
+        return ""
+    lines = ["KNOWN LOCATIONS:"]
+    for l in locs[:20]:
+        d = (l.get("fields") or {}).get("description") or ""
+        lines.append(f"- {l['name']} ({l.get('kind') or 'place'}): {d[:160]}")
+    return "\n".join(lines)
+
+
 def _ctx_story(st: dict) -> str:
     lines = [f"STORY: {st.get('title') or 'untitled'} "
              f"(type: {st.get('story_type') or 'unspecified'})"]
@@ -397,7 +446,9 @@ async def meta():
             "cast_lore_fields": _CAST_LORE_FIELDS, "text_kinds": _TEXT_KINDS,
             "importance": _IMPORTANCE, "levels": list(_LEVELS),
             "style_presets": _STYLE_PRESETS,
-            "sample_models": list(_SAMPLE_MODELS)}
+            "sample_models": list(_SAMPLE_MODELS),
+            "location_fields": _LOCATION_FIELDS,
+            "location_kinds": _LOCATION_KINDS}
 
 
 @router.get("/llms")
@@ -431,7 +482,8 @@ async def create_world(body: WorldIn):
         raise HTTPException(400, "the world needs a name")
     w = {"id": uuid4().hex[:8], "name": name, "created_at": _now(),
          "updated_at": _now(), "world": {}, "stories": [], "cast": [],
-         "texts": [], "project_ids": [], "llm": {"provider": "", "model": ""}}
+         "locations": [], "texts": [], "project_ids": [],
+         "llm": {"provider": "", "model": ""}}
     with _LOCK:
         _save(w)
     return w
@@ -686,7 +738,7 @@ def _clean_member_bits(m: dict, body: MemberIn) -> None:
         m["importance"] = body.importance
     for k, v in (body.fields or {}).items():
         if k in _CAST_FIELD_KEYS:
-            m.setdefault("fields", {})[k] = _flat(v, 600)
+            m.setdefault("fields", {})[k] = _strip_temp_marks(_flat(v, 600))
     lore_keys = {f["key"] for f in _CAST_LORE_FIELDS}
     for k, v in (body.lore or {}).items():
         if k in lore_keys:
@@ -728,6 +780,177 @@ async def delete_member(wid: str, cid: str):
         w["cast"] = [c for c in w["cast"] if c["id"] != cid]
         _save(w)
     return {"deleted": cid}
+
+
+# ══ 📍 locations ═════════════════════════════════════════════════════════════
+class LocationIn(BaseModel):
+    name: str = ""
+    kind: str = ""
+    fields: Dict[str, Any] = {}
+    story_ids: Optional[List[str]] = None
+
+
+def _clean_location_bits(l: dict, body: LocationIn) -> None:
+    if (body.name or "").strip():
+        l["name"] = body.name.strip()
+    if body.kind in _LOCATION_KINDS:
+        l["kind"] = body.kind
+    keys = {f["key"] for f in _LOCATION_FIELDS}
+    for k, v in (body.fields or {}).items():
+        if k in keys:
+            l.setdefault("fields", {})[k] = _flat(v)
+    if body.story_ids is not None:
+        l["story_ids"] = [s for s in body.story_ids if s]
+
+
+@router.post("/worlds/{wid}/locations")
+async def add_location(wid: str, body: LocationIn):
+    if not (body.name or "").strip():
+        raise HTTPException(400, "the location needs a name")
+    l = {"id": uuid4().hex[:8], "name": "", "kind": "exterior", "fields": {},
+         "story_ids": [], "created_at": _now(), "updated_at": _now()}
+    _clean_location_bits(l, body)
+    with _LOCK:
+        w = _load(wid)
+        names = {x["name"].lower() for x in w.get("locations") or []}
+        if l["name"].lower() in names:
+            raise HTTPException(409, f"{l['name']!r} already exists in this world")
+        w.setdefault("locations", []).append(l)
+        _save(w)
+    return l
+
+
+class LocGenIn(BaseModel):
+    story_id: str = ""
+    max_count: int = 6
+    direction: str = ""
+    llm: Optional[LlmPick] = None
+
+
+# ⚠ literal route BEFORE /locations/{lid} — route order is load-bearing
+# (the cast/submit lesson, this module's own first smoke run)
+@router.post("/worlds/{wid}/locations/generate")
+async def generate_locations(wid: str, body: LocGenIn,
+                             session: AsyncSession = Depends(get_session)):
+    """The LLM proposes the locations the world/story needs — sheets only,
+    nothing renders. Mirrors cast/generate."""
+    w = _load(wid)
+    cap = max(1, min(int(body.max_count or 6), 20))
+    ctx = _ctx_world(w)
+    if body.story_id:
+        st = _find(w.get("stories") or [], body.story_id, "story")
+        ctx += "\n\n" + _ctx_story(st)
+    existing = [l["name"] for l in (w.get("locations") or [])]
+    fkeys = [f["key"] for f in _LOCATION_FIELDS]
+    system = (
+        "You are a location scout and production designer for a visual-story "
+        "studio. Decide which LOCATIONS this story actually needs (do not pad "
+        "to the maximum). Return ONLY a JSON array; each element an object "
+        "with keys: \"name\", \"kind\" (one of "
+        + ", ".join(_LOCATION_KINDS) + "), and "
+        + ", ".join(f'\"{k}\"' for k in fkeys)
+        + " (plain strings — concrete, filmable, visually specific; no "
+          "franchise or real-place names unless the world names them).")
+    user = (f"{ctx}\n"
+            + (f"\nALREADY SCOUTED (do NOT repeat): {', '.join(existing)}\n"
+               if existing else "")
+            + (f"\nDIRECTION FROM THE AUTHOR: {body.direction}\n"
+               if body.direction.strip() else "")
+            + f"\nPropose at most {cap} NEW locations. Return only the JSON array.")
+    got = await _ask_json(session, body.llm or _pick_of(w), system, user,
+                          want="array", max_tokens=4000)
+    made, skipped = [], []
+    with _LOCK:
+        w = _load(wid)
+        locs = w.setdefault("locations", [])
+        names = {x["name"].lower() for x in locs}
+        for row in got[:cap]:
+            if not isinstance(row, dict):
+                continue
+            name = _flat(row.get("name"), 120)
+            if not name:
+                continue
+            if name.lower() in names:
+                skipped.append(name)
+                continue
+            l = {"id": uuid4().hex[:8], "name": name,
+                 "kind": (row.get("kind") if row.get("kind") in _LOCATION_KINDS
+                          else "exterior"),
+                 "fields": {k: _flat(row.get(k)) for k in fkeys
+                            if _flat(row.get(k))},
+                 "story_ids": [body.story_id] if body.story_id else [],
+                 "created_at": _now(), "updated_at": _now()}
+            names.add(name.lower())
+            locs.append(l)
+            made.append(l)
+        _save(w)
+    return {"made": made, "skipped_existing": skipped,
+            "total": len(w["locations"])}
+
+
+@router.post("/worlds/{wid}/locations/{lid}/enhance")
+async def enhance_location(wid: str, lid: str, body: EnhanceIn,
+                           session: AsyncSession = Depends(get_session)):
+    """Fill/overwrite one location's sheet from the world+story context."""
+    w = _load(wid)
+    l = _find(w.get("locations") or [], lid, "location")
+    sheet = l.get("fields") or {}
+    keys = _fill_keys(sheet, _LOCATION_FIELDS, body.mode)
+    if not keys:
+        return {"location": l, "changed": [],
+                "note": "nothing empty — use overwrite to redo everything"}
+    hints = {f["key"]: f["hint"] for f in _LOCATION_FIELDS if f["key"] in keys}
+    system = ("You are a production designer. A location lives INSIDE the "
+              "world below. " + _JSON_RULES)
+    user = (f"{_ctx_world(w)}\n\nLOCATION: {l['name']} ({l.get('kind')})\n"
+            + (f"KNOWN: {json.dumps({k: v for k, v in sheet.items() if v})}\n"
+               if any(sheet.values()) else "")
+            + (f"DIRECTION FROM THE AUTHOR: {body.direction}\n"
+               if body.direction.strip() else "")
+            + "\nWrite the following keys:\n"
+            + "\n".join(f"- {k}: {h}" for k, h in hints.items())
+            + "\n\nReturn exactly these keys and no others.")
+    got = await _ask_json(session, body.llm or _pick_of(w), system, user)
+    changed = []
+    with _LOCK:
+        w = _load(wid)
+        l = _find(w.get("locations") or [], lid, "location")
+        sheet = l.setdefault("fields", {})
+        for k in keys:
+            v = _flat(got.get(k))
+            if v and (body.mode == "overwrite"
+                      or not (sheet.get(k) or "").strip()):
+                sheet[k] = v
+                changed.append(k)
+        l["updated_at"] = _now()
+        _save(w)
+    return {"location": l, "changed": changed}
+
+
+@router.post("/worlds/{wid}/locations/{lid}/delete")
+async def delete_location(wid: str, lid: str):
+    with _LOCK:
+        w = _load(wid)
+        _find(w.get("locations") or [], lid, "location")
+        w["locations"] = [x for x in w["locations"] if x["id"] != lid]
+        _save(w)
+    return {"deleted": lid}
+
+
+# ⚠ parameterized update declared AFTER the literals above (route order!)
+@router.post("/worlds/{wid}/locations/{lid}")
+async def update_location(wid: str, lid: str, body: LocationIn):
+    with _LOCK:
+        w = _load(wid)
+        l = _find(w.get("locations") or [], lid, "location")
+        newn = (body.name or "").strip().lower()
+        if newn and any(x["id"] != lid and x["name"].lower() == newn
+                        for x in w.get("locations") or []):
+            raise HTTPException(409, f"{body.name!r} already exists")
+        _clean_location_bits(l, body)
+        l["updated_at"] = _now()
+        _save(w)
+    return l
 
 
 # ══ LLM: enhance ═════════════════════════════════════════════════════════════
@@ -856,7 +1079,10 @@ async def enhance_member(wid: str, cid: str, body: EnhanceIn,
               "object) and \"lore\" (an object). Values are plain strings. "
               "In appearance: 'sex' must be exactly 'male' or 'female', "
               "'age' a number written as a string. Physical description must "
-              "be specific enough to draw from. No franchise, brand or "
+              "be specific enough to draw from. Appearance is the CLEAN "
+              "PERMANENT look — never wounds, blood, bandages, stains, "
+              "smudges or dirt (those belong to outfits/scenes, not the "
+              "base every scene derives from). No franchise, brand or "
               "real-celebrity names anywhere.")
     user = (f"{_ctx_world(w)}\n\nCHARACTER: {m['name']} — "
             f"{m.get('role') or 'role unknown'} "
@@ -877,7 +1103,7 @@ async def enhance_member(wid: str, cid: str, body: EnhanceIn,
         lore_got = got.get("lore") or {}
         ow = body.mode == "overwrite"
         for k in f_keys:
-            v = _flat(app_got.get(k), 600)
+            v = _strip_temp_marks(_flat(app_got.get(k), 600))
             # fill must not eat text typed during the LLM call (see above)
             if v and (ow or not ((m.get("fields") or {}).get(k) or "").strip()):
                 m.setdefault("fields", {})[k] = v
@@ -959,7 +1185,8 @@ async def enhance_field(wid: str, body: FieldEnhanceIn,
         else:
             m = _find(w.get("cast") or [], sub, "cast member")
             if body.field in _CAST_FIELD_KEYS:
-                m.setdefault("fields", {})[body.field] = text[:600]
+                m.setdefault("fields", {})[body.field] = \
+                    _strip_temp_marks(text[:600])
             else:
                 m.setdefault("lore", {})[body.field] = text
         _save(w)
@@ -985,6 +1212,9 @@ async def generate_cast(wid: str, body: CastGenIn,
     if body.story_id:
         st = _find(w.get("stories") or [], body.story_id, "story")
         ctx += "\n\n" + _ctx_story(st)
+    lctx = _ctx_locations(w, body.story_id)
+    if lctx:
+        ctx += "\n\n" + lctx
     existing = [c["name"] for c in (w.get("cast") or [])]
     lore_keys = [f["key"] for f in _CAST_LORE_FIELDS if f["key"] != "notes"]
     system = (
@@ -996,7 +1226,12 @@ async def generate_cast(wid: str, body: CastGenIn,
         "(\"lead\", \"support\" or \"background\"), \"appearance\" (object "
         "with any of: " + ", ".join(_CAST_FIELD_KEYS) + " — 'sex' exactly "
         "'male' or 'female', 'age' a number as a string, be visually "
-        "specific), " + ", ".join(f'"{k}"' for k in lore_keys) + " (strings), "
+        "specific. ⚠ Appearance is the character's CLEAN PERMANENT look — "
+        "NEVER include wounds, blood, bruises, bandages, stains, smudges, "
+        "soot or dirt there, even when the backstory implies them: every "
+        "scene derives from the base look, and a mark that belongs to one "
+        "moment would appear in all of them. Story-driven marks go in an "
+        "outfit or scene description instead), " + ", ".join(f'"{k}"' for k in lore_keys) + " (strings), "
         "and \"outfits\" (array of 1-3 objects {\"name\", \"description\"} — "
         "describe garments only, by attribute: cut, colour, material. No "
         "franchise, brand or real-celebrity names anywhere.)")
@@ -1034,7 +1269,7 @@ async def generate_cast(wid: str, body: CastGenIn,
                  "created_at": _now(), "updated_at": _now()}
             app_got = row.get("appearance") or {}
             for k in _CAST_FIELD_KEYS:
-                v = _flat(app_got.get(k), 600)
+                v = _strip_temp_marks(_flat(app_got.get(k), 600))
                 if v:
                     m["fields"][k] = v
             for k in lore_keys:

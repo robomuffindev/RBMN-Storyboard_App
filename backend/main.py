@@ -592,6 +592,11 @@ app.include_router(characters_all_router)
 from backend.api.storyworld import router as storyworld_router  # noqa: E402
 app.include_router(storyworld_router)
 
+# 🎧 Audio Lab (v1.277.14) — ACE-Step 1.5 music + F5-TTS narration/cloning on
+# the fleet, with import-into-project. MiniMax Music 3 slot auto-detects.
+from backend.api.audio_lab import router as audio_lab_router  # noqa: E402
+app.include_router(audio_lab_router)
+
 # Log registered routes for debugging
 _gen_routes = []
 for route in app.routes:

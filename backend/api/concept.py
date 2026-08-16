@@ -707,7 +707,11 @@ async def autogenerate_characters(
         "- Match the visual style and mood of the project\n"
         "- Characters should make sense for the narrative in the lyrics/concept\n"
         "- If the song is abstract or doesn't clearly reference people, create symbolic/artistic characters "
-        "that embody the themes\n\n"
+        "that embody the themes\n"
+        "- The description is the character's CLEAN PERMANENT look: NEVER include wounds, blood, "
+        "bruises, bandages, stains, smudges, soot or dirt, even when the story implies them — the "
+        "base look feeds every scene, and a mark that belongs to one moment would appear in all of "
+        "them (story-driven marks belong in scene descriptions instead)\n\n"
         "IMPORTANT: Return ONLY a JSON array of objects, each with \"name\" and \"description\" keys. "
         "No markdown, no code fences, no explanation — just the raw JSON array."
     )

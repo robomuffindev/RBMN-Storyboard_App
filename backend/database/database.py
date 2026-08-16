@@ -131,6 +131,15 @@ async def init_db() -> None:
         except Exception:
             pass  # Column already exists
 
+        # v1.277.14: dedicated prompt-LLM override (global)
+        try:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN ollama_prompt_model VARCHAR DEFAULT NULL")
+            )
+            logger.info("Migration: added ollama_prompt_model column to app_settings table")
+        except Exception:
+            pass  # Column already exists
+
         # Add VNCCS Native mode columns to app_settings if missing
         try:
             await conn.execute(

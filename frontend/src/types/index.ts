@@ -222,6 +222,7 @@ export interface AppSettings {
   anima_ultra?: boolean;
   json_prompt_mode?: boolean;
   ollama_vision_model?: string;
+  ollama_prompt_model?: string;
   ollama_vision_available_models?: string[];
   vision_enabled?: boolean;
   // Distilled LoRA
