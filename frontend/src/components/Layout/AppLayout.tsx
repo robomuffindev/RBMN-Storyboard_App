@@ -859,7 +859,7 @@ export default function AppLayout() {
           <button
             onClick={() => setEngineStoryOpen(true)}
             className="px-3 md:px-4 py-2 bg-rose-700 hover:bg-rose-600 rounded text-sm font-medium transition-colors flex items-center gap-2"
-            title="Video engine (LTX 2.3 / MiniMax H3 / LTX 2.5) + link this project to a Story/World"
+            title="Video engine (LTX 2.3 / MiniMax H3) + link this project to a Story/World"
           >
             <Clapperboard size={18} />
             <span className="hidden sm:inline">Engine & Story</span>

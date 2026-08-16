@@ -300,7 +300,6 @@ export default function ProjectList() {
                   {([
                     ['ltx_2.3', 'LTX 2.3', 'the proven pipeline — everything works exactly as before'],
                     ['minimax_h3', 'MiniMax H3', 'reference-driven consistency: character sheets, image & audio refs, native AV'],
-                    ['ltx_2.5', 'LTX 2.5 (staged)', 'models on the workers; renders on 2.3 until its graphs go live'],
                   ] as const).map(([val, label, hint]) => (
                     <label key={val} className="flex items-start gap-3 p-3 border border-gray-700 rounded cursor-pointer hover:bg-gray-800 transition-colors">
                       <input

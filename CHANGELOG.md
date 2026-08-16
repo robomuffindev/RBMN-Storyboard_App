@@ -59,6 +59,17 @@ graphs created for this and test."
   models are the focus."* The graphs + dispatcher lane above ARE the "in place"; do not
   chase its model staging or deeper app integration until he asks.
 
+### 🙈 LTX 2.5 hidden from the frontend (his follow-up call, same day)
+
+- The engine pickers (ProjectList new-project radio, Engine & Story modal) no longer
+  OFFER `ltx_2.5` — backend lane, graphs, dispatcher routing and installers all REMAIN
+  (that's the "keep what we have in the backend"); a project already set to 2.5 keeps
+  working and the modal shows how to switch off it. Restore = re-add the two picker
+  entries (grep `ltx_2.5 hidden`).
+- Fleet ops, same conversation: he cleaned the trainer's E: garbage, is **redeploying
+  helper v1.221 to the boxes himself**, and will NOT restart the app until MM3 is
+  downloaded and tested everywhere.
+
 ### ✅ Post-restart verifications + hand-off scripts
 
 - **MiniMax H3 stack re-verified after the fleet restart**: Video Lab draft t2v

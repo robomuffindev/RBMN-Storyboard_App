@@ -125,8 +125,10 @@ export default function EngineStoryModal({ projectId, onClose }: {
         <div className="mb-5">
           <div className="text-sm font-semibold mb-2">Video engine</div>
           <div className="flex gap-2">
-            {([['ltx_2.3', 'LTX 2.3'], ['minimax_h3', 'MiniMax H3'],
-               ['ltx_2.5', 'LTX 2.5 (staged)']] as const).map(([v, l]) => (
+            {/* ltx_2.5 hidden from the UI (2026-08-16, his call: staged in the
+                backend, not the current focus). A project already set to it keeps
+                working; the button returns when 2.5 becomes a focus. */}
+            {([['ltx_2.3', 'LTX 2.3'], ['minimax_h3', 'MiniMax H3']] as const).map(([v, l]) => (
               <button key={v}
                 className={`px-3 py-1.5 rounded text-sm border ${cfg?.video_engine === v
                   ? 'border-blue-500 bg-blue-900/40 text-blue-200'
@@ -136,8 +138,8 @@ export default function EngineStoryModal({ projectId, onClose }: {
           </div>
           {cfg?.video_engine === 'ltx_2.5' && (
             <div className="text-xs text-amber-400 mt-1">
-              LTX 2.5 models are staged on the workers; scenes render on the 2.3 pipeline
-              until the 2.5 graphs go live. Prompting already targets 2.5.
+              This project is set to LTX 2.5 (staged, currently hidden from selection).
+              Pick LTX 2.3 or MiniMax H3 above to switch.
             </div>
           )}
           {isH3 && (

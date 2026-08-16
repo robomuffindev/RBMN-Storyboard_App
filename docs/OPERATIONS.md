@@ -628,11 +628,14 @@ staging (`--fix` repairs: LAN peer when a clean copy exists, HF once otherwise).
 pulls run on ZOAI1; **the trainer's E: models drive is FULL** (garbage list in the
 v1.277.15 CHANGELOG); helper v1.221 (raises on truncation + `/cleanup/parts`) needs
 Lorenzo's manual redeploy ·
-(2) **LTX 2.5 — graphs WIRED** (`backend/services/jobs/ltx25_graphs.py` + dispatcher
-`ltx25_i2v`/`ltx25_t2v` lane; validated on a worker); first live render pending clean
-models — `scripts/ltx25_live_test.py [host]`, then a real scene ·
-(3) **MiniMax Music 3 — graph wired**, first render pending its text encoder; **ACE-Step
-1.5 is DONE — verified live on all 3 boxes** (~19-23s per 20s track) ·
+(2) **LTX 2.5 — IN PLACE, NOT A FOCUS (his call)**: graphs wired
+(`backend/services/jobs/ltx25_graphs.py` + dispatcher `ltx25_i2v`/`ltx25_t2v` lane,
+validated on a worker) and **HIDDEN from the frontend pickers** (grep `ltx_2.5 hidden`
+to restore); don't chase its staging or integration ·
+(3) **MiniMax Music 3 — graph wired + spec-verified**, first render pending its text
+encoder; he wants MM3 **tested on every box** before he restarts the app
+(`scripts/mm3_first_render.py`; peer-copy the te via `copy_models_to_peers.py`);
+**ACE-Step 1.5 is DONE — verified live on all 3 boxes** (~19-23s per 20s track) ·
 (4) **MiniMax H3 project lane — first LIVE end-to-end scene render pending** (smoke +
 adversarial review verified); also tools.py's sample generator still carries the broken
 raw-workflow krea2 path (use z_image/anima/klein there) ·
