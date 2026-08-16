@@ -954,6 +954,19 @@ class DraftIn(BaseModel):
     refs_note: str = ""                     # ref2v: what each reference is
 
 
+@router.get("/llm-prompt")
+async def llm_prompt():
+    """🤖 The full MiniMax H3 prompting-agent instructions, VERBATIM — for
+    users to paste into their own LLM (ChatGPT, Claude, a local model) and
+    write video prompts outside the app (v1.277.11). Served from
+    docs/MINIMAX_H3_LLM_PROMPT.md so it can be updated without a code change."""
+    fp = _DOCS_DIR / "MINIMAX_H3_LLM_PROMPT.md"
+    try:
+        return {"prompt": fp.read_text("utf-8")}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"prompt file unreadable: {e}")
+
+
 def _agent_spec() -> str:
     fp = _DOCS_DIR / "MINIMAX_H3_PROMPTING.md"
     try:

@@ -1,3 +1,13 @@
+## v1.277.11 -- 🤖 "PROMPT FOR LLMs" — take the H3 prompting agent anywhere (2026-08-15)
+
+His MiniMax H3 prompting-agent instructions (modes, shot structure, camera vocabulary,
+dialogue tags, soundscape rules, all five formats, the quality checklist) are now a
+button in the Video Lab header: **🤖 Prompt for LLMs** opens a modal with the FULL text,
+📋 Copy all (clipboard API with a select-all fallback), scroll + manual selection. For
+writing H3 prompts in ChatGPT/Claude/any external LLM. Stored VERBATIM in
+`docs/MINIMAX_H3_LLM_PROMPT.md`, served by `GET /api/h3/llm-prompt` — updating the doc
+updates the button with no code change. (The in-app 🧠 Draft keeps using its own spec.)
+
 ## v1.277.10 -- 🎯 EVERY STUDIO TAB DEFAULTS TO THE CHARACTER YOU OPENED (2026-08-14)
 
 *"When we are inside an individual's screen of tabs, all those tabs should default to that

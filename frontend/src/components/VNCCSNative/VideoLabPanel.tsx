@@ -91,6 +91,9 @@ export default function VideoLabPanel(): React.ReactElement {
   const pendingRef = useRef<{ kind: string; slot: string } | null>(null);
   // 📚 v1.277.2 — which slot the character-image picker is filling, or null
   const [charPickSlot, setCharPickSlot] = useState<string | null>(null);
+  // 🤖 v1.277.11 — the copyable prompting-agent instructions for external LLMs
+  const [llmPrompt, setLlmPrompt] = useState<string | null>(null);
+  const [llmCopied, setLlmCopied] = useState(false);
 
   const loadOv = useCallback(async () => {
     try {
@@ -267,6 +270,20 @@ export default function VideoLabPanel(): React.ReactElement {
         <span style={hint}>
           720p by default · sage attention already on via the .bat · finished renders take ⬆ Upscale (LTX 2.3 enhancer).
         </span>
+        <div style={{ flex: 1 }} />
+        <button style={btnSm}
+                title="the full MiniMax H3 prompting-agent instructions — copy them into ChatGPT/Claude/your own LLM to write video prompts outside the app"
+                onClick={() => void (async () => {
+                  try {
+                    const r = await fetch(`${BASE}/llm-prompt`);
+                    const j = await r.json();
+                    if (!r.ok) throw new Error(j.detail || `${r.status}`);
+                    setLlmCopied(false);
+                    setLlmPrompt(j.prompt || '');
+                  } catch (ex) { setErr(String((ex as Error).message || ex)); }
+                })()}>
+          🤖 Prompt for LLMs
+        </button>
       </div>
       {err && <div style={{ ...box, color: '#ff8a8a', fontSize: 12 }}>{err}</div>}
 
@@ -515,6 +532,51 @@ export default function VideoLabPanel(): React.ReactElement {
       {charPickSlot && (
         <CharacterImagePicker onPick={(url, name) => void useCharImage(url, name)}
                               onClose={() => setCharPickSlot(null)} />
+      )}
+
+      {llmPrompt !== null && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.72)',
+                      zIndex: 60, display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', padding: 18 }}
+             onClick={() => setLlmPrompt(null)}>
+          <div style={{ background: '#0b0e13', border: '1px solid #2a2f3a',
+                        borderRadius: 12, width: 'min(860px, 96vw)',
+                        height: 'min(720px, 92vh)', display: 'flex',
+                        flexDirection: 'column', padding: 14, gap: 10 }}
+               onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <b style={{ color: '#e6e9ee', fontSize: 14 }}>🤖 MiniMax H3 — prompt for your own LLM</b>
+              <span style={hint}>paste this as the system prompt / first message, then describe your video</span>
+              <div style={{ flex: 1 }} />
+              <button style={{ ...btn, background: llmCopied ? '#166534' : '#3b82f6' }}
+                      onClick={() => void (async () => {
+                        try {
+                          await navigator.clipboard.writeText(llmPrompt);
+                          setLlmCopied(true);
+                        } catch {
+                          // clipboard API can be denied — fall back to select-all
+                          const el = document.getElementById('llm-prompt-pre');
+                          if (el) {
+                            const rng = document.createRange();
+                            rng.selectNodeContents(el);
+                            const sel = window.getSelection();
+                            sel?.removeAllRanges(); sel?.addRange(rng);
+                          }
+                        }
+                      })()}>
+                {llmCopied ? '✓ Copied' : '📋 Copy all'}
+              </button>
+              <button style={btnSm} onClick={() => setLlmPrompt(null)}>✕</button>
+            </div>
+            <pre id="llm-prompt-pre"
+                 style={{ flex: 1, overflow: 'auto', margin: 0, padding: 12,
+                          background: '#0e1116', border: '1px solid #2a2f3a',
+                          borderRadius: 8, color: '#cbd2dc', fontSize: 12,
+                          whiteSpace: 'pre-wrap', userSelect: 'text' }}>
+              {llmPrompt}
+            </pre>
+          </div>
+        </div>
       )}
     </div>
   );
