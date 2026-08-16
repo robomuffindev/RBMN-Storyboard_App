@@ -213,9 +213,11 @@ byte-size instrument (`--fix` repairs); fresh pulls run on ZOAI1, the trainer's 
 drive is FULL (known-garbage list in the v1.277.15 CHANGELOG), helper v1.221 needs redeploy;
 (2) LTX 2.5 — IN PLACE, NOT A FOCUS (his call): graphs wired + validated, HIDDEN from the
 frontend pickers (grep `ltx_2.5 hidden` to restore); don't chase staging/integration;
-(3) MiniMax Music 3 — graph wired + spec-verified, first render pending its text encoder;
-he wants MM3 tested on EVERY box before restarting the app (`mm3_first_render.py`)
-(ACE-Step 1.5 is DONE, verified 3/3 live); (4) MiniMax H3 project lane —
+(3) MiniMax Music 3 — graph wired + spec-verified; `scripts/mm3_fleet_verify.py` is
+RUNNING as agent job `sess0816-mmfleet` (wait for te → render → LAN fan-out → render on
+every box) — a new session's FIRST action is reading its outbox file; ⚠ the agent runs
+ONE job at a time, so nothing else runs until it finishes (ACE-Step 1.5 is DONE,
+verified 3/3 live); (4) MiniMax H3 project lane —
 first LIVE end-to-end scene render pending (smoke + review verified); and tools.py's sample
 generator still carries the broken raw-workflow krea2 path (use z_image/anima/klein there);
 (5) the adopt-k3 cast watcher doesn't survive a restart — re-adopt by hand after a reboot

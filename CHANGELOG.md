@@ -70,6 +70,15 @@ graphs created for this and test."
   helper v1.221 to the boxes himself**, and will NOT restart the app until MM3 is
   downloaded and tested everywhere.
 
+### ⚠ The single-slot agent (learned the hard way, same day)
+
+- **`rbmn_agent.py` runs ONE job at a time** (single worker slot; the thread exists to
+  keep the heartbeat alive, not for concurrency) and picks jobs in SORTED-filename
+  order. `mm3_fleet_verify.py` (a multi-hour waiter) blocked every probe and the final
+  publish behind it. Rule: queue long jobs LAST, or split them into short re-runnable
+  steps. The fleet-verify was deliberately left running as the session's last job —
+  **a new session's first action is reading `scripts/_agent/outbox/sess0816-mmfleet.json`.**
+
 ### ✅ Post-restart verifications + hand-off scripts
 
 - **MiniMax H3 stack re-verified after the fleet restart**: Video Lab draft t2v
