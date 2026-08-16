@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import IdeogramPromptModal from './IdeogramPromptModal';
 import LlmInstructionModal from './LlmInstructionModal';
 import LTXDirectorModal from './LTXDirectorModal';
+import CharacterImagePicker from '@/components/VNCCSNative/CharacterImagePicker';
 import InpaintModal from './InpaintModal';
 import { useAppStore } from '@/store';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -886,6 +887,7 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
   const jobs = useAppStore(s => s.jobs);
   const scenes = useAppStore(s => s.scenes);
   const [directorModalOpen, setDirectorModalOpen] = useState(false);
+  const [videoRefPickerOpen, setVideoRefPickerOpen] = useState(false);
   const directorEnabled = !!((activeScene?.parameters as any)?.ltx_director?.enabled);
 
   // "Use Story Flow" — persisted in scene.parameters.use_story_flow
@@ -3550,6 +3552,43 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
           {/* ══════════ VIDEO TAB ══════════ */}
           {activeTab === 'video' && (
             <>
+              {/* 🎭 MiniMax H3 video references (v1.277.12) — character
+                  sheets / views / dataset images as identity anchors, plus
+                  whatever the picker offers. Used when the project's video
+                  engine is minimax_h3 (ref2v); ignored on LTX. */}
+              <div className="p-3 rounded border border-rose-700/50 bg-rose-950/20">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-rose-200">🎭 Video references (MiniMax H3)</span>
+                  <span className="text-[11px] text-gray-500">outfit sheets are the best identity anchors — keep them constant across scenes</span>
+                  <button
+                    className="ml-auto px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 text-xs"
+                    onClick={() => setVideoRefPickerOpen(true)}
+                  >📚 add</button>
+                </div>
+                {(((activeScene?.parameters as any)?.video_refs?.urls || []) as string[]).length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {(((activeScene?.parameters as any)?.video_refs?.urls || []) as string[]).map((u, i) => (
+                      <div key={u} className="relative">
+                        <img src={u} alt={`ref ${i + 1}`}
+                             className="h-16 rounded border border-gray-700 bg-white object-cover" />
+                        <button
+                          className="absolute -top-1.5 -right-1.5 bg-red-700 hover:bg-red-600 rounded-full w-4 h-4 text-[10px] leading-4"
+                          title="remove"
+                          onClick={async () => {
+                            if (!activeScene) return;
+                            const cur = ((activeScene.parameters as any)?.video_refs?.urls || []) as string[];
+                            await updateSceneAndSync(activeScene.id, {
+                              parameters: { ...activeScene.parameters,
+                                video_refs: { urls: cur.filter((x) => x !== u) } },
+                            });
+                          }}
+                        >✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* ── LTX Director Mode ── */}
               <div className="p-3 rounded border border-blue-700/50 bg-blue-950/30">
                 <label className="flex items-center gap-2 text-sm font-medium text-blue-200 cursor-pointer">
@@ -4108,6 +4147,21 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
 
               </div>{/* end greyed normal video controls */}
 
+              {videoRefPickerOpen && activeScene && (
+                <CharacterImagePicker
+                  k3Only
+                  onPick={async (url) => {
+                    setVideoRefPickerOpen(false);
+                    const cur = ((activeScene.parameters as any)?.video_refs?.urls || []) as string[];
+                    if (cur.includes(url) || cur.length >= 8) return;
+                    await updateSceneAndSync(activeScene.id, {
+                      parameters: { ...activeScene.parameters,
+                        video_refs: { urls: [...cur, url] } },
+                    });
+                  }}
+                  onClose={() => setVideoRefPickerOpen(false)}
+                />
+              )}
               {directorModalOpen && activeScene && currentProject && (
                 <LTXDirectorModal
                   projectId={currentProject.id}

@@ -3326,6 +3326,24 @@ async def outfit_generate(slug: str, body: OutfitIn, request: Request,
                             + " — generate those views first")
             st["error"] = "; ".join(errs) if errs else None
             st["status"] = "done" if not errs else "done_with_errors"
+            # 🪪 v1.277.12 — a finished outfit AUTO-BUILDS its per-outfit
+            # character sheet (single costume, 2048px — the MiniMax identity
+            # anchor), so it is immediately usable as a video reference.
+            # Direct call (pure PIL, we are already in a worker thread);
+            # best-effort — the outfit succeeded either way.
+            if st["status"] in ("done", "done_with_errors"):
+                try:
+                    from backend.api.charsheet import _compose as _sheet_compose
+                    c3 = _load(slug)
+                    sheet_name = f"{c3.get('name') or slug} — {name}" \
+                                 + (f" ({variant})" if variant else "")
+                    meta = _sheet_compose(slug, sheet_name, "outfit", False,
+                                          2048, {"name": name,
+                                                 "variant": variant})
+                    st["outfit_sheet"] = meta.get("file")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("klein3 %s: auto outfit sheet failed: %s",
+                                   slug, e)
         except Exception as e:  # noqa: BLE001
             st.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
 

@@ -1235,6 +1235,7 @@ function TextsTab({ w, meta, note, reload }: {
 function ProjectsTab({ w, note, reload }: {
   w: WorldT; note: (m: string) => void; reload: () => void;
 }) {
+  const nav = useNavigate();
   const [projects, setProjects] = useState<ProjT[]>([]);
   const [pid, setPid] = useState('');
   useEffect(() => {
@@ -1266,7 +1267,9 @@ function ProjectsTab({ w, note, reload }: {
         <div key={p.id} className="flex items-center gap-2 border border-gray-800 rounded px-3 py-2 mb-2">
           <span className="text-sm">{p.name}</span>
           <span className="text-xs text-gray-500">{p.mode}</span>
-          <button className={`${btnCls} ml-auto`} onClick={() => link(p.id, false)}>unlink</button>
+          <button className={`${btnAmber} ml-auto`} title="open this project"
+                  onClick={() => nav(`/project/${p.id}`)}>↗ open</button>
+          <button className={btnCls} onClick={() => link(p.id, false)}>unlink</button>
         </div>
       ))}
       {!attached.length && <div className="text-xs text-gray-600">Nothing attached yet.</div>}

@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, Any, Dict
@@ -674,7 +675,11 @@ class JobDispatcher:
         try:
             from backend.services.runpod.manager import RunPodManager
             rp_manager = RunPodManager.get_instance()
-            if rp_manager.is_configured:
+            _wf_now = str(job.parameters.get("_effective_workflow_type")
+                          or job.parameters.get("workflow_type") or "")
+            # H3 jobs need the MiniMax nodes/models — a video RunPod pod is an
+            # LTX pod and would get a mangled graph (reviewer finding #4)
+            if rp_manager.is_configured and not _wf_now.startswith("h3_"):
                 service_type = "video" if job.job_type == "video" else "image"
                 pods = rp_manager.get_pods_for_service(service_type)
                 logger.info(f"[{job_id_str}] RunPod enabled, {len(pods)} pod(s) configured for '{service_type}'")
@@ -840,6 +845,16 @@ class JobDispatcher:
                         f"[{job_id_str}] MISSING NODE TYPES on {worker.url}: "
                         f"{'; '.join(missing)}"
                     )
+                    # ⚠ v1.277.12 — a missing MiniMax CORE node must FAIL, not
+                    # be auto-removed: removal rewires the sampler to the CLIP
+                    # output and submits a mangled graph that fails confusingly
+                    # server-side (reviewer finding #4). Fail loud instead.
+                    if any("MiniMaxH3" in m for m in missing):
+                        raise Exception(
+                            f"worker {worker.url} lacks the MiniMax H3 nodes "
+                            f"({'; '.join(m for m in missing if 'MiniMaxH3' in m)}) "
+                            f"— it cannot render this job; check the worker's "
+                            f"custom nodes/models")
                     # Auto-remove missing nodes and rewire dependencies
                     removed = remove_missing_nodes(workflow, available_types)
                     if removed:
@@ -1435,6 +1450,54 @@ class JobDispatcher:
                         logger.info(f"[{job.id}] Talkie routing: engine={engine}, portrait={bool(_portrait)}")
             except Exception as _tk_err:
                 logger.warning(f"Talkie routing check failed (continuing): {_tk_err}")
+
+        # 🎬 MiniMax H3 engine routing (v1.277.12): a project whose
+        # settings["video_engine"] is "minimax_h3" renders its video jobs on
+        # the H3 lane. Same shape as AV-native/Talkie above: read the project,
+        # rewrite workflow_type, and every entry path (manual, auto, batch)
+        # inherits it. The LTX family maps onto H3's modes; anything H3 cannot
+        # do (transitions, v2v chains) stays on LTX for that job.
+        if (job and job.project_id and workflow_type
+                and workflow_type.startswith("ltx_")
+                and workflow_type not in ("ltx_transition",)):
+            try:
+                async with self._session_factory() as _h3_session:
+                    _h3_project = await _h3_session.get(Project, job.project_id)
+                    _h3_st = (_h3_project.settings or {}) if _h3_project else {}
+                    if _h3_st.get("video_engine") == "minimax_h3":
+                        _h3_scene = (await _h3_session.get(Scene, job.scene_id)
+                                     if job.scene_id else None)
+                        _sp = (_h3_scene.parameters or {}) if _h3_scene else {}
+                        _map = {"ltx_i2v": "h3_i2v", "ltx_av_native": "h3_i2v",
+                                "ltx_fflf": "h3_first_last",
+                                "ltx_v2v_extend": "h3_i2v",
+                                "ltx_seq_i2v": "h3_i2v",
+                                "ltx_seq_fflf": "h3_first_last"}
+                        new_wf = _map.get(workflow_type)
+                        if new_wf:
+                            # scene video refs (charsheets etc.) → ref2v, which
+                            # is H3's identity-preserving mode
+                            _refs = (_sp.get("video_refs") or {}).get("urls") or []
+                            if new_wf == "h3_i2v" and (
+                                    _refs or _h3_st.get("h3_auto_sheet_refs")):
+                                new_wf = "h3_ref2v"
+                            logger.info(f"[{job.id}] MiniMax H3 routing: "
+                                        f"{workflow_type} -> {new_wf}")
+                            workflow_type = new_wf
+                            params["workflow_type"] = new_wf
+                            params["_h3_settings"] = {
+                                k: _h3_st.get(k) for k in
+                                ("h3_turbo", "h3_draft", "h3_audio_mode",
+                                 "h3_use_audio_ref", "h3_ref_image_size",
+                                 "world_id")}
+                            params["_h3_video_ref_urls"] = _refs
+                            # audio: 'model' keeps H3's own generated track;
+                            # 'project' (default) muxes our narration/music
+                            if (_h3_st.get("h3_audio_mode") or "project") == "model":
+                                params["skip_audio_mux"] = True
+            except Exception as _h3_err:
+                logger.warning(f"H3 engine routing check failed (continuing "
+                               f"on LTX): {_h3_err}")
 
         return await self._build_builtin_workflow(workflow_type, params, job)
 
@@ -2768,7 +2831,178 @@ class JobDispatcher:
                 distilled_lora_name=distilled_lora_name,
             )
 
+        # ── 🎬 MiniMax H3 lane (v1.277.12) ──────────────────────────────────
+        # Reuses h3video._build_graph (the Video Lab's proven graph). Image /
+        # audio inputs are LOCAL paths here — _upload_workflow_files scans the
+        # LoadImage/LoadAudio nodes and uploads+renames them per worker, the
+        # same machinery every other lane uses.
+        if workflow_type in ("h3_i2v", "h3_first_last", "h3_ref2v", "h3_t2v"):
+            return await self._build_h3_workflow(workflow_type, params, job)
+
         raise Exception(f"Unknown workflow type: {workflow_type}")
+
+    async def _build_h3_workflow(self, workflow_type: str, params: dict,
+                                 job) -> dict:
+        """A scene video on MiniMax H3. Modes map: h3_i2v → ImageToVideo from
+        the scene's chosen image; h3_first_last → FF+LF; h3_ref2v →
+        ReferenceToVideo carrying the chosen image + character OUTFIT SHEETS
+        (the community-validated identity anchor: multi-view, one canvas,
+        held constant across shots) + optional audio reference."""
+        from backend.api import h3video as h3
+
+        h3s = params.get("_h3_settings") or {}
+        width = int(params.get("width") or 1280)
+        height = int(params.get("height") or 736)
+        duration = float(params.get("duration") or 5.0)
+        frames = h3._frames(max(1.0, min(15.0, duration)))
+        seed = int(params.get("seed") or 0) or int(time.time()) % 2**31
+
+        # resolve inputs exactly like the LTX lane
+        first_frame = await self._resolve_single_asset_path(
+            params.get("first_frame_asset_id"))
+        last_frame = await self._resolve_single_asset_path(
+            params.get("last_frame_asset_id"))
+        audio_path = await self._resolve_single_asset_path(
+            params.get("audio_asset_id"))
+        if not first_frame or not last_frame or not audio_path:
+            resolved = await self._auto_resolve_video_assets(job, params)
+            first_frame = first_frame or resolved.get("first_frame")
+            last_frame = last_frame or resolved.get("last_frame")
+            audio_path = audio_path or resolved.get("audio")
+
+        mode = {"h3_i2v": "i2v", "h3_first_last": "first_last",
+                "h3_ref2v": "ref2v", "h3_t2v": "t2v"}[workflow_type]
+        if mode in ("i2v", "first_last") and not first_frame:
+            mode = "t2v"                      # nothing to anchor on — honest t2v
+        if mode == "first_last" and not last_frame:
+            mode = "i2v"
+
+        # reference images for ref2v: the chosen frame FIRST (composition
+        # anchor), then explicit scene video refs, then auto outfit sheets
+        ref_imgs: list = []
+        ref_auds: list = []
+        if mode == "ref2v":
+            if first_frame:
+                ref_imgs.append(first_frame)
+            for u in (params.get("_h3_video_ref_urls") or []):
+                p = self._h3_ref_url_to_path(u)
+                if p and p not in ref_imgs:
+                    ref_imgs.append(p)
+            if len(ref_imgs) < 2 and job and job.scene_id:
+                for p in await self._h3_auto_sheet_refs(job):
+                    if p not in ref_imgs:
+                        ref_imgs.append(p)
+            ref_imgs = ref_imgs[:h3.MAX_REF_IMAGES]
+            if not ref_imgs:
+                mode = "t2v"                  # ref2v with zero refs is invalid
+            if h3s.get("h3_use_audio_ref") and audio_path:
+                ref_auds = [audio_path]
+
+        turbo = h3s.get("h3_turbo")
+        turbo = True if turbo is None else bool(turbo)
+        graph = h3._build_graph(
+            mode=mode, prompt=str(params.get("prompt") or ""),
+            w=width, h=height, frames=frames, seed=seed,
+            turbo=turbo, spectrum=False,
+            first_name=(first_frame if mode in ("i2v", "first_last") else None),
+            last_name=(last_frame if mode == "first_last" else None),
+            ref_imgs=ref_imgs,
+            ref_vids=[], ref_auds=ref_auds,
+            ref_image_size=str(h3s.get("h3_ref_image_size") or "match"),
+            prefix=f"H3PROJ_{str(job.id)[:8] if job else 'x'}",
+            draft=bool(h3s.get("h3_draft")))
+        self._record_params(params, _effective_workflow_type=workflow_type,
+                            h3_mode=mode, h3_frames=frames,
+                            h3_ref_count=len(ref_imgs),
+                            h3_turbo=turbo, h3_draft=bool(h3s.get("h3_draft")))
+        logger.info(f"[{job.id if job else '?'}] H3 graph: mode={mode} "
+                    f"{width}x{height} f={frames} refs={len(ref_imgs)} "
+                    f"audio_ref={bool(ref_auds)} turbo={turbo}")
+        return graph
+
+    def _record_params(self, params: dict, **kv) -> None:
+        params.update(kv)
+
+    def _h3_ref_url_to_path(self, url: str):
+        """Map an app image URL (charsheet / klein3 ref / lora item) to its
+        file on disk — scene video refs are stored as the URLs the
+        CharacterImagePicker hands out."""
+        import re as _re
+        from pathlib import Path as _P
+        try:
+            u = str(url).split("?", 1)[0]
+            m = _re.match(r".*/api/charsheet/characters/([^/]+)/sheets/([^/]+)$", u)
+            if m:
+                from backend.api.charsheet import _sheets_dir
+                fp = _sheets_dir(m.group(1)) / m.group(2)
+                return str(fp) if fp.exists() else None
+            m = _re.match(r".*/api/klein3/characters/([^/]+)/refs/([^/]+)/image$", u)
+            if m:
+                from backend.api.klein3 import _cdir
+                fp = _cdir(m.group(1)) / "refs" / f"{m.group(2)}.png"
+                return str(fp) if fp.exists() else None
+            m = _re.match(r".*/api/klein3/characters/([^/]+)/base/active/image$", u)
+            if m:
+                from backend.api.klein3 import _active_base_path, _load as _k3l
+                slug = m.group(1)
+                fp = _active_base_path(slug, _k3l(slug))
+                return str(fp) if fp and fp.exists() else None
+            m = _re.match(r".*/api/lora/datasets/([^/]+)/items/([^/]+)/image$", u)
+            if m:
+                from backend.api.lora import _item_path
+                fp = _item_path(m.group(1), m.group(2))
+                return str(fp) if fp.exists() else None
+            p = _P(u)
+            if p.is_absolute() and p.exists():
+                return str(p)
+            # ⚠ a ref shown on the scene card but silently dropped at render
+            # is the refs_used bug class — always SAY it (reviewer finding #3)
+            logger.warning(f"H3 video ref NOT USED — no path mapping for: {url}")
+            return None
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning(f"H3 ref url unmappable ({url}): {e}")
+            return None
+
+    async def _h3_auto_sheet_refs(self, job) -> list:
+        """Outfit sheets for the characters PRESENT in this scene — the
+        default identity anchors when the project opted into auto sheet refs.
+        Prefers each character's newest OUTFIT sheet (single costume, the
+        format that works; a multi-outfit sheet confuses identity), falls back
+        to their newest sheet of any kind."""
+        out: list = []
+        try:
+            async with self._session_factory() as s:
+                scene = await s.get(Scene, job.scene_id)
+                project = await s.get(Project, job.project_id)
+            if not scene or not project:
+                return out
+            st = project.settings or {}
+            if not st.get("h3_auto_sheet_refs"):
+                return out
+            chars = st.get("characters") or []
+            sp = scene.parameters or {}
+            idxs = ((sp.get("image_refs_first") or {}).get("characterIndices")
+                    or list(range(len(chars))))
+            from backend.api.charsheet import _sheets_dir
+            import json as _json
+            for i in idxs[:3]:
+                if not (0 <= i < len(chars)):
+                    continue
+                slug = str(chars[i].get("char_slug") or "")
+                if not slug:
+                    continue
+                d = _sheets_dir(slug)
+                if not d.exists():
+                    continue
+                sheets = sorted(d.glob("sheet_*.png"), reverse=True)
+                pick = next((f for f in sheets if "_outfit_" in f.name
+                             or f.name.startswith("sheet_outfit")), None) \
+                    or (sheets[0] if sheets else None)
+                if pick:
+                    out.append(str(pick))
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning(f"H3 auto sheet refs failed: {e}")
+        return out
 
     async def _auto_resolve_video_assets(
         self, job: Job, params: dict
@@ -4724,6 +4958,15 @@ class JobDispatcher:
             "lipsync_latentsync": {"latentsync"},
             "lipsync_musetalk": {"musetalk"},
             "lipsync_sonic": {"sonic"},
+            # MiniMax H3 project lane (v1.277.12): no capability constraint —
+            # every box on this fleet carries the H3 models (proven by the
+            # Video Lab running on all three). Declaring an explicit cap here
+            # would require cap-discovery changes for zero routing benefit on
+            # an identical fleet.
+            "h3_i2v": set(),
+            "h3_first_last": set(),
+            "h3_ref2v": set(),
+            "h3_t2v": set(),
             "klein_inpaint": {"klein"},
             "studio_qie_edit": {"vnccs"},
             "studio_rmbg2": {"vnccs"},
@@ -4800,6 +5043,11 @@ class JobDispatcher:
             return {vid_model}
         if workflow_type in ("lipsync_latentsync", "lipsync_musetalk", "lipsync_sonic"):
             return set()  # dedicated lip-sync engines gate on capability, not model slot
+        if workflow_type in ("h3_i2v", "h3_first_last", "h3_ref2v", "h3_t2v"):
+            # MiniMax H3 (v1.277.12): every box on this fleet carries the H3
+            # models (the Video Lab has run on all of them) — no model-slot
+            # constraint; capability gating below is what routes it.
+            return set()
         return set()
 
     @staticmethod
@@ -5393,10 +5641,16 @@ class JobDispatcher:
                         # the mixer "Model Audio" volume slider independently
                         # of the muxed MP4.  We keep it baked into the MP4 too
                         # for single-scene playback / preview convenience.
+                        # v1.277.12: H3 is natively AV — when the user chose to
+                        # KEEP its audio (h3_audio_mode="model"), the sidecar
+                        # must exist or the export assembler silently re-muxes
+                        # project audio over it (reviewer finding #2).
                         if (
                             media_type == "video"
                             and scene_id
-                            and params.get("workflow_type") == "ltx_av_native"
+                            and (params.get("workflow_type") == "ltx_av_native"
+                                 or str(params.get("workflow_type") or "")
+                                 .startswith("h3_"))
                         ):
                             try:
                                 from backend.services.video.ffmpeg import extract_audio_track
@@ -5835,9 +6089,15 @@ class JobDispatcher:
         )
 
         for filename, file_type in unique_candidates:
+            # v1.277.12: prefixes may embed a subfolder ("RBMN-H3/…") — split it
+            # out, or servers that basename-strip /view paths 404 every
+            # candidate exactly when the fallback is needed (reviewer #5)
+            sub = ""
+            if "/" in filename:
+                sub, filename = filename.rsplit("/", 1)
             try:
                 file_bytes = await asyncio.to_thread(
-                    client.try_download_output, filename, "", file_type
+                    client.try_download_output, filename, sub, file_type
                 )
             except Exception as dl_err:
                 logger.warning(f"[{job_id_str}] VHS fallback error for {filename}: {dl_err}")

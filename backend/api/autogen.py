@@ -884,7 +884,29 @@ def _s_clothing(jid: str, st: dict, spec: AutogenSpec, slug: str) -> None:
         o = _wait(jid, _outfit_done, 5400, 15, f"outfit render {label!r}")
         made[-1]["outfit_job"] = {k: o.get(k) for k in ("status", "detail", "error")}
         st["costumes"] = made
-    _stage(jid, st, "clothing", f"{len(made)} outfit(s) designed, adopted and worn")
+
+        # 🪪 v1.277.12 — every generated outfit gets its OWN character sheet
+        # (single costume, 2048px: the community-validated MiniMax identity
+        # anchor), so it is ready to call as a video reference the moment the
+        # outfit exists. Free (PIL), best-effort — a sheet failure must not
+        # fail the clothing stage.
+        try:
+            # klein3's outfit run may have auto-built the sheet already
+            # (v1.277.12 does it in both lanes) — don't make a duplicate
+            if o.get("outfit_sheet"):
+                made[-1]["outfit_sheet"] = o.get("outfit_sheet")
+            else:
+                r = _app("POST", "/api/charsheet/generate",
+                         {"slug": slug, "preset": "outfit",
+                          "outfit_name": label,
+                          "labels": False, "width": 2048}, timeout=120)
+                made[-1]["outfit_sheet"] = r.get("file")
+                _tick(jid, st, f"[{i}/{len(specs)}] {label}: outfit sheet built")
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning("autogen %s: outfit sheet for %r failed: %s",
+                           jid, label, e)
+    _stage(jid, st, "clothing", f"{len(made)} outfit(s) designed, adopted, "
+                                f"worn and sheeted")
 
 
 def _stash_costume_refs(ref_ids: List[str]) -> List[str]:

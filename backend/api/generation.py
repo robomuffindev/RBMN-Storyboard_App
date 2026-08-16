@@ -1017,7 +1017,8 @@ async def enhance_prompt(
         system_prompt_override = None
         gen_model_name = None
         if req.is_video:
-            gen_model_name = app_settings.video_model_type or "ltx_2.3"
+            _p_for_engine = await session.get(Project, project_id)
+            gen_model_name = _project_video_model(_p_for_engine, app_settings)
             overrides = app_settings.video_system_prompt_overrides or {}
         else:
             gen_model_name = app_settings.image_model_type or "flux2_klein_dev_9b"
@@ -2963,6 +2964,35 @@ async def _build_auto_enhance_context(
     return " | ".join(parts)
 
 
+
+def _world_style_for_project(project) -> str:
+    """The linked world's style text, '' when unlinked (v1.277.12)."""
+    try:
+        wid = str(((getattr(project, "settings", None) or {}).get("world_id")) or "")
+        if not wid:
+            return ""
+        from backend.api import storyworld as sw
+        return sw._style_text(sw._load(wid))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+
+def _project_video_model(project, app_settings) -> str:
+    """Per-PROJECT video engine (v1.277.12) beats the global setting.
+
+    settings["video_engine"] = minimax_h3 | ltx_2.5 | ltx_2.3 — chosen at
+    project creation / in the video-config. Falls back to the global
+    AppSettings.video_model_type exactly as before for untagged projects."""
+    try:
+        eng = str(((getattr(project, "settings", None) or {}).get("video_engine")) or "")
+    except Exception:  # noqa: BLE001
+        eng = ""
+    if eng in ("minimax_h3", "ltx_2.5"):
+        return eng
+    return (getattr(app_settings, "video_model_type", None) or "ltx_2.3")
+
+
 async def _build_video_enhance_context(
     project: Project,
     scene: Scene,
@@ -2994,6 +3024,15 @@ async def _build_video_enhance_context(
         f"{mode_context} Scene timing: {scene.start_time}s to {scene.end_time}s. "
         f"Enhance for smooth cinematic video motion and transitions."
     )
+
+    # 🌍 v1.277.12 — a project linked to a Story/World inherits its VISUAL
+    # STYLE, so every scene of the video stays in the chosen medium.
+    _wstyle = _world_style_for_project(project)
+    if _wstyle:
+        parts.append(
+            f"VISUAL STYLE (authoritative — the whole video is in this style, "
+            f"keep every shot consistent with it): {_wstyle}"
+        )
 
     # KEYFRAME INTERPOLATION (FF/LF mode): the render receives BOTH keyframe
     # images — the clip starts EXACTLY on the first and ends EXACTLY on the
@@ -3415,7 +3454,7 @@ async def auto_generate(
 
         image_model = (app_settings.image_model_type if app_settings else None) or "flux2_klein_dev_9b"
         first_pass_gm = _first_pass_gen_key(app_settings)
-        video_model = (app_settings.video_model_type if app_settings else None) or "ltx_2.3"
+        video_model = _project_video_model(project, app_settings)
 
         # Get project resolution
         res_w = project.settings.get("resolution_width", 1536)
@@ -5640,7 +5679,7 @@ async def _run_sequential_auto_gen(
 
             image_model = (app_settings.image_model_type if app_settings else None) or "flux2_klein_dev_9b"
             first_pass_gm = _first_pass_gen_key(app_settings)
-            video_model = (app_settings.video_model_type if app_settings else None) or "ltx_2.3"
+            video_model = _project_video_model(project, app_settings)
 
             res_w = project.settings.get("resolution_width", 1536)
             res_h = project.settings.get("resolution_height", 864)

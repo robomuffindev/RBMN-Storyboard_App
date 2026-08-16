@@ -57,8 +57,12 @@ async function jj<T>(r: Response): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-export default function CharacterImagePicker({ onPick, onClose }: {
+export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
   onPick: (url: string, name: string) => void; onClose: () => void;
+  /** hide VNCCS-store characters — their catalog URLs cannot be resolved to
+   *  disk paths by the H3 video-ref lane, so offering them there would show a
+   *  ref on the card that the render silently drops */
+  k3Only?: boolean;
 }): React.ReactElement {
   const [chars, setChars] = useState<UniCharT[]>([]);
   const [q, setQ] = useState('');
@@ -147,7 +151,8 @@ export default function CharacterImagePicker({ onPick, onClose }: {
   useEffect(() => { if (cur) void loadImages(cur, group); }, [cur, group, loadImages]);
 
   const filtered = chars.filter((c) =>
-    !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase()));
+    (!k3Only || c.source === 'k3')
+    && (!q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase())));
 
   return (
     <div style={modalBg} onClick={onClose}>

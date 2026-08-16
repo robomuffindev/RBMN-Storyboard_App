@@ -622,12 +622,18 @@ class ProjectLinkIn(BaseModel):
 @router.post("/worlds/{wid}/projects")
 async def link_project(wid: str, body: ProjectLinkIn,
                        session: AsyncSession = Depends(get_session)):
+    """⚠ TWO-WAY since v1.277.12: the project's settings carry world_id too —
+    style injection, pull-from-story and the Engine & Story header all key off
+    project.settings.world_id, so a world-side attach that only wrote
+    world.project_ids left the whole machinery inert (reviewer finding #1)."""
     pid = (body.project_id or "").strip()
     if not pid:
         raise HTTPException(400, "project_id is required")
+    proj = None
     if body.attach:
         r = await session.execute(select(Project))
-        if pid not in {str(p.id) for p in r.scalars().all()}:
+        proj = next((p for p in r.scalars().all() if str(p.id) == pid), None)
+        if proj is None:
             raise HTTPException(404, f"project {pid!r} not found")
     with _LOCK:
         w = _load(wid)
@@ -638,6 +644,25 @@ async def link_project(wid: str, body: ProjectLinkIn,
             ids = [x for x in ids if x != pid]
         w["project_ids"] = ids
         _save(w)
+    # write the project-side half of the link
+    try:
+        if body.attach and proj is not None:
+            pst = dict(proj.settings or {})
+            pst["world_id"] = wid
+            pst.setdefault("story_id", "")
+            proj.settings = pst
+            await session.commit()
+        elif not body.attach:
+            r = await session.execute(select(Project))
+            proj = next((p for p in r.scalars().all() if str(p.id) == pid), None)
+            if proj is not None and str((proj.settings or {}).get("world_id")) == wid:
+                pst = dict(proj.settings or {})
+                pst.pop("world_id", None)
+                pst.pop("story_id", None)
+                proj.settings = pst
+                await session.commit()
+    except Exception as e:                                       # noqa: BLE001
+        logger.warning("storyworld link: project-side write failed: %s", e)
     return {"project_ids": w["project_ids"]}
 
 

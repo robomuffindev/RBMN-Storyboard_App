@@ -14,6 +14,7 @@ export default function ProjectList() {
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectMode, setNewProjectMode] = useState<ProjectMode>('music_video');
   const [lipsyncDefault, setLipsyncDefault] = useState(true);
+  const [videoEngine, setVideoEngine] = useState<'ltx_2.3' | 'ltx_2.5' | 'minimax_h3'>('ltx_2.3');
   const [isCreating, setIsCreating] = useState(false);
 
   // Batch mode state
@@ -51,7 +52,7 @@ export default function ProjectList() {
       const response = await createProject({
         name: newProjectName,
         mode: newProjectMode,
-        settings: { lipsync_default: lipsyncDefault },
+        settings: { lipsync_default: lipsyncDefault, video_engine: videoEngine },
       });
       setNewProjectName('');
       setShowNewProjectModal(false);
@@ -287,6 +288,33 @@ export default function ProjectList() {
                         className="w-4 h-4"
                       />
                       <span>{getModeLabel(mode)}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* 🎬 Video engine (v1.277.12) */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium mb-3">Video Engine</label>
+                <div className="space-y-2">
+                  {([
+                    ['ltx_2.3', 'LTX 2.3', 'the proven pipeline — everything works exactly as before'],
+                    ['minimax_h3', 'MiniMax H3', 'reference-driven consistency: character sheets, image & audio refs, native AV'],
+                    ['ltx_2.5', 'LTX 2.5 (staged)', 'models on the workers; renders on 2.3 until its graphs go live'],
+                  ] as const).map(([val, label, hint]) => (
+                    <label key={val} className="flex items-start gap-3 p-3 border border-gray-700 rounded cursor-pointer hover:bg-gray-800 transition-colors">
+                      <input
+                        type="radio"
+                        name="videoEngine"
+                        value={val}
+                        checked={videoEngine === val}
+                        onChange={() => setVideoEngine(val)}
+                        className="w-4 h-4 mt-0.5"
+                      />
+                      <div>
+                        <div className="text-sm font-medium">{label}</div>
+                        <div className="text-xs text-gray-500 mt-0.5">{hint}</div>
+                      </div>
                     </label>
                   ))}
                 </div>

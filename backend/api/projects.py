@@ -829,3 +829,308 @@ async def set_talkie_config(
         "portrait_asset_id": st.get("portrait_asset_id"),
         "talkie_engine": st.get("talkie_engine", "lipsync_ltx"),
     }
+
+
+# ══ 🎬 per-project VIDEO ENGINE (v1.277.12) ═════════════════════════════════
+# LTX 2.3 is how everything worked before and stays the default. minimax_h3
+# routes the project's video jobs through the H3 lane in the dispatcher.
+# ltx_2.5 is STAGED (models on the workers, graphs pending its first live
+# export) — selectable so projects can opt in the moment it goes live.
+_VIDEO_ENGINES = ("ltx_2.3", "ltx_2.5", "minimax_h3")
+_H3_AUDIO_MODES = ("project", "model")   # project = mux our narration/music
+                                         # model   = keep H3's generated audio
+
+
+class VideoConfigIn(BaseModel):
+    """Merge per-project video-engine settings (the talkie-config pattern)."""
+    video_engine: Optional[str] = None
+    h3_turbo: Optional[bool] = None          # 8-step turbo lora (default on)
+    h3_draft: Optional[bool] = None          # 4-step testing mode
+    h3_audio_mode: Optional[str] = None      # project | model
+    h3_use_audio_ref: Optional[bool] = None  # feed the scene's audio slice as
+                                             # an H3 audio REFERENCE (ref2v)
+    h3_ref_image_size: Optional[str] = None  # match | max
+    h3_auto_sheet_refs: Optional[bool] = None  # auto-attach outfit sheets of
+                                               # present characters as refs
+
+
+@router.put("/{project_id}/video-config")
+async def set_video_config(
+    project_id: UUID,
+    req: VideoConfigIn,
+    session: AsyncSession = Depends(get_session),
+):
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = dict(project.settings or {})
+    # a pure READ ({}) must not rewrite the row / bump updated_at
+    if all(getattr(req, k) is None for k in
+           ("video_engine", "h3_turbo", "h3_draft", "h3_audio_mode",
+            "h3_use_audio_ref", "h3_ref_image_size", "h3_auto_sheet_refs")):
+        return {"video_engine": st.get("video_engine", "ltx_2.3"),
+                **{k: st.get(k) for k in ("h3_turbo", "h3_draft",
+                                          "h3_audio_mode", "h3_use_audio_ref",
+                                          "h3_ref_image_size",
+                                          "h3_auto_sheet_refs")}}
+    if req.video_engine is not None:
+        if req.video_engine not in _VIDEO_ENGINES:
+            raise HTTPException(400, f"video_engine must be one of {_VIDEO_ENGINES}")
+        st["video_engine"] = req.video_engine
+    if req.h3_audio_mode is not None:
+        if req.h3_audio_mode not in _H3_AUDIO_MODES:
+            raise HTTPException(400, f"h3_audio_mode must be one of {_H3_AUDIO_MODES}")
+        st["h3_audio_mode"] = req.h3_audio_mode
+    if req.h3_ref_image_size is not None:
+        if req.h3_ref_image_size not in ("match", "max"):
+            raise HTTPException(400, "h3_ref_image_size must be match or max")
+        st["h3_ref_image_size"] = req.h3_ref_image_size
+    for k in ("h3_turbo", "h3_draft", "h3_use_audio_ref", "h3_auto_sheet_refs"):
+        v = getattr(req, k)
+        if v is not None:
+            st[k] = bool(v)
+    project.settings = st
+    project.updated_at = datetime.utcnow()
+    await session.commit()
+    return {"video_engine": st.get("video_engine", "ltx_2.3"),
+            **{k: st.get(k) for k in ("h3_turbo", "h3_draft", "h3_audio_mode",
+                                      "h3_use_audio_ref", "h3_ref_image_size",
+                                      "h3_auto_sheet_refs")}}
+
+
+# ══ 🌍 story/world ↔ project link (v1.277.12) ═══════════════════════════════
+class StoryLinkIn(BaseModel):
+    world_id: Optional[str] = None       # '' or None with attach=False detaches
+    story_id: Optional[str] = None       # optional story inside the world
+    attach: bool = True
+
+
+@router.put("/{project_id}/story-link")
+async def set_story_link(
+    project_id: UUID,
+    req: StoryLinkIn,
+    session: AsyncSession = Depends(get_session),
+):
+    """Link a project to a Story/World Builder world (+ optional story).
+    TWO-WAY: writes project.settings AND the world's project_ids, so both
+    screens can show the link and jump across."""
+    from backend.api import storyworld as sw
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = dict(project.settings or {})
+    old_wid = str(st.get("world_id") or "")
+    pid_s = str(project_id)
+
+    if req.attach:
+        wid = (req.world_id or "").strip()
+        if not wid:
+            raise HTTPException(400, "world_id is required to attach")
+        with sw._LOCK:
+            w = sw._load(wid)               # 404s if missing
+            if req.story_id:
+                sw._find(w.get("stories") or [], req.story_id, "story")
+            ids = [str(x) for x in (w.get("project_ids") or [])]
+            if pid_s not in ids:
+                ids.append(pid_s)
+            w["project_ids"] = ids
+            sw._save(w)
+        # detach from a previously-linked different world
+        if old_wid and old_wid != wid:
+            try:
+                with sw._LOCK:
+                    ow = sw._load(old_wid)
+                    ow["project_ids"] = [x for x in (ow.get("project_ids") or [])
+                                         if str(x) != pid_s]
+                    sw._save(ow)
+            except HTTPException:
+                pass
+        st["world_id"] = wid
+        st["story_id"] = (req.story_id or "").strip()
+    else:
+        if old_wid:
+            try:
+                with sw._LOCK:
+                    ow = sw._load(old_wid)
+                    ow["project_ids"] = [x for x in (ow.get("project_ids") or [])
+                                         if str(x) != pid_s]
+                    sw._save(ow)
+            except HTTPException:
+                pass
+        st.pop("world_id", None)
+        st.pop("story_id", None)
+
+    project.settings = st
+    project.updated_at = datetime.utcnow()
+    await session.commit()
+    return {"world_id": st.get("world_id"), "story_id": st.get("story_id")}
+
+
+@router.get("/{project_id}/story-link")
+async def get_story_link(project_id: UUID,
+                         session: AsyncSession = Depends(get_session)):
+    """The linked world/story, resolved to names for the project header."""
+    from backend.api import storyworld as sw
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = project.settings or {}
+    wid = str(st.get("world_id") or "")
+    if not wid:
+        return {"linked": False}
+    try:
+        w = sw._load(wid)
+    except HTTPException:
+        return {"linked": False, "stale_world_id": wid}
+    sid = str(st.get("story_id") or "")
+    story = next((s for s in (w.get("stories") or []) if s["id"] == sid), None)
+    return {"linked": True, "world_id": wid, "world_name": w.get("name"),
+            "story_id": sid or None,
+            "story_title": (story or {}).get("title"),
+            "style_text": sw._style_text(w),
+            "cast": [{"id": c["id"], "name": c["name"],
+                      "char_slug": c.get("char_slug") or "",
+                      "status": c.get("status")}
+                     for c in (w.get("cast") or [])],
+            "texts": [{"id": t["id"], "kind": t.get("kind"),
+                       "title": t.get("title"), "story_id": t.get("story_id")}
+                      for t in (w.get("texts") or [])]}
+
+
+class PullFromStoryIn(BaseModel):
+    """Which parts of the linked world/story to pull into the project."""
+    concept: bool = True          # story synopsis/logline → concept_text
+    style: bool = True            # world visual style → style_text
+    characters: bool = False      # cast → project characters (images imported)
+    lyrics_text_id: str = ""      # a world text id → Lyrics.initial_text
+
+
+@router.post("/{project_id}/pull-from-story")
+async def pull_from_story(
+    project_id: UUID,
+    req: PullFromStoryIn,
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy story/world material into the project — his flow: 'build out most
+    of the information in story mode before making our videos'. COPY semantics
+    (the global-character-library rule): the project's copy is independent."""
+    from backend.api import storyworld as sw
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = dict(project.settings or {})
+    wid = str(st.get("world_id") or "")
+    if not wid:
+        raise HTTPException(400, "link a world first (PUT story-link)")
+    w = sw._load(wid)
+    sid = str(st.get("story_id") or "")
+    story = next((s for s in (w.get("stories") or []) if s["id"] == sid), None)
+    pulled: list = []
+
+    if req.concept:
+        bits = []
+        ws = w.get("world") or {}
+        if ws.get("logline"):
+            bits.append(f"World: {ws['logline']}")
+        if story:
+            sf = story.get("fields") or {}
+            for k in ("logline", "synopsis", "beats"):
+                if sf.get(k):
+                    bits.append(f"{k.capitalize()}: {sf[k]}")
+        if bits:
+            st["concept_text"] = "\n\n".join(bits)
+            if story:
+                st["song_title"] = st.get("song_title") or story.get("title")
+            pulled.append("concept")
+
+    if req.style:
+        stx = sw._style_text(w)
+        vs = (w.get("world") or {}).get("visual_style") or ""
+        combined = ". ".join(x for x in (stx, vs) if x and x not in stx)
+        if combined:
+            st["style_text"] = combined
+            pulled.append("style")
+
+    if req.characters:
+        chars = list(st.get("characters") or [])
+        have = {str(c.get("name", "")).lower() for c in chars}
+        n_added = 0
+        for m in (w.get("cast") or []):
+            if m["name"].lower() in have:
+                continue
+            desc_bits = [m.get("role") or ""]
+            f = m.get("fields") or {}
+            desc_bits += [f"{k}: {v}" for k, v in f.items() if v]
+            sr = (m.get("lore") or {}).get("story_role")
+            if sr:
+                desc_bits.append(sr)
+            entry = {"name": m["name"],
+                     "description": ". ".join(x for x in desc_bits if x)[:1500],
+                     "image_path": "", "extra_images": [],
+                     "source": "storyworld", "world_cast_id": m["id"],
+                     "char_slug": m.get("char_slug") or ""}
+            # import the generated character's active base as a project asset
+            slug = m.get("char_slug") or ""
+            if slug:
+                try:
+                    rel = await _import_k3_base_as_asset(project, slug, session)
+                    if rel:
+                        entry["image_path"] = rel
+                except Exception as e:                       # noqa: BLE001
+                    logger.warning("pull-from-story: base import failed for "
+                                   "%s: %s", slug, e)
+            chars.append(entry)
+            have.add(m["name"].lower())
+            n_added += 1
+        if n_added:
+            st["characters"] = chars
+            pulled.append(f"characters ({n_added})")
+
+    if req.lyrics_text_id:
+        t = next((x for x in (w.get("texts") or [])
+                  if x["id"] == req.lyrics_text_id), None)
+        if not t:
+            raise HTTPException(404, "that text does not exist in the world")
+        from backend.database.models import Lyrics
+        r = await session.execute(
+            select(Lyrics).where(Lyrics.project_id == project_id))
+        ly = r.scalars().first()
+        if ly is None:
+            ly = Lyrics(project_id=project_id, full_text="",
+                        initial_text=t.get("body") or "")
+            session.add(ly)
+        else:
+            ly.initial_text = t.get("body") or ""
+        pulled.append(f"lyrics ({t.get('title')})")
+
+    project.settings = st
+    project.updated_at = datetime.utcnow()
+    await session.commit()
+    return {"pulled": pulled}
+
+
+async def _import_k3_base_as_asset(project, slug: str, session) -> str:
+    """Copy a klein3 character's active base PNG into the project as a
+    CHARACTER asset; returns the rel_path ('' if no base exists). COPY, not a
+    link — deleting the library character must not orphan the project."""
+    import hashlib
+    from backend.api.klein3 import _active_base_path, _load as _k3_load
+    from backend.database.models import AssetType
+    c = _k3_load(slug)
+    fp = _active_base_path(slug, c)
+    if not fp or not fp.exists():
+        return ""
+    proj_dir = Path(settings.project_dir) / str(project.id)
+    dest_dir = proj_dir / "assets" / "characters"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{slug}_base.png"
+    shutil.copy2(fp, dest)
+    data = dest.read_bytes()
+    rel = str(dest.relative_to(proj_dir))
+    asset = Asset(project_id=project.id, filename=dest.name, rel_path=rel,
+                  asset_type=AssetType.CHARACTER,
+                  sha256=hashlib.sha256(data).hexdigest(),
+                  file_size=len(data),
+                  meta={"source": "storyworld", "slug": slug})
+    session.add(asset)
+    return rel

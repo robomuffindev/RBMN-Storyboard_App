@@ -1,3 +1,72 @@
+## v1.277.12 -- 🎬 PROJECTS GET A VIDEO ENGINE: MiniMax H3 lands, LTX 2.5 staged (2026-08-15)
+
+The big one: projects choose their video engine at creation (and any time after) —
+**LTX 2.3** (unchanged, still the default), **MiniMax H3** (new, the current focus), or
+**LTX 2.5** (staged). Plus the story↔project bridge and the consistency machinery.
+
+### Per-project engine
+
+- `settings["video_engine"]` · set in the create modal or the new **🎬 Engine & Story**
+  toolbar modal · `PUT /api/projects/{pid}/video-config` (merge, the talkie-config pattern)
+  with the H3 knobs: turbo/draft, audio mode, audio-ref, ref fidelity, auto sheet refs.
+
+### The MiniMax H3 project lane (dispatcher)
+
+- Engine routing in `_build_workflow` (the AV-native/Talkie pattern): `ltx_i2v/ltx_fflf/
+  ltx_v2v_extend/ltx_seq_*` → `h3_i2v` / `h3_first_last`; scenes carrying video refs (or a
+  project with auto sheet refs on) → **`h3_ref2v`** — H3's identity-preserving mode.
+  Transitions stay on LTX. Every entry path (manual, auto-sequential, batch) inherits it.
+- `_build_h3_workflow` reuses the Video Lab's proven `h3video._build_graph`; local paths go
+  into the LoadImage/LoadAudio nodes and the dispatcher's existing uploader ships them.
+  H3's frame lattice (`f%17==5`) via `h3video._frames`.
+- **Audio the way he asked**: `h3_audio_mode="project"` (default) muxes OUR narration/music
+  over the clip through the existing mux chain; `"model"` keeps H3's native AV audio;
+  `h3_use_audio_ref` additionally feeds the scene's audio slice as an H3 audio REFERENCE.
+- **Video refs**: new scene param `video_refs.urls` (🎭 section on the video tab, fed by the
+  CharacterImagePicker — sheets / views / dataset, preview-first, ≤8) mapped server-side to
+  disk paths; plus `h3_auto_sheet_refs`: the outfit sheets of the scene's PRESENT characters
+  auto-attach (newest OUTFIT sheet preferred — the single-costume format; community
+  guidance is explicit that multi-outfit sheets drift identity).
+
+### Prompts + style adherence
+
+- New `MINIMAX_VIDEO_SYSTEM_PROMPT` (condensed from the official guide: first-frame anchor,
+  [Shot N] timestamps, camera vocabulary, soundscape/non-diegetic sections, exact-dialogue
+  rules) registered as `minimax_h3`; `ltx_2.5` maps to the 2.3 prompt until its own guidance
+  emerges. `_project_video_model()` makes the engine PER-PROJECT at every enhance/auto site.
+- 🌍 A project linked to a world injects the world's VISUAL STYLE (authoritative) into every
+  video-prompt context — the "adhere to the story's style" guarantee.
+
+### Story ↔ project (both directions)
+
+- `PUT /api/projects/{pid}/story-link` — two-way (project.settings.world_id/story_id AND
+  world.project_ids), `GET` resolves names/cast/texts for the header.
+- **⬇ Pull from story**: concept (logline+synopsis+beats), visual style, CAST → project
+  characters (generated klein3 bases imported as project assets — copy semantics), and any
+  world text → lyrics/script. The world's Projects tab gained ↗ open.
+
+### Character generation grows up
+
+- **Project auto character generation now uses THE CHARACTER BUILDER**: `concept/characters/
+  autogenerate` submits ⚡ Autogen specs (real klein3 characters, picked base) instead of
+  one-off `klein_t2i` renders; a watcher thread imports each finished base back into the
+  project via the new `adopt-k3` endpoint (thread does HTTP only — the v1.276.41 rule).
+- **Every generated outfit auto-builds its per-outfit character sheet** (2048px, single
+  costume) in BOTH lanes — klein3 manual outfits and the autogen clothing stage — so the
+  reference exists the moment the outfit does.
+
+### LTX 2.5 (staged, per his call: ready + testable, MiniMax is the focus)
+
+- Researched: 22B AV model, day-0 Comfy support, T2V/I2V/FLF2V templates; official repo is
+  LICENSE-GATED — staging pulls the identical files from the ungated community mirror
+  (`dummy9996/LTX-2.5-22b-ungate`) + Comfy-Org's gemma-4: int8-convrot transformer + both
+  text encoders + both VAEs + spatial/temporal upscalers (~45 GB/box).
+- **`scripts/install_ltx25.py`** — starts helper-background downloads on every box
+  (`--check` verifies against each ComfyUI's own listing). **All 21 downloads running.**
+- Engine slot live end-to-end (selector, prompts key, settings) — scenes render on the 2.3
+  pipeline until the 2.5 graphs are wired (next step: export API graphs from a worker once
+  models land; the template set is UI-format).
+
 ## v1.277.11 -- 🤖 "PROMPT FOR LLMs" — take the H3 prompting agent anywhere (2026-08-15)
 
 His MiniMax H3 prompting-agent instructions (modes, shot structure, camera vocabulary,
