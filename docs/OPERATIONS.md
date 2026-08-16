@@ -1,4 +1,4 @@
-# RBMN Operations Runbook (v1.276.54, 2026-08-12)
+# RBMN Operations Runbook (v1.277.13, 2026-08-15)
 
 Everything that exists, where it runs, and how to drive it. This is the "which tool, which
 box, which command" page — the narrative is in `HANDOVER_PROMPT.md`, the decisions in
@@ -27,8 +27,8 @@ for ports 8765/8188. Every worker's ComfyUI + Fizgig paths are visible/editable 
 0b. **＋ New Character** (the actual front door since v1.276.40, on `/studio`) — 🎯 **Klein 3.0**
    first and marked `main mode` (name-first: it creates the character and opens the panel with
    it selected), ⚡ **Autogen** (photos or a description → the chain, with toggles, a cost
-   preview and a batch queue — §10), then the two VNCCS lanes. ⚠ Before .40 this picker offered
-   only VNCCS and told you in small print to go and make Klein 3.0 characters somewhere else.
+   preview and a batch queue — §10), then **VNCCS Native** as its own independent flow
+   (the hybrid lane was retired in v1.277.13 — Klein Mode's create IS Klein 3.0).
 1. **🧬 Text 2 Image** — the other character entry point. Name-first (resumable), engines Klein (0-5
    refs) / **Krea 2 Turbo (⚡ since v1.276.45 it renders ROUND-ROBIN across every box that has the
    model — it was pinned to one out of habit; a job naming a LoRA still pins to the boxes
@@ -36,10 +36,14 @@ for ports 8765/8188. Every worker's ComfyUI + Fizgig paths are visible/editable 
    + one-click add-to-prompt; strength 1.0)**, pose scaffolds (full-body-front default),
    batch 1-8, edit-iterate loop with version chains, master gallery, 🏁 promote → front
    ref + base, 📖 Profile & Lore (Story Builder substrate, ✨ LLM fill).
-2. **Create / Clothes / Emotions** — Klein 3.0 character lane (refs, base, strip, views,
-   wardrobe, expressions). Views are face-anchored (v1.275.2) — but see the v1.275.8
-   RETRACTION in CHANGELOG: the anchor does NOT drive view identity. **The lever is the
-   REFERENCE LIST** (v1.275.9): one ref per tag, uploads first, back views last, cap 3.
+2. **Create / Clothes / Pose Library — 🎯 KLEIN MODE (v1.277.13)**: Create IS Klein 3.0
+   (VNCCS-Klein/Qwen create lanes and the Emotions tab left this mode — all retained,
+   untouched, in **VNCCS Native** at `/studio/vnccs`); **👗 outfits render on the CLOTHES
+   tab; 🕺 poses + generate on the POSE LIBRARY tab** (`Klein3Panel only: main|outfits|
+   poses` — one component, JSX-gated, current-character shared across tabs). Views are
+   face-anchored (v1.275.2) — but see the v1.275.8 RETRACTION in CHANGELOG: the anchor
+   does NOT drive view identity. **The lever is the REFERENCE LIST** (v1.275.9): one ref
+   per tag, uploads first, back views last, cap 3.
    **👗 Outfit sets (v1.276.2):** `POST /api/klein3/characters/{slug}/outfits` — a named
    outfit, 13 optional garment slots (4 core + 9 detail), optional `variant` for a look
    within it, rendered across every view. Each view is its own standalone image.
@@ -102,9 +106,12 @@ for ports 8765/8188. Every worker's ComfyUI + Fizgig paths are visible/editable 
    - Per dataset: plan/render/caption/QC/repair/export, and **🚀 Train** (export → upload →
      Fizgig → ArcFace pick → install; background, stages persisted, survives restarts and
      box dropouts; `{run_id}` attaches to an existing run).
-5. **🪪 Character Sheet** — one downloadable reference image (turnaround + face row) per
-   character, composited from identity-scored dataset images. No GPU, no LoRA needed.
-6. **🎬 Video Lab** — MiniMax H3 video generation, LOCAL on any registry worker. Five
+5. **🪪 Character Sheet** — downloadable reference sheets: turnaround+face from
+   identity-scored dataset images, and **per-OUTFIT sheets** (v1.277.2 — five cells from
+   that outfit's OWN views only; every generated outfit auto-builds its 2048px sheet since
+   v1.277.12: the MiniMax identity anchor). Labelled sheet library in the panel. No GPU.
+6. **🎬 Video Lab** — a HOME-SCREEN destination since v1.277.7 (`/video-lab`; the studio
+   strip button is gone, `?tab=video` deep links still resolve). MiniMax H3, LOCAL. Five
    modes: 📝 t2v · 🖼 i2v · 🎞 first+last · 🎯 last-frame · 🧩 references→video (≤9 images,
    ≤3 videos each with a 🔊 use-its-soundtrack toggle, ≤3 audios, match/max ref fidelity).
    720p default (1280×736), ⚡ turbo-lora path default (8-step) vs 20-step quality, 🌀
@@ -365,7 +372,7 @@ now checks the capability count for exactly this reason — free, no renders.
   stories + cast) · **`cast/submit`** (level `details`…`lora`, `estimate_only`, builds
   AutogenSpecs and calls autogen `_enqueue` IN-PROCESS — the bulk-submission producer) ·
   `cast/status` (joins the board to the queue, write-backs terminal results). Worlds live in
-  `_libraries/storyworld/worlds/`. Free suite: `scripts/storyworld_smoke.py` (33 checks).
+  `_libraries/storyworld/worlds/`. Free suite: `scripts/storyworld_smoke.py` (44 checks).
   ⚠ `POST /cast/{cid}` is declared LAST in the module — route order is load-bearing
   (literal `/cast/submit`·`/cast/generate` must match first).
   🎨 **Visual style** (v1.277.2): `style` {preset, custom_text} · `style/ref` (multipart —
@@ -384,10 +391,25 @@ now checks the capability count for exactly this reason — free, no renders.
   generate), engines, **loras (with trigger map), krea2-host**.
 - `/api/charsheet/*` — characters, generate, sheets (+`?download=1`).
 - `/api/h3/*` — 🎬: overview (workers/caps/defaults), upload (image|video|audio),
-  generate (all five modes, **`plan_upscale` default TRUE** — renders one H3 step longer so
+  generate (all five modes, `draft:true` = the v1.0 8-step turbo lora at 4 STEPS —
+  v1.277.9's testing mode; **`plan_upscale` default TRUE** — renders one H3 step longer so
   the LTX upscaler's 8k+1 flooring eats slack, not the tail; the upscale is trimmed back to
   `target_frames`), jobs (+{id}, DELETE), media/{id} (+`?download=1`),
-  jobs/{id}/upscale (LTX 2.3, largest_size 1280/1920/2560), draft-prompt (Ollama+spec).
+  jobs/{id}/upscale (LTX 2.3, largest_size 1280/1920/2560), draft-prompt (Ollama+spec),
+  **llm-prompt** (v1.277.11 — the verbatim prompting-agent text from
+  docs/MINIMAX_H3_LLM_PROMPT.md, for external LLM use; the 🤖 button in the Video Lab).
+- **`/api/projects/{pid}` engine + story routes (v1.277.12)** — `PUT video-config` (merge:
+  `video_engine` ltx_2.3|ltx_2.5|minimax_h3 + the H3 knobs `h3_turbo/h3_draft/
+  h3_audio_mode(project|model)/h3_use_audio_ref/h3_ref_image_size/h3_auto_sheet_refs`;
+  an empty body READS without writing) · `PUT/GET story-link` (two-way world/story link) ·
+  `POST pull-from-story` (concept/style/cast-with-images/texts→lyrics) ·
+  `POST concept/characters/autogenerate` now submits ⚡ AutogenSpecs (real klein3
+  characters) with `POST concept/characters/{i}/adopt-k3` as the write-back.
+- **Dispatcher video workflow types (v1.277.12)**: the `ltx_*` family, plus **`h3_i2v` /
+  `h3_first_last` / `h3_ref2v` / `h3_t2v`** — a `minimax_h3` project's LTX-typed jobs are
+  REWRITTEN to these in `_build_workflow`; scene `video_refs.urls` + auto outfit sheets
+  feed `h3_ref2v` (H3's identity mode). Transitions stay on LTX. A missing MiniMaxH3 node
+  FAILS the job loudly; h3 jobs skip RunPod.
 - `/api/klein3/*` — refs, base, strip, views/generate, generate(-set), posefit.
   Loop script: `k3_side_compare.py --char <slug> --outfit "<name>"` (free, CPU) scores how
   far an outfit's LEFT and RIGHT views disagree about the garments.
@@ -576,9 +598,9 @@ files that were KEPT. Moot, because it is rotated.
   front ref (front PINNED, `refs_used` published). Plus `?tab=` finally being read, so grid
   jumps land on the right tab.
 - **🔍 One lightbox** with zoom+pan everywhere; **⚙ Experimental Modes** hides Klein 1.0/2.0.
-- **🔐 Repo published clean ONCE** (2026-08-09) — token out of source, history purged, 550
-  files. ⚠ **NOT pushed since**; the current publishable set is **558 files** and is ~45
-  versions ahead. Publishing is an OPEN item, see below.
+- **🔐 Repo publishes clean** — token out of source, history purged; the gate lifted at
+  v1.277.3 and publishing is NORMAL CADENCE (564 public files). ⚠ Agent publishes MUST pass
+  `-Yes` (§4).
 
 **⚠ Standing rules this session added (all measured, all in docs/KLEIN3.md):**
 NAME only what is IN VIEW (category words, franchise names, a chest emblem on a back view) ·
@@ -587,17 +609,21 @@ never feed a lane its own prior output or a contradicting view as a reference �
 url · `asyncio.create_task` raises off the event loop, and a status set before the work is
 scheduled can LIE · a correct API does not mean a correct screen.
 
-**Open, in order** (same list as `HANDOVER_PROMPT.md`'s START HERE — keep them in sync):
-(1) 🌍 **Story/World Builder follow-through** (the mode itself SHIPPED in v1.277.0 — it IS the
-bulk-submission mode batch mode was parked for): exercise the LLM enhance lanes against a live
-model and a real multi-character submission above `details` level, then build projects PULLING
-characters/story/texts from an attached world (designed, not built) ·
-(2) ✅ **PUBLISH — DONE at v1.277.3 (2026-08-14)**, gate lifted by his decision after the
-first real Big Bang batch ran clean ·
-(3) LoRA panel **base-outfit picker** (route built + tested, no UI) ·
-(4) **H3's four untested modes** (i2v / first_last / last_frame / ref2v — only t2v has touched
-the GPU) · (5) whether 🙂 `face_first` earns its keep at all · (6) `LoraPanel`'s `nOutfit` has
+**Open, in order** (same list as README and `HANDOVER_PROMPT.md`'s START HERE — identical):
+(1) **LTX 2.5 graphs** — models staging fleet-wide (`scripts/install_ltx25.py --check`);
+engine slot/prompts/settings live, but ltx_2.5 projects render on the 2.3 pipeline until
+API-format 2.5 graphs are exported from a worker and wired ·
+(2) **MiniMax H3 project lane — first LIVE end-to-end scene render pending** (smoke +
+adversarial review verified); also tools.py's sample generator still carries the broken
+raw-workflow krea2 path (use z_image/anima/klein there) ·
+(3) **the adopt-k3 cast watcher does not survive a restart** — re-adopt by hand via
+`POST …/concept/characters/{i}/adopt-k3` after a reboot mid-cast ·
+(4) LoRA panel **base-outfit picker** (route built + tested, no UI) ·
+(5) **H3's Video-Lab modes beyond t2v/i2v** (first_last / last_frame / ref2v untested there) ·
+(6) whether 🙂 `face_first` earns its keep at all · (7) `LoraPanel`'s `nOutfit` has
 no setter wired, so a new dataset's "outfit" field always submits `''`.
+✅ Recently closed: Story/World follow-through (pull-from-story BUILT v1.277.12; LLM lanes +
+a real 7-character batch ran live) · publish (normal cadence since v1.277.3).
 
 ### ⚡ Autogen v2 (v1.276.42) — `backend/api/autogen.py`, prefix `/api/autogen`
 

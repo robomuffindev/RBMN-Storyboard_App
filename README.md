@@ -4,16 +4,29 @@ A local desktop application for creating AI-powered music videos and narration v
 
 ![Robomuffin Idea Factory](Screenshots/robomuffin_idea_factory_screenshot.webp)
 
-## Status (v1.276.54, 2026-08-12)
+## Status (v1.277.13, 2026-08-15)
 
-**⚡ An entire character — from a sentence to a trained LoRA — now builds itself, unattended.**
-A full run took 7.12 hours and completed all eight stages with no intervention; **training is 92%
-of that, so the same chain without the LoRA is about half an hour.** Alongside it: the Video Lab
-is validated on the GPU, the character base set checks its own work, and
-costumes are now a library you design in.**
+**🎬 Projects now choose their VIDEO ENGINE** — **LTX 2.3** (the proven pipeline, still the
+default), **MiniMax H3** (reference-driven consistency: character sheets, image & audio
+references, native AV, per-project turbo/draft and audio modes), or **LTX 2.5** (models
+staged on every worker; renders on 2.3 until its graphs go live). The 🌍 **Story/World
+Builder** (`/worlds`) is where a world, its stories, a shared cast, texts and a visual
+style are built — LLM-enhanced field by field or from one seed idea — then **bulk-submitted
+to the character builder** and **linked to projects**, which can pull the concept, style,
+cast (with generated images) and lyrics straight in. 🎯 **Klein Mode** is now fully
+separated from VNCCS: Create is Klein 3.0, outfits live on the Clothes tab, poses on the
+Pose Library tab; **VNCCS Native is retained untouched** as its own complete flow. Every
+generated outfit auto-builds a **per-outfit character sheet** (the MiniMax identity
+anchor); the 🎬 Video Lab is a home-screen destination with the v1.0 8-step turbo lora,
+a 🏃 draft mode, per-render times, a 📚 character-image reference picker and a copyable
+🤖 LLM prompting guide; the ⚡ Autogen queue can be **⏸ paused across a reboot**.
 
-*Newest first: [costume library](#-design-a-costume-before-anyone-wears-it) · outfit sets that
-verify themselves · a base set that measures its own facing · MiniMax H3 on local workers.*
+*Newest first: per-project video engines · Klein Mode split · Story/World Builder ·
+per-outfit sheets · queue pause · [costume library](#-design-a-costume-before-anyone-wears-it).*
+
+**⚡ An entire character — from a sentence to a trained LoRA — builds itself, unattended**
+(v1.276.51: 7.12 h, all eight stages; training is 92% of it, so the chain without the LoRA
+is ~32 minutes — and project auto character generation now runs through this builder too).
 
 **MiniMax H3 runs locally on our own workers** — all five modes in-app (text→video,
 image→video, first+last frame, last-frame, references→video with up to 9 image / 3 video /
@@ -141,7 +154,8 @@ waits for the left one, then copies its direction from a mirror of it.
 
 **＋ New Character leads with 🎯 Klein 3.0** (v1.276.40) — the mode the app is built around is
 the first, full-width option, and it takes the name inline so you land in the panel with the
-character already made and selected. The two VNCCS lanes sit underneath.
+character already made and selected. VNCCS Native sits underneath as its own independent
+flow (the hybrid lane was retired in v1.277.13 — Klein Mode's create IS Klein 3.0).
 
 **⚡⚡ Autogen — a character from nothing, as far as you want** (v1.276.42/.43). ＋ New Character
 → ⚡ Autogen: hand it reference photos *or just a description*, tick how far to go — base
@@ -159,8 +173,9 @@ sentence or three paragraphs — into a filled world, stories and a proposed cas
 overwriting anything you typed. Cast members are PAPER until you submit them: pick a depth
 (details only → base → views → clothing → sheet → dataset → LoRA per item) and the whole
 selection goes through the ⚡ Autogen serial queue in one batch, with the cost estimated
-first. This is the bulk-submission mode that batch mode was parked for. Worlds attach to
-projects; projects pulling characters/story/texts from a world is the designed next step.
+first. This is the bulk-submission mode that batch mode was parked for. Worlds link to
+projects BOTH ways, and a linked project can ⬇ pull the concept, visual style, cast (with
+generated character images imported) and lyrics/scripts straight in (v1.277.12).
 
 **⚡ The whole fleet gets used** (v1.276.45). Independent renders fan across all three workers;
 only a render that genuinely needs another render's output waits for it. Two lanes were quietly
@@ -184,14 +199,18 @@ shows each run's likeness score — warning you when the epoch installed was not
 one.
 
 Next, in order (the same list as `docs/OPERATIONS.md` §10 and `HANDOVER_PROMPT.md` — they are
-kept identical): (1) 🌍 Story/World Builder follow-through — exercise the LLM enhance lanes
-against a live model and a real multi-character submission above `details` level, then build
-projects PULLING characters/story/texts from an attached world (designed, not built); (2)
-✅ publishing — done at v1.277.3 (2026-08-14), the gate lifted once the mode was proven;
-(3) the base-outfit picker in the LoRA panel; (4) H3's four
-untested modes (i2v, first+last, last-frame, references→video); (5) whether 🙂 `face_first`
-earns its keep at all; (6) `LoraPanel`'s `nOutfit` has no setter wired to any control, so a
-new dataset's "outfit" field always submits `''`. See
+kept identical): (1) LTX 2.5 graphs — models staging fleet-wide via `install_ltx25.py`;
+the engine slot is live but 2.5 projects render on the 2.3 pipeline until API-format graphs
+are exported from a worker and wired; (2) MiniMax H3 project lane — first LIVE end-to-end
+scene render pending (smoke + review verified); and tools.py's sample generator still
+carries the broken raw-workflow krea2 path (use z_image/anima/klein there); (3) the
+adopt-k3 cast watcher doesn't survive a restart — re-adopt by hand after a reboot mid-cast;
+(4) the base-outfit picker in the LoRA panel (route built + tested, no UI); (5) H3's
+Video-Lab modes beyond t2v/i2v (first+last, last-frame, references→video); (6) whether 🙂
+`face_first` earns its keep at all; (7) `LoraPanel`'s `nOutfit` has no setter wired to any
+control, so a new dataset's "outfit" field always submits `''`. Recently closed: Story/World
+follow-through (pull-from-story is BUILT; the LLM lanes and a real 7-character batch ran
+live) and publishing (normal cadence since v1.277.3). See
 **`docs/OPERATIONS.md`** (the runbook), `docs/KLEIN3.md` (the character/outfit/costume lane),
 `CHANGELOG.md` (the decision log — it records retractions, so read a claim's newest mention)
 and `HANDOVER_PROMPT.md`.
@@ -298,17 +317,21 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
   version chains, master gallery, 🏁 promote-to-front-reference, and 📖 Profile & Lore
   per character (physical fields + backstory — the future Story Builder substrate,
   ✨ LLM-fillable).
-- **🪪 Character Sheet** — one downloadable reference image per character (turnaround +
-  face row) composited from identity-scored dataset renders — purpose-built as input for
-  sheet-as-reference video models like MiniMax H3. No GPU, no LoRA needed.
-- **🎬 Video Lab (MiniMax H3, local)** — five modes: text→video, image→video, first+last
-  frame, last-frame, references→video (up to 9 reference images, 3 reference videos each
-  with an optional use-its-soundtrack toggle, 3 standalone audios, match/max identity
-  fidelity). 720p default, ⚡ 8-step turbo-lora path by default vs 20-step quality path,
-  🌀 SPECTRUM speedup opt-in, 🧠 LLM prompt drafting from the canonical H3 spec, and
-  **⬆ LTX 2.3 enhancer upscale** (3-step guided refine on the 22B GGUF + detailer LoRA —
-  sharpens, doesn't re-imagine) on any finished render. Jobs persist across restarts.
-  Method: docs/MINIMAX_H3_PROMPTING.md.
+- **🪪 Character Sheet** — downloadable reference sheets per character: the classic
+  turnaround + face row from identity-scored dataset renders, AND (v1.277.2) **per-OUTFIT
+  sheets** — five cells composed only from that outfit's own rendered views, the format
+  reference-driven video models actually want; every generated outfit auto-builds its own
+  2048px sheet (v1.277.12). The panel keeps a labelled, downloadable sheet library.
+  No GPU, no LoRA needed.
+- **🎬 Video Lab (MiniMax H3, local — a HOME-SCREEN destination since v1.277.7, `/video-lab`)**
+  — five modes: text→video, image→video, first+last frame, last-frame, references→video
+  (up to 9 reference images, 3 reference videos each with an optional use-its-soundtrack
+  toggle, 3 standalone audios, match/max identity fidelity). 720p default, the **Lightx2v
+  v1.0 8-step turbo lora** (distilled at 8 NFE, v1.277.8) with a **🏃 4-step draft mode**
+  for testing, per-render times live and final, a **📚 character-image reference picker**
+  (sheets/views/dataset with preview), 🧠 LLM prompt drafting, a copyable **🤖 Prompt for
+  LLMs** guide, and **⬆ LTX 2.3 enhancer upscale** on any finished render. Jobs persist
+  across restarts. Method: docs/MINIMAX_H3_PROMPTING.md.
 - **🎓 LoRA Dataset Gen + Training** — plan, render, caption, QC (framing/angle/identity/
   artifacts/**wardrobe** — all measured instruments), repair and export a training-ready
   character LoRA dataset from a Klein 3.0 character; then train it on a remote Fizgig worker,

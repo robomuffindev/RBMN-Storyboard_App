@@ -281,7 +281,8 @@ pattern, up to 8) — left alone deliberately: the statue lane is PINNED/parked.
 
 ### Verified
 
-`storyworld_smoke.py` grew to **46 checks** (style vocab/validation, pause round-trip,
+`storyworld_smoke.py` grew to **44 checks** (this entry originally claimed 46 — counted
+from output lines instead of `check(` call sites; corrected in the 2026-08-15 docs audit) (style vocab/validation, pause round-trip,
 outfit-sheet validation) — **41 PASS + 1 SKIP with his real batch occupying the queue**
 (the end-to-end wait now SKIPs when real jobs hold the queue rather than failing — a test
 that fails because the user is rendering teaches people to ignore it). Frontend builds

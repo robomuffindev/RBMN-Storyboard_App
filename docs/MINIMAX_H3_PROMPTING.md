@@ -7,10 +7,12 @@ Our LoRA/character lane stays the consistency backbone; H3 makes consuming those
 in video dramatically easier (🪪 character sheets and dataset renders are purpose-built
 reference sets for it).
 
-Integration plan: Lorenzo supplies API-ready workflows in `tempworkflows/` (gitignored —
-examples only, not part of the repo), then H3 becomes a video option in the app alongside
-LTX. The prompt-agent spec below is the **canonical base instruction set** for building H3
-prompts — used verbatim when we wire an H3 prompt-builder into the app.
+Integration: ✅ DONE in v1.277.12 — MiniMax H3 is a per-project **video engine** alongside
+LTX (`settings.video_engine`; `h3_i2v`/`h3_first_last`/`h3_ref2v` in the dispatcher;
+`MINIMAX_VIDEO_SYSTEM_PROMPT` drives project scene prompts). The Video Lab additionally has
+🏃 draft mode (4-step) and the 🤖 Prompt-for-LLMs button (`GET /api/h3/llm-prompt`, text in
+`docs/MINIMAX_H3_LLM_PROMPT.md`). The prompt-agent spec below remains the **canonical base
+instruction set** for H3 prompts.
 
 ---
 
@@ -24,7 +26,7 @@ prompts — used verbatim when we wire an H3 prompt-builder into the app.
 > `minimax_h3_ref2va_pruned_int8_convrot` (references→video+audio),
 > `minimax_h3_video_vae_fp16`, `minimax_h3_audio_vae_fp32`,
 > `qwen3vl_32b_minimax_h3_int8_convrot` (text encoder, CLIPLoader type `minimax`),
-> `minimax_h3_turbo_4step_ckpt500_comfyui_pruned` (turbo lora).
+> `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16 (v1.277.8 — the Lightx2v v1.0 8-step, distilled at 8 NFE; the old 4-step ckpt500 preview is kept on disk as LORA_TURBO_OLD)` (turbo lora).
 > Local caps differ from the API service: **length 5–3600 frames step 17 (trained
 > ~124–362 ≈ 5–15 s), ≤9 ref images, ≤3 ref videos (2–15 s @24fps), ≤3 ref-video
 > soundtracks, ≤3 standalone audios, `ref_image_size` match|max** (max = 2048px

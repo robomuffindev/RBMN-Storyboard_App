@@ -5,7 +5,7 @@ describe the loop as scripts-only — **the in-app 🚀 Train and ⚡ Autogen bu
 v1.271**, and there are now TWO autogen lanes (see the table near the end). Read a claim's
 newest mention.
 
-The fifth mode, beside Create / Clothes / Emotions / Pose Library.
+The fifth mode, beside Create / Clothes / Pose Library (Klein Mode, v1.277.13 — Emotions is VNCCS Native's).
 Turns a Klein 3.0 character into a **training-ready LoRA dataset**: a planned shot list,
 Klein-rendered images, written captions, a vision-model QC pass, a review gallery, and a zip a
 trainer eats directly.

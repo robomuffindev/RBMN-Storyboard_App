@@ -1,6 +1,6 @@
 # Klein 3.0 — pure Klein reference mode
 
-**Started v1.208.0 (2026-08-04); CURRENT THROUGH v1.276.53 — this file documents the lane as
+**Started v1.208.0 (2026-08-04); CURRENT THROUGH v1.277.13 — this file documents the lane as
 it stands today, newest sections first.** The active character-creation lane. No 3D anywhere. The whole idea:
 Klein 9B is excellent at "the person from image 1 in the pose from image 2" — so the mode is
 nothing but well-managed reference images.
@@ -11,7 +11,9 @@ nothing but well-managed reference images.
             + the pose IN WORDS (from its prompt, or described by the vision LLM)
     output  = the character in that pose
 
-UI: Create area → **🎯 Klein 3.0** engine sub-tab (Klein page, after 🧪 / 🟣 / 🚀).
+UI (v1.277.13): **Klein Mode** (`/studio/vnccs-klein`) — Create IS Klein 3.0 (the 🧪/🟣
+VNCCS lanes left this mode; 🚀 Klein 2.0 stays behind Experimental Modes); **👗 outfits
+render on the CLOTHES tab, 🕺 poses on the POSE LIBRARY tab** (`Klein3Panel only=`).
 Backend: `backend/api/klein3.py` (`/api/klein3`); pose library lives in `backend/api/klein2.py`
 (`/api/klein2/poses*` — shared store). Preflight: `GET /api/klein3/health` (worker table).
 
@@ -175,7 +177,11 @@ cfg=1:
   are comma-joined into one sentence and it should read like a description. `carried` gets
   its own "and carrying …" clause, since a satchel is held rather than worn.
 
-**UI (v1.276.7):** the 👗 Outfits section runs full width under the three columns — name +
+the 👗 Outfits section IS Klein Mode's **Clothes tab** since v1.277.13 (same machinery,
+own tab; a slim character picker rides the studio-wide current character). ⭐ Every
+finished outfit AUTO-BUILDS its per-outfit character sheet (2048px, 5 cells from that
+outfit's OWN views — `/api/charsheet/generate {preset:'outfit'}`, v1.277.2/.12): the
+MiniMax identity anchor, ready the moment the outfit exists.
 variant, the 4 core slots with the 9 detail slots behind `＋ more detail`, view chips, and
 the wardrobe listed as outfit → variants → per-view thumbnails, each opening the zoom/pan
 lightbox with its own ⬇ download. **✎ edit / new variant** loads a saved variant back into
@@ -636,7 +642,7 @@ Consequences now in the code:
 Storage: `<project_dir>/_libraries/klein3/chars/<slug>/` (char.json + refs/ + base/).
 Generations: `_libraries/klein3/_gen/_gen_<gid>/` — every batch keeps the EXACT refs it used.
 
-## Pose Library (🕺 button → modal)
+## Pose Library (🕺 Klein Mode's POSE LIBRARY tab since v1.277.13)
 
 **Sets are user-named containers** (own registry, exist empty, shared across all characters).
 **Tags are pose metadata** — import files' `category`/`tags` columns become tags, never set
