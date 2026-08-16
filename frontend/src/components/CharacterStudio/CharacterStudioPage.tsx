@@ -2594,7 +2594,11 @@ export default function CharacterStudioPage() {
             </div>
 
             <div className="text-xs text-gray-500 mb-2">Or the VNCCS lanes:</div>
-            <div className="grid grid-cols-2 gap-3">
+            {/* v1.277.13 — Klein Mode and VNCCS are fully separated now: the
+                "VNCCS Klein Hybrid" lane is gone (Klein Mode's create IS the
+                🎯 Klein 3.0 option above); VNCCS Native is retained as its own
+                complete flow. */}
+            <div className="grid grid-cols-1 gap-3">
               <div
                 onClick={() => { setShowModePicker(false); navigate('/studio/vnccs'); }}
                 className="border border-gray-700 rounded-lg p-4 cursor-pointer hover:border-purple-500 hover:bg-gray-800/60 transition-all"
@@ -2603,18 +2607,7 @@ export default function CharacterStudioPage() {
                 <div className="font-medium mb-1">VNCCS Native</div>
                 <div className="text-xs text-gray-400">
                   The full staged flow on the VNCCS meganodes — New or Clone, base versions,
-                  costumes, emotions, multi-worker poses.
-                </div>
-              </div>
-              <div
-                onClick={() => { setShowModePicker(false); navigate('/studio/vnccs-klein'); }}
-                className="border border-gray-700 rounded-lg p-4 cursor-pointer hover:border-purple-500 hover:bg-gray-800/60 transition-all"
-              >
-                <div className="text-2xl mb-2">🧪</div>
-                <div className="font-medium mb-1">VNCCS Klein Hybrid</div>
-                <div className="text-xs text-gray-400">
-                  Same interface, separate mode — Klein-powered steps will be grafted into this
-                  process. Currently identical to Native.
+                  costumes, emotions, multi-worker poses. Independent of Klein Mode.
                 </div>
               </div>
             </div>

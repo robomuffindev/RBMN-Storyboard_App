@@ -3383,7 +3383,15 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     if (want) {
       if (want === 'klein3') { setTab('create'); setCreateEngine('klein3'); }
       else if (want === 'klein2') { setTab('create'); setCreateEngine('klein2'); }
-      else if (want === 'qwen') { setTab('create'); setCreateEngine('qwen'); }
+      else if (want === 'qwen') {
+        // v1.277.13 — Qwen create left Klein Mode; the deep link lands on
+        // Klein 3.0 there, and still works in VNCCS Native
+        setTab('create');
+        setCreateEngine(variant === 'klein' ? 'klein3' : 'qwen');
+      }
+      else if (want === 'emotions' && variant === 'klein') {
+        setTab('clothes');            // Emotions tab removed from Klein Mode
+      }
       else if (['studio', 'text2image', 'video', 'create', 'clothes',
                 'emotions', 'poselib', 'lora', 'charsheet'].includes(want)) {
         setTab(want as Tab);
@@ -4718,7 +4726,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
   const exportSettingsJson = () => {
     const payload = {
       exported_at: new Date().toISOString(),
-      page: variant === 'klein' ? 'VNCCS Klein Hybrid' : 'VNCCS Native',
+      page: variant === 'klein' ? 'Klein Mode' : 'VNCCS Native',
       character: (createSub === 'clone' ? cloneName : name) || clothesChar || '',
       settings: buildSettings(),
     };
@@ -4750,7 +4758,7 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
     <div style={{ maxWidth: 1880, margin: '0 auto', padding: 24, color: '#e6e9ee' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <Link to="/studio" style={{ ...btnGhost, textDecoration: 'none' }}>← Studio</Link>
-        <h1 style={{ fontSize: 20, margin: 0 }}>{variant === 'klein' ? 'VNCCS Klein Hybrid' : 'VNCCS Native'}</h1>
+        <h1 style={{ fontSize: 20, margin: 0 }}>{variant === 'klein' ? 'Klein Mode' : 'VNCCS Native'}</h1>
         {variant === 'klein' && (
           <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 12, background: '#2a1d40', color: '#c4b5fd' }}>
             experimental — same engine as Native for now; Klein-specific steps land here
@@ -4927,19 +4935,25 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
             still work; only the strip button is gone. */}
         <button style={tabBtn(tab === 'create')} onClick={() => setTab('create')}>Create</button>
         <button style={tabBtn(tab === 'clothes')} onClick={() => setTab('clothes')}>Clothes</button>
-        <button style={tabBtn(tab === 'emotions')} onClick={() => setTab('emotions')}>Emotions</button>
+        {/* v1.277.13 — Klein Mode is fully separated from VNCCS: no Emotions
+            tab here (that lane is VNCCS meganode machinery; VNCCS Native
+            retains it untouched) */}
+        {variant !== 'klein' && (
+          <button style={tabBtn(tab === 'emotions')} onClick={() => setTab('emotions')}>Emotions</button>
+        )}
         <button style={tabBtn(tab === 'poselib')} onClick={() => setTab('poselib')}>Pose Library</button>
         <button style={tabBtn(tab === 'lora')} onClick={() => setTab('lora')}>🎓 LoRA Dataset Gen</button>
         <button style={tabBtn(tab === 'charsheet')} onClick={() => setTab('charsheet')}>🪪 Character Sheet</button>
       </div>
 
-      {tab === 'create' && variant === 'klein' && createEngine === 'klein2' ? (
+      {tab === 'create' && variant === 'klein' && createEngine === 'klein2' && expModes ? (
         <div>
+          {/* v1.277.13 — Klein Mode create is Klein 3.0 (+ the pinned Klein
+              2.0 statue lane behind Experimental Modes). The VNCCS Klein and
+              Qwen create lanes left this mode; they live on in VNCCS Native. */}
           <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            {expModes && <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>}
-            <button style={tabBtn(false)} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
-            {expModes && <button style={tabBtn(true)}>🚀 Klein 2.0</button>}
             <button style={tabBtn(false)} onClick={() => setCreateEngine('klein3')}>🎯 Klein 3.0</button>
+            <button style={tabBtn(true)}>🚀 Klein 2.0</button>
           </div>
           <p style={{ fontSize: 11, color: '#8d97a5', margin: '0 0 10px' }}>
             🚀 Klein 2.0: statue-reference posing — rotate the textured 3D statue to the exact
@@ -4947,20 +4961,27 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
           </p>
           <Klein2Panel />
         </div>
-      ) : tab === 'create' && variant === 'klein' && createEngine === 'klein3' ? (
+      ) : tab === 'create' && variant === 'klein' ? (
         <div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            {expModes && <button style={tabBtn(false)} onClick={() => setCreateEngine('klein')}>🧪 Klein</button>}
-            <button style={tabBtn(false)} onClick={() => setCreateEngine('qwen')}>🟣 Qwen (VNCCS)</button>
-            {expModes && <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>}
-            <button style={tabBtn(true)}>🎯 Klein 3.0</button>
-          </div>
+          {/* any legacy engine value (klein/qwen) lands here — Klein 3.0 is
+              THE create mode; deep links and stored settings cannot resurrect
+              the removed VNCCS lanes inside Klein Mode */}
+          {expModes && (
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button style={tabBtn(true)}>🎯 Klein 3.0</button>
+              <button style={tabBtn(false)} onClick={() => setCreateEngine('klein2')}>🚀 Klein 2.0</button>
+            </div>
+          )}
           <p style={{ fontSize: 11, color: '#8d97a5', margin: '0 0 10px' }}>
             🎯 Klein 3.0: pure reference mode — tagged refs + one base image + a pose image; no 3D
             anywhere. Klein does the rest: "the person from image 1 in the pose from image 2".
           </p>
           <Klein3Panel />
         </div>
+      ) : tab === 'clothes' && variant === 'klein' ? (
+        /* v1.277.13 — the Clothes tab in Klein Mode IS Klein 3.0's outfit
+           machinery (design, wear across views, costume studio) */
+        <Klein3Panel only="outfits" />
       ) : tab === 'lora' ? (
         <LoraPanel />
       ) : tab === 'studio' ? (
@@ -4971,6 +4992,10 @@ export default function VNCCSNativePage({ variant = 'native' }: { variant?: 'nat
         <VideoLabPanel />
       ) : tab === 'charsheet' ? (
         <CharacterSheetPanel />
+      ) : tab === 'poselib' && variant === 'klein' ? (
+        /* v1.277.13 — Klein Mode's Pose Library tab carries Klein 3.0's pose
+           section (browse the shared library + pose → generate) */
+        <Klein3Panel only="poses" />
       ) : tab === 'poselib' ? (
         <div style={box}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>

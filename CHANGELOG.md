@@ -1,3 +1,27 @@
+## v1.277.13 -- 🎯 KLEIN MODE STANDS ALONE: the VNCCS/Klein separation (2026-08-15)
+
+His cleanup: the non-VNCCS studio is now fully independent, so the confusing hybrid is
+gone. **All parts existed — they moved to where they belong; VNCCS Native is untouched.**
+
+- **"VNCCS Klein Hybrid" is now "Klein Mode"** (title + telemetry; route unchanged so every
+  deep link and jump keeps working).
+- **Klein Mode's Create tab is Klein 3.0** (+ the pinned Klein 2.0 statue lane behind
+  Experimental Modes). The VNCCS-Klein and Qwen create lanes are REMOVED from this mode —
+  stored settings and `?tab=qwen` deep links coerce to Klein 3.0 rather than resurrecting
+  them. Both lanes live on, untouched, in VNCCS Native.
+- **Emotions tab removed from Klein Mode** (VNCCS meganode machinery; Native retains it).
+  Old `?tab=emotions` links land on Clothes.
+- **👗 Klein 3.0's Outfits section IS the Clothes tab now** (design, wear-across-views,
+  costume studio) — no longer a fourth panel buried under the create columns.
+- **🕺 Klein 3.0's pose section IS the Pose Library tab now** (browse the shared library +
+  pose → generate). Native's host pose-library screen stays for Native.
+- Implementation: `Klein3Panel` takes `only: main|outfits|poses` — ONE component, one set of
+  state and logic, only the JSX gated; the moved-out tabs get a slim character picker wired
+  to the same studio-wide current character (v1.277.10), so switching tabs keeps the
+  character and the moved sections behave identically to before.
+- The ＋ New Character modal drops the hybrid lane (Klein 3.0 is already the headline
+  option); VNCCS Native keeps its card, labelled independent.
+
 ## v1.277.12 -- 🎬 PROJECTS GET A VIDEO ENGINE: MiniMax H3 lands, LTX 2.5 staged (2026-08-15)
 
 The big one: projects choose their video engine at creation (and any time after) —

@@ -173,7 +173,15 @@ const OUTFIT_VIEWS = [...VIEWS, 'face'];
 // anchor. Everything else is an extra, and outfit renders have their own panel.
 const CORE_TAGS = ['front', 'back', 'left', 'right', 'face'];
 
-export default function Klein3Panel() {
+/**
+ * v1.277.13 — the panel renders one of three SECTIONS so Klein Mode's tabs can
+ * place them where they belong: 'main' (character + description + refs/views/
+ * base) on Create, 'outfits' on the Clothes tab, 'poses' on the Pose Library
+ * tab. One component, one set of state/logic — only the JSX is gated.
+ */
+export default function Klein3Panel({ only = 'main' }: {
+  only?: 'main' | 'outfits' | 'poses';
+} = {}) {
   // characters
   const [chars, setChars] = useState<CharT[]>([]);
   // v1.277.10: focus jump wins, else the PERSISTENT current character — so a
@@ -1167,7 +1175,11 @@ export default function Klein3Panel() {
   };
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(330px,1fr) minmax(380px,1.2fr) minmax(360px,1.1fr)', gap: 16, alignItems: 'start' }}>
+    <div style={{ display: 'grid',
+                  gridTemplateColumns: only === 'main'
+                    ? 'minmax(330px,1fr) minmax(380px,1.2fr) minmax(360px,1.1fr)'
+                    : '1fr',
+                  gap: 16, alignItems: 'start' }}>
       {/* v1.276.0 — WHO AM I WORKING ON. The character was only identifiable by
           reading the dropdown's current value, which is easy to lose track of
           once you are three columns deep in refs and poses. */}
@@ -1184,6 +1196,22 @@ export default function Klein3Panel() {
           </span>
         </div>
       )}
+      {/* slim character picker for the moved-out sections (Clothes / Pose
+          Library tabs) — the full description column stays on Create */}
+      {only !== 'main' && (
+        <div style={{ ...box, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <b style={{ fontSize: 14 }}>🎯 Character</b>
+          <select style={{ ...input, maxWidth: 320 }} value={slug}
+                  onChange={(e) => setSlug(e.target.value)}>
+            {chars.map((c) => <option key={c.slug} value={c.slug}>{c.name}{c.has_base ? ' — ✓ base' : ''}</option>)}
+            {!chars.length && <option value="">(no characters yet)</option>}
+          </select>
+          {only === 'outfits' && !chars.find((c) => c.slug === slug)?.has_base && (
+            <span style={hint}>this character has no base yet — build it on the Create tab first</span>
+          )}
+        </div>
+      )}
+      {only === 'main' && (<>
       {/* ── column 1: character + description ── */}
       <div style={{ ...box, display: 'grid', gap: 10, alignContent: 'start' }}>
         <h3 style={{ margin: 0, fontSize: 15 }}>🎯 Character</h3>
@@ -1547,8 +1575,10 @@ export default function Klein3Panel() {
         </div>
       </div>
 
-      {/* ── 👗 Outfits: full-width row under the three columns (v1.276.7) ── */}
-      {cur && (
+      </>)}
+
+      {/* ── 👗 Outfits — Klein Mode's CLOTHES tab (moved v1.277.13) ── */}
+      {only === 'outfits' && cur && (
         <div style={{ ...box, gridColumn: '1 / -1', display: 'grid', gap: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <h3 style={{ margin: 0, fontSize: 15 }}>👗 Outfits</h3>
@@ -1869,7 +1899,8 @@ export default function Klein3Panel() {
         </div>
       )}
 
-      {/* ── column 3: poses + generate ── */}
+      {/* ── 🕺 poses + generate — Klein Mode's POSE LIBRARY tab (v1.277.13) ── */}
+      {only === 'poses' && (<>
       <div style={{ ...box, display: 'grid', gap: 10, alignContent: 'start', position: 'sticky', top: 12, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <h3 style={{ margin: 0, fontSize: 15 }}>🕺 Pose → 🚀 Generate</h3>
@@ -2230,6 +2261,7 @@ export default function Klein3Panel() {
           })()}
         </div>
       </div>
+      </>)}
       {lightbox && <ImageLightbox url={lightbox} onClose={() => setLightbox('')} />}
 
       {/* ── 🎨 COSTUME STUDIO (v1.276.27) ─────────────────────────────────
