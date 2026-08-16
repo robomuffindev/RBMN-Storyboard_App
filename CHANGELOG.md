@@ -34,7 +34,10 @@ graphs created for this and test."
   relearned on this module's very first render: the body IS the answer.
 - **MiniMax Music 3 graph wired** (official template shape: int8 DiT via UNETLoader,
   CLIPLoader type "minimax", TextEncode's own `seconds` output driving the latent,
-  VAEDecodeAudioTiled) — first render pending its text encoder landing (ZOAI1 pull).
+  VAEDecodeAudioTiled) — and by end of session **VERIFIED ON ALL THREE BOXES**: 15s
+  instrumental tracks in 35.1s (trainer) / 38.4s (ZOAI3) / 42.4s (ZOAI1, after
+  `mm3_fleet_verify.py` LAN-copied the te). Lyrics mode + exact-length story-arc
+  pairing remain untested.
 
 ### 🎬 LTX 2.5: real graphs, wired end to end
 
