@@ -14,6 +14,7 @@ from sqlmodel import select
 from backend.config import settings
 from backend.database import get_session
 from backend.database.models import Project, ProjectMode, Scene, Asset, Job
+from backend.services import scene_ref_mode
 from backend.utils.file_utils import ensure_project_dirs
 
 logger = logging.getLogger(__name__)
@@ -362,23 +363,62 @@ async def delete_project(
         # scenes->chapters FK.  Deep chapter trees (AAF imports auto-split
         # into parent+sub chapters) made project deletion raise
         # IntegrityError mid-cascade.  NULL both reference chains first.
+        # ⚠⚠⚠ EACH STATEMENT IS GUARDED SEPARATELY, and that is the whole
+        # lesson here. The first version ran them in ONE try/except, so a
+        # single `no such column` aborted the block and every LATER statement
+        # was silently skipped — the log said "pre-clean failed (continuing)",
+        # the delete then failed for a completely different reason, and the
+        # message pointed at the wrong table. **A best-effort cleanup loop must
+        # be best-effort PER STEP, or the first failure hides the rest.**
+        from sqlalchemy import text as _del_text
+        _pid_hex = project_id.hex
+        _steps = [
+            # (1) the two self/cross FKs the ORM cascade cannot order safely
+            ("UPDATE scenes SET chapter_id = NULL WHERE project_id = :pid", {}),
+            ("UPDATE chapters SET parent_chapter_id = NULL WHERE project_id = :pid", {}),
+            # (2) two tables point at SCENES and broke deletion for any project
+            # with SLICED per-scene audio — every AAF import, every
+            # chapter-built project. `timeline_positions` references BOTH
+            # scenes and assets, so whichever the ORM cascades first, the other
+            # FK fails mid-transaction. Per-scene rows, project going away →
+            # delete outright, nothing survives to orphan.
+            ("DELETE FROM timeline_positions WHERE scene_id IN "
+             "(SELECT id FROM scenes WHERE project_id = :pid)", {}),
+            ("DELETE FROM stem_selections WHERE scene_id IN "
+             "(SELECT id FROM scenes WHERE project_id = :pid)", {}),
+            # (3) ⚠⚠ `shortcode_counters` has a `projects.id` FK and **no
+            # relationship on `Project`**, so the ORM never cascades it and
+            # `DELETE FROM projects` ITSELF raises. `allocate_shortcode` writes
+            # a row the first time any chapter or asset gets a code — so a
+            # project that has ever had chapters could not be deleted AT ALL.
+            # Not a new bug; merely unreachable until this lane made deleting
+            # a freshly-built project routine.
+            ("DELETE FROM shortcode_counters WHERE project_id = :pid", {}),
+            # (4) ⭐ `global_characters` is a LIBRARY that deliberately outlives
+            # the project it was saved from (copy semantics — see the model's
+            # docstring). Its column is `source_project_id`, and the right move
+            # is to NULL the provenance, never to delete his saved characters.
+            ("UPDATE global_characters SET source_project_id = NULL "
+             "WHERE source_project_id = :pid", {}),
+        ]
+        for _sql, _extra in _steps:
+            try:
+                await session.execute(_del_text(_sql), {"pid": _pid_hex, **_extra})
+            except Exception as _step_err:                       # noqa: BLE001
+                logger.warning("Project-delete pre-clean step skipped (%s): %s",
+                               _sql.split(" WHERE")[0][:60], _step_err)
+                try:
+                    await session.rollback()
+                except Exception:                                # noqa: BLE001
+                    pass
         try:
-            from sqlalchemy import text as _del_text
-            _pid_hex = project_id.hex
-            await session.execute(
-                _del_text("UPDATE scenes SET chapter_id = NULL WHERE project_id = :pid"),
-                {"pid": _pid_hex},
-            )
-            await session.execute(
-                _del_text("UPDATE chapters SET parent_chapter_id = NULL WHERE project_id = :pid"),
-                {"pid": _pid_hex},
-            )
             await session.commit()
-        except Exception as _fk_err:
-            logger.warning(f"Project-delete FK pre-clean failed (continuing): {_fk_err}")
+        except Exception as _fk_err:                             # noqa: BLE001
+            logger.warning(f"Project-delete FK pre-clean commit failed "
+                           f"(continuing): {_fk_err}")
             try:
                 await session.rollback()
-            except Exception:
+            except Exception:                                    # noqa: BLE001
                 pass
 
         # Delete from database (cascade deletes scenes, assets, jobs, etc.)
@@ -822,6 +862,7 @@ async def set_talkie_config(
         if req.talkie_engine not in _TALKIE_ENGINES:
             raise HTTPException(status_code=400, detail=f"engine must be one of {_TALKIE_ENGINES}")
         st["talkie_engine"] = req.talkie_engine
+
     project.settings = st
     project.updated_at = datetime.utcnow()
     await session.commit()
@@ -852,6 +893,12 @@ class VideoConfigIn(BaseModel):
     h3_ref_image_size: Optional[str] = None  # match | max
     h3_auto_sheet_refs: Optional[bool] = None  # auto-attach outfit sheets of
                                                # present characters as refs
+    # 🎛 the project-wide default for how a scene carries identity — a scene
+    # may override it. See backend/services/scene_ref_mode.py; it lives here
+    # rather than in its own route because the Concept tab already reads this
+    # one config object, and a second endpoint would be a second round trip
+    # for a field that is edited beside the engine picker.
+    scene_ref_mode: Optional[str] = None      # t2i_swap | full_reference
 
 
 @router.put("/{project_id}/video-config")
@@ -867,8 +914,10 @@ async def set_video_config(
     # a pure READ ({}) must not rewrite the row / bump updated_at
     if all(getattr(req, k) is None for k in
            ("video_engine", "h3_turbo", "h3_draft", "h3_audio_mode",
-            "h3_use_audio_ref", "h3_ref_image_size", "h3_auto_sheet_refs")):
+            "h3_use_audio_ref", "h3_ref_image_size", "h3_auto_sheet_refs",
+            "scene_ref_mode")):
         return {"video_engine": st.get("video_engine", "ltx_2.3"),
+                "scene_ref_mode": scene_ref_mode.project_mode(st),
                 **{k: st.get(k) for k in ("h3_turbo", "h3_draft",
                                           "h3_audio_mode", "h3_use_audio_ref",
                                           "h3_ref_image_size",
@@ -885,14 +934,25 @@ async def set_video_config(
         if req.h3_ref_image_size not in ("match", "max"):
             raise HTTPException(400, "h3_ref_image_size must be match or max")
         st["h3_ref_image_size"] = req.h3_ref_image_size
+    if req.scene_ref_mode is not None:
+        # ⚠ the project default may NOT be 'inherit' — there is nothing above
+        # it to inherit from, and storing it would make every scene fall back
+        # to the module default while the UI showed the user's choice.
+        _m = scene_ref_mode.normalise(req.scene_ref_mode)
+        if not _m:
+            raise HTTPException(
+                400, f"scene_ref_mode must be one of {scene_ref_mode.MODES}")
+        st["scene_ref_mode"] = _m
     for k in ("h3_turbo", "h3_draft", "h3_use_audio_ref", "h3_auto_sheet_refs"):
         v = getattr(req, k)
         if v is not None:
             st[k] = bool(v)
+
     project.settings = st
     project.updated_at = datetime.utcnow()
     await session.commit()
     return {"video_engine": st.get("video_engine", "ltx_2.3"),
+            "scene_ref_mode": scene_ref_mode.project_mode(st),
             **{k: st.get(k) for k in ("h3_turbo", "h3_draft", "h3_audio_mode",
                                       "h3_use_audio_ref", "h3_ref_image_size",
                                       "h3_auto_sheet_refs")}}
@@ -902,6 +962,12 @@ async def set_video_config(
 class StoryLinkIn(BaseModel):
     world_id: Optional[str] = None       # '' or None with attach=False detaches
     story_id: Optional[str] = None       # optional story inside the world
+    # 📖 v1.277.46 — and optionally ONE CHAPTER of that story. His call:
+    # "a chapter will essentially be a single video project." Selecting one
+    # narrows the pull (that chapter's narration, recording and beats) and
+    # narrows the derived concept text to that chapter. Absent = story-wide,
+    # exactly as before.
+    chapter_id: Optional[str] = None
     attach: bool = True
 
 
@@ -929,7 +995,13 @@ async def set_story_link(
         with sw._LOCK:
             w = sw._load(wid)               # 404s if missing
             if req.story_id:
-                sw._find(w.get("stories") or [], req.story_id, "story")
+                story = sw._find(w.get("stories") or [], req.story_id, "story")
+                if req.chapter_id:
+                    sw._find(story.get("chapters") or [], req.chapter_id,
+                             "chapter")
+            elif req.chapter_id:
+                raise HTTPException(400, "a chapter needs its story — send "
+                                         "story_id with chapter_id")
             ids = [str(x) for x in (w.get("project_ids") or [])]
             if pid_s not in ids:
                 ids.append(pid_s)
@@ -947,6 +1019,13 @@ async def set_story_link(
                 pass
         st["world_id"] = wid
         st["story_id"] = (req.story_id or "").strip()
+        # ⚠ Changing the STORY must clear a chapter that belonged to the old
+        # one, or the project keeps a chapter_id that resolves to nothing and
+        # story_context silently falls back to story-wide with no sign why.
+        st["chapter_id"] = ((req.chapter_id or "").strip()
+                            if st["story_id"] else "")
+        if not st["chapter_id"]:
+            st.pop("chapter_id", None)
     else:
         if old_wid:
             try:
@@ -959,11 +1038,14 @@ async def set_story_link(
                 pass
         st.pop("world_id", None)
         st.pop("story_id", None)
+        st.pop("chapter_id", None)
+
 
     project.settings = st
     project.updated_at = datetime.utcnow()
     await session.commit()
-    return {"world_id": st.get("world_id"), "story_id": st.get("story_id")}
+    return {"world_id": st.get("world_id"), "story_id": st.get("story_id"),
+            "chapter_id": st.get("chapter_id") or ""}
 
 
 @router.get("/{project_id}/story-link")
@@ -982,11 +1064,24 @@ async def get_story_link(project_id: UUID,
         w = sw._load(wid)
     except HTTPException:
         return {"linked": False, "stale_world_id": wid}
+    from backend.api import storychapters as _sch
     sid = str(st.get("story_id") or "")
+    cid = str(st.get("chapter_id") or "")
     story = next((s for s in (w.get("stories") or []) if s["id"] == sid), None)
+    chapters = (story or {}).get("chapters") or []
+    chapter = next((c for c in chapters if c.get("id") == cid), None)
     return {"linked": True, "world_id": wid, "world_name": w.get("name"),
             "story_id": sid or None,
             "story_title": (story or {}).get("title"),
+            "chapter_id": cid or None,
+            "chapter_title": (chapter or {}).get("title"),
+            # ⚠ A chapter_id that no longer resolves is REPORTED, not swallowed:
+            # the pull would quietly fall back to the whole story otherwise.
+            "chapter_missing": bool(cid and not chapter),
+            # ⭐ the SHARED picker shape — same function the `?brief=1` chapter
+            # list uses, so the dropdown can never get two different objects
+            # depending on which screen filled it.
+            "chapters": [_sch.chapter_row(c) for c in chapters],
             "style_text": sw._style_text(w),
             "cast": [{"id": c["id"], "name": c["name"],
                       "char_slug": c.get("char_slug") or "",
@@ -998,11 +1093,98 @@ async def get_story_link(project_id: UUID,
 
 
 class PullFromStoryIn(BaseModel):
-    """Which parts of the linked world/story to pull into the project."""
-    concept: bool = True          # story synopsis/logline → concept_text
-    style: bool = True            # world visual style → style_text
-    characters: bool = False      # cast → project characters (images imported)
+    """Which parts of the linked world/story to pull into the project.
+
+    ⚠ `concept`/`style` are COPY semantics and are now OPTIONAL: a linked
+    project DERIVES those two live (see `services/story_context.py`), so the
+    copy is only for people who want to detach and edit.
+
+    📖 v1.277.46 — the SCOPE comes from the link, not from here. If the link
+    names a chapter (`settings["chapter_id"]`) every switch below reads that
+    chapter's material: its narration becomes the script, its recording becomes
+    the audio, its BEATS become the timeline chapters, and its named cast
+    narrows the character pull. There is no `chapter` flag on purpose — a
+    project that is a chapter's video is that all the way down, and a per-part
+    override would let it be half one thing and half another."""
+    concept: bool = False         # copy story text → concept_text (legacy)
+    style: bool = False           # copy world style → style_text (legacy)
+    characters: bool = True       # story-scoped cast → project characters
     lyrics_text_id: str = ""      # a world text id → Lyrics.initial_text
+    chapters: bool = True         # story ARCS → chapters (timed to sections)
+    narration_audio: bool = True  # the story's audio/aaf/srt → project assets
+    narration_text: bool = True   # the story's narration → the script (spoken only)
+
+
+class StoryOverrideIn(BaseModel):
+    """Pin ONE field against the linked story (or release it with "")."""
+    field: str
+    value: str = ""
+
+
+@router.get("/{project_id}/story-context")
+async def get_story_context(project_id: UUID,
+                            session: AsyncSession = Depends(get_session)):
+    """🌍 What this project's creative direction RESOLVES to right now.
+
+    The Concept tab reads this: when `linked` is true it shows the story's
+    values (greyed, with a 'from <story>' badge) instead of the project's own,
+    and `overrides` says which fields the user has pinned. Nothing is copied —
+    edit the world and the project follows."""
+    from backend.services import story_context as sc
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = dict(project.settings or {})
+    ctx = sc.resolve(st)
+    eff = sc.effective(st, ctx)
+    # what the project itself holds, so the UI can show what unlinking restores
+    own = {k: st.get(k) or "" for k in sc.OVERRIDABLE}
+    return {"linked": ctx["linked"], "world": ctx["world"],
+            "story": ctx["story"], "arcs": ctx["arcs"],
+            # 📖 v1.277.46 — the chapter scope, forwarded rather than left in
+            # the resolver. ⚠ `arcs` above is the CHAPTER'S BEATS when one is
+            # selected; a reader that does not know which it is holding will
+            # label the wrong rung, so `arcs_are_beats` travels with it.
+            # `chapter_missing` says a linked chapter has been deleted — the
+            # resolver widens to the whole story and this is the only signal.
+            "chapter": ctx.get("chapter"),
+            "arcs_are_beats": bool(ctx.get("arcs_are_beats")),
+            "chapter_missing": bool(ctx.get("chapter_missing")),
+            "cast": [{"id": m.get("id"), "name": m.get("name"),
+                      "char_slug": m.get("char_slug") or "",
+                      "role": m.get("role") or "",
+                      "status": m.get("status") or "paper"}
+                     for m in (ctx["characters"] or [])],
+            "derived": {k: ctx.get(k, "") for k in ("concept_text", "style_text")},
+            "effective": eff, "own": own, "overrides": ctx["overrides"]}
+
+
+@router.put("/{project_id}/story-override")
+async def set_story_override(project_id: UUID, req: StoryOverrideIn,
+                             session: AsyncSession = Depends(get_session)):
+    """✏ Pin one field so the story stops driving it — or release it.
+
+    ⚠ Stored in its OWN key (`story_overrides`), never by writing into
+    `concept_text`: a value written into the concept keys is indistinguishable
+    from a value the story derived, and then nobody can tell what unlinking
+    would restore."""
+    from backend.services import story_context as sc
+    if req.field not in sc.OVERRIDABLE:
+        raise HTTPException(400, f"field must be one of {list(sc.OVERRIDABLE)}")
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    st = dict(project.settings or {})
+    ov = dict(st.get("story_overrides") or {})
+    if (req.value or "").strip():
+        ov[req.field] = req.value
+    else:
+        ov.pop(req.field, None)
+    st["story_overrides"] = ov
+    project.settings = st
+    project.updated_at = datetime.utcnow()
+    await session.commit()
+    return {"overrides": ov}
 
 
 @router.post("/{project_id}/pull-from-story")
@@ -1025,7 +1207,22 @@ async def pull_from_story(
     w = sw._load(wid)
     sid = str(st.get("story_id") or "")
     story = next((s for s in (w.get("stories") or []) if s["id"] == sid), None)
+    # 📖 v1.277.46 — the link may name ONE CHAPTER, and a chapter is one video.
+    # Every branch below prefers the chapter's material and falls back to the
+    # story's, so an unscoped project behaves exactly as it did before.
+    # ⚠ A chapter_id that no longer resolves is reported LOUDLY rather than
+    # silently widening to the whole story — that is a 40-minute video where a
+    # 4-minute one was asked for.
+    cid = str(st.get("chapter_id") or "")
+    chapter = next((c for c in ((story or {}).get("chapters") or [])
+                    if c.get("id") == cid), None)
     pulled: list = []
+    if cid and not chapter:
+        pulled.append(f"⚠ the linked chapter {cid} no longer exists on this "
+                      f"story — pulling the WHOLE story instead")
+    if chapter:
+        pulled.append(f"scoped to chapter {int(chapter.get('i') or 0) + 1}: "
+                      f"{chapter.get('title')}")
 
     if req.concept:
         bits = []
@@ -1037,10 +1234,20 @@ async def pull_from_story(
             for k in ("logline", "synopsis", "beats"):
                 if sf.get(k):
                     bits.append(f"{k.capitalize()}: {sf[k]}")
+        if chapter:
+            bits.append(f"This video is chapter "
+                        f"{int(chapter.get('i') or 0) + 1}: {chapter.get('title')}")
+            if chapter.get("summary"):
+                bits.append(f"Chapter: {chapter['summary']}")
+            if chapter.get("mood"):
+                bits.append(f"Mood: {chapter['mood']}")
         if bits:
             st["concept_text"] = "\n\n".join(bits)
-            if story:
-                st["song_title"] = st.get("song_title") or story.get("title")
+            # ⭐ the CHAPTER names the project — the story title would put the
+            # same name on every video in the series.
+            st["song_title"] = (st.get("song_title")
+                                or (chapter or {}).get("title")
+                                or (story or {}).get("title"))
             pulled.append("concept")
 
     if req.style:
@@ -1052,11 +1259,59 @@ async def pull_from_story(
             pulled.append("style")
 
     if req.characters:
-        chars = list(st.get("characters") or [])
+        # ⚠⚠ COPY THE DICTS, not just the list. `st = dict(project.settings)`
+        # is shallow, so mutating a character dict mutates the object SQLAlchemy
+        # loaded — and then the new value compares EQUAL to the old one, no
+        # UPDATE is emitted, and the change vanishes on commit. Eight
+        # "repaired image" lines were reported and none of them persisted
+        # (2026-08-18). Caught by re-READING the project, not by the response.
+        chars = [dict(c) for c in (st.get("characters") or [])]
         have = {str(c.get("name", "")).lower() for c in chars}
         n_added = 0
-        for m in (w.get("cast") or []):
+        # ⚠ repairs must be SAVED too. The first version only wrote the list
+        # back `if n_added:` — so eight "repaired image" lines were reported
+        # and not one of them persisted (2026-08-18, caught by re-reading the
+        # project after the pull rather than trusting the response).
+        n_repaired = 0
+        # ⚠ v1.277.24 — the cast of THIS STORY, not of the whole world. A
+        # world with three stories used to dump every character into every
+        # project, which is exactly the "we don't necessarily need them all
+        # available" complaint.
+        from backend.services import story_context as _sc
+        pid_prefix = f"{project_id}/"
+        # 📖 a chapter that names its cast narrows it one rung further; a
+        # chapter that names nobody inherits the story's cast rather than
+        # pulling an empty list (the story_cast fallback, one level down).
+        _cast = _sc.story_cast(w, sid)
+        if chapter and (chapter.get("characters") or []):
+            _want = {str(n).strip().lower() for n in chapter["characters"]}
+            _cast = [m for m in _cast
+                     if str(m.get("name") or "").strip().lower() in _want] or _cast
+        for m in _cast:
             if m["name"].lower() in have:
+                # ⚠ ALREADY HERE — but it may carry the pre-.31 broken
+                # image_path (project-relative, so /api/files 404s and the card
+                # shows a name with no face). Repair it in place rather than
+                # making him delete and re-pull.
+                cur = next((c for c in chars
+                            if str(c.get("name", "")).lower() == m["name"].lower()), None)
+                slug0 = (cur or {}).get("char_slug") or m.get("char_slug") or ""
+                if cur is not None and slug0:
+                    ip = str(cur.get("image_path") or "").replace("\\", "/")
+                    if not ip or not ip.startswith(pid_prefix):
+                        try:
+                            rel = await _import_k3_base_as_asset(project, slug0,
+                                                                 session)
+                            if rel:
+                                cur["image_path"] = rel
+                                n_repaired += 1
+                                pulled.append(f"repaired image: {m['name']}")
+                        except Exception as e:                   # noqa: BLE001
+                            logger.warning("pull: repair failed for %s: %s",
+                                           slug0, e)
+                    if not cur.get("description"):
+                        cur["description"] = _sc_member_desc(m)
+                        n_repaired += 1
                 continue
             desc_bits = [m.get("role") or ""]
             f = m.get("fields") or {}
@@ -1082,26 +1337,194 @@ async def pull_from_story(
             chars.append(entry)
             have.add(m["name"].lower())
             n_added += 1
-        if n_added:
+        if n_added or n_repaired:
             st["characters"] = chars
-            pulled.append(f"characters ({n_added})")
+            if n_added:
+                pulled.append(f"characters ({n_added})")
 
-    if req.lyrics_text_id:
-        t = next((x for x in (w.get("texts") or [])
-                  if x["id"] == req.lyrics_text_id), None)
-        if not t:
-            raise HTTPException(404, "that text does not exist in the world")
+    if req.lyrics_text_id or (getattr(req, "narration_text", False) and story):
+        src_label, raw_body = "", None
+        if req.lyrics_text_id:
+            t = next((x for x in (w.get("texts") or [])
+                      if x["id"] == req.lyrics_text_id), None)
+            if not t:
+                raise HTTPException(404, "that text does not exist in the world")
+            src_label, raw_body = t.get("title") or "text", t.get("body") or ""
+        elif chapter and (chapter.get("narration") or "").strip():
+            # ⭐ THE CHAPTER'S OWN NARRATION IS THE SCRIPT. This is the whole
+            # point of the chapter lane: the project renders one chapter's
+            # worth of words, not the whole book's.
+            src_label = f"chapter — {chapter.get('title')}"
+            raw_body = chapter["narration"]
+        else:
+            # no chapter (or an unwritten one): the STORY's narration, as before
+            t = sw._story_narration(w, sid)
+            if not t:
+                raise HTTPException(
+                    404, "this chapter has no narration yet — write it on the "
+                         "Story tab (and the story has none either)"
+                    if chapter else "this story has no narration text yet")
+            src_label, raw_body = t.get("title") or "narration", t.get("body") or ""
         from backend.database.models import Lyrics
         r = await session.execute(
             select(Lyrics).where(Lyrics.project_id == project_id))
         ly = r.scalars().first()
+        # ⚠ SPOKEN TEXT ONLY. The story's narration carries `## Arc` headers so
+        # narration/chapters/beds share boundaries — but a script field feeds a
+        # reader and Whisper alignment, and neither should ever see a heading.
+        body_txt = sw.spoken_only(raw_body or "")
         if ly is None:
             ly = Lyrics(project_id=project_id, full_text="",
-                        initial_text=t.get("body") or "")
+                        initial_text=body_txt)
             session.add(ly)
         else:
-            ly.initial_text = t.get("body") or ""
-        pulled.append(f"lyrics ({t.get('title')})")
+            ly.initial_text = body_txt
+        pulled.append(f"script ({src_label} — spoken text only)")
+
+    if getattr(req, "narration_audio", False) and story:
+        # 🎙 v1.277.31 — the story's THREE narration files, each to the place
+        # the project actually consumes it:
+        #   audio → a MUSIC asset + `settings["story_audio_asset_id"]` so the
+        #           Audio tab can select it without hunting
+        #   srt   → an asset the SRT upload can read
+        #   aaf   → an asset AND `settings["story_aaf_asset_id"]`, which the
+        #           Audio tab's Import-AAF picks up
+        # ⚠ Nothing is auto-ANALYZED and no scenes are replaced: analysis runs
+        # Whisper and an AAF import REPLACES the scene list. Both are his
+        # decision, not a side effect of pressing Pull.
+        import hashlib
+        import shutil as _sh
+        from backend.database.models import Asset, AssetType
+        # 📖 a chapter's own recording wins when it has one — a chapter is one
+        # video, so its take is the take. ⚠ The two lanes store files in
+        # DIFFERENT directories (`chapter_audio` vs `narration_audio`), so the
+        # path resolver has to be picked alongside the file list, not after.
+        from backend.api import storychapters as _sch
+        if chapter and (chapter.get("narration_files") or {}):
+            files = dict(chapter["narration_files"])
+            _fp_of = _sch._ch_slot_fp
+            _src_label = "chapter"
+        else:
+            files = sw._narr_files(story)
+            _fp_of = sw._slot_fp
+            _src_label = "story"
+            if chapter:
+                pulled.append("this chapter has no recording — falling back to "
+                              "the story's")
+        if not files:
+            pulled.append("no narration files on the story yet")
+        got = []
+        for slot in ("audio", "aaf", "srt"):
+            meta = files.get(slot)
+            if not meta:
+                continue
+            src = _fp_of(wid, meta)
+            if not src.exists():
+                pulled.append(f"⚠ the {_src_label}'s {slot} file is missing "
+                              f"on disk")
+                continue
+            proj_dir = Path(settings.project_dir) / str(project_id)
+            sub = "audio" if slot in ("audio", "aaf") else "subtitles"
+            dest_dir = proj_dir / "assets" / sub
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"story_{meta['id']}{meta.get('ext') or ''}"
+            _sh.copy2(src, dest)
+            data = dest.read_bytes()
+            asset = Asset(project_id=project_id, filename=dest.name,
+                          rel_path=str(dest.relative_to(proj_dir)),
+                          asset_type=(AssetType.MUSIC if slot == "audio"
+                                      else AssetType.REFERENCE),
+                          sha256=hashlib.sha256(data).hexdigest(),
+                          file_size=len(data),
+                          meta={"source": "storyworld", "story_id": sid,
+                                "chapter_id": (chapter or {}).get("id") or "",
+                                "slot": slot, "from": _src_label,
+                                "original_name": meta.get("filename")})
+            session.add(asset)
+            await session.flush()          # need the id to point settings at it
+            st[f"story_{slot}_asset_id"] = str(asset.id)
+            st[f"story_{slot}_name"] = meta.get("filename") or dest.name
+            got.append(slot)
+        if got:
+            pulled.append("narration files: " + ", ".join(got)
+                          + (" — the Audio tab can select them now"
+                             if "aaf" not in got else
+                             " — press Import AAF on the Audio tab"))
+
+    if getattr(req, "chapters", False):
+        # 🎬 ARCS → project chapters, timed against the DETECTED SECTIONS (his
+        # call). Story chapters are a preserved source, so a later audio
+        # re-analysis will not delete them.
+        #
+        # 📖 v1.277.46 — when the project is scoped to a STORY CHAPTER, its
+        # BEATS are what become the timeline, not the story's arcs. The arcs
+        # describe the whole book; this project is one chapter of it, and
+        # timing twelve arcs against four minutes of one chapter's audio
+        # produces twelve chapters that all start at zero.
+        # ⭐ A beat is arc-shaped (`_clean_arcs` normalises both), so nothing
+        # downstream — the builder, the re-timer, `arc_context`, the backing-bed
+        # lane — needed a line changed for this.
+        if chapter:
+            arcs = chapter.get("beats") or []
+            _from = f"beats of “{chapter.get('title')}”"
+            _hint = ("this chapter has no beats yet — ✍ write its narration "
+                     "(beats come back with it) or press Beats on the Story tab")
+        else:
+            arcs = (story or {}).get("arcs") or []
+            _from = "arcs"
+            _hint = ("the story has no arcs yet (✨ Structure it on /worlds)")
+        if not arcs:
+            pulled.append(f"chapters skipped — {_hint}")
+        else:
+            from sqlalchemy import text as _text
+            from backend.services.chapters.from_story import (
+                create_chapters_from_arcs)
+            # Clear the previously-pulled chapters (an idempotent re-pull),
+            # unbinding their scenes first.
+            #
+            # ⚠⚠ MATCH ON PROVENANCE, NOT ON `source`. `source` is mutable:
+            # `backend/api/chapters.py` sets it to "manual" on rename (:214),
+            # split (:306), merge (:353) and generate-description (:597). A
+            # DELETE on `source='story'` therefore skipped every chapter he had
+            # edited, and `create_chapters_from_arcs` then built the whole set
+            # again beside the survivors — two chapters over the same seconds,
+            # which is the doubled-chapter bug the builder has a safety net for.
+            #
+            # ⭐ It asks `is_from_story()` — the SAME function the builder's
+            # producer short-circuit and `retime_story_chapters` ask. A SQL
+            # re-implementation of the test was the first version, and it had
+            # already drifted: `chapter_metadata LIKE '%"from_story"%'` matches
+            # the KEY'S PRESENCE while the predicate matches the VALUE'S TRUTH,
+            # so `{"from_story": false}` would be deleted here and kept there.
+            # Three call sites, one definition — a provenance rule with two
+            # implementations is a provenance rule with two answers.
+            from sqlalchemy import bindparam
+            from backend.database.models import Chapter
+            from backend.services.chapters.from_story import is_from_story
+            _prev = (await session.execute(
+                select(Chapter).where(Chapter.project_id == project_id)
+            )).scalars().all()
+            _kill = [c.id for c in _prev if is_from_story(c)]
+            if _kill:
+                await session.execute(
+                    _text("UPDATE scenes SET chapter_id = NULL "
+                          "WHERE project_id = :pid AND chapter_id IN :ids")
+                    .bindparams(bindparam("ids", expanding=True)),
+                    {"pid": project_id.hex, "ids": [c.hex for c in _kill]})
+                await session.execute(
+                    _text("DELETE FROM chapters WHERE id IN :ids")
+                    .bindparams(bindparam("ids", expanding=True)),
+                    {"ids": [c.hex for c in _kill]})
+            await session.flush()
+            made = await create_chapters_from_arcs(session, project_id, arcs)
+            await session.flush()
+            from backend.services.chapters.resolver import (
+                bind_scenes_to_chapters_by_time)
+            try:
+                await bind_scenes_to_chapters_by_time(session, project_id)
+            except Exception as e:                           # noqa: BLE001
+                logger.warning("pull-from-story: scene binding failed: %s", e)
+            pulled.append(f"chapters ({len(made)} from {_from})")
 
     project.settings = st
     project.updated_at = datetime.utcnow()
@@ -1109,10 +1532,34 @@ async def pull_from_story(
     return {"pulled": pulled}
 
 
+def _sc_member_desc(m: dict) -> str:
+    """The cast member's sheet as one description string — so a project
+    character carries WHO they are, not just a name."""
+    bits = [m.get("role") or ""]
+    for k, v in (m.get("fields") or {}).items():
+        if v:
+            bits.append(f"{k}: {v}")
+    lore = m.get("lore") or {}
+    for k in ("story_role", "personality", "motivations", "voice"):
+        if lore.get(k):
+            bits.append(f"{k.replace('_', ' ')}: {lore[k]}")
+    return ". ".join(x for x in bits if x)[:1500]
+
+
 async def _import_k3_base_as_asset(project, slug: str, session) -> str:
-    """Copy a klein3 character's active base PNG into the project as a
-    CHARACTER asset; returns the rel_path ('' if no base exists). COPY, not a
-    link — deleting the library character must not orphan the project."""
+    """Copy a klein3 base PNG in as a CHARACTER asset. COPY, not a link.
+
+    ⚠⚠ RETURNS THE PATH THE **UI** NEEDS, WHICH IS NOT THE ASSET'S rel_path.
+    An `Asset.rel_path` is relative to the PROJECT folder
+    (assets/characters/x.png), but a character's `image_path` is rendered as
+    `/api/files/{image_path}`, and that route resolves against `project_dir`
+    ROOT — so it needs the project id in front
+    (`<project_id>/assets/characters/x.png`).
+
+    Returning the asset's rel_path here is why every storyworld character
+    arrived with a name and a broken image (2026-08-18). The same helper backs
+    adopt-k3, so the autogenerate-characters watcher had the same hole.
+    Forward slashes on purpose: it becomes a URL."""
     import hashlib
     from backend.api.klein3 import _active_base_path, _load as _k3_load
     from backend.database.models import AssetType
@@ -1126,11 +1573,12 @@ async def _import_k3_base_as_asset(project, slug: str, session) -> str:
     dest = dest_dir / f"{slug}_base.png"
     shutil.copy2(fp, dest)
     data = dest.read_bytes()
-    rel = str(dest.relative_to(proj_dir))
+    rel = str(dest.relative_to(proj_dir))               # the ASSET's path
     asset = Asset(project_id=project.id, filename=dest.name, rel_path=rel,
                   asset_type=AssetType.CHARACTER,
                   sha256=hashlib.sha256(data).hexdigest(),
                   file_size=len(data),
                   meta={"source": "storyworld", "slug": slug})
     session.add(asset)
-    return rel
+    # the UI path: project-id-prefixed, forward slashes, /api/files-resolvable
+    return str(dest.relative_to(Path(settings.project_dir))).replace("\\", "/")

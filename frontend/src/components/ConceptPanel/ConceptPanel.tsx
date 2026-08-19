@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, Save, Zap, User, ImageIcon, Monitor, Pencil, Music, Sparkles, Users, X } from 'lucide-react';
 import { getConcept, saveConcept, uploadAsset, getLyrics, baseOnLyrics, autogenerateCharacters } from '@/api/client';
 import { handleImgError } from '@/utils/brokenImage';
+import { SceneRefModeGlobal } from '@/components/Common/SceneRefMode';
 import CharacterCreatorModal from './CharacterCreatorModal';
 import { GlobalCharacterLibraryModal } from './GlobalCharacterLibraryModal';
 import { useAppStore } from '@/store';
@@ -58,6 +59,36 @@ interface ConceptPanelProps {
 
 export default function ConceptPanel({ projectId }: ConceptPanelProps) {
   const [songTitle, setSongTitle] = useState('');
+  // 🌍 v1.277.27 — when the project is LINKED to a world+story, concept/style
+  // are DERIVED from the story (services/story_context.py) rather than typed
+  // here. This panel shows what they resolve to and offers a per-field pin.
+  type StoryCtxT = {
+    linked: boolean; world?: { id: string; name: string } | null;
+    story?: { id: string; title: string } | null;
+    arcs?: { title: string }[];
+    cast?: { name: string; char_slug?: string }[];
+    derived?: Record<string, string>; effective?: Record<string, string>;
+    own?: Record<string, string>; overrides?: Record<string, string>;
+  };
+  const [sctx, setSctx] = useState<StoryCtxT | null>(null);
+  const loadSctx = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/projects/${projectId}/story-context`);
+      if (r.ok) setSctx(await r.json());
+    } catch { /* not linked / offline is fine */ }
+  }, [projectId]);
+  useEffect(() => { void loadSctx(); }, [loadSctx]);
+  const pinned = (f: string) => !!(sctx?.overrides || {})[f];
+  const derivedFor = (f: string) => (sctx?.derived || {})[f] || '';
+  const setOverride = async (field: string, value: string) => {
+    try {
+      await fetch(`/api/projects/${projectId}/story-override`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field, value }),
+      });
+      await loadSctx();
+    } catch { /* surfaced by the badge not changing */ }
+  };
   const [conceptText, setConceptText] = useState('');
   const [styleText, setStyleText] = useState('');
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -488,6 +519,29 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4">
+        {/* 🌍 linked to a world+story — concept & style are DERIVED, not typed */}
+        {sctx?.linked && (
+          <div className="border border-emerald-800/70 bg-emerald-950/30 rounded p-2.5">
+            <div className="text-xs text-emerald-300 font-semibold">
+              🌍 Derived from {sctx.story?.title || 'this story'}
+              <span className="text-emerald-600/80 font-normal"> · {sctx.world?.name}</span>
+            </div>
+            <div className="text-[11px] text-gray-400 mt-1">
+              Concept and visual style come from the story <b>live</b> — edit them on
+              /worlds and this project follows. {(sctx.arcs || []).length
+                ? `${(sctx.arcs || []).length} arcs → chapters.` : 'No arcs yet — ✨ Structure the story to get chapters.'}
+              {(sctx.cast || []).length ? ` ${(sctx.cast || []).length} characters in this story.` : ''}
+            </div>
+            <div className="text-[11px] text-gray-500 mt-1">
+              Pin a field below to stop the story driving it — the pinned value is kept
+              separately, so unpinning restores the story&apos;s.
+            </div>
+          </div>
+        )}
+        {/* 🎛 the project-wide scene reference mode — his call: set it here for
+            the whole project, override per scene in the Scene editor */}
+        <SceneRefModeGlobal projectId={projectId} />
+
         {/* Song Title */}
         <div>
           <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400 mb-1">
@@ -538,7 +592,28 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
 
         {/* Overall Concept */}
         <div>
-          <label className="block text-xs font-medium text-gray-400 mb-1">{isNarration ? 'Narration Concept' : 'Overall Concept'}</label>
+          <label className="flex items-center gap-2 text-xs font-medium text-gray-400 mb-1">
+            {isNarration ? 'Narration Concept' : 'Overall Concept'}
+            {sctx?.linked && (
+              <>
+                <span className={pinned('concept_text')
+                  ? 'text-amber-400 text-[10px]' : 'text-emerald-400 text-[10px]'}>
+                  {pinned('concept_text') ? '✏ pinned — the story is not driving this'
+                                          : `🌍 from ${sctx.story?.title || 'the story'}`}
+                </span>
+                <button className="text-[10px] underline text-gray-500 hover:text-gray-300"
+                  onClick={() => void setOverride('concept_text',
+                    pinned('concept_text') ? '' : (conceptText || derivedFor('concept_text')))}>
+                  {pinned('concept_text') ? 'use the story' : 'pin this text'}
+                </button>
+              </>
+            )}
+          </label>
+          {sctx?.linked && !pinned('concept_text') && (
+            <div className="text-[11px] text-gray-400 bg-gray-800/60 border border-gray-700 rounded p-2 mb-1 max-h-28 overflow-y-auto whitespace-pre-wrap">
+              {derivedFor('concept_text') || '(the story has no logline/synopsis yet)'}
+            </div>
+          )}
           <textarea
             value={conceptText}
             onChange={(e) => { setConceptText(e.target.value); markDirty(); }}
@@ -549,7 +624,27 @@ export default function ConceptPanel({ projectId }: ConceptPanelProps) {
 
         {/* Overall Style */}
         <div>
-          <label className="block text-xs font-medium text-gray-400 mb-1">Visual Style</label>
+          <label className="flex items-center gap-2 text-xs font-medium text-gray-400 mb-1">
+            Visual Style
+            {sctx?.linked && (
+              <>
+                <span className={pinned('style_text')
+                  ? 'text-amber-400 text-[10px]' : 'text-emerald-400 text-[10px]'}>
+                  {pinned('style_text') ? '✏ pinned' : '🌍 from the world style'}
+                </span>
+                <button className="text-[10px] underline text-gray-500 hover:text-gray-300"
+                  onClick={() => void setOverride('style_text',
+                    pinned('style_text') ? '' : (styleText || derivedFor('style_text')))}>
+                  {pinned('style_text') ? 'use the world' : 'pin this text'}
+                </button>
+              </>
+            )}
+          </label>
+          {sctx?.linked && !pinned('style_text') && (
+            <div className="text-[11px] text-gray-400 bg-gray-800/60 border border-gray-700 rounded p-2 mb-1 max-h-24 overflow-y-auto whitespace-pre-wrap">
+              {derivedFor('style_text') || '(the world has no visual style set)'}
+            </div>
+          )}
           <textarea
             value={styleText}
             onChange={(e) => { setStyleText(e.target.value); markDirty(); }}

@@ -832,6 +832,30 @@ export default function AppLayout() {
           <span className="px-3 py-1 bg-gray-800 rounded-full text-sm text-gray-300 hidden md:inline-block flex-shrink-0">
             {getModeLabel(project.mode)}
           </span>
+          {/* 🎬 which VIDEO ENGINE this project renders on — it changes the
+              whole render path, and it used to be visible only inside a modal */}
+          {(() => {
+            const eng = (project as unknown as { settings?: Record<string, unknown> })
+              ?.settings?.video_engine as string | undefined;
+            const label = eng === 'minimax_h3' ? '🎬 MiniMax H3'
+              : eng === 'ltx_2.5' ? '🎬 LTX 2.5' : '🎬 LTX 2.3';
+            const tone = eng === 'minimax_h3'
+              ? 'bg-fuchsia-900/60 text-fuchsia-200 border-fuchsia-700'
+              : 'bg-blue-900/50 text-blue-200 border-blue-800';
+            return (
+              <span className={`px-3 py-1 rounded-full text-sm border hidden md:inline-block flex-shrink-0 ${tone}`}
+                    title="the video engine this project renders on (Video Engine & Story)">
+                {label}
+              </span>
+            );
+          })()}
+          {/* 🌍 linked to a world/story — the concept and chapters come from it */}
+          {!!(project as unknown as { settings?: Record<string, unknown> })?.settings?.world_id && (
+            <span className="px-3 py-1 rounded-full text-sm border bg-emerald-900/40 text-emerald-200 border-emerald-800 hidden lg:inline-block flex-shrink-0"
+                  title="this project derives its concept, chapters and cast from a linked story">
+              🌍 story-linked
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2 md:gap-4 flex-shrink-0">

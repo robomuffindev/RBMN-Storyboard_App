@@ -574,10 +574,13 @@ async def _rebuild_chapters_locked(
     await session.execute(
         text(
             "UPDATE chapters SET parent_chapter_id = NULL "
-            "WHERE project_id = :pid AND source = 'manual' "
+            # ⚠ FIFTH predicate — widened v1.277.29 (the doc audit found it
+            # still narrow: a story child of a deleted parent kept a dangling
+            # link, and a manual child of a SURVIVING story parent was orphaned)
+            "WHERE project_id = :pid AND source IN ('manual', 'story') "
             "AND parent_chapter_id IN ("
             "  SELECT id FROM chapters WHERE project_id = :pid "
-            "  AND (source IS NULL OR source != 'manual'))"
+            "  AND (source IS NULL OR source NOT IN ('manual', 'story')))"
         ),
         {"pid": _pid_hex_pre},
     )
@@ -585,9 +588,13 @@ async def _rebuild_chapters_locked(
     for d in range(10, -1, -1):
         del_res = await session.execute(
             text(
+                # ⚠ 'story' joins 'manual' as a PRESERVED source (v1.277.24):
+                # chapters derived from a linked story's arcs are authored
+                # content, and this rebuild fires automatically from
+                # suggest-timeline, slice-audio and AAF import.
                 "DELETE FROM chapters "
                 "WHERE project_id = :pid "
-                "AND (source IS NULL OR source != 'manual') "
+                "AND (source IS NULL OR source NOT IN ('manual', 'story')) "
                 "AND depth = :d"
             ),
             {"pid": _pid_hex_pre, "d": d},
@@ -622,7 +629,7 @@ async def _rebuild_chapters_locked(
         text(
             "SELECT COUNT(*) FROM chapters "
             "WHERE project_id = :pid "
-            "AND (source IS NULL OR source != 'manual')"
+            "AND (source IS NULL OR source NOT IN ('manual', 'story'))"
         ),
         {"pid": _pid_hex_pre},
     )
@@ -639,7 +646,7 @@ async def _rebuild_chapters_locked(
             _raw_conn = await session.connection()
             await _raw_conn.exec_driver_sql(
                 "DELETE FROM chapters WHERE project_id = ? "
-                "AND (source IS NULL OR source != 'manual')",
+                "AND (source IS NULL OR source NOT IN ('manual', 'story'))",
                 (_pid_hex_pre,),
             )
             await session.commit()
@@ -651,7 +658,7 @@ async def _rebuild_chapters_locked(
                 text(
                     "SELECT COUNT(*) FROM chapters "
                     "WHERE project_id = :pid "
-                    "AND (source IS NULL OR source != 'manual')"
+                    "AND (source IS NULL OR source NOT IN ('manual', 'story'))"
                 ),
                 {"pid": _pid_hex_pre},
             )
@@ -705,6 +712,31 @@ async def _rebuild_chapters_locked(
         select(Chapter).where(Chapter.project_id == project_id)
     )
     existing_chapters = list(chapter_result.scalars().all())
+
+    # 🎬 v1.277.24 — a project LINKED to a story owns its chapter structure
+    # from the story's ARCS (or, since v1.277.46, from a linked CHAPTER's
+    # BEATS). Running the header/auto producers alongside would add a second,
+    # competing set (these are preserved, so they would not even be cleaned
+    # up). Re-time them against the audio instead and stop.
+    #
+    # ⚠⚠ ASK PROVENANCE, NOT `source`. `backend/api/chapters.py` flips `source`
+    # to "manual" on rename/split/merge/describe, so `c.source == "story"` here
+    # meant that RENAMING ONE STORY CHAPTER silently re-enabled the auto
+    # producer and grew a competing set beside it. `is_from_story` reads
+    # `chapter_metadata["from_story"]`, which is written once and never changes.
+    from .from_story import is_from_story
+    _story_chapters = [c for c in existing_chapters if is_from_story(c)]
+    if _story_chapters and not force_auto:
+        from .from_story import retime_story_chapters
+        n = await retime_story_chapters(session, project_id)
+        await session.flush()
+        await bind_scenes_to_chapters_by_time(session, project_id)
+        logger.info("rebuild_chapters(%s): story-linked — %d arc chapter(s) "
+                    "re-timed, header/auto producers skipped", project_id, n)
+        fresh_s = await session.execute(
+            select(Chapter).where(Chapter.project_id == project_id)
+            .order_by(Chapter.depth, Chapter.order_index))
+        return list(fresh_s.scalars().all())
 
     # Decide path: headers or auto
     parsed: Optional[ParsedScript] = None

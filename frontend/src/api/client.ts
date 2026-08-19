@@ -858,6 +858,15 @@ export const deletePersistentBatchRunsBulk = (status?: 'completed' | 'failed') =
 
 // ── Narration Mode ──────────────────────────────────────────────────
 
+/** 🌍 load an SRT the story pull already put in this project (no re-upload) */
+export const importSrtAsset = (projectId: string, srtAssetId: string) => {
+  const formData = new FormData();
+  formData.append('srt_asset_id', srtAssetId);
+  return api.post(`/projects/${projectId}/timeline/upload-srt`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
 export const uploadSrt = (projectId: string, file: File) => {
   const formData = new FormData();
   formData.append('file', file);

@@ -54,3 +54,9 @@ onnxruntime>=1.17
 
 # 3D character pipeline (Blender-as-a-module; app venv is Python 3.11)
 bpy==4.2.0; python_version == '3.11'
+
+# AAF (ElevenLabs) timeline import AND export — pure-Python AAF reader/writer.
+# NOTE: this was in pyproject.toml only, so a `pip install -r requirements.txt`
+# install had NO AAF support at all and import-aaf raised a confusing
+# "requires pyaaf2" at click time. Both files list it now.
+pyaaf2>=1.7

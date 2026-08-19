@@ -978,6 +978,9 @@ async def generate_video_flow(
             "description": ch.description or "",
             "character_focus": list(ch.character_focus or []),
             "style_notes": ch.style_notes or "",
+            # carries arc_id when the chapter came from a story arc, so the
+            # flow LLM can be handed THAT arc rather than the whole story
+            "chapter_metadata": dict(ch.chapter_metadata or {}),
         }
         logger.info(
             f"Flow generate scoped to chapter {ch.short_code}: "
@@ -1046,8 +1049,22 @@ async def _generate_flow_inner(
 
     # Re-gather concept info (already loaded in caller but keep encapsulated)
     s = project.settings or {}
-    concept_text = s.get("concept_text", "")
-    style_text = s.get("style_text", "")
+    # 🌍 v1.277.24 — a LINKED project takes its creative direction from the
+    # world+story, not from what was typed on the Concept tab. `effective()`
+    # returns the SAME keys everything downstream already reads, and an
+    # explicit per-field override still wins.
+    from backend.services import story_context as _sc
+    _ctx = _sc.resolve(s)
+    _eff = _sc.effective(s, _ctx)
+    concept_text = _eff.get("concept_text") or s.get("concept_text", "")
+    style_text = _eff.get("style_text") or s.get("style_text", "")
+    if _ctx.get("linked"):
+        # ⭐ per-CHAPTER arc block: the chapter IS an arc of the story, so the
+        # flow LLM is told which stretch of story it is writing shots for.
+        _arc = _sc.arc_context(_ctx, (chapter_ctx or {}).get("chapter_metadata"),
+                               (chapter_ctx or {}).get("name") or "")
+        if _arc:
+            concept_text = f"{_arc}\n\n{concept_text}"
     # If chapter context provided, fold its description into concept_text
     # and its style_notes into style_text so existing prompt-building
     # paths pick it up automatically.

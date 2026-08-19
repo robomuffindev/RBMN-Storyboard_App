@@ -87,6 +87,19 @@ _STORY_FIELDS: List[Dict[str, str]] = [
 ]
 _STORY_TYPES = ["music_video", "narration", "short_film", "series", "other"]
 
+# 🎬 v1.277.24 — STORIES GET STRUCTURE. `beats` stays as the writer's free text;
+# `arcs` is the machine-readable spine that a PROJECT turns into chapters, that
+# the score lane turns into backing beds, and that the flow LLM reads per
+# chapter. Free text and structure both, because the LLM writes better prose
+# than it writes tables, and the pipeline needs the table.
+_ARC_FIELDS: List[Dict[str, str]] = [
+    {"key": "title",      "label": "Title",      "hint": "what this stretch of story is called"},
+    {"key": "summary",    "label": "What happens", "hint": "the beat itself, 1-3 sentences"},
+    {"key": "mood",       "label": "Mood",       "hint": "how it should FEEL — drives the backing track"},
+    {"key": "characters", "label": "Characters", "hint": "who is present (names from the cast)"},
+    {"key": "locations",  "label": "Locations",  "hint": "where it happens"},
+]
+
 # klein3's physical description sheet — MUST stay in step with klein3._FIELD_ORDER.
 _CAST_FIELD_KEYS = ["age", "sex", "race", "skin_color", "hair", "eyes", "face",
                     "body", "height", "aesthetics", "additional_details"]
@@ -154,6 +167,15 @@ _STYLE_PRESETS: List[Dict[str, str]] = [
 _STYLE_REF_DIR = _ROOT / "style_refs"
 _SAMPLE_DIR = _ROOT / "samples"
 _STYLE_JOBS: Dict[str, dict] = {}        # wid → live sample-render status
+# 📍🖼 v1.277.21 — LOCATION SHEETS ARE IMAGES TOO. Scouting wrote the six text
+# fields and stopped there, so a "location sheet" existed as prose with nothing
+# to hand a render as a reference. Shots live per world, indexed like samples.
+_LOC_SHOT_DIR = _ROOT / "location_shots"
+# 🎙 v1.277.30 — the narration RECORDING lives with the story, so it can be
+# reviewed before any project exists. Audio is the one thing that was still
+# only knowable inside a project.
+_NARR_DIR = _ROOT / "narration_audio"
+_LOC_JOBS: Dict[str, dict] = {}          # f"{wid}:{lid}" → live render status
 _SAMPLE_MODELS = ("krea2", "z_image", "anima", "klein")
 
 # submission level → explicit autogen toggles. "details" is stages=[character]
@@ -448,7 +470,8 @@ async def meta():
             "style_presets": _STYLE_PRESETS,
             "sample_models": list(_SAMPLE_MODELS),
             "location_fields": _LOCATION_FIELDS,
-            "location_kinds": _LOCATION_KINDS}
+            "location_kinds": _LOCATION_KINDS,
+            "arc_fields": _ARC_FIELDS}
 
 
 @router.get("/llms")
@@ -548,8 +571,12 @@ async def set_world_llm(wid: str, pick: LlmPick):
 # ══ stories ══════════════════════════════════════════════════════════════════
 class StoryIn(BaseModel):
     title: str = ""
-    story_type: str = "music_video"
+    # ⚠ Optional, NOT "music_video": update_story writes any VALID value, so a
+    # default of "music_video" silently converted a narration story every time
+    # the arcs editor posted `{arcs}` alone (found by the v1.277.28 doc audit).
+    story_type: Optional[str] = None
     fields: Dict[str, Any] = {}
+    arcs: Optional[List[Dict[str, Any]]] = None
 
 
 @router.post("/worlds/{wid}/stories")
@@ -557,11 +584,12 @@ async def add_story(wid: str, body: StoryIn):
     if not (body.title or "").strip():
         raise HTTPException(400, "the story needs a title")
     st = {"id": uuid4().hex[:8], "title": body.title.strip(),
-          "story_type": body.story_type if body.story_type in _STORY_TYPES
-          else "other",
+          "story_type": (body.story_type if body.story_type in _STORY_TYPES
+                         else "music_video"),
           "fields": {f["key"]: _flat(v) for f in _STORY_FIELDS
                      if (v := (body.fields or {}).get(f["key"])) is not None},
-          "created_at": _now(), "updated_at": _now()}
+          "arcs": _clean_arcs(body.arcs), "created_at": _now(),
+          "updated_at": _now()}
     with _LOCK:
         w = _load(wid)
         w.setdefault("stories", []).append(st)
@@ -577,11 +605,13 @@ async def update_story(wid: str, sid: str, body: StoryIn):
         st = _find(w.get("stories") or [], sid, "story")
         if (body.title or "").strip():
             st["title"] = body.title.strip()
-        if body.story_type in _STORY_TYPES:
+        if body.story_type and body.story_type in _STORY_TYPES:
             st["story_type"] = body.story_type
         for k, v in (body.fields or {}).items():
             if k in keys:
                 st.setdefault("fields", {})[k] = _flat(v)
+        if body.arcs is not None:
+            st["arcs"] = _clean_arcs(body.arcs)
         st["updated_at"] = _now()
         _save(w)
     return st
@@ -589,16 +619,26 @@ async def update_story(wid: str, sid: str, body: StoryIn):
 
 @router.post("/worlds/{wid}/stories/{sid}/delete")
 async def delete_story(wid: str, sid: str):
+    metas: List[dict] = []
     with _LOCK:
         w = _load(wid)
         stories = w.get("stories") or []
-        _find(stories, sid, "story")
+        st = _find(stories, sid, "story")
+        # 📖 a story's CHAPTERS die with it, and each one may own real audio on
+        # disk. Collect the file metadata inside the lock; unlink after the
+        # write lands (the ordering every other file path here follows).
+        metas = [m for c in (st.get("chapters") or [])
+                 for m in (c.get("narration_files") or {}).values()]
+        metas += list(_narr_files(st).values())
         w["stories"] = [s for s in stories if s["id"] != sid]
         for t in w.get("texts") or []:          # orphaned texts stay, unlinked
             if t.get("story_id") == sid:
                 t["story_id"] = ""
         _save(w)
-    return {"deleted": sid}
+    for m in metas:
+        for d in (_NARR_DIR, _ROOT / "chapter_audio"):
+            (d / wid / f"{m.get('id')}{m.get('ext') or ''}").unlink(missing_ok=True)
+    return {"deleted": sid, "files_removed": len(metas)}
 
 
 # ══ texts (lyrics / narrations / scripts) ════════════════════════════════════
@@ -664,6 +704,24 @@ async def all_projects(session: AsyncSession = Depends(get_session)):
     return {"projects": [{"id": str(p.id), "name": p.name,
                           "mode": getattr(p.mode, "value", str(p.mode))}
                          for p in rows]}
+
+
+@router.get("/stories")
+async def all_stories():
+    """Every story across every world, flat — for pickers elsewhere.
+
+    ⚠ Declared BEFORE the parameterized world routes purely by habit of this
+    file's ordering rule; it is a literal path so it is safe either way, but
+    `/worlds/{wid}` style routes ALWAYS go last (route order is load-bearing
+    here, v1.277.0)."""
+    out = []
+    for w in _all_worlds():
+        for s in (w.get("stories") or []):
+            out.append({"id": s.get("id"), "title": s.get("title"),
+                        "world_id": w.get("id"), "world": w.get("name"),
+                        "story_type": s.get("story_type"),
+                        "has_audio": bool(_narr_files(s).get("audio"))})
+    return {"stories": out}
 
 
 class ProjectLinkIn(BaseModel):
@@ -788,6 +846,29 @@ class LocationIn(BaseModel):
     kind: str = ""
     fields: Dict[str, Any] = {}
     story_ids: Optional[List[str]] = None
+
+
+def _clean_arcs(raw: Any) -> List[dict]:
+    """Normalise an arc list: ordered, titled, and never longer than a story.
+
+    ⚠ `weight` is deliberately NOT here. Arcs are matched to the audio's
+    DETECTED SECTIONS in order (his call, 2026-08-16) — inventing a duration
+    for a beat and then fighting the real recording is how a chapter ends up
+    cutting mid-sentence."""
+    out = []
+    for i, a in enumerate((raw or [])[:24]):
+        if not isinstance(a, dict):
+            a = {"title": str(a)}
+        out.append({
+            "id": str(a.get("id") or uuid4().hex[:8]),
+            "i": i,
+            "title": _flat(a.get("title") or f"Arc {i + 1}", 120),
+            "summary": _flat(a.get("summary") or "", 1200),
+            "mood": _flat(a.get("mood") or "", 300),
+            "characters": [_flat(x, 80) for x in (a.get("characters") or [])][:12],
+            "locations": [_flat(x, 80) for x in (a.get("locations") or [])][:8],
+        })
+    return out
 
 
 def _clean_location_bits(l: dict, body: LocationIn) -> None:
@@ -925,6 +1006,612 @@ async def enhance_location(wid: str, lid: str, body: EnhanceIn,
         l["updated_at"] = _now()
         _save(w)
     return {"location": l, "changed": changed}
+
+
+# ── 📍🖼 location shots ──────────────────────────────────────────────────────
+def _loc_shot_rows(wid: str) -> List[dict]:
+    try:
+        d = json.loads((_LOC_SHOT_DIR / wid / "index.json").read_text("utf-8"))
+        return d if isinstance(d, list) else []
+    except Exception:                                            # noqa: BLE001
+        return []
+
+
+def _loc_shot_rows_save(wid: str, rows: List[dict]) -> None:
+    fp = _LOC_SHOT_DIR / wid / "index.json"
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = fp.with_name(f"index.{uuid4().hex[:6]}.tmp")
+    tmp.write_text(json.dumps(rows, indent=2), "utf-8")
+    tmp.replace(fp)
+
+
+def _loc_prompts(l: dict, count: int, direction: str) -> List[tuple]:
+    """Turn the SIX TEXT FIELDS into distinct image prompts — no LLM call.
+
+    The scout already wrote the sheet; asking a model to paraphrase it would
+    add a minute and a failure mode for nothing. Angles are ordered so the
+    first shot is always the establishing one (that is what becomes ⭐ active
+    and what other lanes will cite as the reference)."""
+    f = l.get("fields") or {}
+    name = l.get("name") or "the location"
+    kind = l.get("kind") or "exterior"
+    desc = f.get("description") or ""
+    atmo = f.get("atmosphere") or ""
+    keyd = f.get("key_details") or ""
+    light = f.get("time_and_light") or ""
+    role = f.get("story_role") or ""
+    base = f"{name} — a {kind} location. {desc}".strip()
+    angles = [
+        ("establishing", f"wide establishing shot of {base} {light}. {atmo}"),
+        ("interior / eye level", f"eye-level view inside {name}, showing "
+                                 f"{keyd or desc}. {atmo} {light}"),
+        ("details", f"detail shot of the recognisable specifics of {name}: "
+                    f"{keyd or desc}"),
+        ("other light", f"{name} at a different hour — {base} under changed "
+                        f"light, {atmo}"),
+        ("scene opening", f"the vantage a scene would open on: {base}. "
+                          f"{role or atmo}"),
+        ("corner", f"a quiet corner of {name}: {keyd or desc}. {light}"),
+    ]
+    out = []
+    for i in range(count):
+        label, p = angles[i % len(angles)]
+        if direction.strip():
+            p += f". {direction.strip()}"
+        # ⚠ a REFERENCE plate, not a scene: people and captions in a location
+        # sheet get copied into every render that cites it.
+        # ⚠⚠ AFFIRMATIVE ONLY. The first version ended every plate with "No
+        # people, no characters, no text" and every render came back FULL of
+        # people — these lanes run at cfg 1 with no negative prompt, so naming
+        # a thing summons it (the Klein rule, relearned on locations 08-16).
+        # Describe the EMPTY place instead: deserted, still, unoccupied.
+        out.append((label, _flat(p, 600)
+                    + ". A deserted, unoccupied place: empty of figures, "
+                      "still and quiet, a clean environment plate"))
+    return out
+
+
+def _run_loc_shots(wid: str, lid: str, disp, count: int, model: str,
+                   prompts: List[tuple], style_txt: str,
+                   ref_path: Optional[Path], ref_mode: str = "style") -> None:
+    """Render this location's plates, fanned across the fleet.
+
+    Same three paths as the style samples (klein+styleref / forge's krea2 lane
+    / plain t2i pool) and the same live-status contract — status, total, done,
+    workers, log, elapsed — because that is the standing rule for every
+    generation lane, not a feature of one screen."""
+    import time as _t
+    key = f"{wid}:{lid}"
+    st = _LOC_JOBS[key]
+    st.update({"status": "running", "total": count, "done": 0,
+               "t0": _t.time(), "workers": [], "log": [], "error": None})
+
+    def _log(msg: str) -> None:
+        st.setdefault("log", []).append(
+            {"t": round(_t.time() - st["t0"], 1), "detail": msg})
+
+    out_dir = _LOC_SHOT_DIR / wid
+    out_dir.mkdir(parents=True, exist_ok=True)
+    made: List[dict] = []
+    try:
+        labels = [a for a, _p in prompts]
+        made = _render_prompt_set(disp, model, [p for _a, p in prompts],
+                                  style_txt, ref_path, out_dir, st, _log,
+                                  seed_base=52000, ref_mode=ref_mode)
+        # ⚠ positional write-back: `made` comes back in completion order from a
+        # thread pool, so match on the PROMPT, never on the list index (the
+        # v1.277.0 ② lesson — matching by position on unordered results put one
+        # job's result on another row).
+        for r in made:
+            r["lid"] = lid
+            r["kind"] = "plate"
+            body = (r.get("prompt") or "")
+            r["angle"] = next((a for a, p in prompts if p[:60] in body), "")
+        rows = _loc_shot_rows(wid) + made
+        _loc_shot_rows_save(wid, rows)
+        # ⭐ the first successful plate becomes the location's active image if
+        # it has none — a sheet nobody has picked from is still usable.
+        if made:
+            with _LOCK:
+                w = _load(wid)
+                loc = next((x for x in (w.get("locations") or [])
+                            if x.get("id") == lid), None)
+                if loc is not None and not loc.get("image_id"):
+                    loc["image_id"] = made[0]["id"]
+                    loc["updated_at"] = _now()
+                    _save(w)
+        # 🪪 the SHEET: one image with every plate on it, the way a character
+        # sheet works — a single reference a model can hold consistency from.
+        if made:
+            try:
+                sheet = _build_location_sheet(wid, lid)
+                if sheet:
+                    _log(f"sheet composed: {sheet['id']}")
+            except Exception as e:                               # noqa: BLE001
+                _log(f"sheet compose failed: {e}")
+        st["status"] = "done" if made else "error"
+        if not made and not st.get("error"):
+            st["error"] = "every shot failed — see the log"
+        st["elapsed_s"] = round(_t.time() - st["t0"], 1)
+        _log(f"finished: {len(made)}/{count} shots")
+    except Exception as e:                                       # noqa: BLE001
+        st["status"] = "error"
+        st["error"] = f"{type(e).__name__}: {e}"
+        st["elapsed_s"] = round(_t.time() - st["t0"], 1)
+        logger.exception("location shots %s/%s failed", wid, lid)
+
+
+def _build_location_sheet(wid: str, lid: str, width: int = 2048) -> Optional[dict]:
+    """🪪 Compose this location's plates into ONE sheet image.
+
+    Same idea as the character sheet, and for the same reason: a model holds
+    consistency far better from a single reference showing several views than
+    from one photograph of one angle. Pure PIL — no worker, no GPU, so it is
+    free to rebuild whenever the plates change.
+
+    ⚠ Only PLATES go on the sheet. Including a previous sheet would nest
+    thumbnails inside thumbnails on every rebuild."""
+    from PIL import Image, ImageDraw, ImageFont
+    w = _load(wid)
+    loc = next((x for x in (w.get("locations") or []) if x.get("id") == lid), None)
+    if loc is None:
+        return None
+    d = _LOC_SHOT_DIR / wid
+    plates = [r for r in _loc_shot_rows(wid)
+              if r.get("lid") == lid and (r.get("kind") or "plate") == "plate"
+              and (d / f"{r['id']}.png").exists()]
+    if not plates:
+        return None
+    # ⚠ order the CELLS, not the renders: plates come back in completion order
+    # from a thread pool, so a sheet composed as-rendered opens on whatever
+    # finished first (the first live sheet led with "details").
+    order = ["establishing", "interior / eye level", "details", "other light",
+             "scene opening", "corner"]
+    plates = plates[-6:]                       # newest six is a full sheet
+    plates.sort(key=lambda r: (order.index(r.get("angle"))
+                               if r.get("angle") in order else 99))
+    cols = 2 if len(plates) <= 2 else 3
+    rows = (len(plates) + cols - 1) // cols
+    margin, gutter, label_h, header_h = 24, 16, 34, 96
+    cell_w = (width - margin * 2 - gutter * (cols - 1)) // cols
+    cell_h = int(cell_w * 9 / 16)
+    height = margin * 2 + header_h + rows * (cell_h + label_h) + (rows - 1) * gutter
+    canvas = Image.new("RGB", (width, height), "#101319")
+    draw = ImageDraw.Draw(canvas)
+    try:
+        f_big = ImageFont.truetype("arial.ttf", 46)
+        f_small = ImageFont.truetype("arial.ttf", 24)
+    except Exception:                                            # noqa: BLE001
+        f_big = ImageFont.load_default()
+        f_small = ImageFont.load_default()
+    title = f"{loc.get('name') or 'location'}  ·  {loc.get('kind') or ''}"
+    draw.text((margin, margin), title, fill="#e6e9ee", font=f_big)
+    sub = (loc.get("fields") or {}).get("description") or ""
+    draw.text((margin, margin + 56), sub[:150], fill="#8d97a5", font=f_small)
+
+    for i, r in enumerate(plates):
+        cx = margin + (i % cols) * (cell_w + gutter)
+        cy = margin + header_h + (i // cols) * (cell_h + label_h + gutter)
+        try:
+            im = Image.open(d / f"{r['id']}.png").convert("RGB")
+        except Exception:                                        # noqa: BLE001
+            continue
+        # cover-fit: fill the cell, crop the overflow — letterboxing a
+        # reference sheet wastes the pixels the model is meant to read
+        sc = max(cell_w / im.width, cell_h / im.height)
+        im = im.resize((max(1, int(im.width * sc)), max(1, int(im.height * sc))))
+        ox = (im.width - cell_w) // 2
+        oy = (im.height - cell_h) // 2
+        canvas.paste(im.crop((ox, oy, ox + cell_w, oy + cell_h)), (cx, cy))
+        draw.text((cx + 4, cy + cell_h + 6), (r.get("angle") or "view").upper(),
+                  fill="#8d97a5", font=f_small)
+
+    sid = uuid4().hex[:10]
+    d.mkdir(parents=True, exist_ok=True)
+    canvas.save(d / f"{sid}.png")
+    row = {"id": sid, "lid": lid, "kind": "sheet",
+           "prompt": f"{loc.get('name')} — sheet of {len(plates)} plates",
+           "model": "composite", "worker": None, "angle": "sheet",
+           "created_at": _now()}
+    # ⭐ the sheet supersedes older sheets: keep ONE, so the picker never shows
+    # three near-identical composites
+    rows = [r for r in _loc_shot_rows(wid)
+            if not (r.get("lid") == lid and r.get("kind") == "sheet")]
+    for old in _loc_shot_rows(wid):
+        if old.get("lid") == lid and old.get("kind") == "sheet":
+            (d / f"{old['id']}.png").unlink(missing_ok=True)
+    _loc_shot_rows_save(wid, rows + [row])
+    with _LOCK:
+        w2 = _load(wid)
+        l2 = next((x for x in (w2.get("locations") or []) if x.get("id") == lid), None)
+        if l2 is not None:
+            l2["sheet_id"] = sid
+            # ⭐ the SHEET is the default reference — that is the whole point of
+            # composing one — but a plate the USER pinned wins over a rebuild.
+            if not l2.get("image_pinned"):
+                l2["image_id"] = sid
+            l2["updated_at"] = _now()
+            _save(w2)
+    return row
+
+
+class LocShotsIn(BaseModel):
+    # ⭐ FOUR by default (his call): establishing · interior · details · other
+    # light is the standard set, the same shape as a character sheet's views.
+    count: int = 4
+    model: str = "krea2"
+    direction: str = ""
+    use_style_ref: bool = True
+
+
+# ⚠ literal segments AFTER {lid}, but still declared BEFORE the bare
+# POST /locations/{lid} update route further down — route order is
+# load-bearing in this module (the cast/submit lesson).
+class LocBulkIn(BaseModel):
+    count: int = 4
+    model: str = "krea2"
+    direction: str = ""
+    only_missing: bool = True        # False = regenerate every location
+    use_style_ref: bool = True
+
+
+def _run_loc_bulk(wid: str, lids: List[str], disp, body: LocBulkIn,
+                  style_txt: str, ref_path: Optional[Path]) -> None:
+    """Sheets for MANY locations — serial per location, fanned INSIDE each.
+
+    ⚠ Depth-first on purpose (the v1.276.54 rule): each location already
+    spreads its plates across every box, so running two locations at once
+    would not add throughput, it would just make the live status unreadable
+    and starve whichever finished last."""
+    import time as _t
+    key = f"{wid}:*"
+    st = _LOC_JOBS[key]
+    st.update({"status": "running", "total": len(lids), "done": 0,
+               "t0": _t.time(), "log": [], "error": None})
+
+    def _log(msg: str) -> None:
+        st.setdefault("log", []).append(
+            {"t": round(_t.time() - st["t0"], 1), "detail": msg})
+
+    for lid in lids:
+        try:
+            w = _load(wid)
+            loc = next((x for x in (w.get("locations") or [])
+                        if x.get("id") == lid), None)
+            if loc is None:
+                continue
+            st["current"] = loc.get("name") or lid
+            _log(f"{loc.get('name')}: rendering {body.count} plate(s)")
+            prompts = _loc_prompts(loc, max(1, min(int(body.count or 4), 8)),
+                                   body.direction)
+            _LOC_JOBS[f"{wid}:{lid}"] = {
+                "status": "starting", "total": len(prompts), "done": 0,
+                "t0": _t.time(),
+                "log": [{"t": 0.0, "detail": "queued by the bulk run"}]}
+            own = (loc.get("ref_id") or "")
+            own_fp = _LOC_SHOT_DIR / wid / f"{own}.png" if own else None
+            _run_loc_shots(wid, lid, disp, len(prompts), body.model, prompts,
+                           style_txt,
+                           own_fp if (own_fp and own_fp.exists()) else ref_path,
+                           "subject" if (own_fp and own_fp.exists()) else "style")
+            sub = _LOC_JOBS.get(f"{wid}:{lid}") or {}
+            if sub.get("status") == "error":
+                _log(f"{loc.get('name')}: {sub.get('error')}")
+        except Exception as e:                                   # noqa: BLE001
+            _log(f"{lid}: {type(e).__name__}: {e}")
+        st["done"] = int(st.get("done") or 0) + 1
+    st["current"] = ""
+    st["status"] = "done"
+    st["elapsed_s"] = round(_t.time() - st["t0"], 1)
+    _log(f"finished {st['done']}/{st['total']} locations")
+
+
+@router.post("/worlds/{wid}/locations/shots/all")
+async def render_all_location_shots(wid: str, body: LocBulkIn,
+                                    request: Request):
+    """🖼 Sheets for every location that has none — or for ALL of them."""
+    w = _load(wid)
+    locs = w.get("locations") or []
+    if not locs:
+        raise HTTPException(400, "this world has no locations yet")
+    cur = _LOC_JOBS.get(f"{wid}:*")
+    if cur and cur.get("status") in ("starting", "running"):
+        raise HTTPException(409, "a bulk location render is already running")
+    have = {r.get("lid") for r in _loc_shot_rows(wid)
+            if (_LOC_SHOT_DIR / wid / f"{r['id']}.png").exists()}
+    want = []
+    for l in locs:
+        if body.only_missing and l.get("id") in have:
+            continue
+        # a location with an empty sheet cannot produce a prompt worth rendering
+        if not any((l.get("fields") or {}).get(k) for k in
+                   ("description", "atmosphere", "key_details")):
+            continue
+        want.append(l["id"])
+    if not want:
+        raise HTTPException(409, "nothing to render — every location with a "
+                                 "filled sheet already has plates (untick "
+                                 "'only missing' to regenerate)")
+    if body.model not in _SAMPLE_MODELS:
+        raise HTTPException(400, f"model must be one of {_SAMPLE_MODELS}")
+    disp = getattr(request.app.state, "comfy_dispatcher", None)
+    if not disp:
+        raise HTTPException(409, "no worker dispatcher available")
+    ref_path: Optional[Path] = None
+    rid = (w.get("style") or {}).get("ref_id") or ""
+    if body.use_style_ref and rid and (_STYLE_REF_DIR / f"{rid}.png").exists():
+        ref_path = _STYLE_REF_DIR / f"{rid}.png"
+    import time as _t
+    _LOC_JOBS[f"{wid}:*"] = {"status": "starting", "total": len(want),
+                             "done": 0, "t0": _t.time(), "current": "",
+                             "log": [{"t": 0.0,
+                                      "detail": f"{len(want)} location(s) queued"}]}
+    threading.Thread(target=_run_loc_bulk,
+                     args=(wid, want, disp, body, _style_text(w), ref_path),
+                     daemon=True, name=f"loc-bulk-{wid}").start()
+    return {"started": True, "locations": len(want),
+            "mode": "missing only" if body.only_missing else "all"}
+
+
+@router.get("/worlds/{wid}/locations/shots/job")
+async def location_bulk_job(wid: str):
+    """The BULK job — per-location status stays on each location's own row."""
+    _load(wid)
+    st = dict(_LOC_JOBS.get(f"{wid}:*") or {})
+    if st.get("status") == "running" and st.get("t0"):
+        import time as _t
+        st["elapsed_s"] = round(_t.time() - float(st["t0"]), 1)
+    st.pop("t0", None)
+    return {"job": st}
+
+
+@router.post("/worlds/{wid}/locations/{lid}/sheet")
+async def rebuild_location_sheet(wid: str, lid: str):
+    """🪪 Recompose the sheet from the plates on disk — free, no worker."""
+    _load(wid)
+    row = _build_location_sheet(wid, lid)
+    if not row:
+        raise HTTPException(409, "no plates to compose — render some first")
+    return {"sheet": row}
+
+
+@router.get("/location-images")
+async def location_images(wid: str = ""):
+    """📍 Every location plate/sheet on the fleet, for the REFERENCE pickers.
+
+    Shaped like the character picker's groups so an image reference can be a
+    PLACE as easily as a person — same-origin URLs the video lane can map to
+    disk."""
+    out = []
+    for w in ([_load(wid)] if wid else _all_worlds()):
+        rows = _loc_shot_rows(w["id"])
+        for l in (w.get("locations") or []):
+            imgs = []
+            for r in rows:
+                if r.get("lid") != l.get("id"):
+                    continue
+                if not (_LOC_SHOT_DIR / w["id"] / f"{r['id']}.png").exists():
+                    continue
+                imgs.append({
+                    "id": r["id"], "kind": r.get("kind") or "plate",
+                    "label": r.get("angle") or r.get("kind") or "view",
+                    "active": r["id"] == (l.get("image_id") or ""),
+                    "url": f"/api/storyworld/worlds/{w['id']}/locations/"
+                           f"shots/{r['id']}/image"})
+            if imgs:
+                # sheet first — it is the one a model holds consistency from
+                imgs.sort(key=lambda x: (x["kind"] != "sheet", not x["active"]))
+                out.append({"world_id": w["id"], "world": w.get("name"),
+                            "id": l.get("id"), "name": l.get("name"),
+                            "kind": l.get("kind"), "images": imgs})
+    return {"locations": out}
+
+
+@router.post("/worlds/{wid}/locations/{lid}/reference")
+async def location_reference(wid: str, lid: str, file: UploadFile = File(...),
+                             session: AsyncSession = Depends(get_session)):
+    """📷 YOUR photo of this place → the sheet writes itself from it.
+
+    The character lane has done this for a long time (a front reference photo
+    drives every generated view); locations had no equivalent, so a real place
+    could only be described, never shown. Now:
+
+        upload → VISION scan → the six text fields are filled from what is
+        ACTUALLY in the picture → every plate is rendered FROM that image
+
+    ⚠ The scan describes the PLACE, not the photograph: no "a photo of", no
+    camera talk, and explicitly no people, because the plates that cite this
+    reference must not inherit anyone standing in it."""
+    w = _load(wid)
+    loc = _find(w.get("locations") or [], lid, "location")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty file")
+    try:
+        from PIL import Image as _Img
+        import io as _io
+        im = _Img.open(_io.BytesIO(raw)).convert("RGB")
+    except Exception as e:                                       # noqa: BLE001
+        raise HTTPException(400, f"not a readable image: {e}")
+    rid = uuid4().hex[:12]
+    d = _LOC_SHOT_DIR / wid
+    d.mkdir(parents=True, exist_ok=True)
+    im.save(d / f"{rid}.png", "PNG")
+
+    fields, scan_err = {}, ""
+    try:
+        from backend.api.vnccs_native import _ollama_cfg
+        from backend.services.character_studio.vnccs_native.wizards import (
+            image_bytes_to_b64, ollama_chat_sync)
+        urls, _txt, vision = await _ollama_cfg(session)
+        if urls and vision:
+            sys_p = ("You are a production designer documenting a LOCATION "
+                     "from a reference photograph. Describe the PLACE, never "
+                     "the photograph: no 'a photo of', no camera or lens talk, "
+                     "and never mention people even if some are visible — the "
+                     "sheet describes the place itself. Return ONLY a JSON "
+                     "object with these keys, each a dense paragraph:\n"
+                     '  "description"    what this place IS — layout, scale, '
+                     'materials, landmarks\n'
+                     '  "atmosphere"     mood, sounds, smells, weather, air\n'
+                     '  "key_details"    the recognisable specifics a shot '
+                     'should show\n'
+                     '  "time_and_light" the time of day and how the light '
+                     'behaves here\n'
+                     '  "kind"           one of: exterior, interior, landmark, '
+                     'vehicle, region, other')
+            got = await asyncio.to_thread(
+                ollama_chat_sync, urls, vision, sys_p,
+                "Document this location.", [image_bytes_to_b64(raw)], 0.2)
+            if got:
+                fields = _json_obj(got)
+        else:
+            scan_err = "no Ollama vision model configured in Settings"
+    except Exception as e:                                       # noqa: BLE001
+        scan_err = f"location scan failed: {e}"
+
+    changed = []
+    with _LOCK:
+        w2 = _load(wid)
+        l2 = _find(w2.get("locations") or [], lid, "location")
+        l2["ref_id"] = rid
+        keys = {f["key"] for f in _LOCATION_FIELDS}
+        for k, v in (fields or {}).items():
+            if k == "kind" and str(v).strip() in _LOCATION_KINDS:
+                l2["kind"] = str(v).strip()
+                changed.append("kind")
+            elif k in keys and _flat(v):
+                # ⚠ FILL semantics — never overwrite what he already wrote
+                if not (l2.get("fields") or {}).get(k):
+                    l2.setdefault("fields", {})[k] = _flat(v, 2000)
+                    changed.append(k)
+        l2["updated_at"] = _now()
+        _save(w2)
+    return {"ref_id": rid, "changed": changed, "scan_error": scan_err,
+            "url": f"/api/storyworld/worlds/{wid}/locations/shots/{rid}/image",
+            "location": _find(_load(wid).get("locations") or [], lid, "location")}
+
+
+@router.post("/worlds/{wid}/locations/{lid}/shots")
+async def render_location_shots(wid: str, lid: str, body: LocShotsIn,
+                                request: Request):
+    """🖼 Render this location's SHEET — the plates other lanes cite."""
+    w = _load(wid)
+    l = _find(w.get("locations") or [], lid, "location")
+    key = f"{wid}:{lid}"
+    cur = _LOC_JOBS.get(key)
+    if cur and cur.get("status") in ("starting", "running"):
+        raise HTTPException(409, "this location is already rendering")
+    count = max(1, min(int(body.count or 4), 8))
+    if body.model not in _SAMPLE_MODELS:
+        raise HTTPException(400, f"model must be one of {_SAMPLE_MODELS}")
+    if not any((l.get("fields") or {}).get(k) for k in
+               ("description", "atmosphere", "key_details")):
+        raise HTTPException(400, "fill the sheet first (description / "
+                                 "atmosphere / key details) — ✨ or 📍 Scout "
+                                 "writes them")
+    disp = getattr(request.app.state, "comfy_dispatcher", None)
+    if not disp:
+        raise HTTPException(409, "no worker dispatcher available")
+    # ⭐ the location's OWN uploaded photo wins over the world's style ref:
+    # "make more views of THIS place" beats "make a place in this style".
+    ref_path: Optional[Path] = None
+    ref_mode = "style"
+    own = (l.get("ref_id") or "")
+    if own and (_LOC_SHOT_DIR / wid / f"{own}.png").exists():
+        ref_path = _LOC_SHOT_DIR / wid / f"{own}.png"
+        ref_mode = "subject"          # image 1 IS the place, not a style
+    else:
+        rid = (w.get("style") or {}).get("ref_id") or ""
+        if body.use_style_ref and rid and (_STYLE_REF_DIR / f"{rid}.png").exists():
+            ref_path = _STYLE_REF_DIR / f"{rid}.png"
+    prompts = _loc_prompts(l, count, body.direction)
+    # register BEFORE the thread starts — a status that appears only once work
+    # is underway is a status that can lie (v1.276.29).
+    import time as _t
+    _LOC_JOBS[key] = {"status": "starting", "total": count, "done": 0,
+                      "t0": _t.time(),
+                      "log": [{"t": 0.0, "detail": f"rendering {count} plate(s) "
+                                                   f"of {l.get('name')}"}]}
+    threading.Thread(target=_run_loc_shots,
+                     args=(wid, lid, disp, count, body.model, prompts,
+                           _style_text(w), ref_path, ref_mode),
+                     daemon=True, name=f"loc-shots-{lid}").start()
+    return {"started": True, "count": count, "prompts": prompts,
+            "via": ("klein+locationref" if ref_mode == "subject"
+                    else ("klein+styleref" if ref_path else body.model))}
+
+
+@router.get("/worlds/{wid}/locations/{lid}/shots")
+async def list_location_shots(wid: str, lid: str):
+    w = _load(wid)
+    l = _find(w.get("locations") or [], lid, "location")
+    st = dict(_LOC_JOBS.get(f"{wid}:{lid}") or {})
+    if st.get("status") == "running" and st.get("t0"):
+        import time as _t
+        st["elapsed_s"] = round(_t.time() - float(st["t0"]), 1)
+    st.pop("t0", None)
+    out = []
+    for r in _loc_shot_rows(wid):
+        if r.get("lid") != lid:
+            continue
+        if (_LOC_SHOT_DIR / wid / f"{r['id']}.png").exists():
+            out.append({**r, "active": r["id"] == (l.get("image_id") or ""),
+                        "url": f"/api/storyworld/worlds/{wid}/locations/"
+                               f"shots/{r['id']}/image"})
+    out.sort(key=lambda r: (r.get("kind") != "sheet", r.get("created_at") or ""))
+    return {"shots": out, "job": st, "active_id": l.get("image_id") or "",
+            "sheet_id": l.get("sheet_id") or ""}
+
+
+@router.get("/worlds/{wid}/locations/shots/{sid}/image")
+async def location_shot_image(wid: str, sid: str, download: bool = False):
+    if any(x in sid + wid for x in ("/", "\\", "..")):
+        raise HTTPException(400, "bad id")
+    fp = _LOC_SHOT_DIR / wid / f"{sid}.png"
+    if not fp.exists():
+        raise HTTPException(404, "no such shot")
+    from fastapi.responses import FileResponse
+    if download:
+        return FileResponse(str(fp), media_type="image/png",
+                            filename=f"location_{sid}.png")
+    return FileResponse(str(fp), media_type="image/png")
+
+
+@router.post("/worlds/{wid}/locations/{lid}/shots/{sid}/active")
+async def location_shot_active(wid: str, lid: str, sid: str):
+    """⭐ The plate this location IS — what other lanes will cite."""
+    with _LOCK:
+        w = _load(wid)
+        l = _find(w.get("locations") or [], lid, "location")
+        if not (_LOC_SHOT_DIR / wid / f"{sid}.png").exists():
+            raise HTTPException(404, "no such shot")
+        l["image_id"] = sid
+        l["image_pinned"] = True      # a rebuild must not silently override it
+        l["updated_at"] = _now()
+        _save(w)
+    return {"active_id": sid}
+
+
+@router.post("/worlds/{wid}/locations/{lid}/shots/{sid}/delete")
+async def location_shot_delete(wid: str, lid: str, sid: str):
+    if any(x in sid for x in ("/", "\\", "..")):
+        raise HTTPException(400, "bad id")
+    (_LOC_SHOT_DIR / wid / f"{sid}.png").unlink(missing_ok=True)
+    _loc_shot_rows_save(wid, [r for r in _loc_shot_rows(wid)
+                              if r["id"] != sid])
+    with _LOCK:
+        w = _load(wid)
+        l = _find(w.get("locations") or [], lid, "location")
+        if l.get("image_id") == sid:
+            # ⚠ never leave a dangling active id — the card would show a
+            # broken image and nothing would say why
+            rest = [r for r in _loc_shot_rows(wid) if r.get("lid") == lid]
+            sheet = next((r for r in rest if r.get("kind") == "sheet"), None)
+            l["image_id"] = (sheet or rest[0])["id"] if rest else ""
+            l["image_pinned"] = False
+            _save(w)
+    return {"deleted": sid}
 
 
 @router.post("/worlds/{wid}/locations/{lid}/delete")
@@ -1298,6 +1985,498 @@ class BigBangIn(BaseModel):
     llm: Optional[LlmPick] = None
 
 
+class ArcGenIn(BaseModel):
+    count: int = 0                   # 0 = let the model choose (3-8)
+    direction: str = ""
+    overwrite: bool = False          # False = keep existing arcs
+    llm: Optional[LlmPick] = None
+
+
+@router.post("/worlds/{wid}/stories/{sid}/structure")
+async def structure_story(wid: str, sid: str, body: ArcGenIn,
+                          session: AsyncSession = Depends(get_session)):
+    """🎬 Turn a story's prose into ARCS — the spine a project consumes.
+
+    The writer keeps writing prose (`beats`, `synopsis`); this reads it and
+    returns the ordered machine-readable version. Arcs are what become
+    CHAPTERS on a linked project, what the flow LLM is given per chapter, and
+    what the score lane renders one backing bed per."""
+    w = _load(wid)
+    st = _find(w.get("stories") or [], sid, "story")
+    if st.get("arcs") and not body.overwrite:
+        return {"arcs": st["arcs"], "note": "already structured — tick "
+                                            "overwrite to rewrite"}
+    n = max(0, min(int(body.count or 0), 24))
+    cast_names = [m.get("name") for m in (w.get("cast") or [])
+                  if not m.get("story_ids") or sid in (m.get("story_ids") or [])]
+    loc_names = [l.get("name") for l in (w.get("locations") or [])]
+    system = ("You are a story editor. You answer with JSON only — no prose, "
+              "no markdown fences. You break a story into its ARCS: ordered "
+              "stretches of story, each one a single movement with its own "
+              "mood. You never invent characters or locations that were not "
+              "given to you.")
+    user = (f"{_ctx_world(w)}\n\n{_ctx_story(st)}\n\n"
+            + (f"CAST AVAILABLE: {', '.join([c for c in cast_names if c])}\n"
+               if cast_names else "")
+            + (f"LOCATIONS AVAILABLE: {', '.join([l for l in loc_names if l])}\n"
+               if loc_names else "")
+            + (f"DIRECTION: {body.direction.strip()}\n"
+               if body.direction.strip() else "")
+            + (f"\nBreak it into exactly {n} arcs."
+               if n else "\nBreak it into between 3 and 8 arcs — as many as "
+                         "the story actually has.")
+            + "\nReturn a JSON array of objects with exactly these keys:\n"
+              '  "title"      short name for this stretch\n'
+              '  "summary"    what happens in it, 1-3 sentences\n'
+              '  "mood"       how it FEELS (this drives its backing track)\n'
+              '  "characters" array of names, from the cast above only\n'
+              '  "locations"  array of names, from the locations above only\n')
+    got = await _ask_json(session, body.llm or _pick_of(w), system, user,
+                          want="array", max_tokens=3000)
+    arcs = _clean_arcs(got)
+    if not arcs:
+        raise HTTPException(502, "the model returned no arcs")
+    with _LOCK:
+        w2 = _load(wid)
+        st2 = _find(w2.get("stories") or [], sid, "story")
+        st2["arcs"] = arcs
+        st2["updated_at"] = _now()
+        _save(w2)
+    return {"arcs": arcs}
+
+
+async def _assign_cast_stories(wid: str, story_ids: List[str],
+                               llm: Optional[LlmPick],
+                               session: AsyncSession) -> int:
+    """Map each cast member to the stories they actually appear in.
+
+    Without this a multi-story world has one story owning everybody, so "the
+    cast of THIS story" — the question a linked project asks — has no answer."""
+    w = _load(wid)
+    cast = w.get("cast") or []
+    stories = [s for s in (w.get("stories") or []) if s["id"] in story_ids]
+    if not cast or len(stories) < 2:
+        return 0
+    system = ("You assign characters to the stories they appear in. Answer "
+              "with JSON only: an object mapping each character NAME to an "
+              "array of story TITLES they appear in. A character may appear "
+              "in several stories, or in one.")
+    user = (f"{_ctx_world(w)}\n\nSTORIES:\n"
+            + "\n".join(f"- {s.get('title')}: "
+                         f"{(s.get('fields') or {}).get('logline') or ''}"
+                         for s in stories)
+            + "\n\nCHARACTERS:\n"
+            + "\n".join(f"- {m.get('name')}: {m.get('role') or ''} "
+                         f"{((m.get('lore') or {}).get('story_role') or '')[:200]}"
+                         for m in cast))
+    got = await _ask_json(session, llm or _pick_of(w), system, user,
+                          want="object", max_tokens=2000)
+    by_title = {(s.get("title") or "").strip().lower(): s["id"] for s in stories}
+    n = 0
+    with _LOCK:
+        w2 = _load(wid)
+        for m in (w2.get("cast") or []):
+            titles = got.get(m.get("name") or "") or []
+            ids = [by_title.get(str(t).strip().lower()) for t in titles]
+            ids = [i for i in ids if i]
+            if ids:
+                m["story_ids"] = ids
+                n += 1
+        _save(w2)
+    return n
+
+
+class CastStoryMapIn(BaseModel):
+    llm: Optional[LlmPick] = None
+
+
+@router.post("/worlds/{wid}/cast/map-stories")
+async def map_cast_stories(wid: str, body: CastStoryMapIn,
+                           session: AsyncSession = Depends(get_session)):
+    """🎭 Who is in which story — run it after adding stories or cast."""
+    w = _load(wid)
+    ids = [s["id"] for s in (w.get("stories") or [])]
+    if len(ids) < 2:
+        raise HTTPException(400, "needs at least two stories to be meaningful")
+    n = await _assign_cast_stories(wid, ids, body.llm, session)
+    return {"mapped": n, "cast": (_load(wid).get("cast") or [])}
+
+
+# ── ✍ narration: the words a TTS will read ──────────────────────────────────
+class NarrationIn(BaseModel):
+    minutes: float = 5.0             # target runtime; ~150 spoken words/min
+    tone: str = ""                   # "campfire storyteller", "documentary"…
+    per_arc: bool = True             # write it arc by arc (maps to chapters)
+    person: str = "third"            # third | first
+    overwrite: bool = False          # replace the story's existing narration
+    llm: Optional[LlmPick] = None
+
+
+def spoken_only(body: str) -> str:
+    """The narration with its `## Arc` headers removed — JUST THE SPOKEN TEXT.
+
+    ⭐ The headers exist so the narration, the chapters and the backing beds
+    share boundaries. They must never reach a TTS or the project's script
+    field: a reader would say "hash hash payroll smoke" out loud, and Whisper
+    would align a heading that was never spoken."""
+    out = []
+    for line in (body or "").splitlines():
+        if re.match(r"^\s{0,3}#{1,6}\s", line):
+            continue
+        out.append(line)
+    text = "\n".join(out)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _story_narration(w: dict, sid: str) -> Optional[dict]:
+    """The narration text belonging to THIS story, if it has one."""
+    for t in (w.get("texts") or []):
+        if t.get("story_id") == sid and t.get("kind") == "narration":
+            return t
+    return None
+
+
+@router.get("/worlds/{wid}/stories/{sid}/narration")
+async def get_story_narration(wid: str, sid: str):
+    """The story's narration text + what a TTS would make of it."""
+    w = _load(wid)
+    st = _find(w.get("stories") or [], sid, "story")
+    t = _story_narration(w, sid)
+    body = (t or {}).get("body") or ""
+    words = len([x for x in re.split(r"\s+", body) if x])
+    return {"text": t, "words": words, "files": _narr_files(st),
+            "spoken": spoken_only(body),
+            # 150 wpm is the usual narration pace; it is a SANITY figure, not a
+            # promise — the real duration comes from the rendered audio.
+            "est_minutes": round(words / 150.0, 1) if words else 0.0,
+            "arcs": st.get("arcs") or []}
+
+
+@router.post("/worlds/{wid}/stories/{sid}/narration")
+async def write_story_narration(wid: str, sid: str, body: NarrationIn,
+                                session: AsyncSession = Depends(get_session)):
+    """✍ Write the narration FOR this story — the words a TTS will read.
+
+    ⭐ Written ARC BY ARC when the story has arcs, with a `## Arc title` header
+    before each block. Two reasons, both structural rather than cosmetic:
+    the project's chapter parser already splits a script on markdown headers,
+    and this project's chapters ARE the arcs — so the narration, the chapters
+    and the backing tracks all land on the same boundaries instead of three
+    different ones.
+
+    Length is a WORD BUDGET, not a request: 'about five minutes' means ~750
+    words, and models honour a word count far better than a duration."""
+    w = _load(wid)
+    st = _find(w.get("stories") or [], sid, "story")
+    existing = _story_narration(w, sid)
+    if existing and (existing.get("body") or "").strip() and not body.overwrite:
+        raise HTTPException(409, "this story already has narration — tick "
+                                 "overwrite to rewrite it")
+    minutes = max(0.5, min(float(body.minutes or 5.0), 90.0))
+    total_words = int(minutes * 150)
+    arcs = st.get("arcs") or []
+    use_arcs = bool(arcs) and body.per_arc
+    per = max(60, total_words // max(1, len(arcs))) if use_arcs else total_words
+
+    system = (
+        "You are a narration writer for a video. You write PROSE THAT WILL BE "
+        "READ ALOUD — no headings inside the prose, no stage directions, no "
+        "bullet points, no lyrics, nothing in brackets. Short, speakable "
+        "sentences. Concrete images over abstractions. You never invent "
+        "characters or places that were not given to you, and you never use "
+        "franchise, brand or real-celebrity names."
+        + (" You answer with JSON only." if use_arcs else "")
+    )
+    ctx = (f"{_ctx_world(w)}\n\n{_ctx_story(st)}\n\n"
+           + _ctx_locations(w, sid)
+           + "\n\nCAST: "
+           + ", ".join(f"{m.get('name')} ({m.get('role') or 'character'})"
+                       for m in (w.get("cast") or [])
+                       if not m.get("story_ids") or sid in (m.get("story_ids") or []))
+           + (f"\n\nTONE: {body.tone.strip()}" if body.tone.strip() else "")
+           + (f"\n\nWrite in the {'first' if body.person == 'first' else 'third'} person."))
+
+    if use_arcs:
+        user = (ctx + "\n\nARCS, in order:\n"
+                + "\n".join(f"{i + 1}. {a.get('title')}: {a.get('summary') or ''}"
+                             f" (mood: {a.get('mood') or 'as the story implies'})"
+                             for i, a in enumerate(arcs))
+                + f"\n\nWrite the narration for EACH arc, in order, about "
+                  f"{per} words per arc ({total_words} in total). Return a JSON "
+                  f"array of objects with keys \"arc\" (the arc's title, "
+                  f"exactly as given) and \"text\" (the narration prose for "
+                  f"it).")
+        got = await _ask_json(session, body.llm or _pick_of(w), system, user,
+                              want="array", max_tokens=8000, timeout_s=900)
+        blocks = []
+        for i, a in enumerate(arcs):
+            row = next((r for r in got
+                        if isinstance(r, dict)
+                        and str(r.get("arc") or "").strip().lower()
+                        == (a.get("title") or "").strip().lower()), None)
+            if row is None and i < len(got) and isinstance(got[i], dict):
+                row = got[i]          # positional fallback, in order
+            txt = _flat((row or {}).get("text") or "", 20000)
+            if txt:
+                blocks.append(f"## {a.get('title')}\n\n{txt}")
+        text_body = "\n\n".join(blocks)
+    else:
+        from backend.api.concept import _call_llm
+        provider, key, model = await _llm_cfg(session, body.llm or _pick_of(w))
+        user = (ctx + f"\n\nWrite the complete narration for this story in "
+                      f"about {total_words} words, as flowing prose.")
+        txt = await asyncio.wait_for(
+            asyncio.to_thread(_call_llm, provider, key, model, system, user,
+                              8000), timeout=900)
+        text_body = _flat(re.sub(r"<think>.*?</think>", "", txt or "",
+                                 flags=re.DOTALL), 40000)
+
+    if not (text_body or "").strip():
+        raise HTTPException(502, "the model returned no narration")
+
+    title = f"{st.get('title') or 'story'} — narration"
+    if existing:
+        t = await update_text(wid, existing["id"],
+                              TextIn(kind="narration", title=title,
+                                     body=text_body, story_id=sid))
+    else:
+        t = await add_text(wid, TextIn(kind="narration", title=title,
+                                       body=text_body, story_id=sid))
+    words = len([x for x in re.split(r"\s+", text_body) if x])
+    return {"text": t, "words": words,
+            "est_minutes": round(words / 150.0, 1),
+            "arcs_written": len(arcs) if use_arcs else 0}
+
+
+#: 🎙 v1.277.31 — a narration has up to THREE files, and an AAF project needs
+#: all three. One "audio" slot that silently accepted an .aaf was the hole he
+#: found: the project linked, and then nothing could act on it.
+#:
+#:   audio  the recording itself      → the project's audio source
+#:   aaf    the ElevenLabs timeline   → the project's Import-AAF path
+#:   srt    the subtitle timings      → the project's SRT upload
+#:
+#: Non-AAF modes use audio (+ srt when there is one) exactly the same way.
+_NARR_SLOTS = ("audio", "aaf", "srt")
+_NARR_EXT = {
+    "audio": {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"},
+    "aaf": {".aaf"},
+    "srt": {".srt", ".vtt"},
+}
+_NARR_AUDIO_EXT = {".wav": True, ".mp3": True, ".m4a": True, ".aac": True,
+                   ".flac": True, ".ogg": True, ".aaf": False}
+
+
+def _narr_audio_fp(wid: str, meta: dict) -> Path:
+    return _NARR_DIR / wid / f"{meta.get('id')}{meta.get('ext') or '.wav'}"
+
+
+def _probe_seconds(fp: Path) -> float:
+    """Duration via ffprobe — 0.0 when it is not installed or not audio.
+
+    ⚠ A number here is a MEASUREMENT (of the real recording), unlike the
+    word-budget estimate on the text, which is arithmetic. Keep them labelled
+    differently in the UI or one will be mistaken for the other."""
+    import shutil
+    import subprocess
+    if not shutil.which("ffprobe"):
+        return 0.0
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "format=duration", "-of",
+                            "default=nw=1:nk=1", str(fp)],
+                           capture_output=True, text=True, timeout=60)
+        return round(float((r.stdout or "0").strip() or 0), 2)
+    except Exception:                                            # noqa: BLE001
+        return 0.0
+
+
+def _narr_files(st: dict) -> dict:
+    """The story's three narration files, migrating the pre-.31 single slot.
+
+    ⚠ An .aaf uploaded into the old `narration_audio` slot belongs in `aaf` —
+    read it that way rather than asking him to re-upload 55 MB."""
+    files = dict(st.get("narration_files") or {})
+    legacy = st.get("narration_audio") or None
+    if legacy and not files:
+        slot = "aaf" if (legacy.get("ext") or "") == ".aaf" else "audio"
+        files[slot] = legacy
+    return files
+
+
+def _slot_fp(wid: str, meta: dict) -> Path:
+    return _NARR_DIR / wid / f"{meta.get('id')}{meta.get('ext') or ''}"
+
+
+@router.post("/worlds/{wid}/stories/{sid}/narration/file/{slot}")
+async def upload_story_narration_file(wid: str, sid: str, slot: str,
+                                      file: UploadFile = File(...)):
+    """🎙 Upload one of the story's THREE narration files (audio | aaf | srt).
+
+    All three live with the STORY so a take can be reviewed before any project
+    exists — and so that linking a project has something to hand it."""
+    if slot not in _NARR_SLOTS:
+        raise HTTPException(400, f"slot must be one of {list(_NARR_SLOTS)}")
+    _find(_load(wid).get("stories") or [], sid, "story")
+    name = (file.filename or slot).strip()
+    ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    if ext not in _NARR_EXT[slot]:
+        raise HTTPException(400, f"a {slot} file must be one of "
+                                 f"{sorted(_NARR_EXT[slot])}")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty file")
+    aid = uuid4().hex[:10]
+    d = _NARR_DIR / wid
+    d.mkdir(parents=True, exist_ok=True)
+    fp = d / f"{aid}{ext}"
+    fp.write_bytes(raw)
+    meta = {"id": aid, "filename": name, "ext": ext, "bytes": len(raw),
+            "slot": slot, "playable": slot == "audio",
+            "seconds": _probe_seconds(fp) if slot == "audio" else 0.0,
+            "uploaded_at": _now()}
+    old = None
+    with _LOCK:
+        w = _load(wid)
+        st2 = _find(w.get("stories") or [], sid, "story")
+        files = _narr_files(st2)
+        old = files.get(slot)
+        files[slot] = meta
+        st2["narration_files"] = files
+        st2.pop("narration_audio", None)          # migrated into the slots
+        st2["updated_at"] = _now()
+        _save(w)
+    if old and old.get("id") != aid:
+        _slot_fp(wid, old).unlink(missing_ok=True)
+    return {"slot": slot, "file": meta, "files": files}
+
+
+@router.get("/worlds/{wid}/stories/{sid}/narration/file/{slot}")
+async def get_story_narration_file(wid: str, sid: str, slot: str,
+                                   download: bool = False):
+    st = _find(_load(wid).get("stories") or [], sid, "story")
+    meta = _narr_files(st).get(slot)
+    if not meta:
+        raise HTTPException(404, f"this story has no {slot} file")
+    fp = _slot_fp(wid, meta)
+    if not fp.exists():
+        raise HTTPException(404, "the file is missing on disk")
+    from fastapi.responses import FileResponse
+    mt = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+          ".m4a": "audio/mp4", ".aac": "audio/aac", ".ogg": "audio/ogg",
+          ".srt": "text/plain", ".vtt": "text/vtt"}.get(
+              meta.get("ext") or "", "application/octet-stream")
+    if download or slot != "audio":
+        return FileResponse(str(fp), media_type=mt,
+                            filename=meta.get("filename") or fp.name)
+    return FileResponse(str(fp), media_type=mt)
+
+
+@router.post("/worlds/{wid}/stories/{sid}/narration/file/{slot}/delete")
+async def delete_story_narration_file(wid: str, sid: str, slot: str):
+    meta = None
+    with _LOCK:
+        w = _load(wid)
+        st = _find(w.get("stories") or [], sid, "story")
+        files = _narr_files(st)
+        meta = files.pop(slot, None)
+        st["narration_files"] = files
+        st.pop("narration_audio", None)
+        st["updated_at"] = _now()
+        _save(w)
+    if meta:
+        _slot_fp(wid, meta).unlink(missing_ok=True)
+    return {"deleted": bool(meta), "slot": slot}
+
+
+@router.post("/worlds/{wid}/stories/{sid}/narration/audio")
+async def upload_story_narration_audio(wid: str, sid: str,
+                                       file: UploadFile = File(...)):
+    """🎙 Upload the narration RECORDING for this story.
+
+    His flow: write the narration → read it (or have a TTS read it) → **listen
+    to it here** and decide it is good → only then pull it into a project. The
+    review step needed the audio to live with the story, not inside a project
+    that may not exist yet."""
+    _load(wid)
+    st_ = _find(_load(wid).get("stories") or [], sid, "story")
+    name = (file.filename or "narration").strip()
+    ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    if ext not in _NARR_AUDIO_EXT:
+        raise HTTPException(400, "upload a wav, mp3, m4a, aac, flac, ogg — or "
+                                 "an .aaf timeline")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty file")
+    aid = uuid4().hex[:10]
+    d = _NARR_DIR / wid
+    d.mkdir(parents=True, exist_ok=True)
+    fp = d / f"{aid}{ext}"
+    fp.write_bytes(raw)
+    meta = {"id": aid, "filename": name, "ext": ext, "bytes": len(raw),
+            "playable": _NARR_AUDIO_EXT[ext],
+            "seconds": _probe_seconds(fp) if _NARR_AUDIO_EXT[ext] else 0.0,
+            "uploaded_at": _now()}
+    # ⚠ .31: this legacy route now files into the correct SLOT — an .aaf
+    # uploaded here is a TIMELINE and belongs in `aaf`, not in `audio`, or the
+    # project has "audio" it can never analyze (exactly what he hit).
+    slot = "aaf" if ext == ".aaf" else "audio"
+    meta["slot"] = slot
+    old = None
+    with _LOCK:
+        w = _load(wid)
+        st2 = _find(w.get("stories") or [], sid, "story")
+        files = _narr_files(st2)
+        old = files.get(slot)
+        files[slot] = meta
+        st2["narration_files"] = files
+        st2.pop("narration_audio", None)
+        st2["updated_at"] = _now()
+        _save(w)
+    if old and old.get("id") != aid:
+        _slot_fp(wid, old).unlink(missing_ok=True)
+    return {"audio": meta, "slot": slot, "story": st_.get("title")}
+
+
+@router.get("/worlds/{wid}/stories/{sid}/narration/audio")
+async def get_story_narration_audio(wid: str, sid: str, download: bool = False):
+    """Stream the recording so it can be auditioned right on the story."""
+    w = _load(wid)
+    st = _find(w.get("stories") or [], sid, "story")
+    files = _narr_files(st)
+    meta = files.get("audio") or files.get("aaf")
+    if not meta:
+        raise HTTPException(404, "this story has no narration recording")
+    fp = _slot_fp(wid, meta)
+    if not fp.exists():
+        raise HTTPException(404, "the recording is missing on disk")
+    from fastapi.responses import FileResponse
+    mt = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+          ".m4a": "audio/mp4", ".aac": "audio/aac", ".ogg": "audio/ogg"}.get(
+              meta.get("ext") or "", "application/octet-stream")
+    if download or not meta.get("playable"):
+        return FileResponse(str(fp), media_type=mt,
+                            filename=meta.get("filename") or fp.name)
+    return FileResponse(str(fp), media_type=mt)
+
+
+@router.post("/worlds/{wid}/stories/{sid}/narration/audio/delete")
+async def delete_story_narration_audio(wid: str, sid: str):
+    with _LOCK:
+        w = _load(wid)
+        st = _find(w.get("stories") or [], sid, "story")
+        files = _narr_files(st)
+        meta = files.pop("audio", None) or files.pop("aaf", None)
+        st["narration_files"] = files
+        st.pop("narration_audio", None)
+        st["updated_at"] = _now()
+        _save(w)
+    if meta:
+        _slot_fp(wid, meta).unlink(missing_ok=True)
+    return {"deleted": bool(meta)}
+
+
 @router.post("/worlds/{wid}/bigbang")
 async def bigbang(wid: str, body: BigBangIn,
                   session: AsyncSession = Depends(get_session)):
@@ -1359,6 +2538,15 @@ async def _bigbang_rest(wid: str, body: BigBangIn, session: AsyncSession,
             await enhance_story(wid, st["id"],
                                 EnhanceIn(mode="fill", direction=idea,
                                           llm=body.llm), session)
+            # 🎬 structure it immediately: arcs are what a PROJECT turns into
+            # chapters, so a story without them is a story a project cannot use
+            try:
+                r = await structure_story(wid, st["id"],
+                                          ArcGenIn(llm=body.llm), session)
+                steps.append(f"{_flat(row.get('title'), 40)}: "
+                             f"{len(r.get('arcs') or [])} arcs")
+            except HTTPException as e:
+                steps.append(f"⚠ arcs for {_flat(row.get('title'), 40)}: {e.detail}")
             made_stories.append(st["id"])
         steps.append(f"stories: {len(made_stories)} written")
 
@@ -1367,6 +2555,15 @@ async def _bigbang_rest(wid: str, body: BigBangIn, session: AsyncSession,
         story_id=made_stories[0] if made_stories else "",
         max_count=body.max_cast, direction=idea, llm=body.llm), session)
     steps.append(f"cast: {len(r3.get('made') or [])} proposed")
+    # ⚠ every member landed on story #1 only. A world with three stories whose
+    # whole cast belongs to the first one makes "the cast of THIS story"
+    # meaningless — which is the thing a linked project asks for.
+    if len(made_stories) > 1:
+        try:
+            n = await _assign_cast_stories(wid, made_stories, body.llm, session)
+            steps.append(f"cast↔story: {n} member(s) mapped")
+        except HTTPException as e:
+            steps.append(f"⚠ cast↔story: {e.detail}")
 
     return {"world": _load(wid), "steps": steps}
 
@@ -1692,6 +2889,133 @@ def _style_job_public(wid: str) -> dict:
     return st
 
 
+def _render_prompt_set(disp, model: str, prompts: List[str], style_txt: str,
+                       ref_path: Optional[Path], out_dir: Path, st: dict,
+                       log, seed_base: int = 41000, w: int = 1024,
+                       h: int = 576, ref_mode: str = "style") -> List[dict]:
+    """Render one prompt per image across the fleet. Shared by 🎨 world style
+    samples and 📍 location plates — one implementation, three paths:
+
+      style REF present → Klein edit citing "image 1" (positional, v1.276.x)
+      krea2             → forge's lane, which DISCOVERS the unet per host
+                          ⚠⚠ Krea 2 NEVER uses the generic t2i workflow file:
+                          the unet baked into KREA2_TURBO_T2I.json is not what
+                          is installed and every box 400s the raw graph.
+      otherwise         → the plain t2i pool, workers assigned ROUND-ROBIN UP
+                          FRONT (asking for "a worker" per image PINS them all
+                          to one box — v1.276.45).
+    """
+    count = len(prompts)
+    made: List[dict] = []
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if ref_path is not None:
+        from backend.api.klein3 import _parallel_klein_edits
+        # ⚠⚠ TWO DIFFERENT JOBS WEAR THE SAME SHAPE. A world STYLE reference
+        # means "draw this in that style"; a location's OWN photograph means
+        # "this is the place — show me another view of IT". Feeding the second
+        # into the first's prompt asks Klein to copy the photograph's rendering
+        # and invent a new place, which is the opposite of a reference sheet
+        # (found by the v1.277.28 doc audit — the docs claimed the behaviour
+        # the code did not have).
+        def _p(i: int) -> str:
+            if ref_mode == "subject":
+                return (f"Image 1 is the PLACE itself. Render another view of "
+                        f"that same place, keeping its architecture, materials, "
+                        f"layout and light: {prompts[i]}."
+                        + (f" {style_txt}." if style_txt else "")
+                        + " A clean unlettered image.")
+            # affirmative: describe a clean plate rather than forbidding
+            # captions — at cfg 1 a "no text" instruction paints text
+            return (f"In the exact artistic style of image 1 "
+                    f"— {style_txt or 'that style'} — draw: {prompts[i]}. "
+                    f"A clean unlettered image.")
+        jobs = [{"key": str(i),
+                 "prompt": _p(i),
+                 "refs": [ref_path], "w": w, "h": h,
+                 "seed": seed_base + i} for i in range(count)]
+
+        def _on_result(jb: dict, data: bytes):
+            sid = uuid4().hex[:10]
+            (out_dir / f"{sid}.png").write_bytes(data)
+            task = (st.get("tasks") or {}).get(jb["key"]) or {}
+            made.append({"id": sid, "prompt": jb["prompt"],
+                         "model": ("klein+locationref" if ref_mode == "subject"
+                                   else "klein+styleref"),
+                         "worker": task.get("worker"), "created_at": _now()})
+            st["done"] = int(st.get("done") or 0) + 1
+            log(f"image {st['done']}/{count} done")
+            return None
+
+        log(f"rendering {count} via klein with the style reference")
+        _parallel_klein_edits(disp, jobs, _on_result, st)
+        return made
+
+    from concurrent.futures import ThreadPoolExecutor
+    if model == "krea2":
+        from backend.api.forge import (_krea2_core_graph, _krea2_hosts_for,
+                                       _krea2_render)
+        hosts = _krea2_hosts_for(None, disp)
+        if not hosts:
+            raise RuntimeError("no Krea 2 capable worker online")
+        st["workers"] = sorted(hosts)
+        log(f"rendering {count} via forge's krea2 lane across "
+            f"{len(hosts)} worker(s)")
+
+        def _one_k2(i: int) -> None:
+            host = hosts[i % len(hosts)]
+            try:
+                pr = f"{prompts[i]}, {style_txt}. A clean unlettered image."
+                g = _krea2_core_graph(host, pr, w, h, seed_base + i, None, 1.0)
+                data = _krea2_render(host, g, 300)
+                sid = uuid4().hex[:10]
+                (out_dir / f"{sid}.png").write_bytes(data)
+                made.append({"id": sid, "prompt": pr, "model": "krea2",
+                             "worker": host, "created_at": _now()})
+            except Exception as e:                               # noqa: BLE001
+                log(f"image #{i + 1} failed on {host}: {e}")
+            st["done"] = int(st.get("done") or 0) + 1
+            log(f"image {st['done']}/{count} finished")
+
+        with ThreadPoolExecutor(max_workers=max(1, len(hosts))) as ex:
+            list(ex.map(_one_k2, range(count)))
+        return made
+
+    from backend.api.tools import (_images_from_outputs,
+                                   _prepare_sample_workflow,
+                                   _run_prompt_blocking, _sample_worker_pool)
+    pool = _sample_worker_pool(disp, model)
+    if not pool:
+        raise RuntimeError("no image worker online")
+    st["workers"] = sorted({u for u, _c in pool})
+    log(f"rendering {count} via {model} across {len(st['workers'])} worker(s)")
+
+    def _one(i: int) -> None:
+        url, client = pool[i % len(pool)]
+        try:
+            pr = f"{prompts[i]}, {style_txt}. A clean unlettered image."
+            wf = _prepare_sample_workflow(model, pr, "", w, h, seed_base + i)
+            outputs, _pid = _run_prompt_blocking(client, wf, 300)
+            imgs = _images_from_outputs(outputs)
+            if not imgs:
+                raise RuntimeError("no image produced")
+            pick = imgs[-1]
+            data = client.download_output(pick["filename"],
+                                          pick.get("subfolder", ""),
+                                          pick.get("type", "output"))
+            sid = uuid4().hex[:10]
+            (out_dir / f"{sid}.png").write_bytes(data)
+            made.append({"id": sid, "prompt": pr, "model": model,
+                         "worker": url, "created_at": _now()})
+        except Exception as e:                                   # noqa: BLE001
+            log(f"image #{i + 1} failed on {url}: {e}")
+        st["done"] = int(st.get("done") or 0) + 1
+        log(f"image {st['done']}/{count} finished")
+
+    with ThreadPoolExecutor(max_workers=max(1, len(pool))) as ex:
+        list(ex.map(_one, range(count)))
+    return made
+
+
 def _run_style_samples(wid: str, disp, count: int, model: str,
                        prompts: List[str], style_txt: str,
                        ref_path: Optional[Path]) -> None:
@@ -1707,111 +3031,9 @@ def _run_style_samples(wid: str, disp, count: int, model: str,
         st.setdefault("log", []).append(
             {"t": round(_t.time() - st["t0"], 1), "detail": msg})
 
-    out_dir = _SAMPLE_DIR / wid
-    out_dir.mkdir(parents=True, exist_ok=True)
-    made: List[dict] = []
     try:
-        if ref_path is not None:
-            # style REFERENCE image → Klein edit citing it positionally
-            from backend.api.klein3 import _parallel_klein_edits
-            jobs = [{"key": str(i),
-                     "prompt": f"In the exact artistic style of image 1 "
-                               f"— {style_txt or 'that style'} — draw: "
-                               f"{prompts[i % len(prompts)]}. No text or "
-                               f"captions anywhere in the image.",
-                     "refs": [ref_path], "w": 1024, "h": 576,
-                     "seed": 31000 + i} for i in range(count)]
-
-            def _on_result(jb: dict, data: bytes):
-                sid = uuid4().hex[:10]
-                (out_dir / f"{sid}.png").write_bytes(data)
-                task = (st.get("tasks") or {}).get(jb["key"]) or {}
-                made.append({"id": sid, "prompt": jb["prompt"],
-                             "model": "klein+styleref",
-                             "worker": task.get("worker"),
-                             "created_at": _now()})
-                st["done"] = int(st.get("done") or 0) + 1
-                _log(f"sample {st['done']}/{count} done")
-                return None
-
-            _log(f"rendering {count} via klein with the style reference")
-            _parallel_klein_edits(disp, jobs, _on_result, st)
-        elif model == "krea2":
-            # ⚠⚠ Krea 2 NEVER uses the generic t2i workflow file — the unet
-            # name baked into KREA2_TURBO_T2I.json is not what is installed,
-            # and every box 400s the raw graph (measured 2026-08-14: 4 samples
-            # → 400 on all three workers — the v1.276.27 lesson relearned).
-            # forge's lane DISCOVERS the unet per host; use it.
-            from backend.api.forge import (_krea2_core_graph, _krea2_hosts_for,
-                                           _krea2_render)
-            hosts = _krea2_hosts_for(None, disp)
-            if not hosts:
-                raise RuntimeError("no Krea 2 capable worker online")
-            st["workers"] = sorted(hosts)
-            _log(f"rendering {count} via forge's krea2 lane across "
-                 f"{len(hosts)} worker(s)")
-            from concurrent.futures import ThreadPoolExecutor
-
-            def _one_k2(i: int) -> None:
-                host = hosts[i % len(hosts)]
-                try:
-                    p = (f"{prompts[i % len(prompts)]}, {style_txt}. "
-                         f"No text or captions in the image.")
-                    g = _krea2_core_graph(host, p, 1024, 576, 41000 + i,
-                                          None, 1.0)
-                    data = _krea2_render(host, g, 300)
-                    sid = uuid4().hex[:10]
-                    (out_dir / f"{sid}.png").write_bytes(data)
-                    made.append({"id": sid, "prompt": p, "model": "krea2",
-                                 "worker": host, "created_at": _now()})
-                except Exception as e:                           # noqa: BLE001
-                    _log(f"sample #{i + 1} failed on {host}: {e}")
-                st["done"] = int(st.get("done") or 0) + 1
-                _log(f"sample {st['done']}/{count} finished")
-
-            with ThreadPoolExecutor(max_workers=max(1, len(hosts))) as ex:
-                list(ex.map(_one_k2, range(count)))
-        else:
-            # style TEXT → plain t2i on the chosen model, pooled up front
-            from backend.api.tools import (_images_from_outputs,
-                                           _prepare_sample_workflow,
-                                           _run_prompt_blocking,
-                                           _sample_worker_pool)
-            pool = _sample_worker_pool(disp, model)
-            if not pool:
-                raise RuntimeError("no image worker online")
-            st["workers"] = sorted({u for u, _c in pool})
-            _log(f"rendering {count} via {model} across "
-                 f"{len(st['workers'])} worker(s)")
-            from concurrent.futures import ThreadPoolExecutor
-
-            def _one(i: int) -> None:
-                url, client = pool[i % len(pool)]
-                try:
-                    p = (f"{prompts[i % len(prompts)]}, {style_txt}. "
-                         f"No text or captions in the image.")
-                    wf = _prepare_sample_workflow(model, p, "", 1024, 576,
-                                                  41000 + i)
-                    outputs, _pid = _run_prompt_blocking(client, wf, 300)
-                    imgs = _images_from_outputs(outputs)
-                    if not imgs:
-                        raise RuntimeError("no image produced")
-                    pick = imgs[-1]
-                    data = client.download_output(
-                        pick["filename"], pick.get("subfolder", ""),
-                        pick.get("type", "output"))
-                    sid = uuid4().hex[:10]
-                    (out_dir / f"{sid}.png").write_bytes(data)
-                    made.append({"id": sid, "prompt": p, "model": model,
-                                 "worker": url, "created_at": _now()})
-                except Exception as e:                           # noqa: BLE001
-                    _log(f"sample #{i + 1} failed on {url}: {e}")
-                st["done"] = int(st.get("done") or 0) + 1
-                _log(f"sample {st['done']}/{count} finished")
-
-            with ThreadPoolExecutor(max_workers=max(1, len(pool))) as ex:
-                list(ex.map(_one, range(count)))
-
+        made = _render_prompt_set(disp, model, prompts, style_txt, ref_path,
+                                  _SAMPLE_DIR / wid, st, _log, seed_base=41000)
         rows = _sample_rows(wid) + made
         _sample_rows_save(wid, rows)
         st["status"] = "done" if made else "error"

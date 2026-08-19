@@ -189,6 +189,45 @@ async def _get_project_or_404(project_id: UUID, session: AsyncSession) -> Projec
     return project
 
 
+def authoritative_timeline(settings: Optional[dict]) -> Optional[tuple]:
+    """Is this project's scene timeline GROUND TRUTH? → `(reason, human)` or None.
+
+    ⭐⭐ **THIS PREDICATE IS WHY THE AAF WORKED.** Months of boundary fixes
+    failed because the boundaries kept being RE-DERIVED from Whisper/SRT word
+    timings, and those timings drift against the rendered audio — v1.8.20
+    measured *"39 of 48 scenes ended mid-word … the offset growing to ~10s by
+    the end"*. The AAF's real advantage was never mostly its arithmetic; it was
+    that importing one made the timeline **untouchable**: no resync, no
+    scenes-from-sections, no Suggest Timeline. Precision you can re-derive away
+    is not precision.
+
+    Two sources qualify, and for the SAME structural reason — each boundary is
+    the edge of a real audio segment, not an estimate of where a word fell:
+
+      `audio_source == "aaf"`            an AAF clip start (integer edit units)
+      `scene_source == "chapter_cues"`   a TTS sentence boundary (integer samples)
+
+    ⚠⚠ ONE predicate, every gate. The three call sites each used to inline
+    `settings.get("audio_source") == "aaf"`, so adding a second authoritative
+    source meant finding all three — and the codex's `_keep()` and the chapter
+    lane's `is_from_story()` are both here because that is exactly how a rule
+    ends up enforced in two places out of three.
+
+    ⚠ It does NOT gate manual edits (`PUT /scenes/{id}`, split, delete-merge).
+    Those are the user deliberately moving a boundary, which is always allowed.
+    """
+    s = settings or {}
+    if s.get("audio_source") == "aaf":
+        return ("aaf_authoritative",
+                "the timeline was imported from an AAF (sample-accurate clip "
+                "boundaries)")
+    if s.get("scene_source") == "chapter_cues":
+        return ("cues_authoritative",
+                "the timeline was built from the narration's own measured cues "
+                "(each scene edge is a rendered sentence boundary)")
+    return None
+
+
 async def _maybe_resync_scene_boundaries(
     project_id: UUID,
     session: AsyncSession,
@@ -225,18 +264,14 @@ async def _maybe_resync_scene_boundaries(
     if getattr(proj, "mode", None) not in ("narration_video", "narration_images", "talkie"):
         return {"resynced": False, "reason": "mode_not_narration"}
 
-    # ── AAF-authoritative gate ────────────────────────────────────────
-    # When the timeline was imported from an AAF (ElevenLabs etc.), the
-    # AAF clip boundaries are sample-accurate ground truth — NEVER
-    # re-snap them to Whisper/SRT word timing.  SRT/Whisper stay useful
-    # as TEXT + word-timing sources (subtitles, scene narration), they
-    # just lose boundary authority.
-    if (proj.settings or {}).get("audio_source") == "aaf":
+    # ── AUTHORITATIVE-TIMELINE gate ───────────────────────────────────
+    _auth = authoritative_timeline(proj.settings)
+    if _auth:
         logger.info(
             f"_maybe_resync_scene_boundaries({trigger}, project={project_id}): "
-            f"AAF timeline is authoritative — skipping boundary resync."
+            f"{_auth[1]} — skipping boundary resync."
         )
-        return {"resynced": False, "reason": "aaf_authoritative"}
+        return {"resynced": False, "reason": _auth[0]}
 
     # ── Active auto-gen guard ─────────────────────────────────────────
     # If a sequential auto-gen run is in flight, do NOT mutate scene
@@ -2458,14 +2493,18 @@ async def create_scenes_from_sections(
     """
     try:
         _csp = await _get_project_or_404(project_id, session)
-        # AAF-authoritative guard — section-derived scenes would REPLACE the
-        # sample-accurate AAF boundaries.
-        if (_csp.settings or {}).get("audio_source") == "aaf":
+        # AUTHORITATIVE-timeline guard — section-derived scenes are spectral
+        # (≈0.5 s granularity, no relationship to word positions) and would
+        # REPLACE boundaries that sit on real audio-segment edges.
+        _auth = authoritative_timeline(_csp.settings)
+        if _auth:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "This project's timeline was imported from an AAF, which is "
-                    "authoritative. Detach the AAF on the Audio tab first."
+                    f"Refusing: {_auth[1]}. Section-detected boundaries are "
+                    f"spectral and land ~half a second from where words "
+                    f"actually start. Detach it on the Audio tab first if you "
+                    f"really want to replace them."
                 ),
             )
 
@@ -3448,15 +3487,16 @@ async def suggest_timeline(
 
     project = await _get_project_or_404(project_id, session)
 
-    # AAF-authoritative guard: a fresh timeline would silently REPLACE the
-    # sample-accurate AAF scene boundaries.  Force the user to detach first.
-    if (project.settings or {}).get("audio_source") == "aaf":
+    # AUTHORITATIVE-timeline guard: a fresh timeline would silently REPLACE
+    # boundaries that sit on real audio-segment edges.  Force a detach first.
+    _auth = authoritative_timeline(project.settings)
+    if _auth:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "This project's timeline was imported from an AAF, which is "
-                "authoritative. Detach the AAF on the Audio tab before "
-                "generating a fresh timeline."
+                f"Refusing to generate a fresh timeline: {_auth[1]}. Detach it "
+                f"on the Audio tab first if you really want to replace those "
+                f"boundaries."
             ),
         )
 
@@ -4931,7 +4971,9 @@ async def slice_audio_for_single_scene(
 )
 async def upload_srt(
     project_id: UUID,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    # 🌍 v1.277.35 — or an SRT already pulled in from the linked story
+    srt_asset_id: Optional[str] = Form(None),
     session: AsyncSession = Depends(get_session),
 ) -> LyricsResponse:
     """Upload an SRT subtitle file and parse it into word-level timestamps.
@@ -4959,14 +5001,33 @@ async def upload_srt(
         await _get_project_or_404(project_id, session)
 
         # Validate file extension
-        if not file.filename or not file.filename.lower().endswith(".srt"):
+        srt_name = (file.filename if file is not None else "") or ""
+        if srt_asset_id and file is None:
+            from uuid import UUID as _U
+            _a = await session.get(Asset, _U(str(srt_asset_id)))
+            if not _a or str(_a.project_id) != str(project_id):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                    detail="SRT asset not found in this project")
+            _fp = settings.project_dir / str(project_id) / _a.rel_path
+            if not _fp.exists():
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                    detail=f"SRT asset file missing: {_a.rel_path}")
+            content = _fp.read_bytes()
+            srt_name = _a.filename
+        elif file is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="upload an .srt file or pass srt_asset_id")
+        if not srt_name or not srt_name.lower().endswith((".srt", ".vtt")):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="File must be an .srt subtitle file",
             )
 
-        # Read file content — try UTF-8 BOM first, then plain UTF-8
-        content = await file.read()
+        # Read file content — try UTF-8 BOM first, then plain UTF-8.
+        # ⚠ when the SRT came from an ASSET the bytes are already in `content`;
+        # calling file.read() here would blow up on the None upload.
+        if file is not None:
+            content = await file.read()
         srt_text = ""
         for enc in ("utf-8-sig", "utf-8", "latin-1"):
             try:
@@ -5157,9 +5218,13 @@ async def upload_srt(
 )
 async def import_aaf_timeline(
     project_id: UUID,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     audio: Optional[UploadFile] = File(None),
     audio_asset_id: Optional[str] = Form(None),
+    # 🌍 v1.277.35 — an AAF PULLED FROM A STORY is already a project asset;
+    # requiring a re-upload of a 55 MB file the app already holds is why the
+    # story→project AAF path dead-ended.
+    aaf_asset_id: Optional[str] = Form(None),
     min_scene_seconds: float = Form(0.0),
     session: AsyncSession = Depends(get_session),
 ):
@@ -5174,8 +5239,22 @@ async def import_aaf_timeline(
 
     await _get_project_or_404(project_id, session)
 
-    # 1. Persist the uploaded AAF to a temp file for pyaaf2 (needs a path).
-    aaf_bytes = await file.read()
+    # 1. Persist the AAF to a temp file for pyaaf2 (needs a path). Source is
+    #    either the upload or an asset already in the project (story pull).
+    aaf_bytes = b""
+    if file is not None:
+        aaf_bytes = await file.read()
+    elif aaf_asset_id:
+        from uuid import UUID as _U
+        _a = await session.get(Asset, _U(str(aaf_asset_id)))
+        if not _a or str(_a.project_id) != str(project_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="AAF asset not found in this project")
+        _fp = settings.project_dir / str(project_id) / _a.rel_path
+        if not _fp.exists():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"AAF asset file missing: {_a.rel_path}")
+        aaf_bytes = _fp.read_bytes()
     if not aaf_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty AAF file.")
     tmp = tempfile.NamedTemporaryFile(suffix=".aaf", delete=False)
@@ -5278,7 +5357,8 @@ async def import_aaf_timeline(
                 from backend.services.import_aaf import extract_aaf_embedded_audio
                 _audio_dir = project_path / "assets" / "audio"
                 _audio_dir.mkdir(parents=True, exist_ok=True)
-                _base = Path(file.filename or "timeline.aaf").stem or "aaf_audio"
+                _base = Path((file.filename if file is not None
+                              else "timeline.aaf") or "timeline.aaf").stem or "aaf_audio"
                 _out_wav = _audio_dir / f"{_base}_embedded_{int(datetime.utcnow().timestamp())}.mp3"
                 _ok = await asyncio.to_thread(
                     extract_aaf_embedded_audio, tmp_path, str(_out_wav)
@@ -5378,7 +5458,8 @@ async def import_aaf_timeline(
             _ps = dict(_proj_row.settings or {})
             _ps["audio_source"] = "aaf"
             _ps["aaf_import"] = {
-                "filename": file.filename or "timeline.aaf",
+                "filename": (file.filename if file is not None
+                             else "timeline.aaf") or "timeline.aaf",
                 "imported_at": datetime.utcnow().isoformat() + "Z",
                 "clip_count": len(clips),
                 "scene_count": len(created),
@@ -5426,15 +5507,29 @@ async def detach_aaf(
     project_id: UUID,
     session: AsyncSession = Depends(get_session),
 ):
-    """Clear the AAF-authoritative flag so Whisper/SRT boundary resync and
-    Suggest Timeline work normally again.  Scenes, audio and chapters
-    imported from the AAF are left untouched."""
+    """Clear the AUTHORITATIVE-timeline flag so Whisper/SRT boundary resync and
+    Suggest Timeline work normally again.  Scenes, audio and chapters are left
+    untouched.
+
+    ⭐ Releases whichever source held authority — an imported AAF **or** a
+    cue-built timeline (`scene_source == "chapter_cues"`). One button, because
+    from the user's side there is one question: *"may the tools move my scene
+    boundaries?"* — and a project can only have one answer to it.
+
+    ⚠ Route name kept as `/detach-aaf` deliberately: it is what the frontend
+    and every existing note calls, and renaming a working endpoint to match an
+    internal generalisation is churn that breaks callers for no user benefit."""
     project = await _get_project_or_404(project_id, session)
     _ps = dict(project.settings or {})
-    was_active = _ps.pop("audio_source", None) == "aaf"
+    was = authoritative_timeline(_ps)
+    if _ps.get("audio_source") == "aaf":
+        _ps.pop("audio_source", None)
     _ps.pop("aaf_import", None)
+    if _ps.get("scene_source") == "chapter_cues":
+        _ps.pop("scene_source", None)
+    _ps.pop("cue_import", None)
     project.settings = _ps
     session.add(project)
     await session.commit()
-    return {"detached": was_active}
+    return {"detached": bool(was), "was": was[0] if was else None}
 

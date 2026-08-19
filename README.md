@@ -4,7 +4,24 @@ A local desktop application for creating AI-powered music videos and narration v
 
 ![Robomuffin Idea Factory](Screenshots/robomuffin_idea_factory_screenshot.webp)
 
-## Status (v1.277.14, 2026-08-15)
+## Status (v1.277.51, 2026-08-19)
+
+**📖 A story is told in CHAPTERS, and a chapter is one video.** A story's arcs are its spine;
+a **chapter** takes one arc and tells it at length, with its own full narration and its own
+recording. Link a project to a world → story → **chapter** and that chapter's words become the
+script, its recording becomes the audio, and its **beats** become the timeline — so each video
+stays small enough to be worth re-rolling instead of jamming a whole book into one render. The
+LLM outlines the chapters from the arcs in one press, then writes them **one at a time**, so
+you can edit between them. Each chapter is written **beat by beat — one model call per beat**,
+because a model asked for 1500 words in one go delivers 400: ~10 minutes of narration by
+default, in real paragraphs, with live progress as each beat lands. **📚 And the world remembers.** The new Codex tab keeps a cheat
+sheet of everything your stories have established — factions, rules, places, terms, events —
+plus a page per character: what has happened *to* them, in order, and where they stand now.
+It is built **only from what you actually wrote**, every entry shows its source, and anything
+you write or pin survives every recalculation. Re-calc from the Codex tab or from any story;
+unchanged material is skipped without asking a model at all. Reference:
+[`docs/STORYWORLD.md`](docs/STORYWORLD.md).
+
 
 **🎬 Projects now choose their VIDEO ENGINE** — **LTX 2.3** (the proven pipeline, still the
 default), **MiniMax H3** (reference-driven consistency: character sheets, image & audio
@@ -21,15 +38,62 @@ anchor); the 🎬 Video Lab is a home-screen destination with the v1.0 8-step tu
 a 🏃 draft mode, per-render times, a 📚 character-image reference picker and a copyable
 🤖 LLM prompting guide; the ⚡ Autogen queue can be **⏸ paused across a reboot**.
 
-**🎧 The Audio Lab** (`/audio-lab`) generates BACKING TRACKS locally (ACE-Step 1.5 XL —
-exact-length songs in seconds, paired to story arcs; MiniMax Music 3 slot auto-detects)
-and NARRATIONS with **voice cloning** (F5-TTS: one clean 5-15s sample + its transcript,
-paragraph-pause control) — the in-app ElevenLabs alternative; tracks import straight
-into projects. Worlds also gained **📍 location sheets** (scouted by LLM, linked to
-stories), a global **🧠 dedicated Prompt-LLM** setting, clean-base-look enforcement
-(no more baked-in ink smudges), and **📦 download-once-LAN-copy** model distribution.
+**🎧 The Audio Lab** (`/audio-lab`) generates BACKING TRACKS locally on **four pickable
+engines**, all verified on all three boxes: **ACE-Step 1.5 turbo** (a 20 s track in ~15 s —
+the sketching engine and the default), **ACE-Step 1.5 XL sft / base** (50 steps at **cfg 3**
+— the take-you-keep, ~50 s), and **MiniMax Music 3** (~3× real time, spectrally the
+brightest). 🆚 **Compare** renders one prompt on every engine you tick — **same seed, one
+model per box, all loudness-matched** — because the models genuinely disagree and which one
+suits a piece is an ear question. Every track is normalised to **-14 LUFS / -1 dBTP**, and
+prompts are **shaped per engine**: ACE gets tempo and key moved OUT of the caption into its
+widgets, MiniMax gets them written INTO its three-section structured caption, and lyric
+markup is rewritten to each engine's rules (what changed is published on the job, never
+silently). 🎼 **Score a story** turns a world + story into N exact-length music cues on
+paper — the LLM writes the sound, you edit the seconds, the lengths are normalised to SUM
+to your target — then renders them fanned across the fleet and imports every finished cue
+into a project as MUSIC assets. Narration comes from **F5-TTS voice cloning** (one clean
+reference clip — **≤12 s** — plus its exact transcript, with paragraph-pause control), the
+in-app ElevenLabs alternative. Worlds also gained **📍 location sheets** (scouted by LLM, linked to stories, and
+**rendered as a 🪪 SHEET** — several angle-labelled views composited into one 2048px
+reference image the way a character sheet works, buildable for every location at once, and
+pickable as a reference for image and video models), a global **🧠 dedicated Prompt-LLM** setting, clean-base-look
+enforcement (no more baked-in ink smudges), and **📦 download-once-LAN-copy** model
+distribution.
 
-*Newest first: Audio Lab · location sheets · per-project video engines · Klein Mode split · Story/World Builder ·
+**🎛 Every scene picks how it carries identity.** Two routes existed for a long time and
+neither was ever a *choice*: **T2I → swap the references in** (stage the shot with nobody in
+it, then composite the characters — strongest composition) and **full reference mode** (the
+character sheets go to the model as references; on MiniMax H3 the video runs `ref2v`, the only
+route that holds a face THROUGH the motion). Set the default for a project on the **Concept
+tab**, override it per scene in the **Scene editor**. Before this, reference mode was picked by
+whether refs happened to exist — a default that emerges from data, which is a coin flip with
+extra steps.
+
+**🎙 Narration works, and there are two ways to get a voice.** **Record one**: upload a sample
+of any length and a reference clip is cut from it — the whole file is kept, every re-trim comes
+off that original, and you nudge the window in 0.05 s steps so it never lands mid-word. **Or
+invent one**: pick from 28 built-in speakers, ▶ audition them, and **blend two into a voice that
+exists nowhere else** — no recording at all, and its transcript is exact by construction. Either
+way it lands in the same library, with a 🪪 view of every render it has made and which projects
+and stories those reached. Narration can then be spoken by **F5** (clones the voice, on a
+worker) or by **Kokoro** (instant, on this machine, for invented voices) — and pacing is handled
+with **`[pause]` tags written for you**, re-valued whenever you change the setting, plus a
+pitch-preserving time-stretch rather than asking the model to slow down.
+
+**🎬 The STORY is the spine.** A story carries **arcs** — ordered stretches with a mood, their
+characters and their locations — written from its prose in one press, and editable by hand.
+Link a project to a world + story and it **derives** its concept and visual style from them
+*live* (edit the world, the project follows; pin any single field to opt out); one ⬇ Pull then
+builds its timeline and brings in **that story's** cast rather than the whole world's.
+**Pick a chapter as well and the whole pull narrows to it** — that chapter's narration becomes
+the script, its recording becomes the audio, and its **beats** (not the whole story's arcs)
+become the chapters, timed against the audio's own detected sections. ✍ The narration lives on the story too — the words **and the recording**: say
+how many minutes you want and it writes the spoken words arc by arc, upload the wav/mp3 (or
+an AAF) and audition it right there before any project sees it, so the script, the chapters
+and the backing music all land on the same boundaries — then 🎼 one **instrumental backing
+bed per arc**, each exactly as long as the chapter it plays under.
+
+*Newest first: 📖 story chapters + 📚 the codex · 🎛 scene reference mode + 🎤 the voice library · 🎼 score a story + 🆚 engine compare · Audio Lab · location sheets · per-project video engines · Klein Mode split · Story/World Builder ·
 per-outfit sheets · queue pause · [costume library](#-design-a-costume-before-anyone-wears-it).*
 
 **⚡ An entire character — from a sentence to a trained LoRA — builds itself, unattended**
@@ -173,9 +237,11 @@ set for free and stops rather than spending forty renders on a bad one, can be s
 and resumes where it left off after a restart. **Batch mode** queues many characters and runs
 them one after another.
 
-**🌍 Story / World Builder — the narrative layer** (v1.277.0). A home-page mode (`/worlds`)
-where a WORLD holds the setting sheet, any number of STORIES, a shared CAST and your
-lyrics/narrations. Every field is LLM-enhanceable (pick which configured brain per task), a
+**🌍 Story / World Builder — the narrative layer** (v1.277.0, extended through v1.277.46 —
+full reference: [`docs/STORYWORLD.md`](docs/STORYWORLD.md)). A home-page mode (`/worlds`)
+where a WORLD holds the setting sheet, any number of STORIES, a shared CAST, 📍 LOCATIONS,
+your lyrics/narrations, a 🎨 visual style and a 📚 CODEX. Tabs: 🌍 World · 📖 Stories ·
+🎭 Cast · 📍 Locations · 📚 Codex · 📝 Texts · 🔗 Projects. Every field is LLM-enhanceable (pick which configured brain per task), a
 story's cast can be LLM-proposed under a cap you set, and ⚡ Big Bang turns one idea — a
 sentence or three paragraphs — into a filled world, stories and a proposed cast without
 overwriting anything you typed. Cast members are PAPER until you submit them: pick a depth
@@ -184,6 +250,16 @@ selection goes through the ⚡ Autogen serial queue in one batch, with the cost 
 first. This is the bulk-submission mode that batch mode was parked for. Worlds link to
 projects BOTH ways, and a linked project can ⬇ pull the concept, visual style, cast (with
 generated character images imported) and lyrics/scripts straight in (v1.277.12).
+
+A story is written as prose, structured into **arcs** (its spine), and then told in
+**📖 chapters** — one arc at length, each with its own full narration and its own recording.
+**A chapter is one video project:** link a project to world → story → chapter and the pull
+narrows to that chapter alone, with its **beats** becoming the project's timeline. The
+**📚 Codex** keeps a canon-only cheat sheet of what the stories have established plus a page
+per character — what happened to them, in order, and where they stand now — so a continuing
+series can evolve its cast without contradicting itself. It re-calculates on demand (from the
+Codex tab or from any story), skips anything that has not changed without calling a model at
+all, and never overwrites an entry you wrote or pinned (v1.277.46).
 
 **⚡ The whole fleet gets used** (v1.276.45). Independent renders fan across all three workers;
 only a render that genuinely needs another render's output waits for it. Two lanes were quietly
@@ -207,26 +283,13 @@ shows each run's likeness score — warning you when the epoch installed was not
 one.
 
 Next, in order (the same list as `docs/OPERATIONS.md` §10 and `HANDOVER_PROMPT.md` — they are
-kept identical): (1) model re-staging in flight — the 2026-08-16 restart truncated in-flight
-downloads and helper ≤v1.220 promoted partials as "done"; `audit_model_integrity.py` is the
-byte-size instrument (`--fix` repairs); fresh pulls run on ZOAI1, the trainer's E: models
-drive is FULL (known-garbage list in the v1.277.15 CHANGELOG), helper v1.221 needs redeploy;
-(2) LTX 2.5 — IN PLACE, NOT A FOCUS (his call): graphs wired + validated, HIDDEN from the
-frontend pickers (grep `ltx_2.5 hidden` to restore); don't chase staging/integration;
-(3) ✅ MiniMax Music 3 VERIFIED 3/3 (2026-08-16: 15s tracks in 35-42s per box) — MM3 and
-ACE-Step 1.5 are both live in the Audio Lab; MM3-with-lyrics and exact-length story-arc
-pairing still untested; ⚠ the agent runs ONE job at a time (sorted-filename order) —
-queue long jobs LAST; (4) MiniMax H3 project lane —
-first LIVE end-to-end scene render pending (smoke + review verified); and tools.py's sample
-generator still carries the broken raw-workflow krea2 path (use z_image/anima/klein there);
-(5) the adopt-k3 cast watcher doesn't survive a restart — re-adopt by hand after a reboot
-mid-cast; (6) F5-TTS first voice clone needs Lorenzo's 5-15s sample + transcript;
-(7) the base-outfit picker in the LoRA panel (route built + tested, no UI); (8) H3's
-Video-Lab modes beyond t2v/i2v (first+last, last-frame, references→video); (9) whether 🙂
-`face_first` earns its keep at all; (10) `LoraPanel`'s `nOutfit` has no setter wired to any
-control, so a new dataset's "outfit" field always submits `''`. Recently closed: Story/World
-follow-through (pull-from-story is BUILT; the LLM lanes and a real 7-character batch ran
-live) and publishing (normal cadence since v1.277.3). See
+kept identical):
+(1) **⚡ THE AUTO-GEN 'DO EVERYTHING FROM THE STORY' CHAIN — the one thing still owed** — A sequencer over the lanes that now exist: pull → cast → chapters → per-chapter narration → beats → flow → backing beds → images → videos, with per-stage toggles like ⚡ Autogen v2. ⭐ Its unit is a CHAPTER now, not a whole story (v1.277.46): one chapter is one video, so the chain runs per chapter and each result stays small enough to re-roll. Deliberately last: sequencing lanes while they are still moving is how you ship a button that lies about what it did. · (2) **Model integrity after ANY staging** — ⭐ FILENAME PRESENCE LIES — run `scripts/audit_model_integrity.py` (byte-size vs HF; `--fix` repairs) after any staging; `shape … invalid for input of size …` at a Loader node = TRUNCATION, not wrong-loader. ✅ 2026-08-16: 13/16 clean everywhere, every AUDIO and ACE-quality model byte-correct 3/3, helper v1.221 deployed 3/3. Live progress: `scripts/dl_progress.py` or the Music tab's ⬇ strip. · (3) **LTX 2.5 = IN PLACE, NOT A FOCUS (his call, 2026-08-16 — twice)** — Graphs wired (`ltx25_graphs.py` + dispatcher `ltx25_i2v`/`ltx25_t2v`), validated on a worker, HIDDEN from the frontend pickers (grep `ltx_2.5 hidden` to restore). Its transformer + gemma4 are the only truncated copies the audit still flags — leave them. · (4) **📖📚 THE STORY SPINE + CHAPTERS + THE CODEX ARE SHIPPED — what is open is HIS FIRST REAL RUN THROUGH THEM** — Stories carry **arcs** (the spine) and now **CHAPTERS**: a chapter tells ONE arc at length, owns its own full narration and recording, and **IS one video project** (`settings["chapter_id"]`, picked in 🎬 Engine & Story); its **beats** become that project's timeline chapters. A linked project still DERIVES concept/style live (`services/story_context.py`) with per-field pins, and a chapter narrows all of it. 📚 The **codex** (`backend/api/storycodex.py`) is the canon-only world cheat sheet + per-character history, hash-incremental, Ollama by default, and ✍ hand-written / 📌 pinned entries survive every recalc. ✍ narration is written BEAT BY BEAT (one call per beat, 10 min default, a job with live status) · 🎙 a chapter can be SPOKEN with any voice, auditioned, and the take kept — which writes its **audio AND its SRT** from the render's own measured cues · 🎬 **a chapter becomes a project** in one press, gated on text+audio+SRT, with the scenes built from those cues — and 🔒 **that timeline is AUTHORITATIVE** (`timeline.authoritative_timeline`), so Whisper resync / Suggest Timeline / scenes-from-sections all refuse, exactly as they do for an AAF. That rule, not the arithmetic, is what ended the drift (v1.277.49). ⚠ NOT yet seen live: ✨ Outline against a real model and one ♻ codex recalc end to end. Free: `scripts/story_chapters_smoke.py` (**129 checks**) + `scripts/chapter_voice_probe.py` (**34**) + `scripts/cue_precision_verify.py` (**20**, decoded from the audio: 0.00 ms end drift, max gap energy 0.000, no drift growth over 70 cues). · (5) **🎵 THE MUSIC LANE IS SHIPPED AND SETTLED — real-use testing is what is left** — Four engines pickable + 🆚 Compare (same prompt, same seed, round-robin across boxes, all loudness-matched) · 🎼 Score a story AND **`POST /score/project`** (one INSTRUMENTAL backing bed per arc, length = the chapter's real duration) · every MUSIC track normalised to -14 LUFS / -1 dBTP **when ffmpeg is on the app host** (narration is not normalised) · per-engine prompt shaping. Recipe: turbo is the DEFAULT sketch engine, `ace15_sft` 50 steps @ **cfg 3** is the keeper (seed-confirmed 4/4). ⚠ Do NOT restore ComfyUI's cfg 7/6 and do NOT promote sft to default. ⚠ `music_bench.py` renders worker-direct and BYPASSES both shaping and normalisation. · (6) **MiniMax H3 project lane — first LIVE end-to-end render pending** — Smoke + adversarial review verified; a real scene through h3_i2v/h3_ref2v with sheets/audio has not run yet. Also `tools.py`'s sample generator still carries the raw-workflow krea2 path that 400s (use z_image/anima/klein there). · (7) **F5-TTS first voice clone** — Machinery ready 3/3; needs Lorenzo's clean sample + its EXACT transcript — and the ✍ story narration lane now produces the words to read. ⚠ the real reference cap is **12 s** (hard cut mid-word), and the narration chunk size derives from the transcript's byte length. · (8) **The adopt-k3 cast watcher does not survive a restart** — A reboot mid-cast leaves project characters image-less; `POST …/concept/characters/{i}/adopt-k3 {slug}` re-adopts by hand. · (9) **LoRA panel base-outfit picker** — Route built + tested, no UI. · (10) **H3's Video-Lab modes beyond t2v/i2v** — first_last / last_frame / ref2v untested there. · (11) **Does 🙂 `face_first` earn its keep at all** — It does NOT move identity. · (12) **`LoraPanel`'s `nOutfit` has no setter wired to any control** — So a new dataset's outfit field always submits an empty string (found v1.276.41, deliberately not fixed).
+📌 **v1.277.15-.28 are UNPUBLISHED at his request** (2026-08-16) — publishing is otherwise normal cadence; agent publishes MUST pass `-Yes`.
+
+Recently closed: Story/World follow-through (pull-from-story BUILT; the LLM lanes + a real
+7-character batch ran live) · publishing (normal cadence since v1.277.3) · the ACE quality
+staging + recipe (v1.277.17-.19). See
 **`docs/OPERATIONS.md`** (the runbook), `docs/KLEIN3.md` (the character/outfit/costume lane),
 `CHANGELOG.md` (the decision log — it records retractions, so read a claim's newest mention)
 and `HANDOVER_PROMPT.md`.
@@ -362,6 +425,13 @@ These videos were generated entirely by the app using ComfyUI + LTX 2.3 video ge
   DHCP — edit the row when an IP moves. Full reference: docs/WORKER_HELPER.md.
 
 ### Narration Chapters (long-form workflow)
+
+> ⚠ **These are a PROJECT's timeline chapters** — segments of one video's scene list. They are
+> not the same thing as a **story's chapters** on `/worlds`, which each become a whole video
+> project of their own. Four things in this app are called "chapter"; the table at the top of
+> [`docs/STORYWORLD.md`](docs/STORYWORLD.md) tells them apart. When a project is pulled from a
+> story chapter, that chapter's **beats** are what become the timeline chapters below.
+
 - **Mini-projects inside a project** — Hour-long narrations break naturally into chapters of ~25 scenes. Click any chapter bar above the timeline (or any chapter name in the Chapters tab) to drill into a focused view with the Timeline, Scene Editor, Auto-Gen, and Export scoped to just that chapter's scenes.
 - **Auto-chapter from script headers** — Drop `# Heading` / `## Heading` markers anywhere in the narration script and chapters appear automatically with names + colored timeline overlay. Without headers the project auto-splits by scene count (configurable threshold) at natural pause boundaries.
 - **LLM chapter direction** — Each chapter has a `description`, `character_focus` list, and `style_notes`. The **✨ Generate ALL** button on the Chapters tab reads each chapter's narration text and asks the LLM for a 1-3 sentence concept + character cast + visual tone (one click for all 14 chapters). Per-card buttons regenerate individuals.

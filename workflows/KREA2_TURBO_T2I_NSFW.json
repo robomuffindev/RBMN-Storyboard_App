@@ -61,7 +61,9 @@
       "conditioning": [
         "78:15",
         0
-      ]
+      ],
+      "protect_mode": "🚫 None",
+      "protect_regions": ""
     },
     "class_type": "RBG_Smart_Seed_Variance",
     "_meta": {

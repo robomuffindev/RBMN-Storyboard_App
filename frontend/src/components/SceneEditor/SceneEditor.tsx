@@ -4,6 +4,7 @@ import IdeogramPromptModal from './IdeogramPromptModal';
 import LlmInstructionModal from './LlmInstructionModal';
 import LTXDirectorModal from './LTXDirectorModal';
 import CharacterImagePicker from '@/components/VNCCSNative/CharacterImagePicker';
+import { SceneRefModePicker } from '@/components/Common/SceneRefMode';
 import InpaintModal from './InpaintModal';
 import { useAppStore } from '@/store';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -1110,12 +1111,36 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
     }
   };
 
-  // Two-pass generation — persisted in scene.parameters.two_pass_enabled
-  const twoPass = activeScene?.parameters?.two_pass_enabled || false;
+  // 🎛 SCENE REF MODE (v1.277.37) — the two routes, per scene.
+  // `two_pass_enabled` is route 1's legacy spelling and stays in sync so the
+  // model badge, the backend's `scene_override()` and this dropdown can never
+  // disagree; the backend reads the same fallback (services/scene_ref_mode.py).
+  const [projRefMode, setProjRefMode] = useState<string>('full_reference');
+  useEffect(() => {
+    if (!currentProject?.id) return;
+    let stop = false;
+    fetch(`/api/projects/${currentProject.id}/video-config`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }).then(r => (r.ok ? r.json() : null))
+      .then(j => { if (!stop && j?.scene_ref_mode) setProjRefMode(j.scene_ref_mode); })
+      .catch(() => { /* the default stands */ });
+    return () => { stop = true; };
+  }, [currentProject?.id]);
 
-  const handleSetTwoPass = async (checked: boolean) => {
+  const sceneRefMode = (activeScene?.parameters?.scene_ref_mode as string) || '';
+  const effRefMode = sceneRefMode
+    || (activeScene?.parameters?.two_pass_enabled ? 't2i_swap' : projRefMode);
+  const twoPass = effRefMode === 't2i_swap';
+
+  const handleSetSceneRefMode = async (value: string) => {
     if (!activeScene || !currentProject) return;
-    const newParams = { ...activeScene.parameters, two_pass_enabled: checked };
+    const mode = value === 'inherit' ? '' : value;
+    const eff = mode || projRefMode;
+    const newParams = {
+      ...activeScene.parameters,
+      scene_ref_mode: mode,
+      two_pass_enabled: eff === 't2i_swap',
+    };
     await updateSceneAndSync(activeScene.id, { parameters: newParams });
   };
 
@@ -2836,20 +2861,21 @@ export default function SceneEditor({ collapsed = false, onToggleCollapse }: Sce
                 </label>
               )}
 
-              {/* "Two-Pass Generation" toggle — show when on first frame and characters with images exist */}
+              {/* 🎛 Scene reference mode — replaces the old "Two-Pass" checkbox.
+                  Same switch, but it now also decides the VIDEO route (H3
+                  ref2v vs i2v), and it can defer to the project default. */}
               {frameSubTab === 'first' && conceptCharacters.some(c => c.image_path) && (
-                <label className="flex items-center gap-2 text-xs cursor-pointer group">
-                  <input
-                    type="checkbox"
-                    checked={twoPass}
-                    onChange={(e) => handleSetTwoPass(e.target.checked)}
-                    className="accent-blue-500"
+                <div className="text-xs">
+                  <div className="flex items-center gap-1.5 mb-1 text-gray-400">
+                    <Zap size={13} className={twoPass ? 'text-blue-400' : 'text-gray-500'} />
+                    <span>Reference mode for this scene</span>
+                  </div>
+                  <SceneRefModePicker
+                    value={sceneRefMode}
+                    projectDefault={projRefMode}
+                    onChange={(v) => void handleSetSceneRefMode(v)}
                   />
-                  <Zap size={13} className={twoPass ? 'text-blue-400' : 'text-gray-500 group-hover:text-gray-400'} />
-                  <span className={twoPass ? 'text-blue-300' : 'text-gray-400 group-hover:text-gray-300'}>
-                    Two-Pass Generation
-                  </span>
-                </label>
+                </div>
               )}
 
               {/* ─── Model indicator badge ────────────────────────────

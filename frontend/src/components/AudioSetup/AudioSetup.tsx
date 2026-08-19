@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, Music, Loader, CheckCircle, AlertCircle, Play, Pause, Mic, Drum, Guitar, Waves, FileText, Sparkles, Scissors, MessageSquare } from 'lucide-react';
-import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt, updateProject, importAaf, detachAaf } from '@/api/client';
+import { analyzeAudio, uploadAsset, getSections, getLyrics, saveLyricsText, getAssetFileUrl, createScenesFromSections, sliceSceneAudio, rerunWhisper, suggestTimeline, getScenes, uploadSrt, importSrtAsset, updateProject, importAaf, detachAaf } from '@/api/client';
 import { useAppStore } from '@/store';
 
 interface AudioSetupProps {
@@ -129,6 +129,17 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
   const [aafReslicing, setAafReslicing] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
 
   const aafActive = (currentProject?.settings as any)?.audio_source === 'aaf';
+  // ⭐⭐ A CUE-BUILT TIMELINE IS AUTHORITATIVE TOO, for the same structural
+  // reason an AAF is: every boundary is the edge of a real audio segment (a
+  // rendered sentence), not an estimate of where a word fell. The backend
+  // gates resync / scenes-from-sections / Suggest Timeline on BOTH
+  // (`timeline.authoritative_timeline`) — this banner is how the user finds
+  // out WHY those buttons are refusing, instead of thinking they are broken.
+  const cuesActive =
+    (currentProject?.settings as any)?.scene_source === 'chapter_cues';
+  const cueMeta = ((currentProject?.settings as any)?.cue_import || {}) as {
+    cues?: number; scenes?: number; min_scene_seconds?: number; at?: string;
+  };
   const aafMeta = ((currentProject?.settings as any)?.aaf_import || {}) as {
     filename?: string; imported_at?: string; clip_count?: number; scene_count?: number;
   };
@@ -395,6 +406,46 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
     },
   });
 
+  // 🌍 v1.277.35 — the files a story PULL already put in this project. They
+  // were landing as assets with nothing on screen pointing at them, so the
+  // AAF path dead-ended: the app held the file and still asked for an upload.
+  const projSettings = ((currentProject as unknown as
+    { settings?: Record<string, string> })?.settings) || {};
+  const storyAudioId = projSettings.story_audio_asset_id || '';
+  const storyAafId = projSettings.story_aaf_asset_id || '';
+  const storySrtId = projSettings.story_srt_asset_id || '';
+  const [storyBusy, setStoryBusy] = useState('');
+  const useStoryAudio = async () => {
+    if (!storyAudioId) return;
+    setStoryBusy('audio');
+    try { analyzeMutation.mutate(storyAudioId); } finally { setStoryBusy(''); }
+  };
+  const useStoryAaf = async () => {
+    if (!storyAafId) return;
+    setStoryBusy('aaf');
+    try {
+      const fd = new FormData();
+      fd.append('aaf_asset_id', storyAafId);
+      if (storyAudioId) fd.append('audio_asset_id', storyAudioId);
+      await importAaf(projectId, fd);
+      await queryClient.invalidateQueries({ queryKey: ['scenes', projectId] });
+      await queryClient.invalidateQueries({ queryKey: ['chapters', projectId] });
+      await queryClient.invalidateQueries({ queryKey: ['assets', projectId] });
+    } catch (e) { setErrorMessage(`AAF import failed: ${e}`); setStage('error'); }
+    setStoryBusy('');
+  };
+  const useStorySrt = async () => {
+    if (!storySrtId) return;
+    setStoryBusy('srt');
+    try {
+      const fd = new FormData();
+      fd.append('srt_asset_id', storySrtId);
+      await importSrtAsset(projectId, storySrtId);
+      await queryClient.invalidateQueries({ queryKey: ['lyrics', projectId] });
+    } catch (e) { setErrorMessage(`SRT load failed: ${e}`); setStage('error'); }
+    setStoryBusy('');
+  };
+
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     if (!file) return;
@@ -471,6 +522,43 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* ── 🔒 CUE-BUILT TIMELINE: same authority as an AAF, and the user
+             needs to SEE that, or Analyze/Suggest Timeline refusing looks
+             like a bug instead of the guarantee working. ── */}
+        {cuesActive && (
+          <div className="bg-emerald-950/40 border border-emerald-700/50 rounded-lg p-4">
+            <h4 className="text-sm font-medium mb-1 flex items-center gap-2">
+              <CheckCircle size={14} className="text-emerald-400" />
+              🔒 Narration-cue timeline active — boundaries are locked
+            </h4>
+            <p className="text-xs text-gray-300">
+              These scenes were cut from the narration&apos;s <b>own rendered
+              sentence boundaries</b> — every edge is the join between two audio
+              files, measured in whole samples, so a cut can never land inside a
+              word.
+              {!!cueMeta.cues && (
+                <> {cueMeta.scenes} scene{cueMeta.scenes === 1 ? '' : 's'} from{' '}
+                  {cueMeta.cues} cues
+                  {cueMeta.min_scene_seconds
+                    ? ` (merged under ${cueMeta.min_scene_seconds}s)` : ''}.</>
+              )}
+            </p>
+            <p className="text-xs text-amber-300 mt-1">
+              Whisper resync, Suggest Timeline and scenes-from-sections are
+              <b> refused</b> while this is on — those re-derive boundaries from
+              word timings that drift against the audio. Detach below to allow
+              them; you can still drag or split scenes by hand at any time.
+            </p>
+            <button
+              className="mt-2 px-3 py-1.5 rounded text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 disabled:opacity-40"
+              disabled={aafDetaching}
+              onClick={handleAafDetach}
+            >
+              {aafDetaching ? 'Detaching…' : '🔓 Detach — let the tools re-time these scenes'}
+            </button>
+          </div>
+        )}
+
         {/* ── AAF Timeline (narration modes): the tightest source — clip
              boundaries come straight from the editor that rendered the
              audio. Supersedes Whisper/SRT for TIMING when active. ── */}
@@ -693,6 +781,42 @@ export default function AudioSetup({ projectId, projectMode }: AudioSetupProps) 
             Audio File
           </h4>
 
+          {/* 🌍 what the story PULL already put in this project */}
+          {(storyAudioId || storyAafId || storySrtId) && (
+            <div className="mb-3 border border-emerald-800/70 bg-emerald-950/25 rounded p-2.5">
+              <div className="text-xs text-emerald-300 font-semibold mb-1">
+                🌍 From the linked story
+              </div>
+              <div className="text-[11px] text-gray-400 mb-2">
+                These files came in with the story — nothing to re-upload. ⚠ Analyze and
+                Import AAF both REPLACE the scene list, so they stay a button, not a
+                side effect.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {storyAudioId && (
+                  <button onClick={() => void useStoryAudio()} disabled={!!storyBusy || isAnalyzing}
+                    className="px-3 py-1.5 rounded text-xs bg-blue-700 hover:bg-blue-600 disabled:opacity-40">
+                    {storyBusy === 'audio' ? '⏳' : '🎧'} Analyze the story audio
+                    <span className="text-blue-200/70"> · {projSettings.story_audio_name || 'audio'}</span>
+                  </button>
+                )}
+                {storyAafId && (
+                  <button onClick={() => void useStoryAaf()} disabled={!!storyBusy}
+                    className="px-3 py-1.5 rounded text-xs bg-amber-700 hover:bg-amber-600 disabled:opacity-40">
+                    {storyBusy === 'aaf' ? '⏳' : '🎬'} Import the story AAF
+                    <span className="text-amber-100/70"> · {projSettings.story_aaf_name || 'timeline'}</span>
+                  </button>
+                )}
+                {storySrtId && (
+                  <button onClick={() => void useStorySrt()} disabled={!!storyBusy}
+                    className="px-3 py-1.5 rounded text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40">
+                    {storyBusy === 'srt' ? '⏳' : '📝'} Load the story SRT
+                    <span className="text-gray-300/70"> · {projSettings.story_srt_name || 'subtitles'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           {!musicAsset && !isUploading ? (
             <div className="border-2 border-dashed border-gray-700 rounded-lg p-6 text-center">
               <Music size={32} className="mx-auto text-gray-500 mb-3" />

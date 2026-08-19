@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from backend.api.lora_train import _helpers_list  # noqa: E402
 from scripts.install_ltx25 import FILES as LTX25_FILES  # noqa: E402
 
 #: (hf_url, models subfolder, filename)
@@ -40,7 +39,59 @@ TARGETS = [
      "text_encoders", "minimax_music3_text_encoder_pruned_int8_convrot.safetensors"),
     ("https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/"
      "vae/minimax_music3_dav.safetensors", "vae", "minimax_music3_dav.safetensors"),
+] + [
+    # 🎚 v1.277.17 — the ACE-Step 1.5 QUALITY lane (split files; the AIO
+    # checkpoint above is the TURBO/speed model). Staged by
+    # scripts/install_ace_quality.py.
+    ("https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/"
+     "split_files/diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors",
+     "diffusion_models", "acestep_v1.5_xl_sft_bf16.safetensors"),
+    ("https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/"
+     "split_files/diffusion_models/acestep_v1.5_xl_base_bf16.safetensors",
+     "diffusion_models", "acestep_v1.5_xl_base_bf16.safetensors"),
+    ("https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/"
+     "split_files/text_encoders/qwen_0.6b_ace15.safetensors",
+     "text_encoders", "qwen_0.6b_ace15.safetensors"),
+    ("https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/"
+     "split_files/text_encoders/qwen_4b_ace15.safetensors",
+     "text_encoders", "qwen_4b_ace15.safetensors"),
+    ("https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/"
+     "split_files/vae/ace_1.5_vae.safetensors",
+     "vae", "ace_1.5_vae.safetensors"),
 ] + [(u, folder, fname) for (u, folder, fname, _route) in LTX25_FILES]
+
+
+def _helpers_stdlib() -> list:
+    """The worker registry WITHOUT importing the app.
+
+    ⭐ `from backend.api.lora_train import _helpers_list` runs
+    `backend/api/__init__.py`, which imports FastAPI — so a plain
+    `python scripts\\…` outside the venv dies on ModuleNotFoundError. It did,
+    for him, on dl_progress.py. Operator-facing scripts read the registry off
+    disk instead, and only fall back to the app import if that fails."""
+    import os
+    import re as _re
+    v = os.environ.get("PROJECT_DIR") or ""
+    if not v:
+        try:
+            for line in (Path(__file__).resolve().parent.parent
+                         / ".env").read_text("utf-8").splitlines():
+                m = _re.match(r"\s*PROJECT_DIR\s*=\s*(.+?)\s*$", line, _re.I)
+                if m:
+                    v = m.group(1).strip().strip('"').strip("'")
+                    break
+        except Exception:                                      # noqa: BLE001
+            pass
+    fp = (Path(v or "~/RBMN-Projects").expanduser() / "_libraries" / "forge"
+          / "settings.json")
+    try:
+        hs = json.loads(fp.read_text("utf-8")).get("helpers") or []
+        if hs:
+            return hs
+    except Exception:                                          # noqa: BLE001
+        pass
+    from backend.api.lora_train import _helpers_list           # last resort
+    return _helpers_list()
 
 
 def hf_size(url: str) -> int:
@@ -89,7 +140,7 @@ def start_hf_download(base: str, token: str, url: str, folder: str, fname: str):
 
 def main():
     fix = "--fix" in sys.argv
-    helpers = _helpers_list()
+    helpers = _helpers_stdlib()
     bad = ok_all = 0
     repairs = []
     for url, folder, fname in TARGETS:

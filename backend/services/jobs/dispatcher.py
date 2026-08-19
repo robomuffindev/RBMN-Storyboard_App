@@ -1477,14 +1477,30 @@ class JobDispatcher:
                                 "ltx_seq_fflf": "h3_first_last"}
                         new_wf = _map.get(workflow_type)
                         if new_wf:
-                            # scene video refs (charsheets etc.) → ref2v, which
-                            # is H3's identity-preserving mode
+                            # 🎛 v1.277.37 — SCENE REF MODE, an explicit choice
+                            # instead of an implicit one. Two real strategies:
+                            #   t2i_swap        make the frame, swap characters
+                            #                   in (Klein ref lane), then i2v
+                            #   full_reference  hand H3 the sheets and let it
+                            #                   carry identity natively (ref2v)
+                            # The scene decides; `inherit` (the default) asks
+                            # the project. Before this, ref2v happened whenever
+                            # refs merely EXISTED, so the two lanes could not be
+                            # compared and auto-gen could not pick one.
+                            from backend.services import scene_ref_mode as _srm
                             _refs = (_sp.get("video_refs") or {}).get("urls") or []
-                            if new_wf == "h3_i2v" and (
-                                    _refs or _h3_st.get("h3_auto_sheet_refs")):
-                                new_wf = "h3_ref2v"
+                            _why = _srm.explain(_h3_st, _sp)
+                            _mode = _why["mode"]
+                            if new_wf == "h3_i2v":
+                                if _mode == "t2i_swap":
+                                    pass          # stay on i2v: the frame IS the plan
+                                elif _refs or _h3_st.get("h3_auto_sheet_refs"):
+                                    new_wf = "h3_ref2v"
+                            params["_scene_ref_mode"] = _mode
                             logger.info(f"[{job.id}] MiniMax H3 routing: "
-                                        f"{workflow_type} -> {new_wf}")
+                                        f"{workflow_type} -> {new_wf} "
+                                        f"(scene_ref_mode={_mode}, "
+                                        f"from the {_why['source']})")
                             workflow_type = new_wf
                             params["workflow_type"] = new_wf
                             params["_h3_settings"] = {
@@ -2887,6 +2903,20 @@ class JobDispatcher:
         h3s = params.get("_h3_settings") or {}
         width = int(params.get("width") or 1280)
         height = int(params.get("height") or 736)
+        # ⚠⚠ H3's latent packing needs BOTH dimensions on a 32-px grid. A
+        # 1280x720 request (the obvious "720p") dies inside
+        # SamplerCustomAdvanced with `shape '[1, 24, 1, 1, 22, 2, 40, 2]' is
+        # invalid for input of size 86400` — 720/16 = 45 rows where the reshape
+        # wants 44. The frame count was already snapped (h3._frames); the
+        # DIMENSIONS were trusted from the caller, so any API client that did
+        # not know the table produced an unrenderable graph. Snap here, where
+        # every H3 job passes, and say so in the log.
+        _w0, _h0 = width, height
+        width = max(256, (width // 32) * 32)
+        height = max(256, (height // 32) * 32)
+        if (width, height) != (_w0, _h0):
+            logger.info("H3: snapped %dx%d -> %dx%d (both dims must be /32)",
+                        _w0, _h0, width, height)
         duration = float(params.get("duration") or 5.0)
         frames = h3._frames(max(1.0, min(15.0, duration)))
         seed = int(params.get("seed") or 0) or int(time.time()) % 2**31

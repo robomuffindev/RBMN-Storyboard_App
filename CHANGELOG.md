@@ -1,3 +1,1674 @@
+## v1.277.51 -- 🗣 CHATTERBOX: THE CLONE ENGINE THIS APP CAN SHIP (2026-08-19)
+
+> *"lets use chatterbox… F5 is neat but I hate the non-commercial stance. its trash in 2026."*
+> *"the majority of our content will be narrations for videos to tell a story. and once our app
+> is solid I want to give it to the public to express themselves and tell their stories."*
+
+**The licence stops being a footnote the moment the app is distributed.** F5-TTS is CC-BY-NC
+4.0 — shipping it as the default would put a non-commercial restriction on every person who
+ever uses this. **Chatterbox is MIT** (Resemble AI), and was preferred over ElevenLabs 65.3%
+to 24.5% in blind listening tests. It is now the **default** engine, and the licence of each
+engine is shown **where the engine is chosen**, not buried in a doc.
+
+⚠ **F5 IS NOT REMOVED.** Existing voices and every take already rendered reference it. It stays
+selectable and is labelled `⚠ non-commercial` in the picker.
+
+### 🗣 What Chatterbox changes for him
+
+- **ZERO-SHOT — no reference transcript.** That deletes F5's worst failure mode outright (see
+  the quality section below), and it means **voices F5 refused are now usable**.
+- **No 12-second reference cap.**
+- **`exaggeration` (0.25-2.0) is the CHARACTER dial** — which is what an old western narrator
+  needs and what Kokoro's fixed presets cannot give him. Plus `temperature` and `cfg_weight`.
+- Installed via `diodiogod/TTS-Audio-Suite`, which also brought **IndexTTS-2, Higgs Audio 2/3,
+  VibeVoice, RVC and CosyVoice 3** — no second fleet install to try them.
+  ⭐ **VibeVoice is built for long-form expressive narration**, which is his stated main use
+  case. Worth trying next.
+
+### ⚠⚠⚠ A GREEN JOB THAT WAS ONE SECOND OF SILENCE
+
+The first real render "succeeded". ComfyUI reported **`execution_success` in 191 ms** and
+SaveAudio wrote a **1.0 s silent file**, which our lane happily kept. The node had raised
+`RuntimeError: ChatterboxTTS not available` internally and returned a placeholder.
+
+Cause: **the pack's `requirements.txt` deliberately omits its hard dependencies** — they live
+in its own `install.py`, which ComfyUI Manager runs and our helper does not. Missing:
+`s3tokenizer`, `resemble-perth`, `descript-audio-codec`. `scripts/install_chatterbox.py`
+installs them explicitly, all `--no-deps` (the F5 lesson: a resolver dragging torch is what
+blocked ComfyUI's startup behind a Windows dialog).
+⭐ **An engine that fails by returning silence is worse than one that crashes** — the tell was
+`_normalise` reporting **`+inf dB`**, which is only possible on digital silence.
+
+### ⭐⭐ AND THE MEASUREMENT THAT CORRECTED ME
+
+`ChatterBoxEngineNode.crash_protection_template` defaults to **`"hmm ,, {seg} hmm ,,"`** — it
+pads short segments, and the padding is TEXT. Our chapter lane chunks per SENTENCE, so short
+segments are the common case. I assumed commas were the safe pad "because they are not words".
+Measured, same seed, same two words:
+
+    "{seg}"                 1.28s   ← nothing added
+    "hmm ,, {seg} hmm ,,"   1.72s   (+0.44s, +34%)   the node default
+    ",, {seg} ,,"           2.28s   (+1.00s, +78%)   MY GUESS — the worst of the three
+
+Commas are **pauses**, and they added a full second of dead air to every short line — worse
+than the default I was "improving". And that time lands **inside the cue**, so a scene built
+from it would open on silence nobody wrote. Default is now `{seg}`; "Yes." renders fine at
+0.88 s without padding. **The knob is exposed, and if it ever crashes, the node's own default
+is the tested one — re-measure rather than re-guess.**
+
+### 🔊 TWO QUALITY LOSSES THAT WERE OURS, FIXED
+
+1. **Narration was never loudness-normalised**, and F5 deliberately scales its output back down
+   to the *reference clip's* RMS — so a quiet 12 s reference put his clone 6-10 dB under an
+   ElevenLabs master. This project had already written down that quieter reads as **"muffled"**
+   (`_normalise`'s own docstring), which is the exact word he used. Narration now normalises to
+   **-16 LUFS** (speech sits lower than music's -14, and a narration bed needs room under it).
+2. **Nothing checked that a voice's transcript describes its TRIMMED clip.** F5 derives the
+   whole generation's duration from that pair — paste the transcript of a 60 s export while we
+   auto-trim to 12 s and every chunk gets far too few mel frames, so the model **crams the words
+   in**: close in timbre, mumbled, *"harder to understand words."* A plausibility check
+   (characters-per-second against the ~11-19/s of real speech) now warns, with the direction of
+   the error. ⚠ A warning, never a block — a heuristic must not refuse a legitimate reference.
+
+✅ Verified live: `scripts/chatterbox_probe.py` — **4.08 s of real audio in 6.9 s** once the
+model is cached, cue machinery exact (1 cue, end 4.08 vs 4.08), SRT writes, normalised
+-1.45 dB. First run takes ~12 min: it downloads the model.
+
+## v1.277.50 -- ⏳ A TAKE KNOWS WHICH WORDS IT SPOKE (2026-08-19)
+
+His question: *"if I regenerate the narration for a chapter there will be an AAF correct? I am
+trying to make sure that when I go from the chapter to the project creation through the chapter,
+this will already exist and be used for the project."*
+
+Verified rather than answered — and verifying it found a real hole.
+
+**The answer is: rewriting the narration TEXT renders nothing.** ✍ writes words; 🎙 renders
+audio. Only ✅ **Keep** produces files — and it produces **all three at once** (audio + SRT +
+AAF), which the probe now asserts. All three are copied into the project and
+`story_aaf_asset_id` is set.
+
+⚠⚠ **THE HOLE: a rewritten chapter kept a take that spoke the PREVIOUS draft, and everything
+stayed green.** Text + audio + SRT all present → gate passes → scenes get cut to sentences that
+are no longer in the script, named with words nobody will hear. Silent, and exactly the class
+of mismatch this lane exists to end.
+
+**Every take is now stamped with the words it spoke** (`spoke_words` + a hash of the narration
+at Keep time). `_readiness` compares it, and **create-project refuses** with both counts:
+*"the narration was REWRITTEN after this take was recorded — the audio speaks 69 words and the
+chapter now has 7"*. Restoring the exact text makes it valid again. ⚠ Takes kept before this
+version carry no stamp; they warn rather than block, because refusing on missing evidence would
+be inventing a failure.
+
+⚠ Also fixed a line that **told him to undo finished work**: the pull's *"press Import AAF on
+the Audio tab"* is correct in general and wrong here — Import AAF REPLACES the scene list, which
+create-project has just built from the same cues. It now says the timeline is locked and the AAF
+is attached for his NLE, not that he needs to press anything.
+
+✅ `scripts/chapter_voice_probe.py` — **46 checks ALL PASS**, including the new stale-take guard
+and the AAF reaching the project.
+
+## v1.277.49 -- 🔒 THE BOUNDARIES ARE LOCKED, AND NOW PROVEN (2026-08-19)
+
+> *"I have spent months trying to do this with whisper and SRT and it's VERY VERY VERY VERY
+> sloppy… scenes have words cutting into two scenes… that's where the AAF comes in… I want a
+> guarantee of precision not a guess that results in the entire timeline of scenes being off."*
+
+**He was right, and v1.277.48 was wrong in the way that mattered.** I reproduced the AAF's
+arithmetic and **none of its authority**, which was the actual mechanism.
+
+### ⭐⭐ THE AAF'S ADVANTAGE WAS NEVER MOSTLY THE ARITHMETIC — IT WAS THREE GATES
+
+`audio_source == "aaf"` blocks Whisper/SRT boundary resync (`timeline.py:234`),
+scenes-from-sections (`:2463`) and Suggest Timeline (`:3453`). **That** is what ended the
+months of drift: not a better number, but a rule that nothing may re-derive the number.
+Precision you can re-derive away is not precision.
+
+v1.277.48's cue timeline had **zero** of those gates. Pressing Analyze on a cue-built project
+would have re-snapped every scene to Whisper word timing **and** applied the min/max span clamp
+at `timeline.py:322-326`, which parks `end_time` at values that are not word boundaries at all.
+I built a path straight back into the bug he escaped.
+
+**`timeline.authoritative_timeline(settings)` is now the ONE predicate**, and all three gates
+call it. It recognises both sources, for the same structural reason — each boundary is the edge
+of a real audio segment, not an estimate of where a word fell:
+
+    audio_source == "aaf"          an AAF clip start   (integer edit units)
+    scene_source == "chapter_cues" a TTS sentence edge (integer samples)
+
+`/detach-aaf` releases either; the Audio tab shows a 🔒 banner explaining *why* Analyze and
+Suggest Timeline are refusing, so the guarantee working does not look like a bug.
+
+### ⚠⚠⚠ AND I HAD RE-INTRODUCED THE v1.8.20 BUG IN MY OWN CODE
+
+`_probe_seconds` rounds to 2 dp, and `_concat_with_pauses` **accumulated those rounded
+seconds** — a random walk whose error grows with position down the file. Measured: ~30 ms
+typical, 70 ms p99, 400 ms worst case over 80 cues. **That is precisely the class of bug
+v1.8.20 killed** (*"39 of 48 scenes ended mid-word … the offset growing to ~10s by the end"*).
+
+Fixed by counting **integer samples** from the WAV headers (`_pcm_frames`) and dividing once —
+the same discipline `import_aaf` uses with integer edit units. Also: cues are now scaled by the
+tempo **actually applied** (the filter string is 4 dp and `atempo` clamps, so that is not the
+requested `pace`), `pace` is validated to [0.5, 2.0] instead of silently disagreeing with the
+audio, and the sanity check tests **monotonicity across every cue** rather than only the last
+one — a random walk is most likely to be back near zero at the end, which is exactly where the
+old check looked.
+
+### 🎬 AND THE AAF WRITER HE ASKED FOR, TWICE
+
+`backend/services/export_aaf.py` — timeline-only, one Sound clip per sentence, **`edit_rate` =
+the sample rate** so every cut point is an exact sample (a 25/30 fps edit rate would quantise
+every boundary and re-introduce ±20 ms). Kept a chapter's file set complete: **audio · srt ·
+aaf**. ⚠ Traps paid for: a `SourceMob` will not serialise without an `EssenceDescription` (use
+`MasterMob`); gaps must be `Filler` or everything after the first pause shifts.
+⭐ **Every export is read back through our OWN importer before it is kept** — if the round-trip
+does not recover every boundary the file is deleted rather than handed over looking
+authoritative. `pyaaf2` was in `pyproject.toml` but **missing from `requirements.txt`**, so a
+requirements install had no AAF support at all; both list it now.
+
+### ✅ THE GUARANTEE, MEASURED — 6 minutes, 70 cues, decoded from the audio
+
+`scripts/cue_precision_verify.py` never compares a cue to another number we computed. It
+downloads what the app serves and measures the sound. On a 352.275 s Kokoro render:
+
+| | measured |
+|---|---|
+| last cue vs end of file | **0.00 ms** (352.275000 vs 352.275000) |
+| every cue start on a whole sample | **worst fractional sample 0.000000** |
+| **energy in the gaps vs speech** | **max 0.000, mean 0.000** — 0 of 69 gaps contain speech |
+| drift first third → last third | **0.0000 ms → 0.0000 ms** (no growth) |
+| gap lengths vs requested | **0 of 69 off** (exactly 0.25 / 0.70 s) |
+| SRT vs cues | **worst 0.00 ms** |
+| AAF round-trip through our importer | **start err 0.0 s · end err 0.0 s · 70/70 names kept** |
+
+⭐ **Why it is a guarantee and not a good result:** each sentence is a *separate rendered file*,
+every part is normalised to identical PCM before the join, and the concat demuxer is
+sample-exact (independently measured: 0 samples over an 80-part join; silence at
+`-t {ms/1000:.3f}` is always a whole number of samples at 24 kHz). **A boundary cannot fall
+inside a word because the word is in a different file.** The numbers above only confirm nothing
+downstream corrupts that.
+
+⚠ Honest limits, stated: manual scene edits are still allowed (they should be); the guarantee
+covers TTS-rendered narration, **not** an uploaded human recording, which has no segment
+boundaries to inherit and still needs an AAF or a hand-checked SRT.
+
+Free suite: **129 checks** (121 free), plus the gate predicate locked in so a fourth caller
+cannot forget it.
+
+## v1.277.48 -- 🎙 SPEAK A CHAPTER · 📝 SRT FOR FREE · 🎬 CHAPTER → PROJECT (2026-08-18)
+
+> *"add an option to the chapter area to generate the TTS, audition it, select the voice we
+> want to use and any settings like the speed and pacing option."*
+> *"Once we have a chapter and its Narration Audio and associated files can we have a button
+> in the chapter area to create a project, which asks us what kind of project we want to
+> create… Make it so it requires all the narration files needed to do this before it starts."*
+> *"is there any way in our TTS generation routes to create an SRT and an AAF."*
+
+### ⭐⭐ THE SRT WAS ALREADY PAID FOR — WE WERE THROWING IT AWAY
+
+The TTS renders **sentence by sentence** and joins the parts with measured silence. The line
+that verifies the join already probed **every part's duration** and summed it. Accumulating
+instead of summing is the entire difference between *"we know when each sentence starts"* and
+*"we would have to run Whisper over our own output to find out"*. `_concat_with_pauses` now
+fills a `spans` out-parameter; the job carries **`cues`** (`start` · `end` · the spoken text,
+pause tags already stripped) and `GET /api/audio-lab/jobs/{jid}/srt` writes a standard SRT.
+
+⚠ Two traps, both found by writing them down: the **single-chunk fast path** bypasses the
+normalise loop entirely (a one-paragraph narration would have had an empty cue list and no
+SRT — invisible until the short one mattered), and **`_stretch` runs AFTER the concat**, so
+every cue is scaled by `pace` at capture time rather than at read time. One clock, one truth.
+
+### 🚫 AND THAT IS WHY THERE IS NO AAF WRITER
+
+His call, once the trade was on the table: an ElevenLabs AAF is imported for exactly **one**
+thing — per-sentence cut points — and it does not even carry the words (they live in the
+CSV/SRT, which is why `import_aaf` blanks generic clip names and calls them "Scene N"). Our
+cues are measured, exact, **and named with what was actually said**. A round-trip through a
+227 MB format to recover numbers we already have only loses information. **`scenes_from_cues`
+replaces the AAF entirely** — and reuses `clips_to_scenes`, the same pure timeline math the
+AAF path uses, so the merge rule cannot drift into a second implementation.
+
+### 🎙 THE CHAPTER SPEAKS
+
+`GET …/chapters/{cid}/tts/options` (voices, engines, readiness) · `POST …/tts` (render) ·
+`POST …/tts/keep` (keep a take). Voice, engine, **pace + pace mode**, paragraph and sentence
+pauses, 🪄 auto pause-tagging — all of it the Audio Lab's existing machinery, called
+**in-process**, with the chapter supplying only the opinion: which text, and where the take
+belongs. ⭐ **Audition first, keep second** — nothing touches the chapter until ✅ Keep, so two
+takes can be compared. ⭐⭐ **Keeping writes the audio AND the SRT in one action**, which is what
+makes the project gate reachable.
+
+### 🎬 CHAPTER → PROJECT, GATED
+
+`GET …/project-readiness` answers *"can this become a project, and if not exactly why"* so the
+button is disabled **with a reason** before it is pressed; the POST re-checks anyway, because a
+screen is a cache. **His gate: narration text + audio + SRT, all three** — the strict option,
+deliberately. Missing beats or an untagged cast are **warnings**, not blockers: they make a
+worse project, not an impossible one, and refusing on them would be this tool deciding how
+finished his writing has to be. Creating asks the **mode** (narration video · images · talkie ·
+music video), then creates → links to the chapter → pulls concept, style, cast, script, files
+and beats-as-chapters → **builds the scenes from the cues** → re-times the chapters onto them.
+
+### ⚠⚠⚠ THREE REAL BUGS THE LIVE PROBE FOUND, ALL PRE-EXISTING BUT NEWLY REACHABLE
+
+1. **An HTTP header is latin-1.** A voice called `🎨 Factory test` put an emoji straight into
+   `Content-Disposition` and the SRT route **500'd** — the subtitles were perfect, the
+   *filename* killed it.
+2. **`shortcode_counters` has a `projects.id` FK and NO relationship on `Project`**, so the ORM
+   never cascaded it and `DELETE FROM projects` itself raised. `allocate_shortcode` writes a row
+   the first time any chapter gets a code — meaning **a project that had ever had chapters could
+   not be deleted at all**. Not new; merely unreachable until this lane made deleting a
+   freshly-built project routine. `timeline_positions` and `stem_selections` (both → scenes)
+   were the same story for any project with sliced per-scene audio.
+3. ⭐⭐ **My first fix ran the whole pre-clean in ONE try/except**, so a single
+   `no such column: project_id` aborted the block and every LATER statement was silently
+   skipped — the log blamed the wrong table and the delete still failed. **A best-effort
+   cleanup must be best-effort PER STEP, or the first failure hides the rest.** (The bad column
+   was mine too: `global_characters` uses `source_project_id`, and being a LIBRARY that
+   deliberately outlives its project, it must be **nulled, not deleted**.)
+
+### ✅ MEASURED, END TO END
+
+`scripts/chapter_voice_probe.py` — chapter → spoken take → cues → SRT → project with scenes,
+**34 checks, ALL PASS**, on Kokoro (app host, no GPU, no worker, free):
+**26.48 s of speech · 6 cues · last cue 26.47 s vs a 26.48 s file (0.01 s drift) · gaps
+0.35/0.7/0.35/0.7/0.35 s exactly as requested · 4 scenes ending at 26.47 s, named with the
+words that are spoken in them.** The free suite is **121 checks**.
+⭐ *A green unit test on the SRT writer is not evidence that a real render's cues match a real
+file.* One proves formatting; the other proves the numbers.
+
+## v1.277.47 -- ✍ THE CHAPTER NARRATION IS A FULL TELLING, IN PARAGRAPHS (2026-08-18)
+
+> *"The chapter narration seems too small. It should be a story and be broken up into multiple
+> categories… it should act as more of a full telling of the chapter in enough detail to create
+> a compelling narration that will work well for video. Also we need to make sure you don't just
+> return a single block of text. **Paragraphs matter in TTS.**"*
+
+Two reports, two distinct causes, both real.
+
+### ⚠⚠ THE SINGLE BLOCK WAS A ONE-LINE BUG, AND IT WAS MINE
+
+`sw._flat()` joins a list with `", "`. A model that helpfully answered
+
+    "narration": ["First paragraph…", "Second paragraph…"]
+
+came back **comma-welded into one block**. `_flat` is correct for FIELDS — a mood, a title, a
+summary that must be one line — and destructive on PROSE, and I used it on prose.
+New **`_prose()`** joins with a blank line (and handles the `{"p1":…,"p2":…}` shape too), and
+new **`_paragraphize()`** then GUARANTEES the result: it drops any heading the model sneaked
+in, promotes single newlines to paragraph breaks, and — if it is still one blob and long enough
+to matter — splits on sentence ends into groups of four. ⭐ **The prompt asks for paragraphs
+twice and the code enforces them anyway**, because "paragraphs matter in TTS" is a requirement
+and a prompt is a request. They are also where this app's pause-tagger puts its `[pause]` tags,
+so a blob is not merely ugly — it is a narration with no breaths in it.
+
+### ⭐⭐ THE LENGTH NEEDED A DIFFERENT SHAPE, NOT A BIGGER NUMBER
+
+Asking a model for 1500 words in one response gets ~400: it paces itself against its own sense
+of "an answer", not against the budget. Raising the default alone would not have worked.
+
+**The narration is now written BEAT BY BEAT — one model call per beat**, each with its own
+share of the word budget and **the tail of the previous beat** so the prose continues instead
+of restarting (the failure mode of every multi-call narrative: the same character introduced
+three times and the weather changing). That is also what "broken up into multiple categories"
+buys structurally — the beats are natural paragraph groups. It is the story lane's arc-by-arc
+lesson, one rung down.
+
+Default is now **10 minutes ≈ 1500 words** (his call; 3 minutes was the old default).
+Because it is N calls and takes minutes, it is a **JOB** with the standing live-status
+contract — stage · which beat · running word count · WHERE · elapsed · a log — plus ⏹ cancel,
+and the panel **adopts a run already in progress** after a reload.
+
+### ⚠⚠ AND MY OWN FIRST BUDGET SPLIT SILENTLY LOST HALF THE CHAPTER
+
+`_beat_budgets` gave the first N beats a budget and **zeroed the rest**, so a 24-beat chapter at
+1500 words narrated beats 1-12 and **never told 13-24** — with a green job and a plausible word
+count. `_beat_groups` returns a **partition**: consecutive beats are GROUPED when the budget is
+thin (fewer, fatter calls instead of a string of 60-word stubs), and every beat lands in exactly
+one group. Caught by writing the invariant down as a test, not by reading the code.
+
+**✅ MEASURED ON THE ARTIFACT, not on the planner:** `scripts/story_chapters_smoke.py --live`
+writes one real narration and measures what reached disk — **717 words against a 600 target,
+13 paragraphs, 27 s, 2 calls for 2 beats**, hand-authored beats untouched. The suite is now
+**96 checks** (89 free + 7 live). ⭐ *A green unit test on the helpers is not evidence about the
+artifact* — §4b proves `_paragraphize` can split a blob; §6b proves the model's output actually
+has paragraphs in it.
+
+⭐ One more test-was-wrong-not-code: the live check first asserted "≥3 beats" and failed a
+correct run — the chapter had two hand-authored beats and the writer rightly reused them. It
+now asserts the thing that actually matters: **hand-authored beats survive a rewrite**, because
+a project has already pulled and timed against them.
+
+## v1.277.46 -- 📖📚 STORY CHAPTERS AND THE CODEX (2026-08-18)
+
+Two features, one ask, one shape: *what is true in this world, and where do I tell it?*
+
+### 📖 Chapters — his brief
+
+> *"The Story should have all the beats already created by the creator or LLM. The chapter
+> should work off the story beats and tell those parts in more detail. A chapter can be a
+> single narration and that makes it easier to keep the full media generations like video
+> smaller per chapter rather than trying to jam everything in at once."*
+> *"when matching a project to a story we now need to be able to select the chapter, as a
+> chapter will essentially be a single video project."*
+
+The ladder is three deep now, each rung with one job:
+
+    STORY   → prose + arcs            the spine, short on purpose
+    CHAPTER → one arc, told at length ⭐ ONE CHAPTER = ONE VIDEO PROJECT
+    BEAT    → a slice of a chapter    the project's timeline chapters
+
+**⚠⚠ FOUR things in this codebase are now called "chapter".** Know which you hold before
+touching anything: (1) `Chapter` rows — a PROJECT's timeline segments, `backend/services/
+chapters/`; (2) story `arcs` — the world-side spine; (3) story **`chapters`** — NEW,
+`backend/api/storychapters.py`, each owning a FULL narration; (4) a chapter's **`beats`**,
+which become (1) when a project pulls.
+
+**His four design calls**, all taken: **many chapters per arc** (a long arc gets three, a short
+one gets one) · project timeline chapters come from the chapter's **beats** · the codex is
+**canon only** · the story-level narration **stays** as the whole-story/trailer version while
+chapters own the real per-video scripts.
+
+⭐ **A beat is ARC-SHAPED on purpose.** `_clean_arcs` normalises both, so
+`create_chapters_from_arcs(session, pid, chapter["beats"], dur)` needed no new code and
+`story_context.arc_context` keeps matching on `arc_id`. One shape, two rungs.
+
+⭐ **The LLM writes ONE CHAPTER AT A TIME** (his call). ✨ Outline is the only whole-story call
+and it writes titles and summaries only. Smaller context, better prose, edits in between.
+
+**The project link takes a chapter** (`settings["chapter_id"]`, `PUT /story-link`, picked in
+🎬 Engine & Story). It narrows *everything*: the chapter's narration is the script, its
+recording is the audio, its beats are the timeline, its named cast narrows the pull, and it
+names the project (the story title would put one name on every video in the series).
+
+### 📚 The codex — his brief
+
+> *"a Codex tab to the world that always gets updated when things change so we can almost have
+> a cheat sheet for the world. Maybe also a codex page for characters as well so we can keep
+> track of events and major things that have happened to them for situations where we want to
+> create a continuous series … an option on the story tab to re-calculate codex … I would
+> prefer to use ollama on one of the LLM workers."*
+
+`backend/api/storycodex.py`. A world codex (factions · rules · places · items · terms · events
+· concepts) and a page per character (a summary, a **state line** — *where they stand now,
+what a sequel starts from* — events in story order, and relationships). Both are injected into
+every generator through `story_context.resolve` as *"established canon — never contradict it"*.
+
+Four rules it lives or dies by:
+
+1. **CANON ONLY.** Every entry is derived from something WRITTEN and carries `sources` naming
+   it. Entries without a source are dropped. A codex that invents lore will eventually
+   contradict a story he writes later and he will have no way to tell which half was real.
+2. **A RECALC NEVER EATS WHAT HE WROTE.** `manual` + `pinned` survive, through **one**
+   predicate, `_keep()`. (The project chapter rebuild needed the same rule in five places and
+   shipped with four of them wrong — hence one, in one place.)
+3. **INCREMENTAL.** A canon HASH per story and per character; unchanged material is skipped
+   with no LLM call, and the skip is said out loud. `stale` comes back from a plain GET, so
+   the 🔴 "N things changed" badge costs nothing.
+4. **LIVE VERBOSE STATUS** — the standing rule. Stage · what · WHERE (provider/model/host) ·
+   elapsed · per-stage durations · a change log, and every run kept on the world as
+   benchmarking data (`codex["runs"]`).
+
+Ollama is the default brain (his preference — this is the most token-hungry lane in the app).
+
+### 🔍 THE ADVERSARIAL REVIEW FOUND 17 ISSUES. Six mattered; all are fixed.
+
+**⚠⚠⚠ THE ONE THAT WOULD HAVE COST HIM A WORLD: `_merge_entries` read an empty scope list as
+"everything is in scope".** So a recalc where only a CHARACTER changed passed `scope_ids=[]`
+and **deleted the entire generated codex** — and a story-scoped run (which is exactly what the
+Story tab's 📚 button sends) deleted every world-level entry and, because the world hash was
+still stored, they never came back without `force`. Silent, and the ✅ badge said "up to date"
+afterwards. ⭐ **SCOPE MUST BE STATED, NEVER INFERRED FROM AN EMPTY LIST** — `did_world` is an
+explicit parameter now.
+
+**⚠⚠ AN ENTRY NAMED "Unknown" POISONED THE WORLD FILE PAST REPAIR.** `_flat` maps
+`unknown / none / n/a / nothing / -` to `""`, so `_entry()` returned `None`, the route's own
+name check had already passed, and `None` was appended and saved. Every later read of the
+codex then raised on `None.get(...)` — 500 forever, recoverable only by hand-editing JSON.
+
+**⚠⚠ THE CAP TRUNCATED THE WRONG END.** `merged[:400]` sorted his hand-written entries in with
+the generated ones and then sliced — so a manual entry whose name sorted late was deleted by a
+recalc, breaking the exact promise the module is built on. The cap truncates generated entries
+only now.
+
+**⚠⚠ THE RE-PULL WOULD HAVE DOUBLED HIS CHAPTERS.** `pull-from-story` deleted on
+`source = 'story'`, but `source` is MUTABLE — `backend/api/chapters.py` flips it to `manual`
+on rename, split, merge and re-describe. So a re-pull skipped every chapter he had touched and
+built the full set again beside them: two chapters over the same seconds, the 1.8.15
+doubled-chapter signature reached from a new direction. Deletion matches on **provenance**
+(`chapter_metadata.from_story`, written once, never changed) now.
+
+**⚠ THE DOUBLE-SUBMIT RACE, AGAIN.** The recalc checked the job map and then `await`ed
+`_llm_cfg`; two clicks inside that window started two threads, and the second orphaned the
+first's status object so cancel could only reach one. Claim under the guard, revert on failure
+— the v1.277.0 lesson in a new place.
+
+**⚠ A STATUS SCREEN THAT FROZE ON THE FLOW IT ADVERTISES.** `busy` was only set inside
+`recalc()`, so pressing 📚 Re-calc on the Story tab — which tells you to *"watch it on the 📚
+Codex tab"* — painted `⏳ scan · 0/0 · 0s` and never updated again. The Codex tab adopts a run
+that is already going.
+
+Also fixed: a chapter with **no** beats left the whole story's arcs in `ctx["arcs"]` and the
+concept text printed them under the heading "Beats:" (while `pull_from_story` correctly
+refused — the two halves have to agree) · `GET /codex` rebuilt and SHA-1'd every chapter's
+narration once per cast member, synchronously, in an async route (`_char_hash` composes from
+pre-computed story digests) · a recalc stored a SCAN-TIME hash after a minutes-long LLM call,
+marking an edit made during the run as "already read" (re-hashed under the merge lock;
+anything that moved stays stale and is reported) · ✨ Re-outline orphaned every chapter
+recording on disk and re-checked its overwrite guard against a pre-LLM snapshot · rewriting a
+narration minted NEW beat ids, dangling every pulled project's `arc_id` (carried over
+positionally now) · `note` was not memoized, so one failed fetch became an unbounded
+load→setMsg→re-render→load loop · the chapter dropdown pulled the whole world payload
+(narration + codex) to draw itself — `?brief=1` and `chapter_row()` are now the ONE picker
+shape, shared with `/story-link` · `story_ids` was wiped whenever a generated entry was
+hand-edited · `ffprobe` ran on the event loop · a deleted story orphaned its chapters' audio ·
+`character_brief` was written and never called.
+
+**Free suite: `scripts/story_chapters_smoke.py` — 73 checks, zero renders, zero LLM calls,
+ALL PASS live on v1.277.46.** It loads `_merge_entries` BY PATH (stdlib-only rule) and asserts
+the preservation invariants directly, including the three regressions above.
+
+⭐ **A green route is not a green FEATURE.** `/story-context` resolved the chapter correctly and
+then did not put it in its response — the two failures in the first live run were the resolver
+being right and the route being incomplete.
+
+### 📚 THE DOC PASS FOUND TWO MORE CODE BUGS
+
+Auditing the docs against the code (the .43 method) is supposed to find stale prose. It found
+that **the `source`-is-mutable fix had only been applied in one of three places.**
+
+- **`_rebuild_chapters_locked` still asked `c.source == "story"`** (`builder.py:720`). So
+  **renaming one story chapter silently re-enabled the header/auto producer**, which then grew
+  a second competing set beside it — the same doubled-chapter outcome by a different route.
+- **`retime_story_chapters` selected on `Chapter.source == "story"` in SQL.** An edited chapter
+  was never re-timed, so it kept the times it was born with while its neighbours moved.
+
+Both now ask **`from_story.is_from_story(ch)`**, and so does the pull — which had been
+hand-rolling the test as `chapter_metadata LIKE '%"from_story"%'` in raw SQL. That
+re-implementation had **already drifted**: the SQL matched the KEY'S PRESENCE while the
+function matches the VALUE'S TRUTH, so `{"from_story": false}` would have been deleted by one
+and kept by the other. ⭐ **A provenance rule with two implementations is a provenance rule
+with two answers.** One definition, three call sites.
+⭐ Also worth keeping: **PRESERVATION and PROVENANCE are different questions.** `'manual'` is a
+preserved source in the rebuild's five delete predicates, which is exactly why an edited story
+chapter survived long enough for these three bugs to stay invisible.
+
+**Docs:** new **`docs/STORYWORLD.md`** — the world builder never had a reference doc, and four
+things are now called "chapter", so it opens with a table telling them apart. Corrected six
+outright lies (OPERATIONS' and README's descriptions of what the pull builds chapters FROM,
+the `source='story'` provenance rule, the story-link and story-context contracts, two stale
+version headers) and filled the silent gaps (§7 gained ~26 chapter + codex routes, §6 gained a
+FREE-SUITES table with every suite's REAL check count, §9 gained the storyworld disk paths,
+§10 gained the done entry). `BLUEPRINT_CHAPTERS_v1.md` and the stray root-level `chapters.md`
+both got banners saying which rung they describe. The three open-item lists verified identical.
+
+⭐ **Every check count in the new suites table was COUNTED FROM SOURCE, not from output** —
+and an independent pass confirmed all nine. The one number this project has got wrong twice.
+
+## v1.277.45 -- 🔁 CHANGING THE PAUSE ACTUALLY CHANGES IT (2026-08-18)
+
+*"when i change the pause a second time it makes me manually replace the pause value in the
+narration. autotag does not update the pause."* — idempotence was doing its job too well. It
+skipped any position that already carried a tag, including the tags **it had written itself**,
+so a new setting did nothing and every number had to be retyped. Exactly the chore the feature
+exists to remove.
+
+`auto_tag(retag=True)` now RE-VALUES the tags at auto positions, and the pause dropdown
+re-tags the text **the moment you change it**, so the box on screen always matches the setting.
+New: **`[pause! 1200]` is PINNED** — re-tagging leaves it alone, so one deliberate beat can
+survive a global change.
+
+**Three bugs found by writing the tests first, each invisible by eye:**
+- ⚠⚠ `[pause! 1200]` contains a `!` followed by a space, so the SENTENCE rule matched *inside
+  the tag* and stacked another one in the middle of it:
+  `[pause! 1200] [pause 900] 1200]`. Existing tags are **masked to sentinels** before any
+  punctuation scan now — a scanner looking for punctuation has to be blind to the markup.
+- ⚠⚠ A newly inserted tag was written as literal text, so the *next* pass read the `.` of the
+  ellipsis it had just handled and stacked a third tag:
+  `He waited... [pause 350] [pause 1200] [pause 700] Then…`. New tags are inserted as
+  sentinels too — each pass must be blind to the markup the previous pass produced.
+- ⚠ `...` ends in a `.`, so the sentence rule re-valued what the ellipsis rule had just set,
+  and an ellipsis silently reverted to 350 ms. **First rule wins within a call** (`set` flag).
+
+Suites green on the running build: pause tags **38/38** · voice library **24/24** · scene ref
+mode **14/14** (+7 live).
+
+## v1.277.44 -- ▶ AUDITION THE SPEAKERS · 🗣 Kokoro as a narration engine (2026-08-18)
+
+*"is there any way to audition the speakers from the dropdowns? im looking for a particular
+sounding voice"* — a dropdown of 28 names is not a way to choose a voice. Now:
+
+- **▶ next to the speaker picker**, and a **🎧 Audition all** list with a play button per
+  speaker (click the name to select it, 🔀 to make it the blend partner).
+- **Blends are auditionable too**, which is the point — that is where the voices stop
+  sounding stock.
+- `GET /tts/kokoro/preview` **caches on disk**, keyed by everything that changes the sound.
+  Measured: **11.7 s** first (model load) → **0.01 s** cached → 2.2 s for a fresh blend.
+  Auditioning is browsing; it has to be instant the second time.
+
+### 🗣 …and the answer to "what else can this do": it is a full TTS engine
+
+So it is one now. The narration tab has an **engine** picker:
+
+- **F5** — clones the selected voice's reference clip on a worker. The only one that can
+  sound like a specific person.
+- **Kokoro** — speaks HERE with the built-in speaker a 🎨 factory voice was made from.
+  Measured: **6.30 s of narration in 3.4 s**, no GPU, no clone step, perfectly repeatable.
+
+⚠ **They are not interchangeable, and the UI says so.** Kokoro cannot clone a recording —
+its speakers are fixed embeddings. Picking it for a recorded voice returns a 400 that
+explains that rather than silently substituting a stranger's voice:
+*"'WesternV1' is a RECORDED voice — Kokoro cannot clone a recording…"*
+
+⚠ **Two engines, two conventions for `speed`**: F5's node is INVERTED (>1.0 slower), Kokoro's
+is normal (>1.0 faster). The 🐢 pace label means one thing to the user, so the Kokoro path
+inverts it (`1/pace`) on the way in. Everything else — pause tags, auto-tagging, paragraph
+gaps, the rubberband stretch — is shared, because it all happens after the audio exists.
+
+## v1.277.43 -- 🎨 A VOICE FACTORY: speakers with no recording at all (2026-08-18)
+
+*"is there any way to generate voices without a reference?"* Yes — **Kokoro-82M**, ~54 built-in
+speakers, and it can BLEND two of them into a voice that exists nowhere else. F5 structurally
+cannot do that; it needs a clip to clone.
+
+**But the real win is the combination.** 🎨 *Create a voice from scratch* picks a preset (or a
+blend), speaks a reference line, and files it in the voice library **as a normal voice** — which
+means F5 clones it from there, and **the transcript is exact by construction**, because we chose
+the words. That removes the single most common cause of a drifting clone, which is precisely the
+trap he has been walking around all evening.
+
+Proven end to end: `bm_fable` blended **65/35** with `am_michael` → a 9.6 s reference in 9 s,
+transcript filled in, `ready=True` → F5 rendered it on `.201`. A voice nobody has ever recorded.
+
+### ⚠⚠ It runs on the APP HOST, and that was measured, not preferred
+
+The obvious route — a ComfyUI Kokoro node — **died on the workers' Python 3.13**:
+
+    pip install --only-binary=:all: kokoro misaki[en]
+    → no matching distributions: misaki, numpy   (older kokoro pins numpy==1.26.4)
+
+Which is the same wall `ComfyUI-Geeky-Kokoro-TTS` warns about in its own title. The app venv is
+**3.11**, Kokoro is 82M params and real-time on CPU, and the job is ten seconds of audio — so the
+GPU boxes were never the right home for it. ⭐ **One box first** is what caught this before it
+cost three: the node installed cleanly, ComfyUI restarted, and `object_info` reported **3156
+nodes and no Kokoro** — an install that succeeds and never imports looks exactly like readiness.
+⚠ A dead `ComfyUI_KokoroTTS_MW` folder is left on `.163`; harmless, and removable on request.
+
+### Also here
+
+- `GET /tts/kokoro/presets` (28 English speakers, each with what it is FOR) ·
+  `POST /tts/kokoro/create` {name, preset, preset_b, blend, text}.
+- ⚠ Blending happens on the voice **TENSORS**, not the audio: mixing two finished takes gives
+  you two people talking at once; mixing the embeddings gives you one person who doesn't exist.
+- The default reference line is chosen for **phonetic coverage**, not meaning — a clip that never
+  voices an 'sh' clones badly on words that do.
+- An over-long render is cut at a **sentence end** and the stored transcript is trimmed to match
+  (`_fit_transcript`), because a transcript claiming words the clip never says skews F5's whole
+  duration estimate.
+- First call downloads the model (~330 MB, ~60 s); after that a reference takes seconds.
+
+## v1.277.42 -- 🔊 THE PAUSES WERE NEVER IN THE AUDIO (2026-08-18)
+
+*"the pause doesnt seem to do anything. sounds the same every time. can you confirm its
+actually adding a pause of some kind?"* — he was right, and the second sentence was **literally
+true**. Two bugs, and my 28 green unit tests could not see either, because they tested the
+PLAN and never the RENDER. **A correct plan is not a correct file.**
+
+### 1. Every chunk overwrote the previous one
+
+`_run_graph_job` named its download `<jid><ext>` — the **JOB's** id, not the chunk's. So a
+four-piece narration downloaded four files over the same path and `parts` ended up holding
+four references to the SAME file: the last sentence, four times. Single-chunk renders were
+unaffected, which is exactly why it survived until pause tags made multi-chunk normal. It now
+takes an explicit `stem` (`<jid>_p000`, `_p001`, …).
+⚠ This means **every multi-paragraph narration ever rendered here was wrong**, not just the
+tagged ones.
+
+### 2. FLAC parts + a PCM silence, joined by the concat DEMUXER
+
+ComfyUI's `SaveAudio` returns **FLAC** (`tts_..._00001.flac`). Our silence was PCM WAV. The
+concat **demuxer requires every input to share a codec**: it took its parameters from the
+first (FLAC) input and **dropped the PCM silence while exiting 0**. No error, no warning, no
+pause. Everything is now normalised to one canonical format first (`_canonical`, 24 kHz mono
+s16), and the join **verifies its own arithmetic** — parts + gaps should equal the output, and
+it logs loudly when they do not.
+
+**Measured, before and after** (`scripts/pause_render_verify.py`, new — it renders with a
+deliberately huge tag and runs `silencedetect` over the result):
+
+    before:  asked 2000ms → longest internal silence 0.50s   ❌
+    after:   asked 2000ms → longest internal silence 2.51s   ✅  (4.52s → 6.44s total)
+
+### ⚠⚠ RETRACTION — the v1.277.41 pacing table was measured on broken audio
+
+It claimed *"splitting makes each piece speak slightly FASTER"* (10.58s clean → 8.49s
+tagged). That number came from a render that was the last sentence repeated with the silence
+dropped. **It is withdrawn.** The honest measurement, same text, same voice, same seed:
+
+    clean 1.0, no tags          10.58 s   (1 chunk)
+    1.0 + auto tags             11.60 s   (4 chunks, +1.05 s of silence — it lands)
+    stretch 1.15 + auto tags    13.34 s   (4 chunks)
+
+Tags now do exactly what they say. The lesson is the one that keeps recurring here: **a green
+unit test on the planner is not evidence about the artifact.** `pause_render_verify.py` is the
+test that would have caught this on day one, and it exists now.
+
+## v1.277.41 -- 🫁 PAUSE TAGS, WRITTEN FOR YOU (2026-08-18)
+
+His verdict after listening: **1.0 is the cleanest, 1.15 reads more naturally.** So the goal
+became getting 1.15's pacing at 1.0's quality — which means putting the time BETWEEN the
+words, not inside them. Then: *"is there no way to add a shortcode or model specific tag?"*
+and *"can we auto add the tags, i dont think we ever want to do this by hand."*
+
+**The markup** — stripped before the model ever sees it (a tag left in makes F5 read the word
+"pause" out loud, which is the first thing the suite checks):
+
+    [pause] 400ms · [beat] 600ms · [breath] 200ms · [break] 400ms
+    [pause 750]  → a bare number ≥20 is MILLISECONDS
+    [pause 1.5s] → a unit, or a bare number <20, is SECONDS
+
+**🪄 And they are written FOR him.** `POST /tts/auto-tag` inserts them after every sentence
+end, ellipsis and em-dash — *into the text*, where they are visible and editable, because a
+pause you cannot see is a pause you cannot fix. On by default before each render.
+⚠ **IDEMPOTENT**: a spot that already carries a tag is skipped, so pressing the button twice
+does not double every gap, and hand-placed tags always beat the automatic ones.
+⚠ Commas get NOTHING — F5 already breathes there, and adding silence is what makes a read
+sound chopped instead of measured. Ellipses get 700ms, em-dashes 450ms; they are not the
+same amount of air.
+
+`plan_chunks()` is now the single planner for all three sources of silence (paragraphs, tags,
+optional per-sentence) and returns `(chunks, gaps)` in one pass. Free suite:
+`scripts/pause_tag_smoke.py`, **28 checks, no GPU**.
+⚠ Fixed on the way: a tag alone on its own line **lost its silence entirely** — it now hands
+the gap to the chunk before it. A pause that silently does nothing is worse than one that errors.
+
+**⚠⚠ The measurement that changes how you use this:** splitting makes each piece speak
+slightly FASTER, because F5 predicts duration per chunk and its guess is tighter on short
+text. Same paragraph, same voice, same seed:
+
+    clean 1.0, no tags          10.58 s   (1 chunk)
+    1.0 + auto tags              8.49 s   (4 chunks, +1.05 s of silence)
+    stretch 1.15 + auto tags     9.67 s   (4 chunks)
+
+So tags alone can read *quicker* overall despite the added air. Pair them with pace 1.1-1.15
+— which is exactly the combination he had already picked by ear.
+
+## v1.277.40 -- 🐢 SLOWER WITHOUT THE MUSH · 🫁 a pause after every period (2026-08-18)
+
+*"slowing it down makes it sound really bad"* — correct, and the cause is architectural. F5
+PREDICTS a duration and then fills it, so a slow `speed` stretches the model's prosody
+**while it generates**. A vocoder is not a tape machine.
+
+**So stop asking the model.** 🐢 pace now has two delivery modes, and `stretch` is the
+default: render at the model's native pace, then time-stretch the FINISHED audio with
+**rubberband** (pitch and formants preserved — confirmed present in the app host's ffmpeg by
+asking `-filters`, not by assuming). `model` keeps the old path so the two are comparable on
+the same line rather than on faith.
+
+Measured A/B, same voice, same seed, same sentence:
+
+    baseline 1.0               8.61 s
+    model   1.25 (old way)    10.76 s
+    stretch 1.25 (new)        10.76 s   ← identical LENGTH, so the A/B is purely quality
+    1.0 + 400ms sentences      8.16 s
+    stretch 1.15 + 300ms       9.38 s
+
+**🫁 And the cheapest slowdown of all: a gap after every full stop.** `sentence_pause_ms`
+splits paragraphs on sentence ends and inserts silence — silence cannot introduce artifacts,
+so 250-400 ms reads as measured at zero quality cost. `_concat_with_pauses` takes a LIST of
+gaps now (250 ms inside a paragraph, 900 ms between them, one pass). ⚠ Distinct gaps need
+distinct silence FILES — reusing one name for two lengths gives every join the last one
+written. ⚠ It renders each sentence separately, so prosody can step between them; off by
+default, and note from the table that per-sentence chunks come out slightly FASTER (8.16 s
+vs 8.61 s) because F5's duration guess is tighter on short text.
+
+⭐ **The lever nobody reaches for first: the reference clip.** F5 copies how the sample
+speaks. If 1.0 already sounds hurried — which he also reported — the reference is hurried,
+and re-cutting it on a calmer stretch slows everything downstream for free.
+
+## v1.277.38-.39 -- 🎤 THE VOICE PANEL, AFTER USING IT · 🐢 the pace knob runs BACKWARDS (2026-08-18)
+
+Three reports from the first real session with it, and one measurement that mattered more.
+
+### ⏳ "no indication anything is happening" · "it should state as much" · "no way to save"
+
+- The upload used `fetch`, which **cannot report upload progress** — so a 40 MB sample was a
+  dead button for as long as it took. It is `XMLHttpRequest` now, with a real bar and a
+  button that reads `⏳ uploading 47%`.
+- The server answers with a **receipt in words**, shown inline in the panel:
+  *"Uploaded take3.wav (38.4 MB, 40.0s) and cut a 12.0s reference starting at 1.9s (found
+  the first speech automatically)."* A 200 is not a sentence, and only a sentence lets him
+  check the work.
+- There was no Save button because **picking the file IS the save** — which was true and
+  nowhere on screen. The button says *"📎 Pick a sample & SAVE the voice"* now and the help
+  text says so outright.
+
+### ✍ …and the third one exposed that the flow ran backwards
+
+He asked to preview the cut *"so we can make sure we enter in the correct words"* — and the
+panel was demanding the transcript **before** the upload, i.e. asking him to transcribe a
+window that did not exist yet, because the clip is cut server-side from whatever he picks.
+Reordered: **pick → upload → the cut clip appears with a player → listen → type the words
+spoken in THAT window → 💾 Save transcript.** The transcript is optional at upload now; a
+voice without one is saved, marked `⚠ needs a transcript` in the dropdown, and **refused by
+`tts/generate` with the reason** rather than rendering a smeared clone. In F5 the transcript
+is the ALIGNMENT, not a label — asking for it before the cut was asking for the wrong words.
+
+### ✂ Nudge the window in 0.05s steps, by start, end OR length
+
+*"so the sample doesnt cut off in the middle of a word"*. The length step was **0.5s — wider
+than a syllable**. The window is now editable three equivalent ways (start · end · length),
+all clamped against each other and the source, with ◀▶ buttons at 0.05s and a live
+`1.90s → 13.90s · 12.00s of 40.0s` readout that flags when you are against the 12s ceiling.
+
+### 🐢⚠⚠ THE PACE KNOB RUNS BACKWARDS — measured, not assumed
+
+*"is there any way to slow down the delivery?"* Yes — and the control we shipped would have
+done the opposite. The node's tooltip claims `>1.0 slower`, upstream F5-TTS divides the
+predicted duration (`>1.0` = **faster**), and our UI just said "speed". So it was measured:
+same sentence, same seed, one box, output duration by ffprobe —
+
+    speed 0.8 → 4.86 s · speed 1.0 → 6.07 s · speed 1.2 → 7.28 s
+
+**Higher is SLOWER**, near-perfectly linear. The node's tooltip is right and upstream's
+convention is inverted here. The value still goes to the node untouched — inverting it in
+our code would just move the confusion — but the CONTROL is now a labelled 🐢 pace picker
+(*"1.2 · measured, narration pace"*), and the panel says the bigger lever is the reference
+clip itself: F5 copies how the sample speaks, so a hurried 12s window makes hurried
+narration whatever the knob says. New: `scripts/tts_speed_probe.py`, and **TTS jobs now
+record their output duration** — a narration lane that never measured how long it spoke
+could not answer this question at all.
+
+## v1.277.37 -- 🎛 SCENE REF MODE · 🎤 THE VOICE LIBRARY · 🔧 the klein_t2i 400, solved (2026-08-18)
+
+### 🔧 First: the klein_t2i 400 was never about Klein
+
+The app reported `400 Client Error` and threw the body away; the body was on disk the whole
+time. `scripts/log_grep.py` pulled it back:
+
+    node_errors: { "63": { required_input_missing: protect_mode,
+                           required_input_missing: protect_regions } }
+
+Node 63 is **`RBG_Smart_Seed_Variance`**, a custom node inside the four `KREA2_*_T2I.json`
+workflows. It was **updated on the workers and gained two required inputs**, so every stored
+graph using it failed validation before a single step ran. Patched all four with the node's
+own defaults (`"🚫 None"` / `""`, read from its `object_info`); the same image job then
+finished on `.163` with one asset.
+
+⚠⚠ **A custom node gaining a required input silently breaks every stored graph that uses
+it**, and it looks exactly like a model or routing problem. New: `scripts/probe_klein_t2i.py`
+(submits a shipped workflow, prints `node_errors`) — and note that the probe of the KLEIN
+file returned **200**, which is what sent me looking at the wrong file for a while: the
+failing graph was a KREA2 one reached through the first-pass redirect.
+
+### 🎛 SCENE REF MODE — the two routes, finally a choice
+
+His framing: *"there are 2 routes the autogen can take. 1. t2i and swap the references in.
+2. full reference mode in minimax."* Both already existed. **Neither was ever selected on
+purpose** — `h3_i2v` became `h3_ref2v` whenever refs merely EXISTED, and two-pass was a
+checkbox with no project-level default. So the routes could not be compared on the same
+scene, and the auto-gen chain had nothing to be told.
+
+`backend/services/scene_ref_mode.py` — pure, dependency-free, the single source of truth:
+
+- **`t2i_swap`** — Pass 1 stages the shot with nobody in it, Pass 2 composites the characters
+  in; video runs plain i2v from that frame. Strongest COMPOSITION.
+- **`full_reference`** — the sheets go to the model as references, one pass; on H3 the video
+  routes to `h3_ref2v`. Strongest IDENTITY, and the only route that holds a face THROUGH the
+  motion rather than only in frame 1. **The default**, because it is what the code already did.
+- **`inherit`** (per scene, the default) — ask the project.
+
+Set globally on the **Concept tab** (and in the 🎬 Engine & Story modal, beside the engine —
+only H3 has a native reference mode), overridden per scene in the **Scene editor**, where it
+replaces the old "Two-Pass Generation" checkbox. Honoured by the image lane
+(`_apply_two_pass_to_job_params`, 7 auto-gen call sites) and the H3 branch in the dispatcher,
+which now logs the mode AND who decided it.
+
+⚠ **`two_pass_enabled` is route 1 under its old name** and is still read as such
+(`scene_override()`), so existing scenes keep doing what they did. Both writers keep the two
+keys in sync — an explicit mode out-votes the checkbox, and switching a scene to
+`full_reference` CLEARS a stale checkbox, or the legacy read would quietly out-vote the
+dropdown on the next run. Free: `scripts/scene_ref_mode_smoke.py` (14 rules + 7 live route
+checks; **21/21 live**).
+
+### 🎤 THE VOICE LIBRARY — trim it, save it, look it up
+
+His ask: *"if I upload a long audio sample… give an option to cut it to the needed size. Also
+make sure we save voices… select from a dropdown… see a generated voice's details."*
+
+**The cap is 12 s and it is not advisory** — ComfyUI-F5-TTS hard-cuts the reference at
+12,000 ms, mid-word. Feed it 90 s and it clones from a fragment whose transcript no longer
+matches the audio, and in F5 the transcript is not a label, it is the ALIGNMENT.
+
+- Upload any length: the **whole file is kept as the SOURCE**, a **CLIP** is cut from it, and
+  the auto start finds the first non-silent moment (a clip that opens on room tone spends
+  part of its 12 s on nothing). `voices/<id>.<ext>` is the clip, `<id>_source.<ext>` the
+  original — the render path's `<id>.*` glob still finds only the clip.
+- **✂ Re-trim always cuts from the SOURCE.** Cutting a cut is how four reasonable
+  adjustments leave you with 3 s of reference. Proven: trim to 3 s, then back to 10 s → 10 s.
+- **🎤 Dropdown** of saved voices with durations and an ⚠ on anything over cap; `tts/generate`
+  now **refuses** an over-cap voice instead of letting the node cut it silently.
+- **🪪 Details view** — made-on, source filename/duration, both audio streams playable, the
+  transcript, and every render this voice produced with the projects and **stories** each one
+  landed in. Jobs now carry `voice_id` (a rename used to orphan them) and the import routes
+  leave `used_in` breadcrumbs.
+- **🌍 Send a take straight to a STORY** (`POST /jobs/{jid}/send-to-story`) as its narration
+  recording — the round trip through download-then-upload is where the voice→story link got
+  lost. New `GET /api/storyworld/stories` (flat, for pickers).
+
+Free: `scripts/voice_library_smoke.py` — builds its own 40 s sample with ffmpeg, so it needs
+no GPU and no file of yours. **20/20 live.**
+⚠ Its first version called `/tts/generate` and put a real test-tone render on the fleet. A
+free suite that submits GPU work is not free.
+
+### ✅🩺 …which is how we found — and FIXED — that F5-TTS could not decode anything
+
+The probe render died in `F5TTSAudioInputs` with **`Could not load libtorchcodec`**. Not a
+model, not a graph: F5 decodes its reference through **torchcodec**, which dlopen()s FFmpeg's
+**shared** libraries. `ffmpeg.exe` on PATH is not enough — the loader needs
+`avcodec-*.dll` / `avformat-*.dll` / `avutil-*.dll`, which only the **full-SHARED** build
+ships, and torchcodec supports FFmpeg 4-7 on Windows (**not 8**).
+
+**`scripts/install_ffmpeg_shared.py --apply` did the copy on all three boxes without anyone
+touching a keyboard on them.** The deployed helper (v1.220) has no "copy a file" route, but
+it has two that compose into one: `POST /datasets/<name>` extracts a **raw ZIP body** on the
+box, and `POST /install/pip` runs the ComfyUI **embedded python's** pip, whose `--target`
+writes anywhere. So the DLLs are wrapped in a `py3-none-any` wheel with the payload at the
+TOP LEVEL and unpacked into `python_embeded\` — the directory Windows searches first,
+because `python.exe` lives there. ~50 s for the fleet; downloaded once, here.
+
+**Then the second cause appeared, wearing a completely different costume:** a Windows
+message box on a worker —
+
+    The procedure entry point torch_dtype_float4_e2m1fn_x2 could not be located in
+    ...\torchcodec\libtorchcodec_core7.dll
+
+⭐ That is PROGRESS: torchcodec had found FFmpeg and got far enough to fail on a **torch**
+symbol. The boxes run **torch 2.10**; the installed **torchcodec 0.11 is built for torch
+2.11** (published pairs: 0.11↔2.11 · **0.10↔2.10** · 0.9↔2.9 · 0.7↔2.8). `--fix` installs
+the matching one with **`--no-deps`**, which is not an optimisation: torchcodec DEPENDS on
+torch, and letting pip satisfy that would have upgraded the whole fleet's torch out from
+under SageAttention and every custom node.
+⚠⚠ That modal **BLOCKS ComfyUI's startup until somebody clicks OK on the machine** — a box
+that "won't come back after a restart" may just be waiting behind a dialog.
+
+**✅ MEASURED, 2026-08-18: `--probe` says SPOKE on all three boxes** (torch 2.10.0+cu130 ·
+torchcodec 0.10.0). The F5-TTS narration lane is alive for the first time.
+
+⚠⚠ Three lessons, each of which cost a round trip:
+- The doctor's FIRST version printed "✅ versions line up" for a pairing it had no entry
+  for — a default dressed up as a finding, on the exact box where every render was failing.
+  Unknown says UNKNOWN now, and the table explicitly does not claim to prove decode.
+- Its first tail printed the manual-fix wall **unconditionally**, so even a fully passing
+  run ended in "here is what is broken". A screen that contradicts its own result teaches
+  you to stop reading it.
+- Both fleet tools imported the app to find the worker registry, making them **venv-only**
+  (`ModuleNotFoundError: No module named 'fastapi'` at a plain prompt) — and these are
+  exactly the tools you reach for when things are broken. `scripts/_fleet.py` now reads the
+  registry off disk with stdlib.
+- ⚠ Do not hardcode a BtbN asset filename: the rolling `latest` tag rotates its n7.x builds
+  off and 404s, and GitHub also 404s a bare `Python-urllib` User-Agent — two different
+  causes with the identical symptom. The installer asks the releases API and verifies the
+  published sha256.
+- ⚠ Never chain "restart the fleet" and "wait for it" into ONE agent job: the agent is
+  single-slot, so a stuck wait blocks every diagnostic you would use to find out why.
+
+## v1.277.35-.36 -- 🌍 THE STORY FILES REACH THE AUDIO TAB · ✅ H3 PROVEN FROM A STORY (2026-08-18)
+
+The two things I had said were not done.
+
+### 🌍 The Audio tab can now USE what the pull brought
+
+The AAF, audio and SRT were landing as project assets with **nothing on screen pointing at
+them** — the app held the file and still asked for an upload, which is why his AAF path
+dead-ended. Now:
+- `POST …/timeline/import-aaf` accepts **`aaf_asset_id`** and `POST …/timeline/upload-srt`
+  accepts **`srt_asset_id`**; the file upload became optional on both. Re-uploading 55 MB the
+  app already stores was the whole problem.
+- A **🌍 From the linked story** strip on the Audio tab with three buttons — *Analyze the
+  story audio · Import the story AAF · Load the story SRT* — each naming the file it will
+  use. ⚠ They stay BUTTONS: analyze and AAF import both REPLACE the scene list, and that is
+  his decision, not a side effect of a link.
+
+### ✅ MiniMax H3, end to end, from a story-linked project — and the bug it exposed
+
+He was right to be suspicious. Driving it produced a hard failure inside
+`SamplerCustomAdvanced`:
+
+    shape '[1, 24, 1, 1, 22, 2, 40, 2]' is invalid for input of size 86400
+
+**H3 needs BOTH dimensions on a 32-px grid.** 1280×720 — the obvious "720p" — gives 45 latent
+rows where the reshape wants 44. The frame count was already snapped (`h3._frames`, f%17==5);
+the DIMENSIONS were taken from the caller on trust, so any API client that did not know the
+table produced an unrenderable graph. `_build_h3_workflow` snaps both now and logs the
+change, where every H3 job passes.
+
+**Then it rendered.** Same request, unchanged: BoneWhistle (story-linked, `video_engine =
+minimax_h3`) → a scene → `generate/video` → the H3 lane → **1280×704, 8 s, h264+aac, done on
+`.201`**. The story→H3 path is real, not asserted.
+
+⚠ One thing found on the way and NOT fixed: `generate/image` with `workflow_type=klein_t2i`
+400s on the worker from the API path. Recorded as an open item rather than guessed at.
+
+### 🧩 Also in this wave (v1.277.31-.34)
+
+- **Characters imported from a story had no faces.** `image_path` was stored project-relative
+  while `/api/files/{path}` resolves against the projects ROOT — every one 404'd. The same
+  helper backs **adopt-k3**, so the autogenerate-characters watcher had the identical hole.
+  Fixed, with a repair pass that heals existing projects on the next pull, and cast members
+  now carry their full sheet as the description.
+- ⚠⚠ **And the bug behind that bug:** the first repair reported eight "repaired image" lines
+  and persisted NONE. `st = dict(project.settings)` is shallow, so mutating a character dict
+  mutated the object SQLAlchemy had loaded — the new value compared EQUAL to the old, no
+  UPDATE was emitted, and the change vanished on commit. **Caught only by re-READING the
+  project instead of trusting the response.** Deep-copied now.
+- **A story carries THREE narration files** (🎧 audio · 🎬 aaf · 📝 srt), each with its own
+  upload/download/delete and an inline player for the audio. An .aaf uploaded into the old
+  single slot is migrated to `aaf` — it is a TIMELINE, and calling it "audio" is what gave the
+  project audio it could never analyze.
+- **The script is the narration MINUS its `## Arc` headers** (`spoken_only`) — a reader would
+  say the heading out loud and Whisper would align text that was never spoken.
+- The project header shows a **🎬 engine badge** (MiniMax H3 / LTX 2.3 / LTX 2.5) and a
+  **🌍 story-linked** chip.
+
+## v1.277.30 -- 🎙 THE NARRATION RECORDING LIVES WITH THE STORY (2026-08-17)
+
+*"on our story page near where we can generate or enter our narration, make it so we can
+upload our wave, mp3 or AAF … so we can review the story narrations and make sure it's all
+good before adding to a project."*
+
+- **`POST|GET|DELETE /api/storyworld/worlds/{wid}/stories/{sid}/narration/audio`** — one
+  recording per story, stored beside the text it was read from
+  (`_libraries/storyworld/narration_audio/{wid}/`). Uploading a second one replaces the
+  first **and deletes the old file** rather than leaving orphans on disk.
+- The Stories tab gained a 🎙 **Recording** row directly under the narration text: upload,
+  an inline player, size + **measured duration**, ⬇ download, 🗑.
+  ⭐ The duration is **measured with ffprobe**, unlike the text lane's `words ÷ 150`
+  estimate — the UI labels them differently on purpose, because one is a measurement of a
+  real recording and the other is arithmetic about a hope.
+- **AAF is accepted but not pretended about.** It is a TIMELINE, not audio: no preview, a
+  visible warning, and on pull it says *"use Import AAF on the Audio tab, not Analyze"*.
+- **Pull brings it into the project** (`narration_audio`, default ON) as a MUSIC asset, and
+  says which button to press next. ⚠ It does NOT auto-analyze: analysis runs Whisper and
+  rewrites the scene list, which is his decision, not a side effect of pressing Pull.
+
+**Verified — `scripts/story_audio_smoke.py`: 9 checks, 9 PASS** (upload → filename/bytes
+preserved → playable flag → **19.99 s measured** → streamed back byte-identical → visible on
+the story → deleted → 404).
+⚠ Two things learned building it: the agent's `upload` job kind posts RAW BYTES as
+`application/zip`, which a FastAPI `File(...)` route cannot parse — a multipart body has to
+be built by hand; and the smoke's own `check()` returned `None`, so the first
+`if not check(...)` aborted the run after one PASSING line. **A test harness that stops early
+looks exactly like a feature that works.**
+
+## v1.277.29 -- 📚 THE AUDIT OF THE STORY SPINE: 6 DOC LIES AND 4 REAL BUGS (2026-08-17)
+
+*"update all docs, memories, handover docs, readme, changelog etc."* — done, and then run
+adversarially against the source, which is the only way it finds anything. It found nine
+false claims and, underneath them, **four defects the prose was covering for**.
+
+### ⚠⚠ THE ONE THAT MATTERED: a location's own photo was being used as a STYLE reference
+
+Every doc said *"the location's own reference wins — 'more views of THIS place' beats 'a
+place in this style'"*. The code handed that photograph to the **style-ref branch**, whose
+prompt is *"In the exact artistic style of image 1 … draw: &lt;plate&gt;"* — i.e. Klein was
+told to copy the photo's RENDERING and invent a new place. The opposite of a reference sheet.
+`_render_prompt_set` now takes `ref_mode`: `"subject"` says **"Image 1 is the PLACE itself —
+render another view of that same place, keeping its architecture, materials, layout and
+light"**, and the response/rows say `klein+locationref` instead of `klein+styleref`.
+⭐ **Two different jobs wore the same shape.** A style reference and a subject reference are
+not interchangeable, and nothing in the type system said so.
+
+### ⚠ Three more real bugs
+
+- **An arc edit silently converted the story's type.** `StoryIn.story_type` defaulted to
+  `"music_video"` and `update_story` writes any valid value — so every rename, mood edit,
+  reorder or ＋Add from the arcs editor (which posts `{arcs}` alone) turned a **narration**
+  story into a music video. `story_type` is `Optional[None]` now and only written when sent.
+- **A dead copy of the chapters-from-arcs block sat inside three unrelated routes**
+  (`set_talkie_config`, `set_video_config`, `set_story_link`), referencing `story` and
+  `pulled` — names that do not exist in those scopes. Unreachable (their models have no
+  `chapters` field) but a `NameError` waiting for anyone who added one. Removed.
+- **A FIFTH `source` predicate was never widened.** The docs claimed "all four" — the FK
+  pre-null was a fifth statement, still `source = 'manual'`, so a **manual sub-chapter of a
+  surviving story chapter got its parent link NULLed**. Widened.
+- **The auto-gen flow twin never got the arc block.** `concept._generate_flow_inner` told the
+  LLM *"THIS CHAPTER IS THE STORY ARC: …"*; `generation._ensure_video_flow` did not, so ⚡
+  Auto Generate wrote flow for "the story" while the manual button wrote it for THIS ARC. Now
+  wired — and because that function is handed a scene LIST rather than a chapter, it only
+  applies the arc block when every scene in the batch shares one chapter.
+
+### 📝 Doc claims corrected (they were the load-bearing kind)
+
+- *"a story-linked project skips the header/auto producers"* → the predicate is **"has story
+  chapters"**, not "is linked". Link without pulling and the auto producer still runs.
+- *"`source='story'` is preserved by the rebuild"* → **except on `force_auto`**, which deletes
+  every chapter regardless (that is what "Reset chapters" is for). API-only; the UI never
+  sends it.
+- *"link a project and it builds its chapters from the arcs"* → **the pull does that**, not
+  the link.
+- *"the Concept tab greys the derived fields"* → it **shows** the derived text above the box;
+  the box stays editable, and what you type there is ignored until you pin it. The label now
+  says so.
+- *"the rebuild fires from suggest-timeline, slice-audio and AAF import"* → **slice-audio does
+  not call it.**
+- *"Big Bang structures every story … with real cast names"* → Big Bang structures BEFORE the
+  cast exists, so its arcs come back with empty `characters`. Run 🎭 map-stories / re-Structure
+  after the cast lands.
+- *"the same keys the ~25 call sites already read"* invited the reader to think all 25 became
+  story-aware. **Five do**; the dispatcher's two-pass prompt builders, `suggest_timeline` and
+  `autogenerate_characters` still read the raw project keys.
+- Undocumented and now stated: the 24-arc cap, the 60-word-per-arc floor (so a many-arc story
+  exceeds `minutes × 150`), `structure` soft-failing with a note instead of a 409, the bed
+  engine defaulting to **turbo**, the cue FLOOR being silently clamped, and
+  `GET /locations/shots/job`.
+
+## v1.277.27-.28 -- 🌍 THE DERIVED CONCEPT TAB · 🎼 ARC BEDS · 📷 LOCATIONS FROM YOUR OWN PHOTO (2026-08-17)
+
+Everything that was owed from the story-spine ask, minus the one thing still open.
+
+### 🌍 The Concept tab tells you what is driving it
+
+Linked projects show a **"🌍 Derived from &lt;story&gt;"** banner with the arc and cast counts,
+and Concept + Visual Style each display the story's live text above the box with a
+**pin** control: *pin this text* stops the story driving that field (stored in
+`settings["story_overrides"]`, never written into the concept keys — a value written there
+is indistinguishable from a derived one, and then nobody can tell what unlinking restores),
+*use the story* releases it.
+
+### 🎬 The arcs are editable
+
+The /worlds Stories tab arc list is now a real editor: title · mood · summary · characters ·
+locations, ↑/↓ to reorder, 🗑, ＋ Add an arc — saved through the existing story route, so a
+hand-written arc is worth exactly as much as a generated one.
+
+### 🎼 Backing beds per ARC — `POST /api/audio-lab/score/project`
+
+One bed per arc of the project's linked story. **Lengths come from the CHAPTERS** — which
+are the arcs, timed against the detected sections — so a bed is as long as the stretch of
+story it plays under; no LLM guess, no "a song per scene". **Instrumental by default**
+(these sit under narration, and a vocal fights a voice-over). The caption is the arc's
+**mood** plus the world's style, never its plot. A chapter longer than the 300 s engine
+ceiling is clamped **and flagged**; an arc whose chapter has no time yet defaults to 60 s
+**and says so** in `notes`. ⚠ Cue lengths are deliberately NOT normalised to a total —
+forcing them to sum would undo the property that makes them fit.
+Live on BoneWhistle: 5 beds, one per arc, each caption carrying that arc's mood.
+
+### 📷 Locations: 4 plates, and build from YOUR photo
+
+- **Four plates by default** (his call) — establishing · interior/eye-level · details ·
+  other light, the standard set, the same shape as a character sheet's views.
+- **`POST /worlds/{wid}/locations/{lid}/reference`** — upload your own photograph of a real
+  place: the VISION model documents it, the six sheet fields fill from what is ACTUALLY in
+  the picture (FILL semantics — it never overwrites what you wrote), and **every plate is
+  then rendered FROM that image**, the way a character's front reference drives its views.
+  The location's own reference **wins over the world's style ref**: "more views of THIS
+  place" beats "a place in this style".
+  ⚠ The scan prompt forbids describing the photograph (no "a photo of", no camera talk) and
+  forbids mentioning people even when they are visible — a plate that cites this reference
+  must not inherit anyone standing in it.
+
+### ⏳ Still open, deliberately
+
+The ⚡ auto-gen "do everything from the story" chain. It comes last on purpose: it is a
+sequencer over the lanes above, and sequencing lanes that are still moving is how you get a
+button that lies about what it did.
+
+## v1.277.24-.26 -- 🎬 THE STORY BECOMES THE SPINE (2026-08-17)
+
+*"link a project to a world and story… have the story flow and chapters derived from what we
+have proposed for the story… if we need to make our story more structured so it fits, do it."*
+Plus, mid-build: *"give me an area on a story to define the narration text, and to have the
+LLM create it from the story."*
+
+### 🎬 Stories gained ARCS — the machine-readable spine
+
+`beats` stays as the writer's prose; **`arcs`** is the structure the pipeline consumes:
+title · what happens · **mood** · characters · locations, ordered.
+`POST /worlds/{wid}/stories/{sid}/structure` reads the story (and only the cast and
+locations that exist) and writes them. **Big Bang now structures every story it creates**,
+then runs `_assign_cast_stories` — because a three-story world whose whole cast belonged to
+story #1 made *"the cast of THIS story"* meaningless, which is the exact question a linked
+project asks. Live: *Bonewhistle* → 5 arcs in 21.5 s, real cast and real location names.
+
+⚠ Arcs carry **no duration**. Time comes from the audio (below), not from a weight the model
+guessed — a boundary that does not fall on a real pause cuts a sentence in half.
+
+### 🌍 A linked project DERIVES its direction — it is not a copy
+
+`services/story_context.py`: `resolve()` + `effective()`. A linked project's `concept_text`
+and `style_text` resolve **live** from the world+story, under the SAME keys the ~25 existing
+call sites already read, so nothing downstream had to learn a new name. Edit the world and
+the project follows. `settings["story_overrides"]` pins any single field
+(`PUT /story-override`), and `GET /story-context` is what the Concept tab reads to show
+"from *Bonewhistle*" with the story's values.
+⚠ Wired into **both** flow implementations — `concept._generate_flow_inner` AND
+`generation._ensure_video_flow`, the auto-gen twin that would otherwise have silently
+ignored the story (the v1.276.43 duplicate-implementation trap).
+
+### 🎬 Chapters come from arcs, timed against the DETECTED SECTIONS (his call)
+
+New producer `services/chapters/from_story.py`, beside script-headers and scene-count
+auto-split. Arcs are laid onto the audio's own section boundaries in order —
+5 arcs/5 sections is 1:1; fewer arcs group sections; more arcs subdivide them — and every
+boundary is snapped to a scene start. Each chapter carries the arc's summary as its
+description, its characters as `character_focus`, its mood as style notes, and its `arc_id`
+so the flow LLM is handed **that arc** per chapter.
+
+**Two structural guards, both of which would have been silent data loss:**
+- `source="story"` is now PRESERVED by `_rebuild_chapters_locked` alongside `manual` — the
+  rebuild fires automatically from suggest-timeline, slice-audio and AAF import, and would
+  have deleted the story's structure without a word. All four predicates (delete, FK
+  pre-null, survivor check, raw-connection fallback) were widened in lockstep — leaving the
+  survivor check narrow would have made the safety net eat the preserved rows.
+- **When a project is story-linked, the header/auto producers stand down** and the arcs are
+  RE-TIMED instead (`retime_story_chapters`). Otherwise a second, competing chapter set
+  appears on the next analysis. A story is usually linked before the narration is recorded,
+  so re-timing is the normal path, not the exception.
+
+### 🎭 The cast pull is story-scoped
+
+`pull-from-story` now imports **this story's** cast (`story_cast()`: members tagged with the
+story, falling back to the whole cast when nobody is tagged — a single-story world never
+needs tagging, and returning nothing there would look like a broken link).
+`PullFromStoryIn` gained `chapters` (default ON); `concept`/`style` default OFF now, since
+they are derived rather than copied.
+
+**Live on his own project**: BoneWhistle → Wild West World / Bonewhistle → `characters (8)`,
+`chapters (5 from arcs)`, `source=story`, character focus intact.
+
+### ✍ Narration on the story — the words a TTS will read
+
+`GET/POST /worlds/{wid}/stories/{sid}/narration` + a panel on the Stories tab: target
+minutes, tone, overwrite, an editable body, 📋 Copy for TTS. Written **arc by arc with
+`## Arc title` headers** when the story has arcs — so the narration, the chapters and the
+backing beds land on the same boundaries instead of three different ones, and the project's
+existing header parser can read it.
+⭐ Length is a **word budget** (`minutes × 150`), not a duration request: models honour a
+word count and ignore "about five minutes". Live: 645 words ≈ 4.3 min across 5 arcs, 23.2 s,
+in the requested campfire tone with the real names.
+
+## v1.277.22-.23 -- 🪪📍 THE LOCATION SHEET IS AN ACTUAL SHEET (2026-08-16)
+
+*"isn't a location sheet similar to a character sheet where it shows multiple
+representations… also make sure we can click the images to open them in a lightbox… give
+the option to generate all location sheets that are missing, and to regenerate existing…
+these should also be able to be called in as a reference for both image and video models."*
+All four, plus a defect his eye would have caught next.
+
+### 🪪 A composited SHEET, not a pile of plates
+
+- `_build_location_sheet()` — PIL, no worker, no GPU, so it is free to rebuild whenever the
+  plates change. 2048px, up to six cells, header = name · kind + the description, each cell
+  labelled with its ANGLE. It composes **only plates** (including an old sheet would nest
+  thumbnails inside thumbnails on every rebuild) and keeps **exactly one sheet per
+  location** (three near-identical composites in a picker help nobody).
+- It builds itself at the end of every plate render, and **the sheet becomes the location's
+  ⭐ reference** — unless the user pinned a plate, which a rebuild must never override
+  (`image_pinned`). Deleting the pinned plate hands the crown back to the sheet.
+- ⚠ **Cells are ordered by ANGLE, not by completion.** Plates come back from a thread pool
+  in whatever order finished first, so the first live sheet opened on "details". Establishing
+  shot leads now.
+
+### ⚠⚠ THE PLATES CAME BACK FULL OF PEOPLE — because we told them not to
+
+Every prompt ended *"No people, no characters, no text or captions"*. **These lanes run at
+cfg 1 with no negative prompt, where naming a thing summons it** — the Klein rule, relearned
+on locations. The first sheet of Cinder Spike Rail Camp had rail workers in all six cells,
+which is precisely what a reference plate must not carry (anyone in it gets copied into
+every render that cites it). Now AFFIRMATIVE: *"a deserted, unoccupied place: empty of
+figures, still and quiet, a clean environment plate"*, and *"a clean unlettered image"* in
+place of "no text" — in the shared renderer, so 🎨 style samples got the same fix.
+✅ Re-rendered live: Black Lantern Mine No. 7, three plates, **not a person in frame**.
+
+### The rest of the ask
+
+- **Lightbox** on every plate (the shared zoom/pan viewer — click steps through the whole
+  set with ←/→), with a 🪪 SHEET badge on the composite.
+- **Bulk**: `POST /worlds/{wid}/locations/shots/all` — *🖼 Sheets for all missing* and
+  *♻ Regenerate all*, with plate-count and model pickers in the toolbar and a world-level
+  progress line (`GET …/shots/job`). ⚠ Locations run **serially** — each one already fans
+  its plates across every box, so running two at once would not add throughput (the
+  v1.276.54 depth-first rule).
+- **Locations are now pickable as REFERENCES** wherever characters are: the picker used by
+  the 🎬 Video Lab and the Scene Editor gained a 📍 tab fed by `GET /api/storyworld/location-
+  images`, sheet first. A reference can be a PLACE as easily as a person.
+- Per-card 🪪 button recomposes the sheet from the plates on disk without rendering.
+
+## v1.277.21 -- 📍🖼 A LOCATION SHEET WITH NO PICTURE IS NOT A SHEET (2026-08-16)
+
+*"I have it Scout locations and it got the text it needed I guess but did not generate the
+Location Sheets to use as reference. I don't see a way to do this in the UI either."*
+Correct on both counts: 📍 Scout wrote the six text fields and stopped, and nothing on the
+screen could turn a location into an image. His eight Wild West locations all had 6/6 fields
+filled and `image_id` empty.
+
+### 🖼 Locations now render PLATES — the images other lanes cite
+
+- `POST /worlds/{wid}/locations/{lid}/shots` (count 1-8, model, optional direction) ·
+  `GET …/shots` (plates + LIVE job status) · `GET …/locations/shots/{sid}/image` ·
+  `POST …/shots/{sid}/active` (⭐ the plate this location IS) · `POST …/shots/{sid}/delete`.
+- **Prompts come from the SHEET, not from another LLM call.** The scout already wrote
+  description / atmosphere / key details / time & light — paraphrasing that through a model
+  would add a minute and a failure mode for nothing. Six angle templates, establishing shot
+  FIRST, because the first plate is what becomes ⭐ active.
+- ⚠ Every prompt ends **"no people, no characters, no text or captions"** — a location plate
+  is a REFERENCE, and anyone in it gets copied into every render that cites it.
+- The first successful plate auto-becomes ⭐ active if the location has none, and deleting
+  the active plate promotes another rather than leaving a dangling id.
+- UI: thumbnails on the location card, ⭐/🗑 per plate, a 🖼 Sheet panel (plates · model ·
+  direction) and the live status line — what, WHERE, how long — polling only while
+  something is actually rendering.
+
+### ♻ One renderer, two lanes
+
+`_render_prompt_set()` is now the single implementation of "render N prompts across the
+fleet", shared by 🎨 world style samples and 📍 location plates. It keeps all three paths
+and the traps that made them work: style-ref → Klein citing **image 1** positionally ·
+**Krea 2 NEVER uses the generic t2i workflow file** (its baked unet name is not what is
+installed; every box 400s the raw graph — forge's lane discovers the unet per host) ·
+otherwise the t2i pool with **workers assigned round-robin UP FRONT**.
+
+**Proven live on his own world** (Cinder Spike Rail Camp, 3 plates, krea2): **54.7 s**,
+fanned across all three boxes — `.163` / `.224` / `.201`, one plate each — first plate
+auto-set active.
+
+## v1.277.20 -- 📚 THE DOC AUDIT FOUND A LIVE BUG AND A LYING SCREEN (2026-08-16)
+
+*"please update all documentation, readme, memories and handover docs."* Done — and the
+pass was ADVERSARIAL (a subagent trying to prove the docs wrong against source, with
+file:line), which is the only kind that finds anything. It found 12 defects; the two that
+mattered were not typos.
+
+### ⚠⚠ A REAL BUG: the time signature was stripped and then THROWN AWAY
+
+`prompt_shape.for_ace()` extracted the meter out of the caption and returned it, but
+`enqueue_music` never read `sh["timesignature"]` and both ACE graphs hard-coded `"4"`. So a
+caption saying "in 3/4 time" had the meter **deleted from the text and forced to 4/4 in the
+widget** — the metadata was destroyed, not moved, which is the exact failure the shaping
+exists to prevent. Threaded through now (`MusicIn.timesignature` → `enqueue_music` → both
+graphs), with the trap named in a comment where the value is set.
+⭐ **"Moved" and "stripped" are not the same claim — check that something CONSUMES it.**
+
+### ⚠ THE SCREEN WAS TELLING HIM TO USE THE KNOWN-BAD VALUE
+
+The ▸ advanced row — the one place an operator types a cfg — read *"Defaults are ComfyUI's
+own per model: turbo 8/1 · XL base 50/6 · XL sft 50/7"*, and the engine chips said "cfg 7" /
+"cfg 6". Every doc says cfg 3 and *"do NOT restore 7/6"*. **A reader trusting the screen
+would have "corrected" 3 back to the setting that garbles the model.** Same stale pair was
+still in `_ace_xl_graph`'s docstring, `music_bench.py` and `install_ace_quality.py`.
+
+### The rest of the audit, fixed
+
+- `docs/OPERATIONS.md`'s API bullet still described a **two-engine** music route and
+  "clone = 5-15s"; it now lists all four engines, `music/compare`, `GET staging`,
+  `DELETE jobs/{id}` (which also deletes the file), the **≤12 s** clone cap, and says
+  plainly that **normalisation needs ffmpeg on the app host and does NOT cover narration**.
+- The "every track is normalised" and "one model per box" claims were **overclaims** —
+  narrowed in all three open lists: music only, ffmpeg-dependent, and round-robin (more
+  engines than boxes ⇒ two share a box).
+- ⚠ **`music_bench.py` bypasses `enqueue_music`**, so bench renders get neither prompt
+  shaping nor normalisation — now stated in its own header, because the tool built to end
+  the loudness-test problem was quietly reintroducing it.
+- **Two operator scripts violated our own STDLIB-ONLY rule** (`audit_model_integrity.py`,
+  `install_ace_quality.py` imported `backend.api.lora_train` at module scope, so
+  `python scripts\…` outside the venv died). Both read the worker registry off disk now,
+  with the app import as a last resort.
+- `MAX_CUES = 24` documented · helper version corrected to v1.221 · `tts/voices` is not
+  CRUD (no update route) · duplicated CHANGELOG heading removed ·
+  `prompt_shape_smoke.py`'s docstring said it *imports* the module when it loads it by path.
+- ✅ Verified correct and left alone: both smoke counts (20 and 21 `check(` call sites,
+  counted in source), turbo as the pre-selected default in both lanes, every other quoted
+  default, and the three open lists being identical.
+
+## v1.277.19 -- 🎛 ONE BRIEF, PROJECTED PER ENGINE (2026-08-16)
+
+*"do the prompt shape per engine and do your research."* Done — and the research went to
+the shipping SOURCE of both text encoders, not to blog advice.
+
+### ⚠⚠ THE TWO ENGINES WANT OPPOSITE THINGS. This is the whole finding.
+
+- **ACE-Step 1.5** — `comfy/text_encoders/ace15.py` builds THREE prompts from your two
+  boxes, and the caption stream is literally labelled `# Caption` followed by a
+  `# Metas` block: `- bpm: 90 / - timesignature: 4 / - keyscale: G major / - duration: 20
+  seconds`. **The tokenizer already tells the model the tempo.** Writing "90 bpm" in the
+  caption as well is telling it twice, and the model author's tutorial says so outright:
+  *"Don't write tempo, BPM, key… in Caption."* → we STRIP metadata out of ACE captions.
+- **MiniMax Music 3** — the node has **no metadata widgets at all** (`caption, lyrics,
+  seed, max_duration`), and its docs are explicit: *"Tempo belongs in the caption, e.g.
+  'at 92 BPM'"*, *"there is no speaker to select; the vocal comes from the caption"*, and
+  an unnamed vocal makes it **drift instrumental**. → we WRITE metadata INTO MM3 captions,
+  in MiniMax's own three-section layout (`Global Metadata` / `Vocal Details` /
+  `Arrangement`, with the training-corpus phrasing *"bpm is 90. key is G, and scale is
+  major."*).
+- ⭐ **So a caption cannot be copied between engines — it has to be PROJECTED.** New pure
+  module **`backend/api/prompt_shape.py`**, called from `enqueue_music`, does exactly that.
+
+### 🎛 The rules it now enforces (each from source or the authors' docs)
+
+**ACE** · metadata → widgets · `[verse]` never left in the caption · caption capped at 150
+words (shipped examples run 40-120) · lyric structure tags Title Case with **at most ONE
+modifier** after a single `-` (stacked modifiers get **SUNG**) · blank line between
+sections · **`[Instrumental]`, never an empty lyrics box** (the documented form) · and a
+**LINE BUDGET**: `bars = seconds × bpm / 240`, ~2 bars a line under 100 bpm, so a 20 s cue
+at 90 bpm holds ~4 lines — an over-long sheet is the #1 reported cause of skipped verses
+(ACE-Step issue #391).
+
+**MM3** · the three sections in order · bpm/key/genre/instruments/production written in ·
+**the vocal ALWAYS named** · a ≤30 s cue described as ONE section rather than a six-part
+song · **no four consecutive spaces** (`clean_caption` blind-deletes them and glues words
+together) · lyric tags **lowercased and ALONE on their line** (text left on a tag's line
+can be silently DROPPED) · **stage directions in (parentheses)** because every `[bracket]`
+becomes a tag · caption ≤450 words and the whole prompt kept well under the **5000-token
+HARD ERROR** (the node raises, it does not truncate).
+
+**Nothing is rewritten silently** — every change is published on the job as
+`prompt_notes`, with the original caption kept alongside.
+
+### 🎼 Score cues carry tempo/key as FIELDS now
+
+`bpm` and `key` are cue fields, and the planning LLM is told never to write a BPM or key
+into `caption` — the renderer hands each engine the form it wants. A score can therefore be
+re-rendered on a different engine without re-planning and still be correct for that engine.
+
+**Verified.** `scripts/prompt_shape_smoke.py` — **21 checks, 21 PASS**, zero renders, zero
+LLM, zero GPU (it loads the module BY PATH: importing `backend.api.*` drags in FastAPI, and
+a test that only runs inside the venv is a test nobody runs). Then live, one brief through
+🆚 Compare: ACE got `warm indie folk ballad, female vocal, acoustic guitar…` + bpm 90 /
+G major in its widgets and its lyric sheet trimmed to 3 sung lines; MM3 got the structured
+caption with `bpm is 90. key is G, and scale is major.` inside it and
+`[rain on the window]` rewritten to `(rain on the window)`.
+
+### 📌 Also worth knowing (from the same research, not yet acted on)
+
+- **`cfg_scale` on `TextEncodeAceStepAudio1.5` guides the METADATA, not the caption** — its
+  negative branch is the identical caption with an empty `<think>` block. Raising it will
+  not make a caption "stick" harder; it makes the model obey the bpm/key.
+- **F5-TTS: the reference clip cap is 12 s, not 15** (`aseg[:12000]`, hard cut mid-word) —
+  our UI copy still says 5-15 s. And `max_chars` for narration chunking is derived from the
+  reference TRANSCRIPT's byte length, so a lazy transcript shreds narration into
+  micro-chunks. Fix both when the TTS lane gets its first voice.
+
+## v1.277.18 -- 🔬 THE RESEARCH ROUND: cfg 3 WINS, AND AN UNMATCHED A/B IS A LOUDNESS TEST (2026-08-16)
+
+*"Make sure to do research on what you're doing as there should be modern answers… best
+practises found by the community."* He was right to push. Guessing at parameters had cost
+two rounds; the literature had the answer in a bug report.
+
+### 📚 What the research said (sources in the handover)
+
+- **ComfyUI's own XL templates ship a CFG that is known to break these models.**
+  [Comfy-Org/ComfyUI#12322](https://github.com/Comfy-Org/ComfyUI/issues/12322) (2026-02-06):
+  *"ace step 1.5 base or sft… output becomes garbled and compressed… **Turbo models work
+  fine**"*, and after the merged fix: *"quality degrades substantially with Base and CFG
+  higher than 2.5."* Upstream's own default is **5**; ComfyUI ships **7 / 6** — exactly
+  what our first XL renders used, and exactly what he heard.
+- Upstream is explicit that turbo is CLEANER: *"more steps mean error accumulation, audio
+  clarity may be slightly inferior to Turbo"* — sft buys detail with error. His
+  "A is leaps and bounds better" was the documented behaviour, not an anomaly.
+- **Ruled out by checking, not by assuming**: the HF files were never re-uploaded (commit
+  history), the VAE and the `qwen_0.6b + qwen_4b` DualCLIPLoader pairing are what all three
+  templates use, and `ComfyUI_RyanOnTheInside` — the pack that monkey-patched ACE-Step's
+  forward AT IMPORT TIME and garbled base/sft for people who never used its nodes — is not
+  on any box. New free instrument: **`scripts/comfy_nodepacks.py`** (groups every node
+  class by its registering `python_module`, straight from the running process, and flags
+  packs present on some boxes but not others — it found four).
+- **Upstream: "Don't write tempo, BPM, key… in Caption. These should be set through
+  dedicated metadata parameters."** ComfyUI's own templates violate this, and so did we —
+  our caption said "90 bpm" while the widget defaulted to 120. **The model was being told
+  two tempos.**
+
+### ✅ THE RECIPE HE APPROVED: `ace15_sft`, 50 steps, **cfg 3**, metadata out of the caption
+
+*"R is really really good."* So **the XL default cfg is now 3.0, not ComfyUI's 7/6** —
+deliberately off-template, with the reason in a comment at the constant so nobody
+"restores" it. `_split_meta_from_tags()` now pulls BPM/key/meter OUT of every ACE caption
+and into the metadata fields on both lanes.
+
+### 🔬 Two measurements that changed how we test
+
+- **`scripts/audio_spectrum.py`** — "muffled" is a claim about the top end, and the top end
+  is measurable. Energy above 8 kHz: **cfg 7 → 0.85% · cfg 3 → 0.55% · cfg 1.5 → 0.19%**.
+  ⭐ **On this model cfg is a brightness-vs-artifact knob**, which is why the low-cfg
+  renders were clean *and* dull. It also showed turbo is NOT brighter than the "muffled"
+  sft renders (0.27%) — so brightness alone never explained his preference.
+- **`scripts/audio_level_match.py`** — ⚠⚠ **our A/B was partly a loudness test.** His
+  champion measured **-12.9 LUFS**; the XL renders it was being compared against measured
+  **-14.5**. A 1.6 dB advantage reads as brighter and fuller. Everything is compared
+  level-matched now (two-pass R128 — single-pass `loudnorm` is a DYNAMIC processor and
+  would change the mix while measuring it).
+- Consequence: **every rendered track is now normalised to -14 LUFS / -1 dBTP** in
+  `enqueue_music` (`normalize`, default on; the note lands on the job). The reference
+  ACE-Step pipeline normalises; ComfyUI's graph is `VAEDecodeAudio → Save` with nothing in
+  between, so cues in one project used to sit at different levels.
+
+### 🆚 CHOOSE THE MODEL PER TRACK — `POST /api/audio-lab/music/compare`
+
+*"give different results in the models, maybe let us choose if we want minimax, ace 1.5
+turbo or xl."* One prompt → every picked engine at once, **one per box, same seed, all
+loudness-matched**, so the comparison is about the mix. 🆚 button + engine checkboxes on
+the Music tab; the 🎼 score sheet gained an engine dropdown so a planned score can be
+re-rendered on a different model without re-planning. Verified live: turbo `.201` 35.4s ·
+sft `.163` 49.5s · MM3 `.224` 63.9s, all three normalised.
+⚠ Round-robin assigned UP FRONT again — `pick_music_host` returns the first ready box every
+time, so a per-engine loop would have pinned all three to one worker.
+
+### ✅ SEED-CONFIRMED, so the recipe is settled
+
+Upstream warns *"some seeds are just terrible"* and to fix the seed while tuning — so the
+cfg-3 recipe was re-rendered on **three more seeds (777 / 1234 / 90210, one per box)**,
+level-matched, and judged: *"The r seeds sounds pretty good."* **Four seeds, one verdict —
+`ace15_sft` at 50 steps / cfg 3 with metadata out of the caption is the quality recipe.**
+⚠ R777 came out **7 dB quieter** than R4242 on the same recipe and prompt, which is its own
+argument for the normalisation step above.
+
+**His call on defaults (2026-08-16): TURBO stays pre-selected, sft is one click away.**
+Turbo renders a 20 s track in ~15 s and is the sketching engine; sft at ~50 s is the take
+you keep. Do not "upgrade" the default — the speed difference is the point, and 🆚 Compare
+exists so the choice is made per track by ear.
+**Publishing: he asked to HOLD** — .15 through .18 are unpushed by his decision, not by
+oversight.
+
+## v1.277.17 -- 🎚 WE WERE RENDERING ON THE SPEED MODEL (2026-08-16)
+
+*"the audio quality on ace step is not very good… Minimax sounded better, but took a very
+long time to render. Do a look and see."* He was right on both counts, and the two answers
+are different in kind: ACE has a quality ceiling we chose by accident, MM3's speed is
+physics.
+
+### 🔍 ACE: our graph was ComfyUI's TURBO template, exactly
+
+- ComfyUI ships **five** ACE-Step 1.5 templates. Ours matches `audio_ace_step1_5_xl_turbo`
+  parameter for parameter (8 steps, cfg 1, AuraFlow shift 3) — and the AIO checkpoint we
+  staged wraps the **small 4.8 GB DiT**, not the XL one. **We were rendering on the speed
+  model and hearing exactly that.** The quality templates are `..._xl_base` (50 steps,
+  cfg 6) and `..._xl_sft` (50 steps, cfg 7 — the song finetune), on a 9.97 GB XL DiT with
+  split encoders (`qwen_0.6b` + `qwen_4b`, DualCLIPLoader type `ace`) and its own VAE.
+  ⭐ **A model choice made for staging convenience became a quality ceiling nobody chose.**
+- **Steps are CHEAP on ACE** (20 s track, ZOAI3): 8 → 15.4 s · 24 → 21.9 s · 50 → 29.5 s.
+  About 12 s is fixed (encode + VAE), so the sampler is ~0.34 s/step. Quality on this lane
+  does not cost much wall clock — which is what makes the XL models worth staging.
+
+### ⏱ MM3: the step count is NOT the cost, so there is no speed knob
+
+    30 steps  61.9 s        18 steps  58.1 s        4 steps  48.6 s     (20 s track)
+    with lyrics 61.9 s  ≈  instrumental 62.3 s      cold 39.5 s ≈ warm 39.5 s (15 s track)
+
+- ~0.5 s/step, and **~46 s is FIXED** — the autoregressive text encode, the tiled DAV
+  decode, and weight shuffling on a 16 GB card. Lyrics are free. Model loading is not the
+  cost either (cold and warm are identical, so it is not disk).
+- **Conclusion: MM3 is ~3× real time on a 4060 Ti and that is the floor.** The only lever
+  is parallelism — which the 🎼 score lane already pulls (one cue per box, concurrently).
+  ⭐ Measuring the knob before turning it saved shipping a "fast mode" worth 6%.
+
+### 🎚 What shipped
+
+- **Two new engines**: `ace15_sft` (50/7) and `ace15_base` (50/6), each with its own
+  four-file readiness (`_ace_xl_status` names WHICH file is missing, not just "not ready")
+  and a graph reproducing ComfyUI's template netlist (UNETLoader + DualCLIPLoader "ace" +
+  VAELoader). ⚠ Unlike turbo, **cfg here is real guidance** — dropping it to 1 turns the
+  quality model back into the fast one.
+- **`steps` / `cfg` overrides** on `POST /music/generate` and `enqueue_music` (0 = the
+  engine's official default), plus an **▸ advanced** row in the Audio Lab carrying the
+  measured numbers above, so the trade is visible where the decision is made.
+- **`scripts/install_ace_quality.py`** — stages the quality set (≈18.9 GB/box: both XL
+  DiTs + the VAE; the qwen encoders were **already on all three boxes**), download ONCE on
+  the box with room then `--fanout` over the LAN. `--check` reports per box, with free
+  space. ⚠ It reads `/diag`, not `/health` — **disk lives on `/diag`, and `/health` answers
+  200 without it**; and the free space it reports is the STATE drive, not necessarily the
+  models drive (the trainer's E: is the one that filled on 08-16).
+- `scripts/audit_model_integrity.py` now covers the five ACE quality files.
+- **`scripts/music_bench.py`** — the instrument behind every number above: same seed, same
+  prompt, `--steps`/`--cfg` sweeps, `--save` downloads each render so a timing table can be
+  *listened to*. It splits wall clock into `execution_start → success` (sampling) and the
+  rest (load/queue) from ComfyUI's own history timestamps.
+
+### ⚠⚠ RETRACTION — THE QUALITY MODELS DID NOT WIN. TURBO DID.
+
+**Read this before repeating the experiment.** The prediction in this entry — that the XL
+models would sound better than turbo — was **wrong by his ear**, which is the only
+instrument that counts here. Same seed, same lyrics, same 20 s, rendered after staging:
+
+    A  ace15 turbo   8 steps  cfg 1   15.4 s   "really good"
+    H  ace15_sft    50 steps  cfg 7   50.4 s   "some mixing issues and minor artifacts"
+    I  ace15_base   50 steps  cfg 6   48.6 s   "much much worse with the mix and artifacts"
+
+So: **the turbo checkpoint stays the DEFAULT engine**, the XL lanes stay available and
+staged, and nobody should "fix" the default by pointing it at sft. What the staging DID
+buy is a real A/B and two more engines to tune — it did not buy a better default.
+⭐ **A bigger model on its own official recipe can still lose.** The untested variables
+that could still explain it, in the order worth trying: **cfg** (7 on a 20 s clip with
+terse tags is a lot of guidance), **prompt shape** (the official XL example is long PROSE;
+we fed a comma-separated tag list), and **duration** (the templates default to 120 s —
+these models were trained on whole songs, and 20 s may be the abnormal request).
+⚠ Do NOT conclude "XL is broken" from this: three renders on one prompt at one length.
+
+### 🎧 HIS EAR SETTLED THE OTHER HALF: turbo CANNOT be fixed with settings
+
+- On the A/B pack: *"B isn't bad but I can hear artifacts in it and the mix is really bad.
+  C is a bunch of noise with no vocals."* B was turbo at 24 steps/cfg 3, C at 50/cfg 6.
+  **A distilled model trained for cfg 1 does not become the quality model by turning cfg
+  up — it degrades, then collapses.** More STEPS are harmless; more GUIDANCE is not.
+  The advanced row now says exactly that, in amber, the moment cfg > 1.5 is typed on the
+  turbo engine. ⭐ The listening test is what closed this: no timing table could have.
+
+### ⬇ "I can't tell if they're done or not"
+
+- Engine chips only flip when a file has FULLY landed, so a 19 GB stage and a stalled one
+  look identical for an hour. **`GET /api/audio-lab/staging`** reads each helper's own
+  download queue (bytes / total / % / status) and the Music tab shows a progress strip
+  while anything is moving. ⚠ `/downloads` needs the box TOKEN — `/health` answers 200
+  without it — and the calls are blocking urllib, so the route runs them via
+  `asyncio.to_thread` (blocking I/O in an async route is the v1.276.41 class).
+- **`scripts/dl_progress.py`** — the same answer from the CLI, with MB/s and an ETA.
+  ⚠ `--watch` is bounded by `--for` MINUTES by default: **the agent kills a job at its
+  timeout and writes NO stdout at all**, so an unbounded watcher returns an empty result
+  file — a monitor that reports nothing is worse than no monitor.
+- ⭐ **It is STDLIB ONLY, because his first run of it crashed.** `from backend.api.lora_train
+  import _helpers_list` drags in `backend/api/__init__` → FastAPI, so a plain
+  `python scripts\dl_progress.py` died on `ModuleNotFoundError: No module named 'fastapi'`
+  (the agent runs scripts with the venv python and never saw it). It now asks the RUNNING
+  APP (`/api/audio-lab/staging`) and falls back to reading the worker registry off disk
+  (`.env` PROJECT_DIR → `_libraries/forge/settings.json`), with `--direct` to skip the app.
+  Both paths verified. **A diagnostic that only runs inside the venv is a diagnostic he
+  will not run — importing the app for one helper list is not worth that.**
+- First real read: both XL models ~30% at ~4 MB/s combined, ETA ~1 h. Also surfaced a
+  STALE failed record (an earlier MM3 text-encoder attempt that reset) sitting next to its
+  successful copy — the display now names the FILE next to the error, because a bare
+  `ConnectionResetError` reads like the box is down.
+
+## v1.277.16 -- 🎼 SCORE A STORY (ARC PAIRING) · MM3 SINGS, AND THE SCREEN CAN ASK IT TO (2026-08-16)
+
+Session opener: re-verify the fleet, then continue. The re-verification found the gap,
+and "do the arc pairing" was the ask that followed.
+
+### 🎼 THE ARC PAIRING LANE — `backend/api/audio_score.py`, `/api/audio-lab/score/*`
+
+    world + story  ->  LLM  ->  N CUES ON PAPER  ->  edit  ->  render  ->  import
+
+The Audio Lab could always render an EXACT length. What it could not do was answer *how
+long should this one be, and what should it sound like* from the story. That is this lane.
+
+- `GET /sources` (worlds + their stories/texts + projects + saved scores, one call) ·
+  `POST /plan` (the LLM step — **renders nothing**) · `POST /manual` (same object, no LLM
+  — the path the free smoke drives) · `GET /list` · `GET /{sid}` · `POST /{sid}/cues`
+  (edit) · `POST /{sid}/render` · `POST /{sid}/cancel` · `POST /{sid}/import` ·
+  `POST /{sid}/delete`.
+- **Seconds are the load-bearing field.** `_normalise` clamps every cue to the engines'
+  5-300s and then makes the cues **SUM to the requested total** by adjusting the LAST cue,
+  recording the change as `adjusted_by` — a plan whose parts do not add up to the whole is
+  precisely the bug this lane exists to prevent. Live: 4 cues, 39+40+42+39 = **160.0 s**
+  against a 160 s target, planned in 11.9 s off the Bonewhistle story.
+- **The LLM writes SOUND, not plot.** Each cue carries `caption` (handed to the model),
+  `beat` (what happens in the story here — for the human), `name`, `seconds`, `lyrics`.
+  World logline/genre/tone/setting/themes and the world's visual style feed the context.
+- Paper first, editable, then rendered — his Story/World Builder design call, reused.
+
+**Four traps designed out rather than guarded against** (each one previously paid for):
+① renders are enqueued **in-process** via the new `audio_lab.enqueue_music`, never by
+self-calling this app's HTTP API from an async route (v1.276.41 deadlock) · ② workers are
+assigned **round-robin UP FRONT**; asking `pick_music_host` once per cue in a loop returns
+the same box every time and PINS the whole score (v1.276.45) · ③ a cue is **claimed under
+the lock BEFORE** its job starts and the claim is **reverted if the enqueue raises**, so a
+double-clicked Render cannot queue a cue twice and a failure cannot wedge it at "claimed"
+(v1.277.0 ③⑤) · ④ the parameterized `GET /{sid}` is declared **LAST**, under a comment
+saying why — `/sources` and `/list` would otherwise be swallowed as ids (v1.277.0's
+seven-failures-one-cause).
+- Cue status is merged from the job store **at read time**, not copied into the score file
+  — a second copy of "what is rendering right now" is just a staler one (the .52 lesson).
+  A cue whose job was deleted from the board reverts to paper.
+- Frontend: **🎼 Score a story** tab (`ScorePanel.tsx`) — plan form, editable cue sheet
+  with per-cue live status (worker, ticking elapsed, engine detail), Σ-vs-target readout,
+  per-cue ↻ re-render, ⏹ cancel, inline players, and 📥 import every finished cue.
+
+**Verified — `scripts/audio_score_smoke.py`, 20 `check(` call sites** (counted in the
+SOURCE, not in the output — .47): free run `15 PASS · 1 SKIP` on .16, and **`17 PASS ·
+0 FAIL · 0 SKIP` on .17** once the four-engine list gave the unready-engine guard
+something to provoke it with; `--render` adds two 5 s cues, **fanned to `.201` and
+`.163`**, both finished. ⚠ Its first run died on a cp1252 `UnicodeEncodeError` printing
+its own banner — `sys.stdout.reconfigure` is not optional in this repo.
+
+### ⚠ THE ENGINE WAS READY AND THE SCREEN COULD NOT SELECT IT
+
+- `AudioLabPage.tsx` posted **`engine: 'ace15'` hardcoded** (line 112) and gated the
+  Generate button on `aceReady` — so MiniMax Music 3, verified on all three boxes the
+  day before, was reachable **by API and not by screen**. The page even rendered an
+  "MM3: ✅ ready" badge next to a form that could not use it. ⭐ **A verified engine is
+  not a shipped feature until something on screen can ask for it** (the .36 lesson —
+  a correct API is not a correct screen — in its live form).
+- Fixed: a two-chip **engine picker**, each chip carrying its OWN readiness and its
+  measured throughput; the button gates on the SELECTED engine (`engineReady`);
+  bpm/key inputs hide for MM3 (its graph ignores them — tempo/key belong in the
+  caption); the tags field relabels to **Caption** with an MM3-shaped placeholder.
+  Built and verified in the shipped bundle (`index-5NLbbGkn.js`).
+
+### 🎤 MM3 LYRICS MODE: VERIFIED (it was listed as untested)
+
+- Live render on ZOAI3 (`.163`): 25s indie-folk with a tagged `[verse]/[chorus]`
+  lyric — **74.7s wall clock**, and the returned MP3 measures **25.03s** against a
+  requested 25.0. **Exact-length control survives lyrics mode**, which is the property
+  the story-arc pairing depends on.
+- Throughput, measured across both sessions: MM3 ≈ **2.5-3.0s of render per second of
+  music** (15s→35-42s, 25s→75s) vs ACE-Step ≈ **1s per second** (20s→19-23s). ACE is
+  the iteration engine; MM3 is the "commit to this cue" engine.
+
+### 🔍 Fleet re-verification (free, no renders)
+
+- `scripts/audit_model_integrity.py`: **8/11 files clean everywhere**. Every AUDIO
+  model — ACE AIO, MM3 DiT/text-encoder/VAE — is byte-correct on all three boxes. The
+  only bad copies are the three **LTX 2.5** files (transformer + gemma4 truncated on
+  ZOAI3/ZOAI1, absent on the trainer), which is the parked lane, not a blocker.
+- **Helper v1.221 is deployed on all three boxes** (`/health` → `1.221.0` on `.201`
+  ZOMAIN01, `.163` ZOAI3, `.224` ZOAI1) — the truncation-raising redeploy is DONE.
+- ⚠ **The running backend reports `1.277.14` while the repo VERSION says .15/.16** —
+  `_read_app_version()` reads the VERSION file at import, so the live process predates
+  the bump. Audio lanes are live in it (MM3 rendered through it this session); the LTX
+  2.5 dispatcher lane is the part that may not be loaded. A restart settles it.
+- ⚠ Agent job files use **`path`**, not `url` — a job with `url` silently falls back to
+  `/api/health` and returns a healthy-looking 200 for a route you never called.
+  **A 200 from the wrong endpoint is the most convincing wrong answer there is.**
+- Restarted onto v1.277.16 through the agent at the end of the session; `/api/health`
+  confirms the version, and both smokes ran against the fresh process.
+
 ## v1.277.15 -- 🎬 LTX 2.5 GRAPHS LIVE-WIRED · 🎵 ACE VERIFIED 3/3 · 🔍 THE TRUNCATED-MODEL FORENSICS (2026-08-16)
 
 Post-restart go-live session: "make sure everything is where it needs to be and get the

@@ -6,6 +6,11 @@
  * choose one of our characters and select which character sheet to use and
  * have a preview... same with our dataset images and base views."
  *
+ * 📍 v1.277.22 — LOCATIONS are pickable here too. A reference can be a PLACE
+ * as easily as a person, and a location's 🪪 sheet is exactly the same kind of
+ * artefact as a character sheet: several views in one image, which is what a
+ * model needs to hold a place consistent across shots.
+ *
  * Sources per character (followed by source, per the unified adapter):
  *   k3 → 🪪 character sheets (incl. per-outfit) · 🧭 views & refs (incl.
  *        outfit views, active base) · 🎓 dataset renders
@@ -51,6 +56,9 @@ interface UniCharT {
   datasets?: { id: string }[];
 }
 interface PickT { url: string; name: string; group: string; label: string }
+interface LocImgT { id: string; url: string; kind: string; label: string; active?: boolean }
+interface LocGroupT { world_id: string; world: string; id: string; name: string;
+                      kind: string; images: LocImgT[] }
 
 async function jj<T>(r: Response): Promise<T> {
   if (!r.ok) throw new Error(String(r.status));
@@ -64,6 +72,9 @@ export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
    *  ref on the card that the render silently drops */
   k3Only?: boolean;
 }): React.ReactElement {
+  const [mode, setMode] = useState<'chars' | 'locs'>('chars');
+  const [locs, setLocs] = useState<LocGroupT[]>([]);
+  const [curLoc, setCurLoc] = useState<LocGroupT | null>(null);
   const [chars, setChars] = useState<UniCharT[]>([]);
   const [q, setQ] = useState('');
   const [cur, setCur] = useState<UniCharT | null>(null);
@@ -79,6 +90,11 @@ export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
         const r = await jj<{ characters: UniCharT[] }>(await fetch('/api/characters'));
         setChars(r.characters || []);
       } catch (e) { setErr(`could not load characters: ${e}`); }
+      try {
+        const r = await jj<{ locations: LocGroupT[] }>(
+          await fetch('/api/storyworld/location-images'));
+        setLocs(r.locations || []);
+      } catch { /* worlds are optional — a fleet with no worlds is fine */ }
     })();
   }, []);
 
@@ -149,6 +165,14 @@ export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
   }, []);
 
   useEffect(() => { if (cur) void loadImages(cur, group); }, [cur, group, loadImages]);
+  useEffect(() => {
+    if (mode !== 'locs' || !curLoc) return;
+    setImgs((curLoc.images || []).map((im) => ({
+      url: im.url, name: `${curLoc.name.replace(/\s+/g, '_')}_${im.kind}_${im.id}.png`,
+      group: im.kind, label: (im.kind === 'sheet' ? '🪪 sheet' : im.label)
+        + (im.active ? ' ⭐' : '') })));
+    setSel(null); setErr('');
+  }, [mode, curLoc]);
 
   const filtered = chars.filter((c) =>
     (!k3Only || c.source === 'k3')
@@ -158,8 +182,9 @@ export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
     <div style={modalBg} onClick={onClose}>
       <div style={modal} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <b style={{ color: '#e6e9ee', fontSize: 14 }}>📚 Pick a character image</b>
-          <span style={hint}>sheets · views · dataset renders — preview before you commit</span>
+          <b style={{ color: '#e6e9ee', fontSize: 14 }}>📚 Pick a reference image</b>
+          <span style={hint}>characters: sheets · views · dataset · 📍 locations: 🪪 sheet + plates
+            — preview before you commit</span>
           <div style={{ flex: 1 }} />
           <button style={btnGhost} onClick={onClose}>✕</button>
         </div>
@@ -168,9 +193,37 @@ export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
           {/* characters */}
           <div style={{ width: 210, display: 'flex', flexDirection: 'column', gap: 6,
                         overflowY: 'auto', flexShrink: 0 }}>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button style={tabBtn(mode === 'chars')}
+                      onClick={() => { setMode('chars'); setCurLoc(null); }}>🎭 characters</button>
+              <button style={tabBtn(mode === 'locs')}
+                      onClick={() => { setMode('locs'); setCur(null); }}>📍 locations</button>
+            </div>
             <input style={inp} placeholder="filter…" value={q}
                    onChange={(e) => setQ(e.target.value)} />
-            {filtered.map((c) => (
+            {mode === 'locs' && locs
+              .filter((l) => !q.trim() || l.name.toLowerCase().includes(q.trim().toLowerCase()))
+              .map((l) => (
+                <button key={`${l.world_id}:${l.id}`}
+                  style={{ ...btnGhost, display: 'flex', gap: 8, alignItems: 'center',
+                           justifyContent: 'flex-start', textAlign: 'left',
+                           borderColor: curLoc?.id === l.id ? '#3b82f6' : '#2a2f3a' }}
+                  onClick={() => setCurLoc(l)}>
+                  <img src={l.images[0]?.url} alt="" style={{ width: 30, height: 30,
+                       borderRadius: 4, objectFit: 'cover' }} />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis',
+                                 whiteSpace: 'nowrap' }}>
+                    {l.name}
+                    <span style={{ ...hint, display: 'block', fontSize: 10 }}>
+                      {l.world} · {l.images.length} img
+                    </span>
+                  </span>
+                </button>
+              ))}
+            {mode === 'locs' && !locs.length && (
+              <span style={hint}>no location plates yet — render them on /worlds → 📍 Locations</span>
+            )}
+            {mode === 'chars' && filtered.map((c) => (
               <button key={c.ref}
                 style={{ ...btnGhost, display: 'flex', gap: 8, alignItems: 'center',
                          justifyContent: 'flex-start', textAlign: 'left',
@@ -189,9 +242,15 @@ export default function CharacterImagePicker({ onPick, onClose, k3Only }: {
 
           {/* images */}
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {cur ? (
+            {(cur || curLoc) ? (
               <>
-                {cur.source === 'k3' && (
+                {mode === 'locs' && curLoc && (
+                  <span style={hint}>
+                    📍 {curLoc.name} — 🪪 the SHEET first (several views in one image, the
+                    reference a model holds a place consistent from), then the plates
+                  </span>
+                )}
+                {mode === 'chars' && cur?.source === 'k3' && (
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button style={tabBtn(group === 'sheets')}
                             onClick={() => setGroup('sheets')}>🪪 Sheets</button>

@@ -15,6 +15,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AutogenBoard from '@/components/CharacterStudio/AutogenBoard';
 import useLightbox from '@/components/shared/useLightbox';
+// 📖 chapters (one arc told at length = one video) and 📚 the codex (canon-only
+// cheat sheet). Both live in their own files: a chapter's narration can be tens
+// of thousands of words, and neither belongs in the payload every tab loads.
+import ChaptersPanel from './ChaptersPanel';
+import CodexTab from './CodexTab';
 
 const B = '/api/storyworld';
 const LLM_KEY = 'rbmn_world_llm';           // persisted per-browser default pick
@@ -49,6 +54,8 @@ type MetaT = {
 type LocationT = {
   id: string; name: string; kind: string; fields: Record<string, string>;
   story_ids: string[]; updated_at?: string;
+  /** the user's own uploaded photo of this place — every plate builds from it */
+  ref_id?: string;
 };
 type StyleT = {
   preset?: string; custom_text?: string; ref_id?: string; ref_description?: string;
@@ -65,7 +72,13 @@ type WorldLightT = {
   id: string; name: string; logline: string; stories: number; cast: number;
   texts: number; project_ids: string[]; updated_at: string;
 };
-type StoryT = { id: string; title: string; story_type: string; fields: Record<string, string> };
+type StoryT = {
+  arcs?: { id: string; i: number; title: string; summary: string; mood: string;
+           characters: string[]; locations: string[] }[];
+  /** the narration's THREE files: the recording, the AAF timeline, the SRT */
+  narration_files?: Record<string, { id: string; filename: string; ext: string;
+                                     bytes: number; seconds: number;
+                                     playable: boolean }>; id: string; title: string; story_type: string; fields: Record<string, string> };
 type OutfitT = { name: string; description: string };
 type MemberT = {
   id: string; name: string; role: string; importance: string;
@@ -172,7 +185,7 @@ export default function StoryWorldPage() {
   const [worlds, setWorlds] = useState<WorldLightT[]>([]);
   const [wid, setWid] = useState('');
   const [w, setW] = useState<WorldT | null>(null);
-  const [tab, setTab] = useState<'world' | 'stories' | 'cast' | 'locations' | 'texts' | 'projects'>('world');
+  const [tab, setTab] = useState<'world' | 'stories' | 'cast' | 'locations' | 'codex' | 'texts' | 'projects'>('world');
   const [msg, setMsg] = useState('');
   const [busyKeys, setBusyKeys] = useState<Record<string, boolean>>({});
   const [newName, setNewName] = useState('');
@@ -187,7 +200,12 @@ export default function StoryWorldPage() {
   };
   const llmBody = pick.provider ? { llm: pick } : {};
 
-  const note = (m: string) => { setMsg(m); };
+  // ⚠⚠ MEMOIZED, and it has to be. `note` is passed to ChaptersPanel and
+  // CodexTab, whose loaders list it as a useCallback dependency. A fresh
+  // closure each render turns one failed fetch into an unbounded loop:
+  // load fails → note → setMsg → re-render → new note → new load → … It also
+  // made every status message anywhere on the page re-fetch the chapter list.
+  const note = useCallback((m: string) => { setMsg(m); }, []);
   const busy = (k: string, on: boolean) =>
     setBusyKeys(prev => ({ ...prev, [k]: on }));
 
@@ -297,6 +315,7 @@ export default function StoryWorldPage() {
                 {([['world', '🌍 World'], ['stories', `📖 Stories (${w.stories.length})`],
                    ['cast', `🎭 Cast (${w.cast.length})`],
                    ['locations', `📍 Locations (${(w.locations || []).length})`],
+                   ['codex', '📚 Codex'],
                    ['texts', `📝 Texts (${w.texts.length})`],
                    ['projects', `🔗 Projects (${w.project_ids.length})`]] as const).map(([k, label]) => (
                   <button key={k}
@@ -322,6 +341,9 @@ export default function StoryWorldPage() {
               {meta && tab === 'locations' && (
                 <LocationsTab w={w} meta={meta} llmBody={llmBody} busyKeys={busyKeys}
                   busyFn={busy} note={note} reload={() => loadWorld(w.id)} />
+              )}
+              {tab === 'codex' && (
+                <CodexTab w={w} llmBody={llmBody} note={note} />
               )}
               {meta && tab === 'texts' && (
                 <TextsTab w={w} meta={meta} note={note} reload={() => loadWorld(w.id)} />
@@ -594,6 +616,89 @@ function StoriesTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
   const [sid, setSid] = useState(w.stories[0]?.id || '');
   const [title, setTitle] = useState('');
   const [dir, setDir] = useState('');
+  // 🎬 arcs — the machine-readable spine a linked project turns into chapters
+  type ArcT = { id: string; i: number; title: string; summary: string;
+                mood: string; characters: string[]; locations: string[] };
+  // ✍ narration — the words a TTS will read
+  type NarrT = { text: { id: string; title: string; body: string } | null;
+                 words: number; est_minutes: number };
+  const [narr, setNarr] = useState<NarrT | null>(null);
+  const [narrBody, setNarrBody] = useState('');
+  const [narrMin, setNarrMin] = useState(5);
+  const [narrTone, setNarrTone] = useState('');
+  const [narrOver, setNarrOver] = useState(false);
+  const loadNarr = useCallback(async (id: string) => {
+    if (!id) { setNarr(null); setNarrBody(''); return; }
+    try {
+      const r = await fetch(`/api/storyworld/worlds/${w.id}/stories/${id}/narration`)
+        .then(x => x.json());
+      setNarr(r); setNarrBody(r?.text?.body || '');
+    } catch { setNarr(null); }
+  }, [w.id]);
+  useEffect(() => { void loadNarr(sid); }, [sid, loadNarr]);
+
+  const structure = async (overwrite: boolean) => {
+    if (!sid) return;
+    busyFn('story.arcs', true); note('🎬 breaking the story into arcs…');
+    try {
+      const r = await post<{ arcs: ArcT[]; note?: string }>(
+        `/worlds/${w.id}/stories/${sid}/structure`,
+        { overwrite, direction: dir, ...llmBody });
+      note(r.note || `🎬 ${r.arcs.length} arcs`); reload();
+    } catch (e) { note(`⚠ ${e}`); } finally { busyFn('story.arcs', false); }
+  };
+  const saveArcs = async (arcs: ArcT[]) => {
+    if (!sid) return;
+    try { await post(`/worlds/${w.id}/stories/${sid}`, { arcs }); reload(); }
+    catch (e) { note(`⚠ ${e}`); }
+  };
+  const patchArc = (arcs: ArcT[], i: number, patch: Partial<ArcT>) =>
+    arcs.map((a, k) => (k === i ? { ...a, ...patch } : a));
+
+  const writeNarration = async () => {
+    if (!sid) return;
+    busyFn('story.narr', true);
+    note(`✍ writing ~${Math.round(narrMin * 150)} words of narration…`);
+    try {
+      const r = await post<{ words: number; est_minutes: number; arcs_written: number }>(
+        `/worlds/${w.id}/stories/${sid}/narration`,
+        { minutes: narrMin, tone: narrTone, per_arc: true,
+          overwrite: narrOver, ...llmBody });
+      note(`✍ ${r.words} words ≈ ${r.est_minutes} min`
+        + (r.arcs_written ? ` · ${r.arcs_written} arcs` : ''));
+      await loadNarr(sid); reload();
+    } catch (e) { note(`⚠ ${e}`); } finally { busyFn('story.narr', false); }
+  };
+  // 🎙 the narration RECORDING — auditioned here, before any project exists
+  // 🎙 THREE files, because an AAF project needs all three: the recording,
+  // the ElevenLabs timeline, and the subtitle timings. Non-AAF modes use the
+  // audio (+ srt when there is one) the same way.
+  const slotRef = useRef<HTMLInputElement | null>(null);
+  const [slotFor, setSlotFor] = useState<'audio' | 'aaf' | 'srt'>('audio');
+  const uploadSlot = async (slot: string, f: File) => {
+    if (!sid) return;
+    busyFn(`story.${slot}`, true); note(`⬆ uploading the ${slot}…`);
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const r = await fetch(
+        `/api/storyworld/worlds/${w.id}/stories/${sid}/narration/file/${slot}`,
+        { method: 'POST', body: fd });
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const j = await r.json();
+      note(`${slot}: ${j.file?.filename}`
+        + (j.file?.seconds ? ` · ${Math.round(j.file.seconds)}s` : ''));
+      reload(); void loadNarr(sid);
+    } catch (e) { note(`⚠ ${e}`); } finally { busyFn(`story.${slot}`, false); }
+  };
+
+  const saveNarration = async () => {
+    if (!narr?.text) { note('⚠ generate it first, or add a text on the 📝 tab'); return; }
+    try {
+      await post(`/worlds/${w.id}/texts/${narr.text.id}`,
+        { kind: 'narration', title: narr.text.title, body: narrBody, story_id: sid });
+      note('saved'); await loadNarr(sid);
+    } catch (e) { note(`⚠ ${e}`); }
+  };
   useEffect(() => {
     if (!w.stories.find(s => s.id === sid)) setSid(w.stories[0]?.id || '');
   }, [w.stories, sid]);
@@ -671,6 +776,22 @@ function StoriesTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
               {busyKeys['story.all'] ? '⏳ thinking…' : '✨ Fill empty'}</button>
             <button className={btnCls} disabled={busyKeys['story.all']}
               onClick={() => enhanceAll('overwrite')}>✨ Overwrite all</button>
+            {/* 📚 his ask: recalc the codex from the Story tab, scoped to THIS
+                story. Cheap when nothing changed — the backend hashes the canon
+                and skips unchanged material without an LLM call. */}
+            <button className={btnCls} disabled={!!busyKeys['story.codex']}
+              title="re-read this story and update the world/character codex"
+              onClick={async () => {
+                busyFn('story.codex', true);
+                try {
+                  const r = await post<{ provider: string; model: string; host: string }>(
+                    `/worlds/${w.id}/codex/recalc`,
+                    { story_id: st.id, ...llmBody });
+                  note(`📚 recalculating on ${r.provider}/${r.model} — `
+                    + 'watch it on the 📚 Codex tab');
+                } catch (e) { note(`⚠ ${e}`); } finally { busyFn('story.codex', false); }
+              }}>
+              {busyKeys['story.codex'] ? '⏳' : '📚 Re-calc codex'}</button>
             <button className={`${btnCls} ml-auto text-red-300`}
               onClick={async () => {
                 if (!window.confirm(`Delete story "${st.title}"? Its texts stay, unlinked.`)) return;
@@ -685,6 +806,195 @@ function StoriesTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
                 onSave={v => save({ fields: { [f.key]: v } })}
                 onEnhance={cur => enhanceOne(f.key, cur)} />
             ))}
+          </div>
+
+          {/* 🎬 ARCS — what a linked project turns into chapters */}
+          <div className="mt-4 border border-gray-800 rounded p-3">
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <span className="text-sm font-semibold text-amber-300">🎬 Arcs</span>
+              <span className="text-[11px] text-gray-500">
+                the story&apos;s spine — a linked project turns each arc into a CHAPTER
+                (timed against the detected audio sections), the flow LLM gets the arc it is
+                writing for, and the score lane renders one backing bed per arc
+              </span>
+              <div className="flex-1" />
+              <button className={btnAmber} disabled={!!busyKeys['story.arcs']}
+                      onClick={() => void structure(false)}>
+                {busyKeys['story.arcs'] ? '⏳ structuring…' : '✨ Structure into arcs'}</button>
+              {!!(st.arcs || []).length && (
+                <button className={btnCls} disabled={!!busyKeys['story.arcs']}
+                        onClick={() => { if (window.confirm('Rewrite the arcs?')) void structure(true); }}>
+                  ♻ Rewrite</button>
+              )}
+            </div>
+            {(st.arcs || []).length ? (
+              <div className="space-y-1">
+                {(st.arcs || []).map((a, i) => {
+                  const arcs = (st.arcs || []) as ArcT[];
+                  return (
+                  <div key={a.id || i} className="text-xs border border-gray-800 rounded p-2 space-y-1">
+                    <div className="flex gap-1 items-center">
+                      <span className="text-gray-600 w-5">{i + 1}.</span>
+                      <input className={`${inputCls} flex-1 font-semibold`} defaultValue={a.title}
+                             onBlur={e => { if (e.target.value !== a.title)
+                               void saveArcs(patchArc(arcs, i, { title: e.target.value })); }} />
+                      <input className={`${inputCls} w-40`} defaultValue={a.mood}
+                             placeholder="mood — drives its backing track"
+                             onBlur={e => { if (e.target.value !== a.mood)
+                               void saveArcs(patchArc(arcs, i, { mood: e.target.value })); }} />
+                      <button className={btnCls} title="move up" disabled={i === 0}
+                              onClick={() => { const n = [...arcs];
+                                [n[i - 1], n[i]] = [n[i], n[i - 1]]; void saveArcs(n); }}>↑</button>
+                      <button className={btnCls} title="move down" disabled={i === arcs.length - 1}
+                              onClick={() => { const n = [...arcs];
+                                [n[i + 1], n[i]] = [n[i], n[i + 1]]; void saveArcs(n); }}>↓</button>
+                      <button className={`${btnCls} text-red-300`} title="delete this arc"
+                              onClick={() => { if (window.confirm(`Delete arc "${a.title}"?`))
+                                void saveArcs(arcs.filter((_, k) => k !== i)); }}>🗑</button>
+                    </div>
+                    <textarea className={`${inputCls} text-xs`} rows={2} defaultValue={a.summary}
+                              placeholder="what happens in this stretch of story…"
+                              onBlur={e => { if (e.target.value !== a.summary)
+                                void saveArcs(patchArc(arcs, i, { summary: e.target.value })); }} />
+                    <div className="flex gap-1">
+                      <input className={`${inputCls} flex-1`} defaultValue={(a.characters || []).join(', ')}
+                             placeholder="characters present (comma separated)"
+                             onBlur={e => void saveArcs(patchArc(arcs, i,
+                               { characters: e.target.value.split(',').map(x => x.trim()).filter(Boolean) }))} />
+                      <input className={`${inputCls} flex-1`} defaultValue={(a.locations || []).join(', ')}
+                             placeholder="📍 locations (comma separated)"
+                             onBlur={e => void saveArcs(patchArc(arcs, i,
+                               { locations: e.target.value.split(',').map(x => x.trim()).filter(Boolean) }))} />
+                    </div>
+                  </div>);
+                })}
+                <button className={btnCls}
+                        onClick={() => void saveArcs([...(st.arcs || []) as ArcT[],
+                          { id: '', i: (st.arcs || []).length, title: `Arc ${(st.arcs || []).length + 1}`,
+                            summary: '', mood: '', characters: [], locations: [] }])}>
+                  ＋ Add an arc
+                </button>
+              </div>
+            ) : (
+              <div className="text-xs text-gray-600">
+                No arcs yet. Write the story first (synopsis / beats), then ✨ Structure —
+                a project cannot derive chapters from a story that has no arcs.
+              </div>
+            )}
+          </div>
+
+          {/* 📖 CHAPTERS — one arc told at length; each one becomes a video */}
+          <ChaptersPanel wid={w.id} sid={sid} llmBody={llmBody} note={note} />
+
+          {/* ✍ NARRATION — the whole-story version.
+              ⚠ This is NOT the chapter narrations. His call: keep both — this
+              is the trailer / one-shot script, the chapters above are the real
+              per-video ones, and a chapter-scoped pull prefers the chapter's. */}
+          <div className="mt-4 border border-gray-800 rounded p-3">
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <span className="text-sm font-semibold text-emerald-300">
+                ✍ Narration <span className="text-gray-500 font-normal">(whole story)</span>
+              </span>
+              <span className="text-[11px] text-gray-500">
+                the one-shot / trailer version, written arc by arc with `## Arc` headers.
+                For a per-video script use a <b>chapter&apos;s</b> narration above — a
+                chapter-scoped project pulls that one instead of this.
+              </span>
+              <div className="flex-1" />
+              {!!narr?.words && (
+                <span className="text-[11px] text-gray-400">
+                  {narr.words} words ≈ {narr.est_minutes} min at 150 wpm
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2 items-end flex-wrap mb-2">
+              <div>
+                <label className="text-[10px] text-gray-500 block">target minutes</label>
+                <input type="number" min={0.5} max={90} step={0.5} value={narrMin}
+                       className={`${inputCls} w-20`}
+                       onChange={e => setNarrMin(Math.max(0.5, Number(e.target.value) || 5))} />
+              </div>
+              <input className={`${inputCls} flex-1 min-w-[12rem]`} value={narrTone}
+                     placeholder="tone (optional) — e.g. campfire storyteller, dry and wry"
+                     onChange={e => setNarrTone(e.target.value)} />
+              <label className="flex items-center gap-1 text-[11px] text-gray-400 pb-2">
+                <input type="checkbox" checked={narrOver}
+                       onChange={e => setNarrOver(e.target.checked)} />
+                overwrite
+              </label>
+              <button className={btnAmber} disabled={!!busyKeys['story.narr']}
+                      onClick={() => void writeNarration()}>
+                {busyKeys['story.narr'] ? '⏳ writing…' : '✍ Write narration'}</button>
+            </div>
+            <textarea className={`${inputCls} font-mono text-xs`} rows={12} value={narrBody}
+                      placeholder="Paste or write the narration here, or let the LLM write it from the story above."
+                      onChange={e => setNarrBody(e.target.value)} />
+            <div className="flex gap-2 mt-1">
+              <button className={btnCls} onClick={() => void saveNarration()}
+                      disabled={!narr?.text}>💾 Save</button>
+              <button className={btnCls} disabled={!narrBody}
+                      onClick={() => { void navigator.clipboard.writeText(narrBody);
+                        note('copied — paste it into any TTS'); }}>📋 Copy for TTS</button>
+              <span className="text-[11px] text-gray-600 self-center">
+                a linked project pulls this in as its script (📝 Lyrics/script in the pull panel)
+              </span>
+            </div>
+
+            {/* 🎙 the THREE narration files — reviewed here, pulled into a project */}
+            <div className="mt-3 border-t border-gray-800 pt-2 space-y-2">
+              <input ref={slotRef} type="file" className="hidden"
+                     accept={slotFor === 'audio' ? '.wav,.mp3,.m4a,.aac,.flac,.ogg,audio/*'
+                       : slotFor === 'aaf' ? '.aaf' : '.srt,.vtt'}
+                     onChange={e => { const f = e.target.files?.[0]; e.target.value = '';
+                       if (f) void uploadSlot(slotFor, f); }} />
+              <div className="text-[11px] text-gray-500">
+                🎙 the narration&apos;s files live with the STORY — review them here, then ⬇ Pull
+                sends all of them to the project. An AAF project needs all three; the other
+                modes use the audio (and the SRT when there is one).
+              </div>
+              {(['audio', 'aaf', 'srt'] as const).map(slot => {
+                const f = (st.narration_files || {})[slot];
+                const label = slot === 'audio' ? '🎧 Audio (wav/mp3)'
+                  : slot === 'aaf' ? '🎬 AAF timeline' : '📝 SRT subtitles';
+                return (
+                  <div key={slot} className="flex gap-2 items-center flex-wrap">
+                    <span className="text-xs w-36 text-gray-300">{label}</span>
+                    <button className={btnCls} disabled={!!busyKeys[`story.${slot}`]}
+                            onClick={() => { setSlotFor(slot); setTimeout(() => slotRef.current?.click(), 0); }}>
+                      {busyKeys[`story.${slot}`] ? '⏳' : (f ? '⬆ Replace' : '⬆ Upload')}
+                    </button>
+                    {f ? (
+                      <>
+                        <span className="text-[11px] text-gray-400 truncate max-w-xs">
+                          {f.filename}
+                          {f.seconds ? ` · ${Math.floor(f.seconds / 60)}m ${Math.round(f.seconds % 60)}s` : ''}
+                          {` · ${(f.bytes / 1048576).toFixed(1)} MB`}
+                        </span>
+                        <a className="text-[11px] text-blue-300"
+                           href={`/api/storyworld/worlds/${w.id}/stories/${sid}/narration/file/${slot}?download=1`}>⬇</a>
+                        <button className={`${btnCls} text-red-300`}
+                                onClick={async () => {
+                                  if (!window.confirm(`Delete the ${slot} file?`)) return;
+                                  await post(`/worlds/${w.id}/stories/${sid}/narration/file/${slot}/delete`);
+                                  reload(); void loadNarr(sid);
+                                }}>🗑</button>
+                      </>
+                    ) : <span className="text-[11px] text-gray-600">none yet</span>}
+                    {slot === 'audio' && f && (
+                      <audio controls preload="none" className="w-full h-9 mt-1"
+                             src={`/api/storyworld/worlds/${w.id}/stories/${sid}/narration/file/audio`} />
+                    )}
+                  </div>
+                );
+              })}
+              {(st.narration_files || {}).aaf && (
+                <div className="text-[11px] text-amber-400">
+                  ⚠ AAF is a TIMELINE, not audio — no preview. In the project it goes through
+                  <b> Import AAF</b> on the Audio tab (not Analyze), and it wants the audio
+                  file alongside it.
+                </div>
+              )}
+            </div>
           </div>
         </div>
       ) : <div className="text-gray-500 p-6">Add a story on the left.</div>}
@@ -1158,6 +1468,103 @@ function LocationsTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
   const [genDir, setGenDir] = useState('');
   const [genBusy, setGenBusy] = useState(false);
   const fields = meta.location_fields || [];
+  // 📍🖼 v1.277.21 — the sheet is IMAGES too. Scouting wrote the text and
+  // stopped; there was no way to render the plates other lanes would cite.
+  type ShotT = { id: string; url: string; active?: boolean; worker?: string;
+                 prompt?: string; kind?: string; angle?: string };
+  type ShotJobT = { status?: string; total?: number; done?: number; elapsed_s?: number;
+                    error?: string | null; workers?: string[] };
+  const [shots, setShots] = useState<Record<string, ShotT[]>>({});
+  const [shotJobs, setShotJobs] = useState<Record<string, ShotJobT>>({});
+  const [shotOpen, setShotOpen] = useState<string>('');
+  const [shotModel, setShotModel] = useState('krea2');
+  const [shotCount, setShotCount] = useState(4);  // the standard set
+  const [shotDir, setShotDir] = useState('');
+  const lb = useLightbox();                       // click a plate → zoom/pan
+  const [bulkJob, setBulkJob] = useState<{ status?: string; total?: number;
+    done?: number; current?: string; elapsed_s?: number } | null>(null);
+
+  const loadShots = useCallback(async (lid: string) => {
+    try {
+      const r = await fetch(`/api/storyworld/worlds/${w.id}/locations/${lid}/shots`)
+        .then(x => x.json());
+      setShots(p => ({ ...p, [lid]: r.shots || [] }));
+      setShotJobs(p => ({ ...p, [lid]: r.job || {} }));
+    } catch { /* transient */ }
+  }, [w.id]);
+  useEffect(() => { locs.forEach(l => void loadShots(l.id)); /* once per tab open */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w.id, locs.length]);
+  // poll only while something is actually rendering (the standing rule: live
+  // status, but no polling storm when nothing is happening)
+  const shotsLive = Object.values(shotJobs).some(
+    j => j && ['starting', 'running'].includes(j.status || ''));
+  useEffect(() => {
+    if (!shotsLive) return;
+    const iv = window.setInterval(() => {
+      Object.entries(shotJobs).forEach(([lid, j]) => {
+        if (j && ['starting', 'running'].includes(j.status || '')) void loadShots(lid);
+      });
+    }, 3000);
+    return () => window.clearInterval(iv);
+  }, [shotsLive, shotJobs, loadShots]);
+
+  const loadBulk = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/storyworld/worlds/${w.id}/locations/shots/job`)
+        .then(x => x.json());
+      setBulkJob(r.job && r.job.status ? r.job : null);
+      if (r.job && ['starting', 'running'].includes(r.job.status)) {
+        locs.forEach(l => void loadShots(l.id));
+      }
+    } catch { /* transient */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w.id, locs.length, loadShots]);
+  useEffect(() => { void loadBulk(); }, [loadBulk]);
+  useEffect(() => {
+    if (!bulkJob || !['starting', 'running'].includes(bulkJob.status || '')) return;
+    const iv = window.setInterval(() => void loadBulk(), 4000);
+    return () => window.clearInterval(iv);
+  }, [bulkJob, loadBulk]);
+
+  const renderAll = async (onlyMissing: boolean) => {
+    try {
+      const r = await post<{ locations: number; mode: string }>(
+        `/worlds/${w.id}/locations/shots/all`,
+        { count: shotCount, model: shotModel, direction: shotDir,
+          only_missing: onlyMissing });
+      note(`🖼 ${r.locations} location(s) queued (${r.mode}) — one at a time, `
+        + 'each fanned across the boxes');
+      void loadBulk();
+    } catch (e) { note(`⚠ ${e}`); }
+  };
+
+  // 📷 YOUR photo of the place → vision scan → fields filled → plates built
+  // FROM it (the character front-reference pattern, for locations)
+  const refInput = useRef<HTMLInputElement | null>(null);
+  const [refFor, setRefFor] = useState('');
+  const uploadRef = async (lid: string, f: File) => {
+    busyFn(`locref.${lid}`, true);
+    note('📷 scanning your reference…');
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const r = await fetch(`/api/storyworld/worlds/${w.id}/locations/${lid}/reference`,
+        { method: 'POST', body: fd }).then(x => x.json());
+      note(r.scan_error ? `⚠ ${r.scan_error}`
+        : `📷 reference saved — filled ${(r.changed || []).length} field(s) from the image`);
+      reload(); void loadShots(lid);
+    } catch (e) { note(`⚠ ${e}`); } finally { busyFn(`locref.${lid}`, false); }
+  };
+
+  const renderShots = async (lid: string) => {
+    try {
+      await post(`/worlds/${w.id}/locations/${lid}/shots`,
+        { count: shotCount, model: shotModel, direction: shotDir });
+      note('🖼 rendering the location sheet — fanned across the boxes');
+      setShotJobs(p => ({ ...p, [lid]: { status: 'starting', total: shotCount, done: 0 } }));
+      void loadShots(lid);
+    } catch (e) { note(`⚠ ${e}`); }
+  };
 
   const enhance = async (l: LocationT) => {
     busyFn(`loc.${l.id}`, true);
@@ -1175,10 +1582,34 @@ function LocationsTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
         <button className={btnCls} onClick={() => setEditing({
           id: '', name: '', kind: 'exterior', fields: {}, story_ids: [] })}>＋ Add by hand</button>
         <button className={btnAmber} onClick={() => setGenOpen(true)}>📍 Scout locations (LLM)</button>
+        <button className={btnCls} title="render a sheet for every location that has none"
+                onClick={() => void renderAll(true)}>🖼 Sheets for all missing</button>
+        <button className={btnCls} title="re-render EVERY location's plates and rebuild its sheet"
+                onClick={() => { if (window.confirm('Re-render plates for every location?')) void renderAll(false); }}>
+          ♻ Regenerate all
+        </button>
+        <div className="flex gap-1 items-end">
+          <input type="number" min={1} max={8} value={shotCount} className={`${inputCls} w-14`}
+                 title="plates per location"
+                 onChange={e => setShotCount(Math.max(1, Math.min(8, Number(e.target.value) || 3)))} />
+          <select className={`${inputCls} w-24`} value={shotModel} title="image model"
+                  onChange={e => setShotModel(e.target.value)}>
+            {['krea2', 'z_image', 'anima', 'klein'].map(m => <option key={m}>{m}</option>)}
+          </select>
+        </div>
         <span className="text-xs text-gray-600">
-          location sheets feed prompts + style samples; link them to the stories that use them
+          location sheets feed prompts + style samples; 🖼 renders the PLATES other lanes cite
         </span>
       </div>
+      <input ref={refInput} type="file" accept="image/*" className="hidden"
+             onChange={e => { const f = e.target.files?.[0]; e.target.value = '';
+               if (f && refFor) void uploadRef(refFor, f); }} />
+      {bulkJob && ['starting', 'running'].includes(bulkJob.status || '') && (
+        <div className="text-xs text-blue-300 mb-2">
+          ⏳ sheets: {bulkJob.done || 0}/{bulkJob.total || 0} locations
+          {bulkJob.current ? ` · now ${bulkJob.current}` : ''} · {Math.round(bulkJob.elapsed_s || 0)}s
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {locs.map(l => (
           <div key={l.id} className="rounded border border-gray-800 bg-gray-900/50 p-3">
@@ -1197,11 +1628,94 @@ function LocationsTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
                 {l.story_ids.map(sid => w.stories.find(s => s.id === sid)?.title || '?').join(' · ')}
               </div>
             )}
+            {/* 🖼 the plates — the location's sheet, and what other lanes cite */}
+            {(shots[l.id] || []).length > 0 && (
+              <div className="flex gap-1 mt-2 flex-wrap">
+                {(shots[l.id] || []).map((sh, i) => (
+                  <div key={sh.id} className="relative">
+                    <img src={sh.url} alt="" title={sh.prompt || ''}
+                         onClick={() => lb.open((shots[l.id] || []).map(x => x.url), i,
+                           `${l.name} — ${sh.kind === 'sheet' ? 'SHEET' : (sh.angle || 'plate')}`)}
+                         className={`h-16 w-28 object-cover rounded border cursor-zoom-in ${
+                           sh.active ? 'border-emerald-500' : 'border-gray-700'}`} />
+                    {sh.kind === 'sheet' && (
+                      <span className="absolute top-0 left-0 text-[9px] bg-emerald-700/90 rounded-br px-1">
+                        🪪 SHEET
+                      </span>
+                    )}
+                    <div className="absolute inset-x-0 bottom-0 flex justify-between px-0.5">
+                      <button className="text-[10px] bg-black/60 rounded px-1"
+                              title="use this plate as the location's reference"
+                              onClick={async () => {
+                                await post(`/worlds/${w.id}/locations/${l.id}/shots/${sh.id}/active`);
+                                void loadShots(l.id);
+                              }}>{sh.active ? '⭐' : '☆'}</button>
+                      <button className="text-[10px] bg-black/60 rounded px-1 text-red-300"
+                              onClick={async () => {
+                                await post(`/worlds/${w.id}/locations/${l.id}/shots/${sh.id}/delete`);
+                                void loadShots(l.id);
+                              }}>🗑</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {(() => {
+              const j = shotJobs[l.id] || {};
+              if (!j.status || j.status === 'done') return null;
+              return (
+                <div className={`text-[11px] mt-1 ${j.status === 'error' ? 'text-red-400' : 'text-blue-300'}`}>
+                  {j.status === 'error'
+                    ? `✕ ${j.error}`
+                    : `⏳ ${j.done || 0}/${j.total || 0} plates · ${Math.round(j.elapsed_s || 0)}s`
+                      + (j.workers?.length ? ` · ${j.workers.join(', ')}` : '')}
+                </div>
+              );
+            })()}
+            {shotOpen === l.id && (
+              <div className="mt-2 border border-gray-800 rounded p-2 flex gap-2 items-end flex-wrap">
+                <div>
+                  <label className="text-[10px] text-gray-500 block">plates</label>
+                  <input type="number" min={1} max={8} value={shotCount} className={`${inputCls} w-16`}
+                         onChange={e => setShotCount(Math.max(1, Math.min(8, Number(e.target.value) || 3)))} />
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-500 block">model</label>
+                  <select className={`${inputCls} w-28`} value={shotModel}
+                          onChange={e => setShotModel(e.target.value)}>
+                    {['krea2', 'z_image', 'anima', 'klein'].map(m => <option key={m}>{m}</option>)}
+                  </select>
+                </div>
+                <input className={`${inputCls} flex-1 min-w-[10rem]`} value={shotDir}
+                       placeholder="direction (optional) — e.g. overcast, no snow"
+                       onChange={e => setShotDir(e.target.value)} />
+                <button className={btnAmber} onClick={() => void renderShots(l.id)}>🖼 Render</button>
+                <button className="text-[11px] text-gray-500" onClick={() => setShotOpen('')}>✕</button>
+              </div>
+            )}
             <div className="flex gap-1 mt-2">
               <button className={btnCls} onClick={() => setEditing(l)}>✏ Edit</button>
               <button className={btnCls} disabled={!!busyKeys[`loc.${l.id}`]}
                 title="LLM fills every empty field from the world context"
                 onClick={() => enhance(l)}>{busyKeys[`loc.${l.id}`] ? '⏳' : '✨ Fill'}</button>
+              <button className={btnCls}
+                title="render this location's plates — the images other lanes cite as a reference"
+                onClick={() => setShotOpen(o => (o === l.id ? '' : l.id))}>
+                {(shots[l.id] || []).length ? '🖼 More plates' : '🖼 Sheet'}
+              </button>
+              <button className={btnCls} disabled={!!busyKeys[`locref.${l.id}`]}
+                title="upload YOUR photo of this place — it is scanned to fill the sheet and every plate is built from it"
+                onClick={() => { setRefFor(l.id); refInput.current?.click(); }}>
+                {busyKeys[`locref.${l.id}`] ? '⏳' : (l.ref_id ? '📷 Replace ref' : '📷 Use my photo')}
+              </button>
+              {(shots[l.id] || []).some(x => x.kind !== 'sheet') && (
+                <button className={btnCls} title="recompose the 🪪 sheet from the plates on disk (free, no render)"
+                        onClick={async () => {
+                          try { await post(`/worlds/${w.id}/locations/${l.id}/sheet`);
+                            note('🪪 sheet rebuilt'); void loadShots(l.id);
+                          } catch (e) { note(`⚠ ${e}`); }
+                        }}>🪪</button>
+              )}
               <button className={`${btnCls} ml-auto text-red-300`} onClick={async () => {
                 if (!window.confirm(`Delete location "${l.name}"?`)) return;
                 await post(`/worlds/${w.id}/locations/${l.id}/delete`); reload();
@@ -1280,6 +1794,7 @@ function LocationsTab({ w, meta, llmBody, busyKeys, busyFn, note, reload }: {
         </div>
       )}
 
+      {lb.node}
       {genOpen && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
              onClick={() => !genBusy && setGenOpen(false)}>

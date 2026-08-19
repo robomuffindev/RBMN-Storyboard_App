@@ -165,6 +165,11 @@ export default function StoryboardSceneModal({
         image_refs_first: frame === 'first' ? refs : firstRefs,
         image_refs_last: frame === 'last' ? refs : lastRefs,
         two_pass_enabled: twoPass,
+        // 🎛 v1.277.37 — this checkbox is route 1 under its old name, so it
+        // must ALSO write the mode. Writing only the legacy key would leave a
+        // stale `scene_ref_mode` on the scene, and an explicit mode OUT-VOTES
+        // the checkbox in the backend — the box would tick and change nothing.
+        scene_ref_mode: twoPass ? 't2i_swap' : 'full_reference',
         workflow_type: effectiveWf,
       };
       if (frame === 'last') paramUpdates.last_frame_prompt = activePrompt;

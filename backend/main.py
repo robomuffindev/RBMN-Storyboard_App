@@ -592,10 +592,33 @@ app.include_router(characters_all_router)
 from backend.api.storyworld import router as storyworld_router  # noqa: E402
 app.include_router(storyworld_router)
 
+# 📖 Story CHAPTERS (v1.277.46) — a story's arcs are the spine; a CHAPTER tells
+# one arc at length and owns its own full narration + recording. ⭐ A chapter is
+# ONE video project, which is what keeps a media generation small enough to be
+# worth re-rolling. Registered AFTER storyworld: it shares that module's lock,
+# loader and vocab, and nothing it declares can shadow a route above it (every
+# path here is deeper than /worlds/{wid}/cast/{cid}).
+from backend.api.storychapters import router as storychapters_router  # noqa: E402
+app.include_router(storychapters_router)
+
+# 📚 The CODEX (v1.277.46) — the world's cheat sheet and every character's
+# history, derived ONLY from what is written and re-calculable on demand.
+# Recalc runs on a thread against Ollama by default (his preference: it is the
+# most token-hungry lane in the app) with the standard live-status contract.
+from backend.api.storycodex import router as storycodex_router  # noqa: E402
+app.include_router(storycodex_router)
+
 # 🎧 Audio Lab (v1.277.14) — ACE-Step 1.5 music + F5-TTS narration/cloning on
 # the fleet, with import-into-project. MiniMax Music 3 slot auto-detects.
 from backend.api.audio_lab import router as audio_lab_router  # noqa: E402
 app.include_router(audio_lab_router)
+
+# 🎼 Score a story (v1.277.16) — world+story → LLM → N exact-length music CUES
+# on PAPER → edit → render fanned round-robin across the ready boxes → import
+# every finished cue into a project as MUSIC assets. Registered AFTER audio_lab
+# because it calls that module's enqueue in-process (no HTTP self-call).
+from backend.api.audio_score import router as audio_score_router  # noqa: E402
+app.include_router(audio_score_router)
 
 # Log registered routes for debugging
 _gen_routes = []

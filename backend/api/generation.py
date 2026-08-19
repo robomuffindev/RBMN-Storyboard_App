@@ -28,6 +28,7 @@ from backend.database.models import (
     BatchRun,
     BatchRunStatus,
 )
+from backend.services import scene_ref_mode
 from backend.services.jobs.queue import JobQueue
 from backend.utils.background import track as _track_task
 
@@ -1875,6 +1876,8 @@ def _apply_two_pass_to_job_params(
     two_pass: bool,
     ref_ids: list[str],
     character_only_ids: list[str] | None = None,
+    scene_params: dict | None = None,
+    project_settings: dict | None = None,
 ) -> dict:
     """Transform image job parameters for two-pass mode.
 
@@ -1901,9 +1904,22 @@ def _apply_two_pass_to_job_params(
             for Pass 2.  When ``None`` (legacy callers), falls back to
             ``ref_ids`` for backward compatibility.
 
+        scene_params / project_settings: when EITHER is given, 🎛 scene ref
+            mode decides instead of the ``two_pass`` argument — route
+            ``t2i_swap`` is two-pass by definition, ``full_reference`` hands
+            the refs straight to the model in one pass. Auto-gen passes them;
+            the manual button keeps passing its own boolean, so a scene the
+            user is hand-driving still does exactly what the checkbox says.
+
     Returns:
         Modified params dict (or original if two-pass not applicable)
     """
+    if scene_params is not None or project_settings is not None:
+        _mode = scene_ref_mode.resolve(project_settings, scene_params)
+        two_pass = scene_ref_mode.wants_two_pass(_mode)
+        params = dict(params)
+        params["scene_ref_mode"] = _mode      # recorded so a finished job says
+                                              # which route actually produced it
     if not two_pass or not ref_ids:
         return params
 
@@ -1924,12 +1940,29 @@ def _apply_two_pass_to_job_params(
     return params
 
 
-async def _persist_two_pass_on_scene(scene: Scene, session, two_pass: bool, ref_ids: list[str]):
+async def _persist_two_pass_on_scene(scene: Scene, session, two_pass: bool,
+                                     ref_ids: list[str],
+                                     project_settings: dict | None = None):
     """Persist two_pass_enabled flag on scene parameters when auto-gen uses two-pass.
 
     This ensures the UI checkbox reflects what auto-gen actually did.
     Only updates if two_pass is True and there are refs (i.e., two-pass will actually run).
+
+    🎛 With ``project_settings``, scene ref mode decides — and it also CLEARS a
+    stale checkbox. A scene switched to ``full_reference`` while carrying an
+    old ``two_pass_enabled`` would otherwise keep showing a ticked two-pass box
+    forever, and `scene_override()` reads that box as route 1, so leaving it
+    set would quietly out-vote the dropdown on the very next run.
     """
+    if project_settings is not None:
+        _mode = scene_ref_mode.resolve(project_settings, scene.parameters)
+        two_pass = scene_ref_mode.wants_two_pass(_mode)
+        if not two_pass and (scene.parameters or {}).get("two_pass_enabled"):
+            _sp = dict(scene.parameters or {})
+            _sp["two_pass_enabled"] = False
+            scene.parameters = _sp
+            await session.commit()
+            return
     if not two_pass or not ref_ids:
         return
     scene_params = dict(scene.parameters or {})
@@ -2221,9 +2254,35 @@ async def _ensure_video_flow(
     logger.info(f"Auto-flow: No flow ideas found — auto-generating video flow for {len(scenes)} scenes")
 
     s = project.settings or {}
-    concept_text = s.get("concept_text", "")
-    style_text = s.get("style_text", "")
+    # 🌍 v1.277.24 — LINKED projects derive their direction from the story.
+    # This is the auto-gen twin of concept._generate_flow_inner; the two
+    # prompts must stay in step (the v1.276.43 duplicate-implementation trap).
+    from backend.services import story_context as _sc
+    _ctx = _sc.resolve(s)
+    _eff = _sc.effective(s, _ctx)
+    concept_text = _eff.get("concept_text") or s.get("concept_text", "")
+    style_text = _eff.get("style_text") or s.get("style_text", "")
     characters = s.get("characters", [])
+    # ⭐ per-CHAPTER arc block — the doc audit caught this missing here while
+    # present in concept._generate_flow_inner, i.e. ⚡ Auto Generate was writing
+    # flow for "the story" while the manual button wrote it for THIS ARC.
+    # ⚠ this function has NO chapter_id parameter — it is handed a scene list.
+    # Use the chapter those scenes belong to, and ONLY when they all share one:
+    # a mixed batch has no single arc, and guessing one would put the wrong
+    # stretch of story in front of every scene in the batch.
+    _cids = {getattr(x, "chapter_id", None) for x in scenes}
+    _cids.discard(None)
+    if _ctx.get("linked") and len(_cids) == 1:
+        try:
+            from backend.database.models import Chapter as _Chapter
+            _ch = await session.get(_Chapter, next(iter(_cids)))
+        except Exception:                                        # noqa: BLE001
+            _ch = None
+        if _ch is not None:
+            _arc = _sc.arc_context(_ctx, dict(_ch.chapter_metadata or {}),
+                                   _ch.name or "")
+            if _arc:
+                concept_text = f"{_arc}\n\n{concept_text}"
 
     # Fetch lyrics for per-scene context
     from backend.database.models import Lyrics as LyricsModel
@@ -2687,8 +2746,11 @@ async def _build_auto_enhance_context(
         )
 
     # Concept & style
-    concept_text = project.settings.get("concept_text", "")
-    style_text = project.settings.get("style_text", "")
+    # 🌍 linked-story aware (v1.277.24): same keys, resolved through the
+    # world+story when the project is linked, overrides honoured
+    _eff = _story_effective(project)
+    concept_text = _eff.get("concept_text", "")
+    style_text = _eff.get("style_text", "")
     if concept_text:
         parts.append(f"Video concept: {concept_text}")
     if style_text:
@@ -2965,6 +3027,16 @@ async def _build_auto_enhance_context(
 
 
 
+def _story_effective(project) -> dict:
+    """Creative text for THIS project — the linked story's, or its own.
+
+    One accessor rather than 25 hard-coded `settings.get("concept_text")`
+    reads. It returns the same keys, so a call site adopts it by changing
+    which dict it reads from."""
+    from backend.services import story_context as _sc
+    return _sc.effective(dict(getattr(project, "settings", None) or {}))
+
+
 def _world_style_for_project(project) -> str:
     """The linked world's style text, '' when unlinked (v1.277.12)."""
     try:
@@ -3091,8 +3163,11 @@ async def _build_video_enhance_context(
     if _vc_hint:
         parts.append(_vc_hint)
 
-    concept_text = project.settings.get("concept_text", "")
-    style_text = project.settings.get("style_text", "")
+    # 🌍 linked-story aware (v1.277.24): same keys, resolved through the
+    # world+story when the project is linked, overrides honoured
+    _eff = _story_effective(project)
+    concept_text = _eff.get("concept_text", "")
+    style_text = _eff.get("style_text", "")
     if concept_text:
         parts.append(f"Video concept: {concept_text}")
     if style_text:
@@ -4803,8 +4878,14 @@ async def _run_windowed_batch(
                         "frame_type": "first",
                         "auto_save_preview": True,
                     }
-                    img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=char_asset_ids)
-                    await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                    img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=char_asset_ids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
+                    await _persist_two_pass_on_scene(
+                        scene, session, two_pass, ref_ids,
+                        project_settings=(project.settings or {}) if project else {})
                     img_job = Job(
                         project_id=project_id,
                         scene_id=scene.id,
@@ -4990,7 +5071,13 @@ async def _run_windowed_batch(
                 scene_params = dict(scene.parameters or {})
                 scene_params["scene_source_type"] = "image"
                 scene_params["ignore_prev_scene_ref"] = True
-                if two_pass and ref_ids:
+                # 🎛 the mode decides — writing the caller's `two_pass` here
+                # would set the legacy checkbox that `scene_override()` reads,
+                # out-voting a scene set to full_reference on the next run
+                if ref_ids and scene_ref_mode.wants_two_pass(
+                        scene_ref_mode.resolve(
+                            (project.settings or {}) if project else {},
+                            scene_params)):
                     scene_params["two_pass_enabled"] = True
                 scene.parameters = scene_params
                 await session.commit()
@@ -5003,7 +5090,11 @@ async def _run_windowed_batch(
                     "frame_type": "first",
                     "auto_save_preview": True,
                 }
-                img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=char_asset_ids)
+                img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=char_asset_ids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
                 eligible.append({
                     "scene_id": scene.id,
                     "scene_name": scene_name,
@@ -6174,8 +6265,14 @@ async def _run_sequential_auto_gen(
                         "frame_type": "first",
                         "auto_save_preview": True,
                     }
-                    img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
-                    await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                    img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=seq_char_aids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
+                    await _persist_two_pass_on_scene(
+                        scene, session, two_pass, ref_ids,
+                        project_settings=(project.settings or {}) if project else {})
                     job = Job(
                         project_id=project_id,
                         scene_id=scene.id,
@@ -6240,8 +6337,14 @@ async def _run_sequential_auto_gen(
                             "frame_type": "first",
                             "auto_save_preview": True,
                         }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
-                        await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                        img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=seq_char_aids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
+                        await _persist_two_pass_on_scene(
+                        scene, session, two_pass, ref_ids,
+                        project_settings=(project.settings or {}) if project else {})
                         job = Job(
                             project_id=project_id,
                             scene_id=scene.id,
@@ -6380,8 +6483,14 @@ async def _run_sequential_auto_gen(
                             "frame_type": "first",
                             "auto_save_preview": True,
                         }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
-                        await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                        img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=seq_char_aids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
+                        await _persist_two_pass_on_scene(
+                        scene, session, two_pass, ref_ids,
+                        project_settings=(project.settings or {}) if project else {})
                         job = Job(
                             project_id=project_id,
                             scene_id=scene.id,
@@ -6460,8 +6569,14 @@ async def _run_sequential_auto_gen(
                                     "frame_type": "first",
                                     "auto_save_preview": True,
                                 }
-                                img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
-                                await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                                img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=seq_char_aids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
+                                await _persist_two_pass_on_scene(
+                        scene, session, two_pass, ref_ids,
+                        project_settings=(project.settings or {}) if project else {})
                                 job = Job(
                                     project_id=project_id,
                                     scene_id=scene.id,
@@ -6604,8 +6719,14 @@ async def _run_sequential_auto_gen(
                             "frame_type": "first",
                             "auto_save_preview": True,
                         }
-                        img_params = _apply_two_pass_to_job_params(img_params, two_pass, ref_ids, character_only_ids=seq_char_aids)
-                        await _persist_two_pass_on_scene(scene, session, two_pass, ref_ids)
+                        img_params = _apply_two_pass_to_job_params(
+                        img_params, two_pass, ref_ids,
+                        character_only_ids=seq_char_aids,
+                        scene_params=scene.parameters,
+                        project_settings=(project.settings or {}) if project else {})
+                        await _persist_two_pass_on_scene(
+                        scene, session, two_pass, ref_ids,
+                        project_settings=(project.settings or {}) if project else {})
                         job = Job(
                             project_id=project_id,
                             scene_id=scene.id,
